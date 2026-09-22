@@ -19,6 +19,8 @@ Run: venv/bin/python -m pytest tests/test_storage_budget_fifo.py -v
 import sys
 from pathlib import Path
 
+import json
+import os
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -574,12 +576,24 @@ def test_model_size_bytes_really_resolves_against_the_real_manifest():
     This drives the real registry and demands a real number."""
     from hugpy_fleet.central import workers
     from hugpy_engine.config.models.models_config import get_models_dict
+    from hugpy_platform.app_dirs import model_physical_json
     from hugpy_platform.constants import MODELS_DIR
 
+    # Sizes come from the persisted physical record, or are derived cold from
+    # the model files on disk. A host with neither (a CI runner; other tests
+    # leave only empty family dirs behind) has nothing real to size: skip, do
+    # not fake it.
     store = Path(MODELS_DIR)
-    model_dirs = [p for p in store.iterdir() if p.is_dir() and p.name != "cache"] if store.is_dir() else []
-    if not model_dirs:
-        pytest.skip(f"no models under {store}: nothing for the real sizing path to size (CI runner)")
+    has_files = any(f.is_file() for f in store.rglob("*") if "cache" not in f.parts) if store.is_dir() else False
+    try:
+        with open(model_physical_json(), encoding="utf-8") as fh:
+            records = (json.load(fh).get("models") or {}).values()
+        has_sizes = any((r.get("fields") or {}).get("size_bytes") for r in records)
+    except (OSError, ValueError, AttributeError):
+        has_sizes = False
+    if not has_files and not has_sizes:
+        pytest.skip(f"no model files under {store} and no sized record in {model_physical_json()}: "
+                    "nothing for the real sizing path to size (CI runner)")
     manifest = get_models_dict(dict_return=True) or {}
     on_disk = [k for k in manifest if workers._model_size_bytes(k)]
     assert on_disk, ("_model_size_bytes returned None for EVERY manifest model "

@@ -285,7 +285,11 @@ def _warmable_subset(worker, cold: list) -> list:
         verdict = _worker_fit(mk, worker)
         if verdict.get("fit") is False:
             key = (wid, mk)
-            if now - _fit_skip_last.get(key, 0.0) >= _WARM_COOLDOWN_S:
+            # first skip for this pair always logs: monotonic() counts from boot,
+            # so a "0.0 default" would swallow the note for a whole cooldown on
+            # a freshly started box (seen on CI runners)
+            last = _fit_skip_last.get(key)
+            if last is None or now - last >= _WARM_COOLDOWN_S:
                 _fit_skip_last[key] = now
                 logger.info(
                     "reconcile: skipping load-probe for %s on worker %s "

@@ -11,6 +11,14 @@ import sys
 if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
     sys.modules.setdefault("abstract_hugpy_dev", None)
 
+# Script-style studio tests create their work dirs with tempfile.mkdtemp(dir=...)
+# under the storage root's video_intel/_scratch (the route jails source paths to
+# it). A fresh machine (CI runner) has no storage root yet, so make it here,
+# before collection imports the modules that mkdtemp at import time.
+from hugpy_platform.constants import DEFAULT_ROOT  # noqa: E402
+
+os.makedirs(os.path.join(DEFAULT_ROOT, "video_intel", "_scratch"), exist_ok=True)
+
 
 # --------------------------------------------------------------------------- #
 # Script-style tests moved from the monolith patch ``media_bus`` module globals
