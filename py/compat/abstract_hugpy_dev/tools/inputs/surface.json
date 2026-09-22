@@ -1,0 +1,3556 @@
+{
+ "ADAPTER_CONFIG_NAME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "ADAPTER_TASK": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "AbstractSet": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "AdapterBaseUnavailable": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "Annotated": {
+  "kind": "_TypedCacheSpecialForm",
+  "source": "external",
+  "module": "annotated_types",
+  "stdlib": false
+ },
+ "Any": {
+  "kind": "_AnyMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "AnyStr": {
+  "kind": "TypeVar",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "AsyncContextManager": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.placement"
+ },
+ "AsyncGenerator": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "AsyncIterable": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "AsyncIterator": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.backend"
+ },
+ "Awaitable": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "BaseModel": {
+  "kind": "ModelMetaclass",
+  "source": "external",
+  "module": "pydantic",
+  "stdlib": false
+ },
+ "BinaryIO": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ByteString": {
+  "kind": "_DeprecatedGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "CHAT_MODELS_REGISTRY": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "CHAT_UPLOAD_DIR": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "Callable": {
+  "kind": "_CallableType",
+  "source": "hugpy",
+  "module": "hugpy_control.shared"
+ },
+ "CancelStoppingCriteria": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.config"
+ },
+ "ChainMap": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ChatInput": {
+  "kind": "_UnionGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.chat_schemas"
+ },
+ "ChatMessage": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.chat_schemas"
+ },
+ "ChatRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.chat_schemas"
+ },
+ "ChatResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.chat_schemas"
+ },
+ "ClassVar": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Collection": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Concatenate": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ConfigDict": {
+  "kind": "_TypedDictMeta",
+  "source": "external",
+  "module": "pydantic",
+  "stdlib": false
+ },
+ "Container": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ContextBudget": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.context_budget"
+ },
+ "ContextManager": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.placement"
+ },
+ "Coroutine": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Counter": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "DATASETS_DIR": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DATASETS_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DATE_FORMAT": {
+  "kind": "str",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "DEEPCODER_GENERATE_URL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "DEEPCODER_URL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "DEFAULT_AGENT_BRAIN": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "DEFAULT_CHAT_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "DEFAULT_CONTEXT_TOKENS_BY_MODEL": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "DEFAULT_DEPTH_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_DETECT_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_EMBED_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_IMAGEGEN_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_IMG_CLASSIFY_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_KEYWORDS_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_LOCAL_FILES_ONLY": {
+  "kind": "bool",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_MAX_TOKENS": {
+  "kind": "int",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_MAX_TOKENS_LOCAL": {
+  "kind": "int",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "DEFAULT_PATHS": {
+  "kind": "_LazyModelPaths",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "DEFAULT_ROOT": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_SEGMENT_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_SUMMARIZE_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_TEMPERATURE": {
+  "kind": "float",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_TIMEOUT": {
+  "kind": "float",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_TOP_P": {
+  "kind": "float",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_VISION_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DEFAULT_WHISPER_MODEL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DISK_AUTHORITATIVE": {
+  "kind": "list",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "DeepCoder": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.coder"
+ },
+ "DeepCoderChatRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.generate_runner"
+ },
+ "DeepCoderConfig": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.config"
+ },
+ "DeepCoderRuntime": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.model_schemas"
+ },
+ "DefaultDict": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Deque": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Dict": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "DoneEvent": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.event_schemas"
+ },
+ "EMBED_MODELS_REGISTRY": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "EXCLUDE_DIR_NAMES": {
+  "kind": "frozenset",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "EXCLUDE_DIR_PREFIXES": {
+  "kind": "tuple",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "EXTERNAL_TASK_RUNNERS": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers"
+ },
+ "EmbedRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.embeded_schemas"
+ },
+ "EmbedResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.embeded_schemas"
+ },
+ "Enum": {
+  "kind": "EnumType",
+  "source": "external",
+  "module": "enum",
+  "stdlib": true
+ },
+ "ErrorEvent": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.event_schemas"
+ },
+ "FAILED": {
+  "kind": "object",
+  "source": "hugpy",
+  "module": "hugpy_platform"
+ },
+ "FINISH_REASONS": {
+  "kind": "_LiteralGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "FeatureExtractionRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.embed.embed_runner"
+ },
+ "Field": {
+  "kind": "function",
+  "source": "external",
+  "module": "pydantic",
+  "stdlib": false
+ },
+ "Final": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "filelock",
+  "stdlib": false
+ },
+ "FinishReason": {
+  "kind": "_LiteralGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.summarizer_schemas"
+ },
+ "ForwardRef": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "FrameAnalysis": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_video.schemas.video_schemas"
+ },
+ "FrameCandidate": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "FrameContext": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "FrozenSet": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "GGUF_QUANT": {
+  "kind": "Pattern",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "GenerateOnce": {
+  "kind": "_CallableGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context"
+ },
+ "GeneratedImage": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.imagegen.schemas"
+ },
+ "GenerationOutcome": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.unbounded"
+ },
+ "Generator": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Generic": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "HFAuditRow": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "HFValidationError": {
+  "kind": "type",
+  "source": "external",
+  "module": "huggingface_hub.errors",
+  "stdlib": false
+ },
+ "HF_CACHE": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HF_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HF_HUB_CACHE": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HF_TASK_TO_TASKS": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine"
+ },
+ "HF_TOKEN": {
+  "kind": "bool",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HF_TOKEN_ENV": {
+  "kind": "bool",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HF_TOKEN_PATH": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HUGGINGFACE_DOMAIN": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HUGPY_AUTO_DOWNLOAD": {
+  "kind": "bool",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HUGPY_MARKER": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "HUGPY_URL": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "Hashable": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "HfApi": {
+  "kind": "type",
+  "source": "external",
+  "module": "huggingface_hub",
+  "stdlib": false
+ },
+ "HfHubHTTPError": {
+  "kind": "type",
+  "source": "external",
+  "module": "huggingface_hub.errors",
+  "stdlib": false
+ },
+ "IDENTITIES_DIR": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "IDENTITIES_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "IMG2IMG_CAPABLE_FRAMEWORKS": {
+  "kind": "frozenset",
+  "source": "hugpy",
+  "module": "hugpy_engine.categories"
+ },
+ "IO": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ImageGenRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.imagegen.schemas"
+ },
+ "ImageGenResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.imagegen.schemas"
+ },
+ "ImageGenRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.imagegen.imagegen_runner"
+ },
+ "Img2ImgRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.imagegen.imagegen_runner"
+ },
+ "InputPolicy": {
+  "kind": "EnumType",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.summarizer_schemas"
+ },
+ "ItemsView": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Iterable": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.binaries"
+ },
+ "Iterator": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_control.bus"
+ },
+ "JOBSTATUS": {
+  "kind": "_LiteralGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "KeysView": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "KeywordRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.keywords.keywords_runner"
+ },
+ "KeywordTaskRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.keywords.schemas"
+ },
+ "KeywordTaskResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.keywords.schemas"
+ },
+ "LLAMA_HOST": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "LOG_FORMAT": {
+  "kind": "str",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "LOG_ROOT": {
+  "kind": "str",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "LevelFilter": {
+  "kind": "type",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "List": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "Literal": {
+  "kind": "_TypedCacheSpecialForm",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "LiteralString": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "LlamaCppBaseRunner": {
+  "kind": "ABCMeta",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.src.base_runner"
+ },
+ "LlamaCppChatRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.chat_runner"
+ },
+ "LlamaCppPythonRunner": {
+  "kind": "ABCMeta",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.src.python_runner"
+ },
+ "LlamaCppRunner": {
+  "kind": "ABCMeta",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.src.ccp_runner"
+ },
+ "LoadRefusal": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "LocalEngineUnavailable": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.get"
+ },
+ "MEDIA_DEFAULTS": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine"
+ },
+ "MEDIA_TYPES": {
+  "kind": "dict",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "MIME_TYPES": {
+  "kind": "dict",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "MIN_INPUT_WORDS_DEFAULT": {
+  "kind": "int",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "MISSING": {
+  "kind": "_MISSING_TYPE",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.model_schemas"
+ },
+ "MODELS": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.acquire"
+ },
+ "MODELS_DICT_PATH": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "MODELS_DIR": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "MODELS_DISCOVERY_PATH": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "MODELS_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "MODEL_CONFIG_NAME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "MODEL_REGISTRY": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "MODEL_REGISTRY_DICT": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "Mapping": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.backend"
+ },
+ "MappingView": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Match": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "MediaArtifactManifest": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "MediaWorkspace": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "ModelConfig": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.model_schemas"
+ },
+ "ModelMetadata": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.metadata_schemas"
+ },
+ "MutableMapping": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "MutableSequence": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "MutableSet": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "NEEDS_CLASSIFICATION_TASK": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "NamedTuple": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Never": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "NewType": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "NoDefault": {
+  "kind": "NoDefaultType",
+  "source": "external",
+  "module": "_typing",
+  "stdlib": true
+ },
+ "NoReturn": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "NotRequired": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "OVERLAY_ALLOWED": {
+  "kind": "set",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "Optional": {
+  "kind": "_SpecialForm",
+  "source": "hugpy",
+  "module": "hugpy_platform.binaries"
+ },
+ "OrderedDict": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "PATHS": {
+  "kind": "list",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "PIP_CACHE_DIR": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "PROJECTS_DIR": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "PROJECTS_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "PROJECTS_PLACEMENT_PATH": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "ParamSpec": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ParamSpecArgs": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "ParamSpecKwargs": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Path": {
+  "kind": "type",
+  "source": "external",
+  "module": "pathlib",
+  "stdlib": true
+ },
+ "Pattern": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "PdfReader": {
+  "kind": "type",
+  "source": "external",
+  "module": "PyPDF2",
+  "stdlib": false
+ },
+ "Peer": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "Protocol": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "REGISTRY": {
+  "kind": "_Registry",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate"
+ },
+ "ROLES": {
+  "kind": "_LiteralGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "RUNNER_PAIRS": {
+  "kind": "set",
+  "source": "hugpy",
+  "module": "hugpy_engine"
+ },
+ "RUNTIME_FAMILIES": {
+  "kind": "tuple",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "ReadOnly": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "RepoFile": {
+  "kind": "type",
+  "source": "external",
+  "module": "huggingface_hub",
+  "stdlib": false
+ },
+ "Required": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Resolution": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.task_schemas"
+ },
+ "ResolverFn": {
+  "kind": "_CallableGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "Reversible": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Runner": {
+  "kind": "_ProtocolMeta",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.runner_schemas"
+ },
+ "SOURCEKIND": {
+  "kind": "_LiteralGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "SafeFormatter": {
+  "kind": "type",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "Self": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "Sequence": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.placement"
+ },
+ "Set": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SingletonMeta": {
+  "kind": "type",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "Sized": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "bs4",
+  "stdlib": false
+ },
+ "StatusEvent": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.event_schemas"
+ },
+ "StreamEvent": {
+  "kind": "_UnionGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.coder"
+ },
+ "SummarizeRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.summarizer_schemas"
+ },
+ "SummarizeResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.summarizer_schemas"
+ },
+ "SummarizeRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.summarizers.summarize_runner"
+ },
+ "SummaryPreset": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.summarizer_schemas"
+ },
+ "SummaryRequest": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.summarizer_schemas"
+ },
+ "SupportsAbs": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SupportsBytes": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SupportsComplex": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SupportsFloat": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SupportsIndex": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SupportsInt": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "SupportsRound": {
+  "kind": "_ProtocolMeta",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TASK_DEFAULTS": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine"
+ },
+ "TOKENIZER_SENTINEL_THRESHOLD": {
+  "kind": "float",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "TORCH_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "TTS_TASK": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "TYPE_CHECKING": {
+  "kind": "bool",
+  "source": "external",
+  "module": "annotated_types",
+  "stdlib": false
+ },
+ "TaskRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.task_schemas"
+ },
+ "TaskResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.task_schemas"
+ },
+ "Text": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TextIO": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TokenCounter": {
+  "kind": "_CallableGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context"
+ },
+ "TokenEvent": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.event_schemas"
+ },
+ "TranscribeRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "TranscribeResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "TranscribeSegment": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "TranscribeWord": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.schemas.whisper_schemas"
+ },
+ "Tuple": {
+  "kind": "_TupleType",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "Type": {
+  "kind": "_SpecialGenericAlias",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.task_schemas"
+ },
+ "TypeAlias": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TypeAliasType": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TypeGuard": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TypeIs": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TypeVar": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TypeVarTuple": {
+  "kind": "type",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "TypedDict": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "UPLOADS_HOME": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "Union": {
+  "kind": "_SpecialForm",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.coder"
+ },
+ "Unpack": {
+  "kind": "_SpecialForm",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "VISION_HOST": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "VISION_MODELS_REGISTRY": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "ValuesView": {
+  "kind": "_SpecialGenericAlias",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "VideoAnalysisConfig": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_video.schemas.video_schemas"
+ },
+ "VideoAnalysisSummary": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_video.schemas.video_schemas"
+ },
+ "VisionBackendConfig": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.vision.schemas"
+ },
+ "VisionRequest": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.vision.schemas"
+ },
+ "VisionResult": {
+  "kind": "ModelMetaclass",
+  "source": "hugpy",
+  "module": "hugpy_media.vision.schemas"
+ },
+ "VisionRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.vision.vision_runner"
+ },
+ "WHISPER_MODELS_REGISTRY": {
+  "kind": "dict",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "WhisperRunner": {
+  "kind": "type",
+  "source": "hugpy",
+  "module": "hugpy_media.whisper_model.src.runner"
+ },
+ "acquire": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.acquire"
+ },
+ "adapter_base_id": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "adapter_metadata_fields": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "adapter_peft_type": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "adapter_refusal": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "adapter_unserveable_reason": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "annotations": {
+  "kind": "_Feature",
+  "source": "hugpy",
+  "module": "hugpy_platform"
+ },
+ "apis": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.apis",
+  "source": "monolith"
+ },
+ "argparse": {
+  "kind": "module",
+  "module": "argparse",
+  "source": "external"
+ },
+ "asdict": {
+  "kind": "function",
+  "source": "external",
+  "module": "dataclasses",
+  "stdlib": true
+ },
+ "assert_never": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "assert_type": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "assess_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "attempt": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.except_utils"
+ },
+ "audit_hf_snapshot": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "audit_hfs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "backfill_markers": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "base64": {
+  "kind": "module",
+  "module": "base64",
+  "source": "external"
+ },
+ "base_model_present": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "base_present": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "bs4": {
+  "kind": "module",
+  "module": "bs4",
+  "source": "external"
+ },
+ "build_deepcoder_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.config"
+ },
+ "build_deepcoder_runtime": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.config"
+ },
+ "build_resolver_chain": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "call_and_code": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "call_generate": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "candidate_model_dirs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "cast": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "catalog_get": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.catalog_source"
+ },
+ "catalog_rows": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.catalog_source"
+ },
+ "catching": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.except_utils"
+ },
+ "caught": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.except_utils"
+ },
+ "caught_block": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.except_utils"
+ },
+ "classify_model_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "clean_hub_id": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "clean_invalid_newlines": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "clear": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "clear_llama_runners": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.get"
+ },
+ "clear_overloads": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "combineList": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "compact_chat_request": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.chat_context"
+ },
+ "compact_messages_to_budget": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.context_budget"
+ },
+ "compare_lists": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "config": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.config",
+  "source": "monolith"
+ },
+ "config_exists": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "confirm_all_links": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "constants": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.src.constants",
+  "source": "monolith"
+ },
+ "contextmanager": {
+  "kind": "function",
+  "source": "external",
+  "module": "contextlib",
+  "stdlib": true
+ },
+ "copy": {
+  "kind": "module",
+  "module": "copy",
+  "source": "external"
+ },
+ "count_tokens": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.chunking"
+ },
+ "ctx_fit_chat_request": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.chat_context"
+ },
+ "ctx_fit_keep_indices": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.chat_context"
+ },
+ "dataclass": {
+  "kind": "function",
+  "source": "external",
+  "module": "dataclasses",
+  "stdlib": true
+ },
+ "dataclass_fields": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "dataclass_transform": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "datetime": {
+  "kind": "type",
+  "source": "external",
+  "module": "datetime",
+  "stdlib": true
+ },
+ "deep_coder_generate": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.coder"
+ },
+ "default_context_tokens_for_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "derive_media_type": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "derive_model_config_row": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "detect_bnb_capable": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "detect_moe_capable": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "discover_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "discover_models": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "download_dict_models": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "download_missing_only": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "download_one": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "download_repo": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "dump_if_json": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "eatAll": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "eatInner": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "eatOuter": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "enrich": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "ensure_headroom_for_load": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "ensure_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "ensure_models": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "ensure_nested_list": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "ensure_shard_server": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.src.shard_server"
+ },
+ "ensure_staple_weights": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "ensure_vision_server": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.src.shard_server"
+ },
+ "env_bool": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "estimate_message_tokens": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.context_budget"
+ },
+ "estimate_tokens": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.context_budget"
+ },
+ "evict": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "evict_llama_runner": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.get"
+ },
+ "exclude_dirs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "execute_chat_stream": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "execute_prompt": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "execute_prompt_stream": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "exists": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "extension_from_content_type": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.whisper_model.src.stream"
+ },
+ "external_runner_for": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "extract_gguf_filename": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "field": {
+  "kind": "function",
+  "source": "external",
+  "module": "dataclasses",
+  "stdlib": true
+ },
+ "field_validator": {
+  "kind": "function",
+  "source": "external",
+  "module": "pydantic",
+  "stdlib": false
+ },
+ "fields": {
+  "kind": "function",
+  "source": "external",
+  "module": "dataclasses",
+  "stdlib": true
+ },
+ "filter_json_list_values": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "final": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "find_base_model_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "find_keys": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "find_keys_by_type": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "find_mmproj": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "find_original_case": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "find_paths_to_key": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "flat_destination": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "flatten_json": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "functools": {
+  "kind": "module",
+  "module": "functools",
+  "source": "external"
+ },
+ "get_abs_name_of_this": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_actual_number": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_all_code": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_all_configs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "get_any_value": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_args": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "get_assessed_model_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "get_base_64_image": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_base_name": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_caller": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_caller_dir": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_caller_path": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_code": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_code_from_respose": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_config_from_folder": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "get_config_in_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_context_tokens": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "get_current_path": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_deep_coder": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.coder"
+ },
+ "get_desired_key_values": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_df": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_directory": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_dirlist": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_easyocr": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_encoder": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.chunking"
+ },
+ "get_env_value": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_ext": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_file_name": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_file_parts": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_file_path": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_files": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_files_and_dirs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_gguf_file": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "get_glob": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_guffs_in_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_highest_value_obj": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_home_dir": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_home_folder": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_host": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_hub_id_from_directory": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "get_huggingface_module_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "get_huggingface_module_link": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "get_inputs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_keybert": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_keys": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_lazy_attr": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_llama_runner": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.get"
+ },
+ "get_logFile": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_max_model_length": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_message": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_messages": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_mime_type": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_model_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "get_model_dirs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "get_model_home": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "get_model_path": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "get_model_registry": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "get_model_values": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "get_models_dict": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "get_models_dict_by_names": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "get_models_dict_by_tasks": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "get_moviepy": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_only_kwargs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_origin": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "get_overloads": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "get_paddleocr": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_parts": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_pdf2image": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_port": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_prompt": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_protocol_members": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "get_pydub": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_pypdf2": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_pytesseract": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_request_id": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_response_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_response_path": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_responses_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_safe_basename": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_safe_dirname": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_safe_splitext": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_sentence_transformers": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_single_from_list": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_slash": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_sort": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_spacy": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_speech_recognition": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_stat": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_symetric_difference": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_target_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_tiktoken": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_time_response_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "get_torch": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_transformers": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_type_hints": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "get_unique_part": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "get_value_from_path": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "get_whisper": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "get_worker_provider": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.remote"
+ },
+ "glob": {
+  "kind": "module",
+  "module": "glob",
+  "source": "external"
+ },
+ "has_hugpy_marker": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "has_standalone_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "hf_hub_download": {
+  "kind": "function",
+  "source": "external",
+  "module": "huggingface_hub",
+  "stdlib": false
+ },
+ "hub_id_for": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "human_bytes": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "imports": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports",
+  "source": "monolith"
+ },
+ "infer_arg_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "infer_framework": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "init_imports": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.src.init_imports",
+  "source": "monolith"
+ },
+ "is_adapter_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "is_available": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "is_dir": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "is_directory_excluded": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "is_file": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "is_mmproj_file": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "is_model_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "is_number": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "is_protocol": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "is_speech_checkpoint_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "is_typeddict": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "is_valid_repo_id": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "itter_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "join_path": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "json": {
+  "kind": "module",
+  "module": "json",
+  "source": "external"
+ },
+ "last_used_snapshot": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "lazy_import": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "lazy_import_single": {
+  "kind": "_lru_cache_wrapper",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "lazy_module": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "legacy_task_dirs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "list_gguf_quants": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "list_model_options": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "list_models": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "list_set": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "loaded_disk_detail": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "loaded_model_keys": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "loaded_runner_detail": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.get"
+ },
+ "loading_model_keys": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "logger": {
+  "kind": "Logger",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "logging": {
+  "kind": "module",
+  "module": "logging",
+  "source": "external"
+ },
+ "makeParams": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "make_key_map": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "make_list": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "make_list_add": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "make_list_it": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "make_request_id": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "make_response_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "make_response_path": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "make_time_response_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "makedirs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "managers": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.managers",
+  "source": "monolith"
+ },
+ "map_finish_reason": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.unbounded"
+ },
+ "media_default_state": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "media_state": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "media_states": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "merge_consecutive_messages": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.schemas.chat_schemas"
+ },
+ "merge_discovery_into_models": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "merge_disk_over_registry": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "message_to_dict": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "messages_to_dicts": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "mkdirs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "model_looks_downloaded": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_presence"
+ },
+ "model_serializer": {
+  "kind": "function",
+  "source": "external",
+  "module": "pydantic",
+  "stdlib": false
+ },
+ "model_validator": {
+  "kind": "function",
+  "source": "external",
+  "module": "pydantic",
+  "stdlib": false
+ },
+ "models": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.config.models",
+  "source": "monolith"
+ },
+ "needs_classification_refusal": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "no_makeroom_active": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "no_type_check": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "no_type_check_decorator": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "normalize_folder": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "normalize_prompt_kwargs": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "nullProxy": {
+  "kind": "type",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "os": {
+  "kind": "module",
+  "module": "os",
+  "source": "external"
+ },
+ "osp": {
+  "kind": "module",
+  "module": "posixpath",
+  "source": "external"
+ },
+ "overload": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "override": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "parse_qs": {
+  "kind": "function",
+  "source": "external",
+  "module": "urllib.parse",
+  "stdlib": true
+ },
+ "parse_url": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "peer_for": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "pick_device_and_dtype": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.generate.config"
+ },
+ "pipeline_class_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "postRequest": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "print_hf_audit": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.huggingface_api"
+ },
+ "prune_inputs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "prune_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "publish_catalog_changed": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.events"
+ },
+ "quote": {
+  "kind": "function",
+  "source": "external",
+  "module": "urllib.parse",
+  "stdlib": true
+ },
+ "raw_create_dirs": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "re": {
+  "kind": "module",
+  "module": "re",
+  "source": "external"
+ },
+ "read_adapter_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "read_any_file": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "read_directory": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "read_file_as_text": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "read_from_file": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "read_hugpy_marker": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "read_malformed_json": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "read_model_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "read_stored_hf_token": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.constants"
+ },
+ "reap_orphaned_staging": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "record_downloaded_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "recursive_chunk": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.chunking"
+ },
+ "recursive_json_list": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "refresh_registry": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "refresh_task_registries": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "remove_from_list": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "replacement": {
+  "kind": "str",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_default"
+ },
+ "requested_file_missing": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "requests": {
+  "kind": "module",
+  "module": "requests",
+  "source": "external"
+ },
+ "require": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "require_file": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "require_peft": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.module_imports"
+ },
+ "resolve": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "resolve_adapter_pair": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "resolve_dir_declaration": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "resolve_hf_model_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "resolve_hub_model_info": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "resolve_hugpy_marker": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "resolve_layout_path": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "resolve_local_config": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "resolve_local_tokenizer": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.get_module"
+ },
+ "resolve_model_dir": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "resolve_model_key": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "resolve_model_source": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.main"
+ },
+ "resolve_task": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "retry_on_emfile": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_control.shared"
+ },
+ "reveal_type": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "route_destination": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "run_pruned_func": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "run_unbounded": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.unbounded"
+ },
+ "runner_for": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "runtime_checkable": {
+  "kind": "function",
+  "source": "external",
+  "module": "typing",
+  "stdlib": true
+ },
+ "runtime_folder": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "safe_dtype_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "safe_dump_to_file": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "safe_dump_to_json": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "safe_join": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "safe_json_loads": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "safe_list_return": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "safe_load_from_json": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "safe_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "safe_path_part": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "safe_read_from_json": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "sanitize_filename": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "save_df": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "save_response": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.apis.call_api"
+ },
+ "schemas": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.src.schemas",
+  "source": "monolith"
+ },
+ "serve_endpoint": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.serve.serve"
+ },
+ "serve_model_name": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.serve.serve"
+ },
+ "serve_path": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.providers"
+ },
+ "set_evict_reason": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "set_evictable": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "set_fit_check": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "set_make_room": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "set_media_default": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "set_model_media": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "set_no_worker_diagnostic": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.remote"
+ },
+ "set_placement_provider": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.remote"
+ },
+ "set_post_evict_hook": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "set_worker_boot_prewarm": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "set_worker_provider": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.remote"
+ },
+ "set_worker_wildcard": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "slot_backed_model_keys": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.llama.runners.get"
+ },
+ "slugify": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "snapshot_download": {
+  "kind": "function",
+  "source": "external",
+  "module": "huggingface_hub",
+  "stdlib": false
+ },
+ "socket": {
+  "kind": "module",
+  "module": "socket",
+  "source": "external"
+ },
+ "split_hub_id": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.model_paths"
+ },
+ "split_text": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "src": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.src",
+  "source": "monolith"
+ },
+ "st_mtime": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "st_size": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "staged_bytes": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.download_models"
+ },
+ "standalone_load_refusal": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.peft_adapters"
+ },
+ "standalone_utils": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.imports.src.standalone_utils",
+  "source": "monolith"
+ },
+ "stream_runner": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "stream_url_to_temp_file": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.whisper_model.src.stream"
+ },
+ "summarize": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.summarizers.summarizers"
+ },
+ "supported_task_keys": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "sync_marker_quants": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "sys": {
+  "kind": "module",
+  "module": "sys",
+  "source": "external"
+ },
+ "tasks_for_pipeline_class": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.model_classifier"
+ },
+ "tempfile": {
+  "kind": "module",
+  "module": "tempfile",
+  "source": "external"
+ },
+ "threading": {
+  "kind": "module",
+  "module": "threading",
+  "source": "external"
+ },
+ "time": {
+  "kind": "module",
+  "module": "time",
+  "source": "external"
+ },
+ "timezone": {
+  "kind": "type",
+  "source": "external",
+  "module": "datetime",
+  "stdlib": true
+ },
+ "touch_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.dispatch.dispatch"
+ },
+ "traceback": {
+  "kind": "module",
+  "module": "traceback",
+  "source": "external"
+ },
+ "trim_content_to_token_budget": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.chat_context.context_budget"
+ },
+ "try_json_loads": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "unicodedata": {
+  "kind": "module",
+  "module": "unicodedata",
+  "source": "external"
+ },
+ "unique_path": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_platform.utils"
+ },
+ "unprune_model": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "unquote": {
+  "kind": "function",
+  "source": "external",
+  "module": "urllib.parse",
+  "stdlib": true
+ },
+ "update_model_config_dict": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "urllib": {
+  "kind": "module",
+  "module": "urllib",
+  "source": "external"
+ },
+ "urlparse": {
+  "kind": "function",
+  "source": "external",
+  "module": "urllib.parse",
+  "stdlib": true
+ },
+ "urlunparse": {
+  "kind": "function",
+  "source": "external",
+  "module": "urllib.parse",
+  "stdlib": true
+ },
+ "utils": {
+  "kind": "module",
+  "module": "abstract_hugpy_dev.utils",
+  "source": "monolith"
+ },
+ "uuid": {
+  "kind": "module",
+  "module": "uuid",
+  "source": "external"
+ },
+ "uuid1": {
+  "kind": "function",
+  "source": "external",
+  "module": "uuid",
+  "stdlib": true
+ },
+ "validate_file_path": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ },
+ "validate_registry": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.resolvers.model_resolver"
+ },
+ "whisper_transcribe_url_stream": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_media.whisper_model.src.stream"
+ },
+ "worker_boot_prewarm_state": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "worker_wildcard_state": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_engine.config.models.models_config"
+ },
+ "write_hugpy_marker": {
+  "kind": "function",
+  "source": "hugpy",
+  "module": "hugpy_storage.hugpy_marker"
+ },
+ "write_to_file": {
+  "kind": "function",
+  "source": "external",
+  "module": "abstract_essentials",
+  "stdlib": false
+ }
+}

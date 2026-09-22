@@ -10,6 +10,9 @@ pip install "hugpy[server]"
 hugpy serve            # console at http://localhost:7002/ , API at /api/v1
 ```
 
+From a checkout, `./local_install.sh` installs every package editable into
+`.venv` (see [`LOCAL_INSTALL.md`](LOCAL_INSTALL.md)).
+
 ## What is in this repository
 
 The product is thirteen independently buildable Python distributions plus the

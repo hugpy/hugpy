@@ -1,0 +1,69 @@
+name: npm-publish
+# The ONLY way an @hugpy/* React package reaches npm (never `npm publish` by hand).
+# Push a tag  npm-<pkg>-v<version>  where <pkg> is the npm name without the scope
+# and <version> equals "version" in that package's package.json, e.g.
+#   git tag npm-ui-v0.3.1 && git push origin npm-ui-v0.3.1
+# Tags are pushed only after an explicit go (ECOSYSTEM.md D.5); the job also waits
+# on the `npm-publish` environment, which should have required reviewers.
+on:
+  push:
+    tags:
+      - "npm-ui-v*"
+      - "npm-ui-shared-v*"
+      - "npm-agents-ui-v*"
+      - "npm-media-intelligence-ui-v*"
+      - "npm-video-intelligence-ui-v*"
+permissions:
+  contents: read
+  id-token: write # npm --provenance
+concurrency:
+  group: npm-publish-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Resolve tag -> package directory
+        id: pkg
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          [[ "$tag" =~ ^npm-(.+)-v([0-9]+\.[0-9]+\.[0-9]+.*)$ ]] || { echo "bad tag: $tag"; exit 1; }
+          slug="${BASH_REMATCH[1]}"; version="${BASH_REMATCH[2]}"
+          case "$slug" in
+            ui) dir=react/ui ;;
+            ui-shared) dir=react/ui_shared ;;
+            agents-ui) dir=react/agents_ui ;;
+            media-intelligence-ui) dir=react/media_intelligence_ui ;;
+            video-intelligence-ui) dir=react/video_intelligence_ui ;;
+            *) echo "unknown package slug: $slug"; exit 1 ;;
+          esac
+          name=$(node -p "require('./$dir/package.json').name")
+          have=$(node -p "require('./$dir/package.json').version")
+          [ "$name" = "@hugpy/$slug" ] || { echo "$dir is $name, tag says @hugpy/$slug"; exit 1; }
+          [ "$have" = "$version" ] || { echo "$dir is at $have, tag says $version"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+      # react/ is an npm workspace root without a root lockfile; each package keeps
+      # its own package-lock.json, so install with --workspaces=false.
+      - name: Install
+        run: |
+          cd ${{ steps.pkg.outputs.dir }}
+          # ui_shared has no dependencies and no lockfile
+          if [ -f package-lock.json ]; then npm ci --workspaces=false; fi
+      - name: Install the arms (ui's postbuild bundles them into dist/)
+        if: steps.pkg.outputs.dir == 'react/ui'
+        run: |
+          for d in react/agents_ui react/media_intelligence_ui react/video_intelligence_ui; do
+            (cd "$d" && npm ci --workspaces=false)
+          done
+      - name: Build
+        run: cd ${{ steps.pkg.outputs.dir }} && npm run build --if-present
+      - name: Publish
+        run: cd ${{ steps.pkg.outputs.dir }} && npm publish --access public --provenance --workspaces=false
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

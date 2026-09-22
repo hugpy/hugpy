@@ -77,7 +77,7 @@ os.environ.pop("HUGPY_MODEL_STATUS_EPOCH_POLL_S", None)
 os.environ["HUGPY_MODEL_PHYSICAL_PATH"] = os.path.join(_EPOCH_DIR, "physical.json")
 
 cache = importlib.import_module("hugpy_storage.model_status_cache")
-from hugpy_control.jobs import normalize_status
+from hugpy_control.jobs import job_store as _job_store, normalize_status
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -653,7 +653,7 @@ def test_refresh_registry_flushes_the_memo(monkeypatch):
 def test_download_cancel_flushes_the_memo(monkeypatch):
     live = CountingStat()
     seen = _spy_invalidation(monkeypatch)
-    job = cd.job_store.create("repo-0", kind="download", transport="test")
+    job = _job_store.create("repo-0", kind="download", transport="test")
 
     m = _model("repo-0")
     cache.cached_model_status(m, live, scope="central-holdings")

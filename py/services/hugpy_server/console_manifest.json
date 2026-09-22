@@ -1,0 +1,30 @@
+{
+  "react_root": "../../../react",
+  "console_dist": "src/hugpy_server/console_dist",
+  "mounts": {
+    "/": {
+      "package_dir": "ui",
+      "npm": "@hugpy/ui",
+      "version": "0.3.0",
+      "target": ""
+    },
+    "/fleet": {
+      "package_dir": "agents_ui",
+      "npm": "@hugpy/agents-ui",
+      "version": "0.3.0",
+      "target": "fleet"
+    },
+    "/media": {
+      "package_dir": "media_intelligence_ui",
+      "npm": "@hugpy/media-intelligence-ui",
+      "version": "0.3.0",
+      "target": "media"
+    },
+    "/video": {
+      "package_dir": "video_intelligence_ui",
+      "npm": "@hugpy/video-intelligence-ui",
+      "version": "0.3.2",
+      "target": "video"
+    }
+  }
+}

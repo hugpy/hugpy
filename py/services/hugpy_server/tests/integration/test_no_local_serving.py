@@ -143,6 +143,10 @@ def test_policy_off_run_proceeds_to_local_runner(policy_off, delegating_runner):
 
 def test_guard_policy_off_no_provider_proceeds(monkeypatch, policy_off):
     # No worker provider registered (standalone posture): historically this PROCEEDS.
+    # Establish the posture explicitly: any app built earlier in the session
+    # (several modules build one at import) ran the server wiring, which
+    # registers the fleet's worker provider in hugpy_engine.resolvers.remote.
+    monkeypatch.setattr(remote, "_worker_provider", None)
     monkeypatch.delenv("HUGPY_VIDEOGEN_LOCAL", raising=False)
     assert guard_mod.guard_gpu_worker("some-diffusion-model", "job-1") is None
 

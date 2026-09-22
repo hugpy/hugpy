@@ -602,7 +602,18 @@ def test_journal_line_leads_with_the_fields_an_operator_greps():
 # dispatch wiring — the events a real headroom pass produces
 # --------------------------------------------------------------------------- #
 
-def test_headroom_pass_emits_a_correlated_story(monkeypatch):
+@pytest.fixture
+def wired_placement():
+    """The engine's dispatch emits eviction telemetry through the
+    ``hugpy_engine.placement`` EvictionLedger seam, which the server wiring
+    fills with ``hugpy_fleet.central.evictions``. Install it the way the server
+    does so these tests do not depend on an earlier test having built an app
+    (the conftest restores the placement registry afterwards)."""
+    from hugpy_server.wiring import install_placement
+    install_placement()
+
+
+def test_headroom_pass_emits_a_correlated_story(monkeypatch, wired_placement):
     from hugpy_engine.dispatch import dispatch as d
 
     seen = []
@@ -647,7 +658,7 @@ def test_headroom_pass_emits_a_correlated_story(monkeypatch):
     assert done["evicted"] == ["cold"]
 
 
-def test_headroom_pass_is_unaffected_by_a_broken_emitter(monkeypatch):
+def test_headroom_pass_is_unaffected_by_a_broken_emitter(monkeypatch, wired_placement):
     """THE contract: telemetry failure is invisible to the load path."""
     from hugpy_engine.dispatch import dispatch as d
 
@@ -673,7 +684,7 @@ def test_headroom_pass_is_unaffected_by_a_broken_emitter(monkeypatch):
         d.set_post_evict_hook(None)
 
 
-def test_makeroom_refusal_emits_a_verdict_and_still_raises(monkeypatch):
+def test_makeroom_refusal_emits_a_verdict_and_still_raises(monkeypatch, wired_placement):
     from hugpy_engine.dispatch import dispatch as d
 
     seen = []

@@ -29,6 +29,7 @@ projects live in a temp dir UNDER the real studio tree (the runner requires a pr
 under STUDIO_ROOT) and outputs are unique-named under edits/renders/ — all cleaned up.
 """
 from __future__ import annotations
+import pytest
 
 import importlib
 import logging
@@ -141,6 +142,7 @@ def test_pathmap_drive_letter():
 # --------------------------------------------------------------------------- #
 # 2) UNRESOLVED RESOURCES — honest error-as-data
 # --------------------------------------------------------------------------- #
+@pytest.mark.skipif(shutil.which("melt") is None, reason="needs the melt (MLT) binary: run_mlt_render probes melt before any other check, so without it every path returns melt_missing")
 def test_unresolved_resource_errors_as_data():
     _private_bus()
     # A project referencing a UNC clip that does NOT exist under the jail after mapping.
@@ -186,6 +188,7 @@ def test_spec_validation():
         pass
 
 
+@pytest.mark.skipif(shutil.which("melt") is None, reason="needs the melt (MLT) binary: run_mlt_render probes melt before any other check, so without it every path returns melt_missing")
 def test_runner_project_outside_jail():
     _private_bus()
     tmp = tempfile.mkdtemp(prefix="hugpy_mlt_outside_")
@@ -198,6 +201,7 @@ def test_runner_project_outside_jail():
     assert res.ok is False and res.error.code == "project_outside_jail", res
 
 
+@pytest.mark.skipif(shutil.which("melt") is None, reason="needs the melt (MLT) binary: run_mlt_render probes melt before any other check, so without it every path returns melt_missing")
 def test_runner_missing_project():
     _private_bus()
     spec = make_mlt_render(

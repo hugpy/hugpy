@@ -82,6 +82,7 @@ v1 = importlib.import_module("hugpy_server.app.routes.v1_routes")
 mc = importlib.import_module("hugpy_engine.config.models.models_config")
 cache = importlib.import_module("hugpy_storage.model_status_cache")
 
+_job_store = importlib.import_module("hugpy_control.jobs").job_store
 
 # ──────────────────────────────────────────────────────────────────────────
 # helpers
@@ -217,6 +218,18 @@ def _live_catalog_is_off_limits():
     after = _catalog_stamp()
     changed = [p for p in before if before[p] != after[p]]
     assert not changed, f"a test modified live registry state: {changed}"
+
+
+@pytest.fixture(autouse=True)
+def _no_async_catalog_refresh(monkeypatch):
+    """Since the partition, every ``catalog.changed`` on the control bus makes
+    the engine's catalog bridge re-derive the registry on a daemon thread
+    (``hugpy_engine.catalog_bridge``). These tests stub the manifest
+    (``get_models_dict``) but not the registry, so that background refresh
+    would race them and drop rows the empty test registry does not back.
+    Silence the listener; the synchronous paths under test are unchanged."""
+    cb = importlib.import_module("hugpy_engine.catalog_bridge")
+    monkeypatch.setattr(cb, "refresh_from_event", lambda *_a, **_k: None)
 
 
 @pytest.fixture(autouse=True)
@@ -765,7 +778,7 @@ def test_download_cancel_drops_the_downloading_row(monkeypatch):
     app = _flask_app()
     with app.test_client() as client:
         client.get("/models")
-    job = cd.job_store.create("repo-0", kind="download", transport="test")
+    job = _job_store.create("repo-0", kind="download", transport="test")
     assert cd.cancel_download(job.id)["cancelled"] is True
     assert store.physical_store.record("repo-0") is None
     assert store.physical_store.record("repo-1") is not None
@@ -1270,15 +1283,16 @@ def _drive_download(monkeypatch, dest_root, exitcode, max_attempts=1):
     monkeypatch.setattr(eng, "_watch", lambda *_a, **_k: False)
     monkeypatch.setattr(eng, "_read_error", lambda _j: "synthetic failure")
     monkeypatch.setattr(eng, "record_downloaded_model", lambda *a, **k: None)
-    monkeypatch.setattr(eng, "refresh_registry", lambda *a, **k: None)
+    # The engine registry refresh reaches storage via the catalog seam now.
+    monkeypatch.setattr(eng, "catalog_refresh", lambda *a, **k: None)
     monkeypatch.setattr(eng, "MAX_ATTEMPTS", max_attempts)
     monkeypatch.setattr(eng.mp, "get_context", lambda _n: _FakeCtx(exitcode))
 
-    job = cd.job_store.create("repo-0", kind="download", transport="test")
+    job = _job_store.create("repo-0", kind="download", transport="test")
     eng.start_cancellable_download(job, _model("repo-0"))
     deadline = time.time() + 30
     while time.time() < deadline:
-        cur = cd.job_store.get(job.id)
+        cur = _job_store.get(job.id)
         if cur is not None and cur.terminal:
             return cur
         time.sleep(0.05)

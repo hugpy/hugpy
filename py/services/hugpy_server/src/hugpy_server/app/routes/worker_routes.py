@@ -4688,6 +4688,9 @@ _transfer_sem = _threading.BoundedSemaphore(_TRANSFER_CAP)
 # indefinitely (which just turns the transfer cap into a request-thread
 # exhaustion bug instead of a fix).
 _TRANSFER_WAIT_S = float(os.environ.get("HUGPY_CENTRAL_TRANSFER_WAIT_S", "5"))
+# Upper bound on waiting for the archive tar producer thread after the stream
+# ends (normal completion, client disconnect or writer error).
+_ARCHIVE_JOIN_S = float(os.environ.get("HUGPY_CENTRAL_ARCHIVE_JOIN_S", "30"))
 
 
 def _transfer_busy_response() -> Response:
@@ -5093,7 +5096,14 @@ def model_archive(model_key):
                         break
                     yield chunk
         finally:
-            thread.join()
+            # The read end is closed by now, so a writer mid-write gets EPIPE
+            # and exits; bound the join anyway so a wedged producer can never
+            # pin this serving thread (and its transfer permit) forever.
+            thread.join(timeout=_ARCHIVE_JOIN_S)
+            if thread.is_alive():
+                logger.warning("archive %s: writer thread still alive after %.0fs; "
+                               "releasing the transfer permit anyway",
+                               model_key, _ARCHIVE_JOIN_S)
             permit.release()
 
     return Response(

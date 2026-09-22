@@ -18,21 +18,30 @@ copied in before the wheel is built.
 
 ## Steps
 
-From the workspace root:
+The table above lives in `console_manifest.json` (mount -> React package dir,
+npm name, pinned published version, copy target under `console_dist/`).
+`tools/build_console.py` (stdlib only) reads it. From this package directory:
 
 ```bash
-SERVER=py/services/hugpy_server/src/hugpy_server/console_dist
-
-for pkg in ui agents_ui media_intelligence_ui video_intelligence_ui; do
-  (cd react/$pkg && npm ci && npm run build)
-done
-
-rm -rf "$SERVER" && mkdir -p "$SERVER"
-cp -r react/ui/dist/.                      "$SERVER/"
-cp -r react/agents_ui/dist/.               "$SERVER/fleet/"
-cp -r react/media_intelligence_ui/dist/.   "$SERVER/media/"
-cp -r react/video_intelligence_ui/dist/.   "$SERVER/video/"
+python tools/build_console.py --from-source           # npm ci + npm run build in react/<pkg>, copy dist/
+python tools/build_console.py --from-npm              # npm pack <npm>@<pinned version>, copy its dist/
+python tools/build_console.py --from-source --only /fleet   # one mount; repeat --only for more
+python tools/build_console.py --check                 # which mounts are present, index.html per mount
 ```
+
+* Only the selected mounts are replaced. Rebuilding `/` clears the root files
+  but never `fleet/`, `media/` or `video/`, and it does not copy the arm copies
+  that ui's `postbuild` puts in `ui/dist/<arm>/` (each arm has its own mount).
+* `--from-source` installs with `npm ci --workspaces=false` (`npm install` when a
+  package has no lockfile) because `react/` is an npm workspace root without a
+  root lockfile. `--skip-install` reuses the existing `node_modules`.
+* `--from-npm` needs a release whose tarball includes `dist/`. `"dist"` was added
+  to `files` after the currently pinned versions were published (ui 0.3.0,
+  agents-ui 0.3.0, media-intelligence-ui 0.3.0, video-intelligence-ui 0.3.2),
+  so those versions stop with a clear error. Bump the pins in the manifest
+  after the next tag-published release (`react/README.md`).
+* `--check` exits 1 when a selected mount has no `index.html`. `--console-dist`
+  and `--react-root` override the manifest paths (tests use a temp dir).
 
 Then build the wheel (`python -m build --wheel` inside `py/services/hugpy_server`).
 `pyproject.toml` lists `console_dist/**/*` as package data, so every file under

@@ -77,6 +77,13 @@ def gate_spy(monkeypatch):
         calls["evict"].append({"mk": mk, "need": need,
                                "limits": dict(getattr(state, "limits", {}) or {})})
     monkeypatch.setattr(B, "evict_to_fit", _fake_evict)
+    # After the partition storage no longer imports the fleet: the gate reaches
+    # ensure_model_present only through hugpy_storage.providers, installed by the
+    # worker boot / slot child (WIRING.md). Install the same fleet gate here, as
+    # the worker process would; monkeypatch restores the previous one after.
+    from hugpy_storage import providers as _sp
+    from hugpy_fleet.worker import storage_hooks as _sh
+    monkeypatch.setattr(_sp, "_BUDGET_GATE", _sh._budget_gate)
     P.set_budget_state(None)                    # clean slate each test
     yield calls
     P.set_budget_state(None)

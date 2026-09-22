@@ -142,6 +142,8 @@ def main() -> int:
         if pid == "monolith":
             base, top = manifest.source_root, manifest.monolith_import
             tests = manifest.source_root.parents[1] / "tests"
+            if not base.exists():  # tree retired after the partition
+                continue
         else:
             pkg = manifest.packages[pid]
             base, top = pkg.src_dir, pkg.import_name

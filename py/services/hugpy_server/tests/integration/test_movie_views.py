@@ -63,17 +63,13 @@ from hugpy_platform.constants import UPLOADS_HOME, DEFAULT_ROOT
 # STORE isolation — rebind the module globals the store path helpers read. IDENTITIES_HOME
 # must sit under the real DEFAULT_ROOT so the identity-owned ring frames pass the route jail.
 _TMP_IDENTITIES = tempfile.mkdtemp(prefix="hugpy-mvview-store-", dir=os.path.join(DEFAULT_ROOT, "video_intel", "_scratch"))
-identity_profiles.IDENTITIES_HOME = _TMP_IDENTITIES
 _TMP_PROJECTS = tempfile.mkdtemp(prefix="hugpy-mvview-projects-")
-identity_profiles.PROJECTS_HOME = _TMP_PROJECTS
 
 # JAIL: reference/frame images must resolve under the real UPLOADS_HOME.
 _TMP_UPLOADS = tempfile.mkdtemp(prefix="hugpy-mvview-uploads-", dir=UPLOADS_HOME)
 
 # media bus -> temp DB so nothing touches the real catalog.
 _TMP_DB = tempfile.mkstemp(prefix="mvview-bus-", suffix=".db")[1]
-media_bus.DB_PATH = _TMP_DB
-media_bus._initialized = False
 with sqlite3.connect(_TMP_DB) as _c:
     _c.execute(
         "CREATE TABLE IF NOT EXISTS media_jobs ("
@@ -94,7 +90,43 @@ def _capture_enqueue(name, spec, **kwargs):   # principal/owner attribution
     return f"job_test_{len(_ENQUEUED):03d}"
 
 
-media_bus.enqueue = _capture_enqueue
+
+# Module-level rebinding of these globals used to happen at IMPORT (collection)
+# time and was never undone, so every test collected after this module ran
+# against a fake media_bus.enqueue and a temp identity store (it broke the
+# media-bus tests in test_member_tier.py / test_video_share.py). Apply the
+# rebinding for this module only and restore it afterwards.
+_PATCHES = (
+    (identity_profiles, "IDENTITIES_HOME", _TMP_IDENTITIES),
+    (identity_profiles, "PROJECTS_HOME", _TMP_PROJECTS),
+    (media_bus, "DB_PATH", _TMP_DB),
+    (media_bus, "_initialized", False),
+    (media_bus, "enqueue", _capture_enqueue),
+)
+
+
+def _apply_patches():
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _v in _PATCHES]
+    for mod, name, value in _PATCHES:
+        setattr(mod, name, value)
+    return saved
+
+
+def _undo_patches(saved):
+    for mod, name, value in saved:
+        setattr(mod, name, value)
+
+
+try:
+    import pytest  # noqa: E402
+
+    @pytest.fixture(autouse=True, scope="module")
+    def _module_isolation():
+        saved = _apply_patches()
+        yield
+        _undo_patches(saved)
+except ImportError:  # script mode without pytest
+    pass
 
 app = Flask(__name__)
 app.register_blueprint(vr.video_bp)
@@ -412,4 +444,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    _apply_patches()
     raise SystemExit(main())

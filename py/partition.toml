@@ -1,4 +1,8 @@
 schema_version = 2
+# Historical: the monolith tree was retired on 2026-09-22 (history in
+# py/unwired/archive/, remnants in py/unwired/monolith/). The path is kept so
+# the move table still reads as "monolith-relative -> package"; tools skip the
+# source-side checks when it does not exist.
 source_root = "../abstract_hugpy_dev/src/abstract_hugpy_dev"
 monolith_import = "abstract_hugpy_dev"
 
@@ -58,7 +62,6 @@ depends = []
 "central.py" = "central.py"
 "imports/src/constants/constants.py" = "constants.py"
 "imports/src/constants/trust.py" = "trust.py"
-"imports/src/_compat.py" = "compat.py"
 "imports/src/except_utils.py" = "except_utils.py"
 "imports/src/module_imports.py" = "module_imports.py"
 "imports/src/utils.py" = "utils.py"
@@ -242,7 +245,6 @@ optional_depends = ["media", "video"]
 "fleet_runbook.json" = "doctrine/fleet_runbook.json"
 "managers/fleet" = "fleet_manager"
 "managers/phone_brick_orchestrator" = "phone_brick_orchestrator"
-"managers/get_pids.py" = "get_pids.py"
 "managers/toks_report.py" = "toks_report.py"
 "comms/agent_nodes.py" = "central/agent_nodes.py"
 "comms/blocklist.py" = "central/blocklist.py"
@@ -328,7 +330,6 @@ optional_depends = ["discord", "ops"]
 
 [package.moves]
 "flask_app/wsgi_app.py" = "wsgi_app.py"
-"flask_app/__init__.py" = "flask_app_init.py"
 "flask_app/app/__init__.py" = "app/__init__.py"
 "flask_app/app/endpoints_explorer.py" = "app/endpoints_explorer.py"
 "flask_app/app/endpoints_view.py" = "app/endpoints_view.py"
@@ -340,19 +341,13 @@ optional_depends = ["discord", "ops"]
 "flask_app/app/functions/__init__.py" = "app/functions/__init__.py"
 "flask_app/app/functions/chat" = "app/functions/chat"
 "flask_app/app/functions/imports/__init__.py" = "app/functions/imports/__init__.py"
-"flask_app/app/functions/imports/init_imports.py" = "app/functions/imports/init_imports.py"
 "flask_app/app/functions/imports/options" = "app/functions/imports/options"
 "flask_app/app/functions/imports/utils/__init__.py" = "app/functions/imports/utils/__init__.py"
-"flask_app/app/functions/imports/utils/imports.py" = "app/functions/imports/utils/imports.py"
 "flask_app/app/functions/imports/utils/constants.py" = "app/functions/imports/utils/constants.py"
 "flask_app/app/functions/imports/utils/api_keys.py" = "app/functions/imports/utils/api_keys.py"
 "flask_app/app/functions/imports/utils/video_share_keys.py" = "app/functions/imports/utils/video_share_keys.py"
 "flask_app/app/functions/imports/utils/discord_bindings.py" = "app/functions/imports/utils/discord_bindings.py"
 "flask_app/app/functions/imports/utils/install_links.py" = "app/functions/imports/utils/install_links.py"
-"flask_app/app/functions/imports/utils/schemas/__init__.py" = "app/functions/imports/utils/schemas/__init__.py"
-"flask_app/app/functions/imports/utils/schemas/imports.py" = "app/functions/imports/utils/schemas/imports.py"
-"flask_app/app/functions/downloads/__init__.py" = "app/functions/downloads/__init__.py"
-"flask_app/app/functions/downloads/imports.py" = "app/functions/downloads/imports.py"
 "console_dist" = "console_dist"
 
 # ---------------------------------------------------------------------------
@@ -435,6 +430,7 @@ source_roots = [
   "utils/__init__.py",
   "utils/imports.py",
   "get_vids.py",
+  "worker_agent/get_size.py",
   "console_dist.bak-shardpage",
   "fleet_runbook.json.bak-remount-20260908",
   "managers/falconsai",
@@ -449,4 +445,16 @@ source_roots = [
   "flask_app/app/functions/imports/utils/workers.py.bak-moeskip",
   "flask_app/app/functions/imports/utils/workers.py.bak-shardstore",
   "flask_app/app/operator_auth.py.bak-authfix-20260914",
+  # Moved with their package, then dissolved during the explicit-import
+  # cleanup (aggregator/dead files; copies of the two with code sit in
+  # py/unwired/). Listed so the ledger stays complete after the tree went.
+  "imports/src/_compat.py",
+  "managers/get_pids.py",
+  "flask_app/__init__.py",
+  "flask_app/app/functions/imports/init_imports.py",
+  "flask_app/app/functions/imports/utils/imports.py",
+  "flask_app/app/functions/imports/utils/schemas/__init__.py",
+  "flask_app/app/functions/imports/utils/schemas/imports.py",
+  "flask_app/app/functions/downloads/__init__.py",
+  "flask_app/app/functions/downloads/imports.py",
 ]

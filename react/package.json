@@ -1,0 +1,20 @@
+{
+  "name": "@hugpy/react-workspace",
+  "private": true,
+  "description": "npm workspace root for the @hugpy React packages; never published",
+  "license": "SEE LICENSE IN ../LICENSE",
+  "workspaces": [
+    "ui_shared",
+    "agents_ui",
+    "media_intelligence_ui",
+    "video_intelligence_ui",
+    "ui"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:ui": "npm run build -w @hugpy/ui",
+    "build:agents-ui": "npm run build -w @hugpy/agents-ui",
+    "build:media-intelligence-ui": "npm run build -w @hugpy/media-intelligence-ui",
+    "build:video-intelligence-ui": "npm run build -w @hugpy/video-intelligence-ui"
+  }
+}

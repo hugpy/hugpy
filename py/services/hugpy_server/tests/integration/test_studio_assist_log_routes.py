@@ -45,11 +45,27 @@ def _load_route_harness():
 
     vr = importlib.import_module(
         "hugpy_server.app.routes.video_routes")
-    imports_mod = sys.modules[
-        "hugpy_server.app.functions.imports"]
+    # The assist route does ``from hugpy_engine.dispatch.dispatch import
+    # execute_prompt`` at call time, so that module is where the executor is
+    # looked up (the monolith read it off functions.imports; see
+    # tests/test_prompt_spread.py for the same seam).
+    imports_mod = importlib.import_module("hugpy_engine.dispatch.dispatch")
     app = Flask(__name__)
     app.register_blueprint(vr.video_bp)
     return vr, imports_mod, app.test_client()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _restore_execute_prompt():
+    """``_patch_executor`` replaces the engine's real ``execute_prompt``; put it
+    back so the fake never leaks into another test."""
+    mod = importlib.import_module("hugpy_engine.dispatch.dispatch")
+    orig = mod.execute_prompt
+    yield
+    mod.execute_prompt = orig
 
 
 def _patch_executor(imports_mod, reply_text, ok=True, error=None, raises=None):

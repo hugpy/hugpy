@@ -11,7 +11,8 @@ architecture and `MOVE_MAP.md` tracks status.
 ```bash
 cd /home/op/Documents/hugpy/trimming
 source .venv/bin/activate            # every hugpy-* package is installed -e
-export PYTHONPATH=abstract_hugpy_dev/src   # ONLY for transitional/integration runs
+# (historical) export PYTHONPATH=abstract_hugpy_dev/src was the transitional mode; the tree is retired,
+# the compat shell py/compat/abstract_hugpy_dev now answers for old import paths
 export HUGPY_ALLOW_MONOLITH=1              # lifts the conftest block during transition
 ```
 
@@ -23,7 +24,7 @@ Tools (all read the manifest; run from the workspace root):
 | Tool | Purpose |
 |---|---|
 | `python py/validate_partition.py --edges --package <id>` | Every import edge the manifest forbids for your package, with file:line. This is your to-do list. |
-| `.venv/bin/python py/tooling/explicit_imports.py <file-or-dir> --write` | Replaces `from X import *` with explicit imports resolved to the true defining module; also re-sources explicit imports from retired aggregator modules. Run with `PYTHONPATH=abstract_hugpy_dev/src`. Leaves a `# TODO(partition): unresolved` comment for names it cannot place. |
+| `.venv/bin/python py/tooling/explicit_imports.py <file-or-dir> --write` | Replaces `from X import *` with explicit imports resolved to the true defining module; also re-sources explicit imports from retired aggregator modules. Ran with `PYTHONPATH=abstract_hugpy_dev/src` while the tree existed; the compat shell serves the same map now. Leaves a `# TODO(partition): unresolved` comment for names it cannot place. |
 | `.venv/bin/python py/tooling/check_imports.py <id>` | Dangling imports (module or name that does not exist). Must be zero. |
 | `python py/tooling/relocate.py <monolith-relative-path>` | Re-home a file after you change its owner/destination in `partition.toml`. Rewrites references workspace-wide. |
 | `python py/tooling/extract_package.py <id> --scaffold-only` | Regenerate `tests/test_import_policy.py` after a manifest change. |

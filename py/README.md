@@ -1,7 +1,7 @@
 # Hugpy Python distributions
 
 This directory is the target home for independently buildable Python
-distributions extracted from `../abstract_hugpy_dev`.
+distributions extracted from the retired `abstract_hugpy_dev` monolith (history: `unwired/archive/`).
 
 The architecture and migration order are documented in
 [`../PARTITION.md`](../PARTITION.md). Exact source ownership and allowed

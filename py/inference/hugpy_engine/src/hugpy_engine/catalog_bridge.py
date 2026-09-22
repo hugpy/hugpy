@@ -11,8 +11,9 @@ wipe / promote. :func:`install` wires all three:
       canonical_key, resolve_dir, register, refresh over
       ``config.models.models_config`` / ``config.main`` / ``assure_model_key``);
     * ``serve.hot_cache.use`` -> ``set_serve_path_hook``;
-    * a ``catalog.changed`` subscriber that refreshes discovery (coalesced,
-      on a daemon thread) so the registry follows the physical inventory.
+    * a ``catalog.changed`` subscriber that re-reads the discovery report
+      (coalesced, on a daemon thread) so the registry follows the physical
+      inventory without re-walking the store.
 
 ``install`` is idempotent and best-effort: a missing storage/control seam is
 tolerated (logged at debug) so single-box use never depends on it. The facade
@@ -92,9 +93,18 @@ class EngineCatalogSource:
         return True
 
     def refresh(self) -> None:
+        """Re-derive the registry from the discovery REPORT (no store walk).
+
+        This is the pre-partition download-completion behaviour
+        (``refresh_registry(run_discovery=False)``): the event that changed
+        the store already recorded its row and carries its own targeted
+        physical-state invalidation. A full walk (``run_discovery=True``)
+        rewrites the discovery report and drops the whole persisted physical
+        table; it belongs only to the explicit ``/models/discover`` sweep and
+        worker boot, never to every ``catalog.changed``."""
         from hugpy_engine.config.models.models_config import refresh_registry
 
-        refresh_registry(run_discovery=True)
+        refresh_registry(run_discovery=False)
 
 
 _lock = threading.Lock()

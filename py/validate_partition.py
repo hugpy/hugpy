@@ -65,7 +65,12 @@ def validate_manifest(manifest) -> list[str]:
     import json
 
     errors: list[str] = []
+    # the monolith's generated map; after the tree was retired the compat shell
+    # keeps the last copy under its generator inputs
     reloc_path = manifest.source_root / "_relocations.json"
+    if not reloc_path.exists():
+        reloc_path = (Path(__file__).resolve().parent / "compat" / "abstract_hugpy_dev"
+                      / "tools" / "inputs" / "monolith_relocations.json")
     relocations = json.loads(reloc_path.read_text()) if reloc_path.exists() else {}
     ids = manifest.order
     if len(ids) != len(set(ids)):

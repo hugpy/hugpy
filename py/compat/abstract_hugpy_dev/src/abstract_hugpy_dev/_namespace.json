@@ -1,0 +1,1255 @@
+{
+ "aggregators": {
+  "abstract_hugpy_dev": [
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev._compat_pydantic",
+    "names": [
+     [
+      "ensure_pydantic",
+      "_ensure_pydantic"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "importlib.metadata",
+    "names": [
+     [
+      "version",
+      "_pkg_version"
+     ]
+    ]
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils"
+   }
+  ],
+  "abstract_hugpy_dev.comms": [
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.jobs",
+    "names": [
+     [
+      "CANONICAL_STATUSES",
+      "CANONICAL_STATUSES"
+     ],
+     [
+      "TERMINAL_STATUSES",
+      "TERMINAL_STATUSES"
+     ],
+     [
+      "Job",
+      "Job"
+     ],
+     [
+      "JobError",
+      "JobError"
+     ],
+     [
+      "JobStore",
+      "JobStore"
+     ],
+     [
+      "job_store",
+      "job_store"
+     ],
+     [
+      "normalize_status",
+      "normalize_status"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.bus",
+    "names": [
+     [
+      "TOPIC_CONTROL_CANCEL",
+      "TOPIC_CONTROL_CANCEL"
+     ],
+     [
+      "TOPIC_JOB_CREATED",
+      "TOPIC_JOB_CREATED"
+     ],
+     [
+      "TOPIC_JOB_DONE",
+      "TOPIC_JOB_DONE"
+     ],
+     [
+      "TOPIC_JOB_STATUS",
+      "TOPIC_JOB_STATUS"
+     ],
+     [
+      "Bus",
+      "Bus"
+     ],
+     [
+      "BusMessage",
+      "BusMessage"
+     ],
+     [
+      "Subscription",
+      "Subscription"
+     ],
+     [
+      "bus",
+      "bus"
+     ],
+     [
+      "wire_cancel",
+      "wire_cancel"
+     ],
+     [
+      "wire_job_events",
+      "wire_job_events"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.principals",
+    "names": [
+     [
+      "Principal",
+      "Principal"
+     ],
+     [
+      "PrincipalStore",
+      "PrincipalStore"
+     ],
+     [
+      "allowed",
+      "allowed"
+     ],
+     [
+      "principal_store",
+      "principal_store"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.settings",
+    "names": [
+     [
+      "SettingsStore",
+      "SettingsStore"
+     ],
+     [
+      "settings_store",
+      "settings_store"
+     ],
+     [
+      "wire_settings_events",
+      "wire_settings_events"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.blocklist",
+    "names": [
+     [
+      "BLOCKED_MARKER",
+      "BLOCKED_MARKER"
+     ],
+     [
+      "NS",
+      "BLOCKED_NS"
+     ],
+     [
+      "block",
+      "block_model"
+     ],
+     [
+      "block_info",
+      "block_info"
+     ],
+     [
+      "block_reason",
+      "block_reason"
+     ],
+     [
+      "blocked_keys",
+      "blocked_keys"
+     ],
+     [
+      "is_blocked",
+      "is_blocked"
+     ],
+     [
+      "unblock",
+      "unblock_model"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.calibration",
+    "names": [
+     [
+      "CalibrationStore",
+      "CalibrationStore"
+     ],
+     [
+      "calibration_store",
+      "calibration_store"
+     ],
+     [
+      "calibration_table",
+      "calibration_table"
+     ],
+     [
+      "clamp_correction",
+      "clamp_correction"
+     ],
+     [
+      "corrections_for",
+      "corrections_for"
+     ],
+     [
+      "record_samples",
+      "record_samples"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.comms.model_metrics",
+    "names": [
+     [
+      "ModelMetricsStore",
+      "ModelMetricsStore"
+     ],
+     [
+      "derive_variant",
+      "derive_variant"
+     ],
+     [
+      "model_metrics_store",
+      "model_metrics_store"
+     ]
+    ]
+   }
+  ],
+  "abstract_hugpy_dev.flask_app": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.wsgi_app"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.chat.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.downloads": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.downloads.downloads"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.downloads.downloader"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.downloads.model_physical"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.downloads.cancelable_downloads"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.downloads.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.imports.init_imports": [
+   {
+    "kind": "star",
+    "module": "abstract_flask"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils"
+   },
+   {
+    "kind": "import",
+    "module": "signal"
+   },
+   {
+    "as": "mp",
+    "kind": "import",
+    "module": "multiprocessing"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.imports.options.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.init_imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.imports.utils.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.init_imports"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.download_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.install_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.job_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.model_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.specs_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.request_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.config_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.chat_schemas"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.functions.imports.utils.schemas.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions.imports.utils.constants"
+   }
+  ],
+  "abstract_hugpy_dev.flask_app.app.routes.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.flask_app.app.functions"
+   }
+  ],
+  "abstract_hugpy_dev.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.apis"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config"
+   }
+  ],
+  "abstract_hugpy_dev.imports.apis": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.apis.call_api"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.apis.huggingface_api"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.apis.get_module"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.apis.download_models"
+   }
+  ],
+  "abstract_hugpy_dev.imports.apis.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config"
+   }
+  ],
+  "abstract_hugpy_dev.imports.config": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config.models"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config.main"
+   }
+  ],
+  "abstract_hugpy_dev.imports.config.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src"
+   }
+  ],
+  "abstract_hugpy_dev.imports.config.models": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config.models.models_config"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config.models.models_default"
+   }
+  ],
+  "abstract_hugpy_dev.imports.config.models.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.config.imports"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.constants"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.init_imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.module_imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.chunking"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.utils"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.except_utils"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.peft_adapters"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src.constants": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.constants.constants"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.constants.paths"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.constants.categories"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.constants.hugpy_marker"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src.constants.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.init_imports"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src.init_imports": [
+   {
+    "kind": "import",
+    "module": "os"
+   },
+   {
+    "kind": "import",
+    "module": "json"
+   },
+   {
+    "kind": "import",
+    "module": "re"
+   },
+   {
+    "kind": "import",
+    "module": "unicodedata"
+   },
+   {
+    "kind": "import",
+    "module": "bs4"
+   },
+   {
+    "kind": "import",
+    "module": "urllib"
+   },
+   {
+    "kind": "import",
+    "module": "tempfile"
+   },
+   {
+    "kind": "import",
+    "module": "copy"
+   },
+   {
+    "kind": "import",
+    "module": "uuid"
+   },
+   {
+    "kind": "import",
+    "module": "logging"
+   },
+   {
+    "kind": "import",
+    "module": "argparse"
+   },
+   {
+    "kind": "import",
+    "module": "json"
+   },
+   {
+    "kind": "import",
+    "module": "os"
+   },
+   {
+    "kind": "import",
+    "module": "re"
+   },
+   {
+    "kind": "import",
+    "module": "requests"
+   },
+   {
+    "kind": "import",
+    "module": "glob"
+   },
+   {
+    "as": "osp",
+    "kind": "import",
+    "module": "os.path"
+   },
+   {
+    "kind": "from",
+    "module": "pydantic",
+    "names": [
+     [
+      "BaseModel",
+      "BaseModel"
+     ],
+     [
+      "ConfigDict",
+      "ConfigDict"
+     ],
+     [
+      "Field",
+      "Field"
+     ],
+     [
+      "model_validator",
+      "model_validator"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "dataclasses",
+    "names": [
+     [
+      "dataclass",
+      "dataclass"
+     ],
+     [
+      "asdict",
+      "asdict"
+     ],
+     [
+      "field",
+      "field"
+     ],
+     [
+      "dataclass",
+      "dataclass"
+     ],
+     [
+      "fields",
+      "fields"
+     ],
+     [
+      "MISSING",
+      "MISSING"
+     ]
+    ]
+   },
+   {
+    "kind": "alias",
+    "name": "dataclass_fields",
+    "target": "fields"
+   },
+   {
+    "kind": "from",
+    "module": "typing",
+    "names": [
+     [
+      "List",
+      "List"
+     ],
+     [
+      "Optional",
+      "Optional"
+     ],
+     [
+      "Callable",
+      "Callable"
+     ],
+     [
+      "Dict",
+      "Dict"
+     ],
+     [
+      "Tuple",
+      "Tuple"
+     ],
+     [
+      "Union",
+      "Union"
+     ],
+     [
+      "Literal",
+      "Literal"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "urllib.parse",
+    "names": [
+     [
+      "urlunparse",
+      "urlunparse"
+     ],
+     [
+      "unquote",
+      "unquote"
+     ],
+     [
+      "quote",
+      "quote"
+     ],
+     [
+      "urlparse",
+      "urlparse"
+     ],
+     [
+      "parse_qs",
+      "parse_qs"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "collections",
+    "names": [
+     [
+      "Counter",
+      "Counter"
+     ]
+    ]
+   },
+   {
+    "kind": "star",
+    "module": "typing"
+   },
+   {
+    "kind": "from",
+    "module": "PyPDF2",
+    "names": [
+     [
+      "PdfReader",
+      "PdfReader"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "uuid",
+    "names": [
+     [
+      "uuid1",
+      "uuid1"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "pathlib",
+    "names": [
+     [
+      "Path",
+      "Path"
+     ]
+    ]
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.standalone_utils"
+   },
+   {
+    "kind": "import",
+    "module": "requests"
+   },
+   {
+    "kind": "from",
+    "module": "datetime",
+    "names": [
+     [
+      "datetime",
+      "datetime"
+     ],
+     [
+      "timezone",
+      "timezone"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "enum",
+    "names": [
+     [
+      "Enum",
+      "Enum"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "huggingface_hub",
+    "names": [
+     [
+      "hf_hub_download",
+      "hf_hub_download"
+     ],
+     [
+      "snapshot_download",
+      "snapshot_download"
+     ],
+     [
+      "HfApi",
+      "HfApi"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "huggingface_hub.hf_api",
+    "names": [
+     [
+      "RepoFile",
+      "RepoFile"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "huggingface_hub",
+    "names": [
+     [
+      "HfApi",
+      "HfApi"
+     ],
+     [
+      "snapshot_download",
+      "snapshot_download"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "huggingface_hub.utils",
+    "names": [
+     [
+      "HfHubHTTPError",
+      "HfHubHTTPError"
+     ]
+    ]
+   },
+   {
+    "argc": 1,
+    "func": "get_logFile",
+    "kind": "call",
+    "name": "logger"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src.schemas": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.chat_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.event_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.model_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.runner_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.task_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.video_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.whisper_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.summarizer_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.embeded_schemas"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.schemas.metadata_schemas"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src.schemas.imports": [
+   {
+    "kind": "from",
+    "module": "typing",
+    "names": [
+     [
+      "Literal",
+      "Literal"
+     ],
+     [
+      "Optional",
+      "Optional"
+     ],
+     [
+      "Union",
+      "Union"
+     ],
+     [
+      "Mapping",
+      "Mapping"
+     ],
+     [
+      "Any",
+      "Any"
+     ],
+     [
+      "AsyncIterator",
+      "AsyncIterator"
+     ],
+     [
+      "Protocol",
+      "Protocol"
+     ],
+     [
+      "runtime_checkable",
+      "runtime_checkable"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "pydantic",
+    "names": [
+     [
+      "BaseModel",
+      "BaseModel"
+     ],
+     [
+      "ConfigDict",
+      "ConfigDict"
+     ],
+     [
+      "Field",
+      "Field"
+     ],
+     [
+      "field_validator",
+      "field_validator"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.imports.src.constants",
+    "names": [
+     [
+      "DEFAULT_MAX_TOKENS",
+      "DEFAULT_MAX_TOKENS"
+     ],
+     [
+      "DEFAULT_TEMPERATURE",
+      "DEFAULT_TEMPERATURE"
+     ],
+     [
+      "DEFAULT_TOP_P",
+      "DEFAULT_TOP_P"
+     ],
+     [
+      "FINISH_REASONS",
+      "FINISH_REASONS"
+     ],
+     [
+      "ROLES",
+      "ROLES"
+     ],
+     [
+      "MIN_INPUT_WORDS_DEFAULT",
+      "MIN_INPUT_WORDS_DEFAULT"
+     ],
+     [
+      "DEFAULT_LOCAL_FILES_ONLY",
+      "DEFAULT_LOCAL_FILES_ONLY"
+     ]
+    ]
+   },
+   {
+    "kind": "from",
+    "module": "abstract_hugpy_dev.imports.src.utils",
+    "names": [
+     [
+      "get_request_id",
+      "get_request_id"
+     ],
+     [
+      "get_messages",
+      "get_messages"
+     ],
+     [
+      "get_message",
+      "get_message"
+     ]
+    ]
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports.src.init_imports"
+   }
+  ],
+  "abstract_hugpy_dev.imports.src.standalone_utils": [
+   {
+    "kind": "star",
+    "module": "abstract_essentials"
+   },
+   {
+    "kind": "from",
+    "module": "abstract_essentials",
+    "names": [
+     [
+      "__all__",
+      "__all__"
+     ]
+    ]
+   }
+  ],
+  "abstract_hugpy_dev.managers": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.embed"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imagegen"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.keywords"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.generate"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.vision"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.video"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.summarizers"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.llama"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.resolvers"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.dispatch"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.chat_context"
+   }
+  ],
+  "abstract_hugpy_dev.managers.chat_context.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.dispatch.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.embed.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.falconsai": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.falconsai.falconsai_module"
+   }
+  ],
+  "abstract_hugpy_dev.managers.falconsai.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.generate.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.imagegen.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.keywords.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.llama.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.llama.runners.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.llama.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.resolvers.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.serve.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.summarizers.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.video.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.vision.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.vision_analysis.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.src.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.constants"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.src.model.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.src.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.src.model.utils.files.artifacts.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.src.model.utils.files.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.src.model.utils.files.frames.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.src.model.utils.files.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.src.model.utils.files.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.src.model.utils.imports"
+   }
+  ],
+  "abstract_hugpy_dev.managers.whisper_model.src.model.utils.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers.whisper_model.src.model.imports"
+   }
+  ],
+  "abstract_hugpy_dev.utils": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils.seo"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils.text"
+   }
+  ],
+  "abstract_hugpy_dev.utils.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.managers"
+   }
+  ],
+  "abstract_hugpy_dev.utils.seo.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils.imports"
+   }
+  ],
+  "abstract_hugpy_dev.utils.text.imports": [
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils.imports"
+   },
+   {
+    "kind": "star",
+    "module": "abstract_hugpy_dev.utils.pdfs"
+   }
+  ]
+ },
+ "retired": {
+  "abstract_hugpy_dev.get_vids": "retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/get_vids.py",
+  "abstract_hugpy_dev.imports.src._compat": "target `hugpy_platform.compat` no longer exists in its package",
+  "abstract_hugpy_dev.managers.falconsai.falconsai_module": "retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/managers/falconsai/falconsai_module.py",
+  "abstract_hugpy_dev.managers.generate.coder_guff": "retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/managers/generate/coder_guff.py",
+  "abstract_hugpy_dev.managers.generate.generate_runner2": "retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/managers/generate/generate_runner2.py",
+  "abstract_hugpy_dev.managers.get_pids": "target `hugpy_fleet.get_pids` no longer exists in its package; copy at py/unwired/fleet/get_pids.py",
+  "abstract_hugpy_dev.managers.resolvers.categories.imports": "target `hugpy_engine.resolvers.categories.imports` no longer exists in its package; copy at py/unwired/monolith/managers/imports.py",
+  "abstract_hugpy_dev.video_intel._selftest_movie_presets": "target `hugpy_video.intel._selftest_movie_presets` no longer exists in its package",
+  "abstract_hugpy_dev.video_intel._selftest_scene": "target `hugpy_video.intel._selftest_scene` no longer exists in its package; copy at py/unwired/video/_selftest_scene.py",
+  "abstract_hugpy_dev.worker_agent.get_size": "target `hugpy_fleet.worker.get_size` no longer exists in its package; copy at py/unwired/fleet/get_size.py"
+ }
+}

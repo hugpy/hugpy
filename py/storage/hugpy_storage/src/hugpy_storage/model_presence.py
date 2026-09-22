@@ -281,39 +281,35 @@ def disk_stats(path: Optional[str]) -> dict:
         return {}
 
 
-_ERRNO_HUMAN = {
-    "ENOSPC": "disk full",
-    "EDQUOT": "disk quota exceeded",
-    "EROFS": "read-only filesystem",
-    "EACCES": "permission denied",
-    "EPERM": "permission denied",
-    "EMFILE": "too many open files",
-    "ENFILE": "too many open files (system-wide)",
-    "EIO": "I/O error",
-    "ENOENT": "path does not exist",
-    "ENOTEMPTY": "directory not empty",
-    "ESTALE": "stale file handle (NFS/virtiofs)",
-}
-
-
 def describe_disk_error(exc: BaseException, dest_path: Optional[str] = None,
                         stats: Optional[dict] = None) -> str:
     """One operator-grade line for an OS-level transfer failure, e.g.
-    ``disk full (ENOSPC) on /mnt/storage — 0 B free of 938 GB``. "" when the
-    exception is not one this can say anything sharper about than str(exc)."""
+    ``disk full (ENOSPC) on /mnt/storage — 0 B free of 938 GB``.
+
+    Only the errnos an operator can act on get a sentence: ENOSPC / EDQUOT
+    (with free/total when known) and EROFS / EACCES / EPERM ("cannot write to
+    <where> (<ERRNO>)"). Everything else returns "" so callers fall back to
+    str(exc) without a special case. Contract carried over verbatim from the
+    pre-partition ``comms.evictions.describe_disk_error``."""
     try:
         name = errno_name(exc)
         if not name:
             return ""
-        human = _ERRNO_HUMAN.get(name, "")
-        head = f"{human} ({name})" if human else name
         st = stats if isinstance(stats, dict) else disk_stats(dest_path)
-        if st.get("disk_mount"):
-            head += f" on {st['disk_mount']}"
-        if name in ("ENOSPC", "EDQUOT") and st.get("disk_total_bytes") is not None:
-            head += (f" — {_fmt_bytes(st.get('disk_free_bytes'))} free of "
-                     f"{_fmt_bytes(st.get('disk_total_bytes'))}")
-        return head
+        where = st.get("disk_mount") or dest_path or "the destination volume"
+        if name == "ENOSPC":
+            head = f"disk full (ENOSPC) on {where}"
+        elif name == "EDQUOT":
+            head = f"disk quota exceeded (EDQUOT) on {where}"
+        elif name in ("EROFS", "EACCES", "EPERM"):
+            return f"cannot write to {where} ({name})"
+        else:
+            return ""
+        free = st.get("disk_free_bytes")
+        total = st.get("disk_total_bytes")
+        if free is None or total is None:
+            return head
+        return f"{head} — {_fmt_bytes(free)} free of {_fmt_bytes(total)}"
     except Exception:  # noqa: BLE001
         return ""
 

@@ -1,0 +1,62 @@
+# abstract_hugpy_dev — transitional compatibility shell over the hugpy-*
+# distributions. Dev-only local alias: it is installed from this workspace,
+# never republished to PyPI (ECOSYSTEM.md D.4 retires the PyPI name with a
+# bridge release instead). It contains no implementation: `import
+# abstract_hugpy_dev` installs a meta-path finder that aliases every old
+# dotted path to the same module object in its new hugpy_* home.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abstract_hugpy_dev"
+version = "0.1.267.dev0"
+description = "Transitional alias of the retired abstract_hugpy_dev monolith over the hugpy-* distributions (dev-only; do not publish)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+classifiers = [
+    "Development Status :: 7 - Inactive",
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+    "hugpy-media",
+    "hugpy-video",
+    "hugpy-oracle",
+    "hugpy-fleet",
+    "hugpy-curation",
+    "hugpy-ops",
+    "hugpy-discord",
+    "hugpy-server",
+    "hugpy",
+]
+
+[project.urls]
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/compat/abstract_hugpy_dev"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-timeout"]
+
+[project.scripts]
+abstract-hugpy-dev-check = "abstract_hugpy_dev._check:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["abstract_hugpy_dev*"]
+
+[tool.setuptools.package-data]
+abstract_hugpy_dev = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
