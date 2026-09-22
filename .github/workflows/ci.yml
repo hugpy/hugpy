@@ -34,13 +34,18 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python -m pip install -U pip build pytest pytest-timeout
-      # sibling packages from the tree, so the matrix never pulls PyPI versions of itself
+      # sibling packages from the tree in one pip run, so every inter-package
+      # dependency resolves against the checkout and the matrix never pulls
+      # PyPI versions of itself (a per-package loop fails on the first package
+      # whose sibling dependency is not installed yet)
       - run: |
+          specs=()
           for d in py/foundation/* py/storage/* py/inference/hugpy_engine py/inference/hugpy_media \
                    py/cinema/hugpy_video py/cinema/hugpy_oracle py/fleet/* py/curation/* \
                    py/operations/* py/integrations/* py/services/* py/meta/* py/compat/*; do
-            pip install -e "$d"
+            specs+=(-e "$d")
           done
+          pip install "${specs[@]}"
       - run: cd ${{ matrix.pkg }} && python -m build --wheel
       - run: cd ${{ matrix.pkg }} && pytest -q --timeout=120
       - run: pip install --force-reinstall --no-deps ${{ matrix.pkg }}/dist/*.whl && python -c "import $(basename ${{ matrix.pkg }})"
@@ -65,3 +70,5 @@ jobs:
       # react/package.json is a workspace root with no root lockfile; each package
       # installs from its own package-lock.json.
       - run: cd ${{ matrix.pkg }} && (npm ci --workspaces=false || npm install --workspaces=false) && npm run build
+      # unit tests where a package defines a `test` script (vitest in the media arm)
+      - run: cd ${{ matrix.pkg }} && npm test --if-present

@@ -207,7 +207,7 @@ def surface_probe() -> None:
             others = sorted(
                 (k for k, v in list(sys.modules.items())
                  if v is not None and not k.startswith(ROOT_NAME) and ga(v, n) is obj),
-                key=lambda k: (k.count("."), k),
+                key=lambda k: (any(part.startswith("_") for part in k.split(".")), k.count("."), k),
             )
             if others:
                 rec.update(source="external", module=others[0], stdlib=others[0].split(".")[0] in stdlib)
@@ -318,8 +318,15 @@ def emit_init(surface: dict[str, dict]) -> str:
             w("")
     if stdlib_mods:
         w("# --- standard library names the old namespace re-exported ----------------")
-        for module in sorted(stdlib_mods):
-            w(_from_line(module, stdlib_mods[module], indent=""))
+        w("# Bound one by one: a name this interpreter lacks (added or removed in another")
+        w("# Python release) is skipped and listed in _SURFACE_UNAVAILABLE instead of")
+        w("# breaking the whole import.")
+        w("from ._relocations import reexport_stdlib as _reexport_stdlib")
+        w("")
+        w("_SURFACE_UNAVAILABLE: list[str] = []")
+        for module in sorted(stdlib_mods, key=_public_stdlib_module):
+            names = sorted(set(stdlib_mods[module]))
+            w(_reexport_lines(_public_stdlib_module(module), names))
         w("")
     if third_mods:
         w("# --- third-party names the old namespace re-exported ---------------------")
@@ -366,6 +373,29 @@ def emit_init(surface: dict[str, dict]) -> str:
 def _chunks(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i:i + n]
+
+
+def _public_stdlib_module(module: str) -> str:
+    """``_typing`` -> ``typing``: the probe may record a C accelerator module as
+    the origin of an object; import it from the public module when that exposes it."""
+    top = module.split(".")[0]
+    if not top.startswith("_"):
+        return module
+    public = top.lstrip("_")
+    try:
+        importlib.import_module(public)
+    except ImportError:
+        return module
+    return public
+
+
+def _reexport_lines(module: str, names: list[str]) -> str:
+    head = f"_SURFACE_UNAVAILABLE += _reexport_stdlib(globals(), {module!r}, ["
+    one = head + ", ".join(repr(n) for n in names) + "])"
+    if len(one) <= 96:
+        return one
+    body = ",\n".join(f"    {n!r}" for n in names)
+    return f"{head}\n{body},\n])"
 
 
 def _from_line(module: str, names: list[str], indent: str) -> str:

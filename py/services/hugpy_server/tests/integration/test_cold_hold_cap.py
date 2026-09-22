@@ -134,7 +134,7 @@ def _message_checks(remote):
     check("refusal names the concurrent-load LIMIT as the reason",
           "concurrent model loads" in low and "limit" in low)
     check("refusal says the model is still LOADING (not that it failed)",
-          "is still loading on" in low)
+          "is still loading into vram on" in low)
     check("refusal states plainly that nothing is broken",
           "nothing is broken" in low)
     check("refusal is actionable (tells the caller when to come back)",
@@ -726,7 +726,6 @@ def _route_checks():
 
 
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(strict=False, reason="stale before the partition (monolith checkpoint 7c19ce7): asserts 'is still loading on' but ColdHoldCapacityError.stream_message now says 'is still loading into VRAM on'")
 def test_cold_hold_cap():
     global ok
     ok = 0

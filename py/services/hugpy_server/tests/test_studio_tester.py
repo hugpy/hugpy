@@ -207,10 +207,11 @@ def client_and_enqueues(monkeypatch):
 
     enqueued = []
 
-    def fake_enqueue(name, spec, principal=None, owner=None):
+    def fake_enqueue(name, spec, principal=None, owner=None, private=False):
         # `owner` (2026-08-06 member tier) rides alongside `principal` on every
         # enqueue — accepted here so the double keeps matching the real
         # signature rather than 500ing the route under test.
+        # `private` (per-job visibility) is the same story.
         enqueued.append((name, spec, principal))
         return "job-abc123"
 
@@ -223,7 +224,6 @@ def client_and_enqueues(monkeypatch):
     return app.test_client(), enqueued
 
 
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): fake media_bus.enqueue lacks the private= kwarg the route now passes (TypeError -> 500)')
 def test_endpoint_enqueues_studio_tester_job(client_and_enqueues):
     client, enqueued = client_and_enqueues
     resp = client.post("/video/studio/tester",

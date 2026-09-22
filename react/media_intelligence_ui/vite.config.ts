@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -16,6 +17,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+  },
+  // `npm test` (vitest run). The unit tests cover transport/schemas/upload
+  // helpers only and need no DOM: Node's own fetch/File/DOMException suffice.
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
   },
   // Standalone `vite dev` / `vite preview` reach the same-origin API by proxying
   // /api to the local hugpy Flask backend, stripping the /api prefix exactly like

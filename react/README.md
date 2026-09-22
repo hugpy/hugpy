@@ -25,8 +25,9 @@ this repository; locate their source before any further release (ECOSYSTEM.md B.
 (`ui_shared` first). `npm run build` here builds every package in order
 (`ui_shared` has no build step; the three arms; then `ui`, whose `postbuild`
 also rebuilds the arms into `ui/dist/<arm>/`). `npm run build:ui` and friends
-build one package. There is no root `test` script: the media arm has
-`*.test.ts` files written for vitest, but vitest is not a dependency yet.
+build one package. There is no root `test` script; the media arm has a
+vitest suite (`npm test` in `react/media_intelligence_ui`), and CI runs
+`npm test --if-present` in every package after its build.
 
 There is no root lockfile. Each package keeps its own `package-lock.json`, so
 install inside a package with `npm ci --workspaces=false` (a plain `npm ci`

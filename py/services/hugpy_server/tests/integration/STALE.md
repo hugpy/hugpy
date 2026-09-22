@@ -2,11 +2,13 @@
 
 How we found them: we ran these test files against the pre-partition monolith checkpoint (git `7c19ce7`, same venv) and against this package, then diffed the two lists of failures. The 100 tests that also failed on the monolith count as pre-existing.
 Of those 100, 62 turned out to depend on test order, not to be stale. Test modules rebound `media_bus.DB_PATH` / `media_bus.enqueue` / `identity_profiles.IDENTITIES_HOME` and the fake identity-service URLs at import time. The fix is collection-time isolation in `tests/conftest.py`, and those 62 now pass (listed at the bottom).
-The remaining 38 are marked below: `skipif` when the host is missing something, `xfail(strict=False)` when the test is stale. To fix one, update the test or the code and remove the marker. To delete one, drop the test.
+The remaining 38 were marked: `skipif` when the host is missing something, `xfail(strict=False)` when the test is stale. To fix one, update the test or the code and remove the marker. To delete one, drop the test.
+
+Fixed on 2026-09-22 (markers removed, no longer listed): the 21 script-style studio tests in `test_studio_enhance.py`, `test_studio_id_lock.py`, `test_studio_source_video.py` and `test_studio_vace.py`. Their `_setup_fixtures()` / `_teardown_fixtures()` only ran under `__main__`; each module now has a module-scoped autouse fixture that calls them under pytest. One of them (`test_run_studio_i2v_source_video_ok`) also opts into `STUDIO_ALLOW_SYNTHETIC=1` for its 0.5 GB budget, as the sibling bus-level modules already do.
+Also fixed the same day: `test_cold_hold_cap` (assertion updated to the current `is still loading into VRAM on` wording) and `test_endpoint_enqueues_studio_tester_job` (the fake `media_bus.enqueue` now accepts `private=`).
 
 | test id | classification | reason |
 |---|---|---|
-| `integration/test_cold_hold_cap.py::test_cold_hold_cap` | stale test | asserts 'is still loading on' but ColdHoldCapacityError.stream_message now says 'is still loading into VRAM on' |
 | `integration/test_identity_profiles.py::test_create_and_store_shape` | stale test | identity profiles are versioned now (active_version/canonical); the store entry no longer carries the flat reference_images key the test asserts |
 | `integration/test_identity_profiles.py::test_delete_archives` | stale test | asserts archived['reference_images'] but versioned profiles no longer carry that flat key (KeyError; on the monolith it 403'd on ownership first) |
 | `integration/test_identity_profiles.py::test_validation_rejects` | stale test | expects 400 'at most 4' for 5 reference_images, but profile creation now accepts the body (201): refs are no longer validated at create |
@@ -16,34 +18,12 @@ The remaining 38 are marked below: `skipif` when the host is missing something, 
 | `integration/test_mlt_render.py::test_unresolved_resource_errors_as_data` | environment (melt binary) | run_mlt_render probes melt first; without it every path returns melt_missing |
 | `integration/test_mlt_render.py::test_runner_project_outside_jail` | environment (melt binary) | run_mlt_render probes melt first; without it every path returns melt_missing |
 | `integration/test_mlt_render.py::test_runner_missing_project` | environment (melt binary) | run_mlt_render probes melt first; without it every path returns melt_missing |
-| `integration/test_studio_enhance.py::test_real_interpolation_doubles_fps_and_frames` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_real_upscale_hits_target_geometry` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_prompt_in_hash_but_not_in_pixels` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_resume_on_hash` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_premium_rife_graceful_deps_missing` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_premium_ltx_graceful_weights_missing` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_route_interp_source_video_200` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_enhance.py::test_route_upres_source_video_200` | stale test | script-style module: _setup_fixtures() (ffmpeg source clip) only runs under __main__, so under pytest the source clip never exists |
-| `integration/test_studio_id_lock.py::test_runner_preflight_real_ref_degrades_deps_missing` | stale test | script-style module: _setup_fixtures() (reference image / control clip) only runs under __main__, so under pytest the fixture files never exist |
-| `integration/test_studio_id_lock.py::test_route_id_lock_valid_200` | stale test | script-style module: _setup_fixtures() (reference image / control clip) only runs under __main__, so under pytest the fixture files never exist |
-| `integration/test_studio_id_lock.py::test_route_id_lock_non_image_rejected` | stale test | script-style module: _setup_fixtures() (reference image / control clip) only runs under __main__, so under pytest the fixture files never exist |
-| `integration/test_studio_id_lock.py::test_route_control_only_with_id_lock` | stale test | script-style module: _setup_fixtures() (reference image / control clip) only runs under __main__, so under pytest the fixture files never exist |
-| `integration/test_studio_id_lock.py::test_route_id_lock_with_control_200` | stale test | script-style module: _setup_fixtures() (reference image / control clip) only runs under __main__, so under pytest the fixture files never exist |
 | `integration/test_studio_lock_templates.py::test_all_presets_route` | stale test | preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it |
 | `integration/test_studio_tier_presets.py::test_all_presets_route` | stale test | preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it |
 | `integration/test_studio_presets_route.py::test_every_preset_routes_to_a_model` | stale test | preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it |
 | `integration/test_studio_presets_route.py::test_preset_binding_intent` | stale test | preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it |
 | `integration/test_studio_model_pin.py::test_router_pin_overrides_autopick` | stale test | pins wan2.2-t2v-a14b, which was removed from studio models_seed (2026-08-13) -> PINNED_MODEL_UNAVAILABLE |
-| `integration/test_studio_source_video.py::test_route_source_video_real_mp4_200` | stale test | script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_source_video.py::test_route_source_video_not_a_video_400` | stale test | script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_source_video.py::test_route_source_asset_id_resolves_and_unknown_404` | stale test | script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_source_video.py::test_produce_clip_extends_from_source_video` | stale test | script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_source_video.py::test_run_studio_i2v_source_video_ok` | stale test | script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_vace.py::test_produce_v2v_real_source_deps_missing` | stale test | script-style module: _setup_fixtures() (source mp4) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_vace.py::test_run_studio_i2v_v2v_spec_deps_missing` | stale test | script-style module: _setup_fixtures() (source mp4) only runs under __main__, so under pytest the source video never exists |
-| `integration/test_studio_vace.py::test_route_v2v_source_video_200` | stale test | script-style module: _setup_fixtures() (source mp4) only runs under __main__, so under pytest the source video never exists |
 | `test_compute_actions.py::test_routes_never_500_on_a_store_fault` | stale test | on a store fault /llm/model-metrics and /llm/compute-actions return the empty panel without the 'error' reason the test asserts |
-| `test_studio_tester.py::test_endpoint_enqueues_studio_tester_job` | stale test | fake media_bus.enqueue lacks the private= kwarg the route now passes (TypeError -> 500) |
 
 ## Pre-existing on the monolith, but passing once collection-time isolation was added (no marker)
 

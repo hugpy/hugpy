@@ -147,6 +147,14 @@ def _teardown_fixtures() -> None:
             pass
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _module_fixtures():
+    """Under pytest, build and tear down the same fixture files main() does under __main__."""
+    _setup_fixtures()
+    yield
+    _teardown_fixtures()
+
+
 def _studio_env(master_fps: int = 12) -> StudioEnv:
     return StudioEnv(
         output_root="/out", weights_root="/weights", manifest_root="/manifests",
@@ -227,7 +235,6 @@ def test_manifest_hash_keys_on_source_video():
 # --------------------------------------------------------------------------- #
 # [3] Route: POST source_video=<real tiny mp4 inside the jail> -> 200 {job_id}.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists')
 def test_route_source_video_real_mp4_200():
     if not (_FFMPEG and _FFPROBE):
         print("      (ffmpeg/ffprobe unavailable — skipping route real-mp4 check)")
@@ -264,7 +271,6 @@ def test_route_source_video_jail_escape_400():
 # --------------------------------------------------------------------------- #
 # [6] Route: an in-jail file that is NOT a video -> 400 (probe-classified).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists')
 def test_route_source_video_not_a_video_400():
     if not _FFPROBE:
         print("      (ffprobe unavailable — skipping non-video classify check)")
@@ -278,7 +284,6 @@ def test_route_source_video_not_a_video_400():
 # [7] Route: source_asset_id resolves via the media catalog to its uri -> 200;
 #     an unknown asset id -> 404.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists')
 def test_route_source_asset_id_resolves_and_unknown_404():
     if not (_FFMPEG and _FFPROBE):
         print("      (ffmpeg/ffprobe unavailable — skipping source_asset_id check)")
@@ -310,7 +315,6 @@ def test_route_t2v_ignores_source_video():
 #     Ok(Artifact); the last-frame extraction ran (source_lastframe.png sidecar) and
 #     the manifest.json records source_video; a re-run RESUMES (deterministic).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists')
 def test_produce_clip_extends_from_source_video():
     if not (_FFMPEG and _FFPROBE):
         print("      (ffmpeg/ffprobe unavailable — skipping produce extend check)")
@@ -384,7 +388,6 @@ def test_produce_clip_t2v_carries_but_ignores_source():
 #      JobResult(ok=True) carrying a video clip ref; the clip's manifest records
 #      source_video (the spec->adapter->produce->manifest thread, end to end).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4 + seeded catalog asset) only runs under __main__, so under pytest the source video never exists')
 def test_run_studio_i2v_source_video_ok():
     if not (_FFMPEG and _FFPROBE):
         print("      (ffmpeg/ffprobe unavailable — skipping bus-adapter extend check)")
@@ -397,6 +400,9 @@ def test_run_studio_i2v_source_video_ok():
 
     orig = media_bus.is_cancelling
     media_bus.is_cancelling = lambda job_id: False
+    # at 0.5 GB only the synthetic prover fits, and binding it is opt-in
+    orig_synthetic = os.environ.get("STUDIO_ALLOW_SYNTHETIC")
+    os.environ["STUDIO_ALLOW_SYNTHETIC"] = "1"
     try:
         result = run_studio_i2v(spec, job_id="srcvid-bus-1")
         assert result.ok is True, f"a source_video bus job must be ok=True; got {result}"
@@ -410,6 +416,10 @@ def test_run_studio_i2v_source_video_ok():
         assert man["source_video"] == _SRC_MP4, (
             "the produced clip's manifest must record source_video end to end")
     finally:
+        if orig_synthetic is None:
+            os.environ.pop("STUDIO_ALLOW_SYNTHETIC", None)
+        else:
+            os.environ["STUDIO_ALLOW_SYNTHETIC"] = orig_synthetic
         media_bus.is_cancelling = orig
         shutil.rmtree(out_root, ignore_errors=True)
 

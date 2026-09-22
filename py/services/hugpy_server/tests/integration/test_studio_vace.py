@@ -116,6 +116,14 @@ def _teardown_fixtures() -> None:
         pass
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _module_fixtures():
+    """Under pytest, build and tear down the same fixture files main() does under __main__."""
+    _setup_fixtures()
+    yield
+    _teardown_fixtures()
+
+
 def _studio_env(master_fps: int = 12) -> StudioEnv:
     return StudioEnv(
         output_root="/out", weights_root="/weights", manifest_root="/manifests",
@@ -181,7 +189,6 @@ def test_registry_valid_and_vace_entrypoint_wired():
 #     runner (DEPS_MISSING can ONLY come from run_wan_vace — synthetic has no v2v),
 #     never raises.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4) only runs under __main__, so under pytest the source video never exists')
 def test_produce_v2v_real_source_deps_missing():
     if not _FFMPEG:
         print("      (ffmpeg unavailable — skipping produce v2v real-source check)")
@@ -239,7 +246,6 @@ def test_produce_v2v_ghost_source_is_source_missing():
 #     -> JobResult(ok=False, error.code=="deps_missing"), through the live-shaped
 #     spec->adapter->produce->runner path; never raises.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4) only runs under __main__, so under pytest the source video never exists')
 def test_run_studio_i2v_v2v_spec_deps_missing():
     if not _FFMPEG:
         print("      (ffmpeg unavailable — skipping bus-adapter v2v check)")
@@ -269,7 +275,6 @@ def test_run_studio_i2v_v2v_spec_deps_missing():
 #     prompt:...} -> 200 {job_id} (capability passes through T3b's passthrough; the
 #     source is validated + enqueued; no restart).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): script-style module: _setup_fixtures() (source mp4) only runs under __main__, so under pytest the source video never exists')
 def test_route_v2v_source_video_200():
     if not (_FFMPEG and _FFPROBE):
         print("      (ffmpeg/ffprobe unavailable — skipping route v2v check)")

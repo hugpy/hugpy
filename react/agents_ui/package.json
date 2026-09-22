@@ -48,7 +48,6 @@
   "files": [
     "dist",
     "src",
-    "ui_shared",
     "entry.tsx",
     "index.html",
     "vite.config.ts",

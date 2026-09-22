@@ -61,9 +61,14 @@ def _import_report(surface: bool) -> dict:
     }
     if surface:
         pkg = importlib.import_module(ROOT)
-        missing = [n for n in getattr(pkg, "_SURFACE", ()) if not hasattr(pkg, n)]
+        # stdlib names this interpreter does not have (e.g. typing.NoDefault before
+        # 3.13) are bound nowhere; they are reported, not counted as missing
+        unavailable = list(getattr(pkg, "_SURFACE_UNAVAILABLE", ()))
+        missing = [n for n in getattr(pkg, "_SURFACE", ())
+                   if not hasattr(pkg, n) and n not in unavailable]
         report["surface_total"] = len(getattr(pkg, "_SURFACE", ()))
         report["surface_missing"] = missing
+        report["surface_unavailable"] = unavailable
     return report
 
 
@@ -134,6 +139,8 @@ def main(argv=None) -> int:
                   f"/{report['surface_total']} names present")
             for n in report["surface_missing"]:
                 print(f"  MISSING {n}")
+            for n in report["surface_unavailable"]:
+                print(f"  UNAVAILABLE {n}: not in this Python's standard library")
         print(f"retired without alias: {len(report['retired'])}")
         print("result:", "FAIL" if bad else "OK")
     return 1 if bad else 0

@@ -310,6 +310,21 @@ class RelocationFinder(importlib.abc.MetaPathFinder):
         return None
 
 
+def reexport_stdlib(namespace: dict, module: str, names: list[str]) -> list[str]:
+    """Bind ``names`` from stdlib ``module`` into ``namespace``; return the ones
+    this interpreter does not have (added or removed in another Python release,
+    e.g. ``typing.NoDefault`` is 3.13+). A missing name must not break the import
+    of the whole compatibility surface."""
+    mod = importlib.import_module(module)
+    unavailable: list[str] = []
+    for name in names:
+        try:
+            namespace[name] = getattr(mod, name)
+        except AttributeError:
+            unavailable.append(name)
+    return unavailable
+
+
 def install() -> None:
     if not any(isinstance(f, RelocationFinder) for f in sys.meta_path):
         sys.meta_path.insert(0, RelocationFinder())

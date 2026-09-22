@@ -83,9 +83,14 @@ def test_retired_modules_do_not_resolve():
 
 
 def test_top_level_surface_present():
-    missing = [n for n in abstract_hugpy_dev._SURFACE if not hasattr(abstract_hugpy_dev, n)]
+    unavailable = set(abstract_hugpy_dev._SURFACE_UNAVAILABLE)
+    missing = [n for n in abstract_hugpy_dev._SURFACE
+               if not hasattr(abstract_hugpy_dev, n) and n not in unavailable]
     assert not missing, f"{len(missing)} names missing from the old surface: {missing[:20]}"
     assert set(abstract_hugpy_dev.__all__) <= set(abstract_hugpy_dev._SURFACE)
+    # only stdlib names newer than this interpreter may be unavailable
+    assert unavailable <= {"NoDefault", "ReadOnly", "TypeIs", "TypeAliasType", "override",
+                           "Never", "Self", "ByteString", "get_protocol_members", "is_protocol"}, unavailable
 
 
 def test_unknown_top_level_name_raises():
