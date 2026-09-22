@@ -3,8 +3,7 @@
 This is the target decomposition of `abstract_hugpy_dev`. The machine-readable
 source ownership map is [`py/partition.toml`](py/partition.toml), validated by
 [`py/validate_partition.py`](py/validate_partition.py); the working procedure
-for finishing each package is [`py/EXTRACTION_GUIDE.md`](py/EXTRACTION_GUIDE.md)
-and the status ledger is [`MOVE_MAP.md`](MOVE_MAP.md).
+for finishing each package is [`py/EXTRACTION_GUIDE.md`](py/EXTRACTION_GUIDE.md).
 
 The split follows runtime ownership rather than the current directory names.
 Three current directories are deliberately dismantled:

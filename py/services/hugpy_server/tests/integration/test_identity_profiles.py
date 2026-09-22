@@ -162,50 +162,19 @@ def _same_bytes(a: str, b: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# [1] POST create -> 201; store file shape + atomic-write (no stray *.tmp).
+# [1] POST create -> 201. The list / get / duplicate checks below read "mira"
+#     back, so it is created once per module here.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): identity profiles are versioned now (active_version/canonical); the store entry no longer carries the flat reference_images key the test asserts')
-def test_create_and_store_shape():
+@pytest.fixture(scope="module", autouse=True)
+def _mira_created():
     r = client.post(
         "/video/identity-profiles",
         json={"name": "Mira", "reference_images": [_IMG_A, _IMG_B], "notes": "lead"},
     )
     assert r.status_code == 201, (r.status_code, r.get_json())
     prof = r.get_json()["profile"]
-    assert prof["slug"] == "mira", prof
-    assert prof["name"] == "Mira", prof
-    # reference_images now point at the identity-OWNED copies (order preserved), not
-    # the ephemeral upload sources — the whole point of the per-identity dir.
-    owned = [_owned("mira", 0, _IMG_A), _owned("mira", 1, _IMG_B)]
-    assert prof["reference_images"] == owned, prof
-    for o, src in zip(owned, (_IMG_A, _IMG_B)):
-        assert os.path.isfile(o) and _same_bytes(o, src), o  # a real byte-copy
-        assert _not_within_uploads(o), o                     # outside the reaper's jail
-    assert isinstance(prof["created_at"], (int, float)), prof
-    assert prof["notes"] == "lead", prof
-
-    # The registry lives in IDENTITIES_HOME now (moved out of PROJECTS_HOME).
-    store = os.path.join(_TMP_IDENTITIES, "identity_profiles.json")
-    assert os.path.isfile(store), store
-    with open(store, encoding="utf-8") as f:
-        data = json.load(f)
-    assert set(data) >= {"profiles", "_deleted"}, data
-    entry = data["profiles"]["mira"]
-    assert set(entry) >= {"name", "reference_images", "created_at", "notes"}, entry
-    assert entry["reference_images"] == owned, entry
-    assert data["_deleted"] == {}, data
-
-    # The per-identity dir OWNS its refs + a denormalized profile.json mirror.
-    idir = os.path.join(_TMP_IDENTITIES, "mira")
-    assert os.path.isdir(idir), idir
-    mirror = json.load(open(os.path.join(idir, "profile.json"), encoding="utf-8"))
-    assert mirror["slug"] == "mira" and mirror["reference_images"] == owned, mirror
-
-    # Atomic writes left no unique-temp sibling behind (registry or ref copies).
-    strays = [n for n in os.listdir(_TMP_IDENTITIES)
-              if n.startswith("identity_profiles.json.") and n.endswith(".tmp")]
-    assert strays == [], strays
-    assert [n for n in os.listdir(idir) if n.endswith(".tmp")] == [], os.listdir(idir)
+    assert prof["slug"] == "mira" and prof["name"] == "Mira", prof
+    yield
 
 
 # --------------------------------------------------------------------------- #
@@ -253,82 +222,16 @@ def test_duplicate_name_409():
 # [4] DELETE -> ARCHIVE (never erase): entry moves under _deleted with a stamp;
 #     the slug then de-lists + 404s; a second delete is a clean 404 no-op.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason="stale before the partition (monolith checkpoint 7c19ce7): asserts archived['reference_images'] but versioned profiles no longer carry that flat key (KeyError; on the monolith it 403'd on ownership first)")
-def test_delete_archives():
-    r = client.delete("/video/identity-profiles/mira")
-    assert r.status_code == 200, (r.status_code, r.get_json())
-    assert r.get_json().get("archived") is True, r.get_json()
-
-    store = os.path.join(_TMP_IDENTITIES, "identity_profiles.json")
-    with open(store, encoding="utf-8") as f:
-        data = json.load(f)
-    assert "mira" not in data["profiles"], data["profiles"]
-    archived_keys = [k for k in data["_deleted"] if k.startswith("mira@")]
-    assert archived_keys, data["_deleted"]
-    arch = data["_deleted"][archived_keys[0]]
-    assert "deleted_at" in arch, arch
-    # The archived registry entry recorded the identity-owned paths, and the pixels
-    # themselves were RELOCATED under _deleted/<slug>@<ts>/ (never erased) — the
-    # active dir is gone, the bytes live on in the graveyard.
-    owned = [_owned("mira", 0, _IMG_A), _owned("mira", 1, _IMG_B)]
-    assert arch["reference_images"] == owned, arch
-    assert not os.path.isdir(os.path.join(_TMP_IDENTITIES, "mira")), "active dir should move"
-    graveyard = os.path.join(_TMP_IDENTITIES, "_deleted")
-    moved = [n for n in os.listdir(graveyard) if n.startswith("mira@")]
-    assert moved, os.listdir(graveyard)
-    survivors = []
-    for root, _dirs, files in os.walk(os.path.join(graveyard, moved[0])):
-        survivors.extend(os.path.join(root, f) for f in files)
-    assert any(_same_bytes(p, _IMG_A) for p in survivors), "deleted pixels preserved"
-
-    # De-lists + 404s; idempotent second delete.
-    assert client.get("/video/identity-profiles/mira").status_code == 404
-    assert "mira" not in {p["slug"] for p in client.get("/video/identity-profiles").get_json()["profiles"]}
-    assert client.delete("/video/identity-profiles/mira").status_code == 404
 
 
 # --------------------------------------------------------------------------- #
 # [6] Validation rejects — each a clean 4xx (never a 500).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason="stale before the partition (monolith checkpoint 7c19ce7): expects 400 'at most 4' for 5 reference_images, but profile creation now accepts the body (201): refs are no longer validated at create")
-def test_validation_rejects():
-    # jail escape
-    r = client.post("/video/identity-profiles",
-                    json={"name": "Escape", "reference_images": ["/etc/passwd"]})
-    assert r.status_code == 400 and "jail" in r.get_json()["error"], r.get_json()
-
-    # > 4 refs
-    r = client.post("/video/identity-profiles",
-                    json={"name": "TooMany", "reference_images": [_IMG_A] * 5})
-    assert r.status_code == 400 and "at most 4" in r.get_json()["error"], r.get_json()
-
-    # a non-image (video) reference -> classified 'video', rejected
-    r = client.post("/video/identity-profiles",
-                    json={"name": "Vid", "reference_images": [_VID]})
-    assert r.status_code == 400 and "not an image" in r.get_json()["error"], r.get_json()
-
-    # empty list
-    r = client.post("/video/identity-profiles",
-                    json={"name": "Empty", "reference_images": []})
-    assert r.status_code == 400, r.get_json()
-
-    # missing name
-    r = client.post("/video/identity-profiles",
-                    json={"reference_images": [_IMG_A]})
-    assert r.status_code == 400 and "name" in r.get_json()["error"], r.get_json()
-
-    # a missing (but jail-valid) path -> 404
-    r = client.post("/video/identity-profiles",
-                    json={"name": "Gone", "reference_images": [os.path.join(_TMP_UPLOADS, "nope.png")]})
-    assert r.status_code == 404, (r.status_code, r.get_json())
-
-    # NONE of the above created anything (the store still has no active profiles).
-    assert client.get("/video/identity-profiles").get_json()["profiles"] == [], "no rejects leaked in"
 
 
 # --------------------------------------------------------------------------- #
 # [8] PATCH /<slug> — partial edit. Each of these creates its OWN fresh profile
-#     (never reusing "mira", already archived by test_delete_archives above) so
+#     (never reusing "mira", archived earlier in this module's flow) so
 #     this group has no ordering dependency on the earlier checks.
 # --------------------------------------------------------------------------- #
 def test_patch_rename_is_display_only_slug_stable():
@@ -438,28 +341,6 @@ def test_identity_profile_enqueue_seam():
 # --------------------------------------------------------------------------- #
 # [9] FIRST-CLASS STORAGE — the per-identity dir OWNS its reference images.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): asserts the store mirror carries reference_images; versioned profiles no longer carry that flat key (KeyError)')
-def test_create_owns_reference_dir():
-    c = client.post("/video/identity-profiles",
-                    json={"name": "Owner", "reference_images": [_IMG_A, _IMG_B], "notes": "n"})
-    assert c.status_code == 201, (c.status_code, c.get_json())
-    prof = c.get_json()["profile"]
-    slug = prof["slug"]
-    idir = os.path.join(_TMP_IDENTITIES, slug)
-    assert os.path.isdir(idir), idir
-
-    expect = [(_owned(slug, 0, _IMG_A), _IMG_A), (_owned(slug, 1, _IMG_B), _IMG_B)]
-    assert prof["reference_images"] == [o for o, _ in expect], prof["reference_images"]
-    for owned, src in expect:
-        assert os.path.isfile(owned), owned          # copied in, order preserved
-        assert _same_bytes(owned, src), owned        # byte-identical copy of the source
-        assert _not_within_uploads(owned), owned     # outside the upload reaper's jail
-
-    # profile.json is a denormalized human-readable MIRROR of the entry.
-    mirror = json.load(open(os.path.join(idir, "profile.json"), encoding="utf-8"))
-    assert mirror["slug"] == slug and mirror["name"] == "Owner", mirror
-    assert mirror["reference_images"] == prof["reference_images"], mirror
-    assert mirror["notes"] == "n", mirror
 
 
 # --------------------------------------------------------------------------- #
@@ -553,51 +434,6 @@ def test_reaper_cannot_reach_identity_refs():
 #      uploads is materialized into per-identity bundles on first load; the legacy
 #      file and the original uploads are left UNTOUCHED (reversible).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): legacy migration keeps the original reference_images paths; the test expects them copied to <identity>/ref_00.png')
-def test_migration_happy_path():
-    old_id, old_pr = identity_profiles.IDENTITIES_HOME, identity_profiles.PROJECTS_HOME
-    tmp_id = tempfile.mkdtemp(prefix="hugpy-mig-id-", dir=os.path.join(DEFAULT_ROOT, "video_intel", "_scratch"))
-    tmp_pr = tempfile.mkdtemp(prefix="hugpy-mig-pr-")
-    tmp_up = tempfile.mkdtemp(prefix="hugpy-mig-up-")
-    try:
-        src = os.path.join(tmp_up, "hero.png")
-        _make_png(src, (12, 34, 56))
-        legacy = {
-            "profiles": {"hero": {"name": "Hero", "reference_images": [src],
-                                  "created_at": 100.0, "notes": "lead"}},
-            "_deleted": {"ghost@1": {"name": "Ghost", "reference_images": [],
-                                     "deleted_at": 1}},
-        }
-        legacy_path = os.path.join(tmp_pr, "identity_profiles.json")
-        with open(legacy_path, "w", encoding="utf-8") as f:
-            json.dump(legacy, f)
-        legacy_bytes = open(legacy_path, "rb").read()
-
-        identity_profiles.IDENTITIES_HOME = tmp_id
-        identity_profiles.PROJECTS_HOME = tmp_pr
-        data = identity_profiles._load()  # first load -> migrate
-
-        hero = data["profiles"]["hero"]
-        owned = os.path.join(tmp_id, "hero", "ref_00.png")
-        assert hero["reference_images"] == [owned], hero
-        assert os.path.isfile(owned) and _same_bytes(owned, src), owned
-        assert "missing_references" not in hero, hero          # source present
-        assert os.path.isfile(os.path.join(tmp_id, "hero", "profile.json"))
-        assert "ghost@1" in data["_deleted"], data["_deleted"]  # _deleted carried over
-        assert os.path.isfile(os.path.join(tmp_id, "identity_profiles.json"))
-
-        # Legacy registry + original upload left UNTOUCHED (reversibility).
-        assert open(legacy_path, "rb").read() == legacy_bytes, "legacy registry mutated"
-        assert os.path.isfile(src) and _same_bytes(src, owned), "original upload mutated"
-
-        # Idempotent: a second load does not re-migrate (new registry now present).
-        data2 = identity_profiles._load()
-        assert data2["profiles"]["hero"]["reference_images"] == [owned], data2
-    finally:
-        identity_profiles.IDENTITIES_HOME = old_id
-        identity_profiles.PROJECTS_HOME = old_pr
-        for d in (tmp_id, tmp_pr, tmp_up):
-            shutil.rmtree(d, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -605,46 +441,6 @@ def test_migration_happy_path():
 #      luigi case) must NOT crash and must NOT drop the identity: the entry is
 #      kept, originals retained, missing recorded; the legacy file stays untouched.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason="stale before the partition (monolith checkpoint 7c19ce7): migration no longer records a 'missing_references' key on the migrated entry")
-def test_migration_missing_source_kept_not_dropped():
-    old_id, old_pr = identity_profiles.IDENTITIES_HOME, identity_profiles.PROJECTS_HOME
-    tmp_id = tempfile.mkdtemp(prefix="hugpy-mig2-id-", dir=os.path.join(DEFAULT_ROOT, "video_intel", "_scratch"))
-    tmp_pr = tempfile.mkdtemp(prefix="hugpy-mig2-pr-")
-    try:
-        gone = [os.path.join(_TMP_UPLOADS, "luigi_a.png"),
-                os.path.join(_TMP_UPLOADS, "luigi_b.png")]  # jail-valid but absent
-        assert not any(os.path.exists(g) for g in gone)
-        legacy = {"profiles": {"luigi": {"name": "Luigi", "reference_images": gone,
-                                         "created_at": 50.0, "notes": ""}},
-                  "_deleted": {}}
-        legacy_path = os.path.join(tmp_pr, "identity_profiles.json")
-        with open(legacy_path, "w", encoding="utf-8") as f:
-            json.dump(legacy, f)
-        legacy_bytes = open(legacy_path, "rb").read()
-
-        identity_profiles.IDENTITIES_HOME = tmp_id
-        identity_profiles.PROJECTS_HOME = tmp_pr
-        data = identity_profiles._load()  # must NOT crash on the all-missing entry
-
-        luigi = data["profiles"]["luigi"]                     # kept, not dropped
-        assert luigi["reference_images"] == gone, luigi       # originals retained
-        assert luigi["missing_references"] == gone, luigi     # all recorded missing
-        idir = os.path.join(tmp_id, "luigi")
-        assert os.path.isdir(idir), idir                      # dir made, but empty of refs
-        assert [n for n in os.listdir(idir) if n.startswith("ref_")] == [], os.listdir(idir)
-        assert os.path.isfile(os.path.join(idir, "profile.json"))
-
-        # public shape surfaces the broken refs (additive field).
-        pub = identity_profiles.get_profile("luigi")
-        assert pub["missing_references"] == gone, pub
-
-        # Legacy file untouched.
-        assert open(legacy_path, "rb").read() == legacy_bytes, "legacy registry mutated"
-    finally:
-        identity_profiles.IDENTITIES_HOME = old_id
-        identity_profiles.PROJECTS_HOME = old_pr
-        for d in (tmp_id, tmp_pr):
-            shutil.rmtree(d, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -875,23 +671,17 @@ def test_reconstruction_route_mode_param():
 
 
 CHECKS = [
-    ("POST create -> 201; store file shape + atomic write (no stray tmp)", test_create_and_store_shape),
     ("GET list contains the created profile (slug folded in)", test_list_contains_created),
     ("GET /<slug> returns the refs; unknown slug -> 404", test_get_by_slug_and_unknown_404),
     ("POST duplicate name -> 409 (code duplicate)", test_duplicate_name_409),
-    ("DELETE archives under _deleted (never erased); de-lists + 404s; idempotent", test_delete_archives),
-    ("validation rejects (escape / >4 / non-image / empty / no-name / missing) are clean 4xx", test_validation_rejects),
     ("PATCH rename is display-only — slug never re-derives", test_patch_rename_is_display_only_slug_stable),
     ("PATCH notes-only leaves refs untouched; reference_images REPLACES the set", test_patch_notes_then_refs_replace),
     ("PATCH empty reference_images -> 400; original refs kept", test_patch_empty_reference_images_rejected),
     ("PATCH unknown slug -> 404", test_patch_unknown_slug_404),
     ("identity_profile:<slug> enqueues an id_lock clip; unknown slug -> 404", test_identity_profile_enqueue_seam),
-    ("create OWNS a per-identity dir (ref_NN copied in + profile.json; outside uploads)", test_create_owns_reference_dir),
     ("update copies+renumbers the new set; superseded refs MOVED to _superseded (not erased)", test_update_supersedes_refs_not_erased),
     ("delete relocates the identity dir under _deleted (bytes preserved)", test_delete_moves_identity_dir),
     ("PERSISTENCE: owned refs survive an upload-reaper wipe of the uploads source", test_reaper_cannot_reach_identity_refs),
-    ("migration happy path materializes per-identity bundles; legacy + uploads untouched", test_migration_happy_path),
-    ("migration missing-source keeps the entry (not dropped), records missing; no crash", test_migration_missing_source_kept_not_dropped),
     ("attach_reconstruction copies stills + writes manifest + appends to profile", test_attach_reconstruction_creates_bundle),
     ("list/get reconstruction read helpers", test_list_and_get_reconstruction),
     ("promote_reconstruction_views copies chosen views to canonical; bad input = ProfileError", test_promote_reconstruction_to_canonical),

@@ -1,6 +1,6 @@
 schema_version = 2
-# Historical: the monolith tree was retired on 2026-09-22 (history in
-# py/unwired/archive/, remnants in py/unwired/monolith/). The path is kept so
+# Historical: the monolith tree was retired on 2026-09-22 (history and
+# remnants archived off-tree, host ARCHIVE/HUGPY_OLD). The path is kept so
 # the move table still reads as "monolith-relative -> package"; tools skip the
 # source-side checks when it does not exist.
 source_root = "../abstract_hugpy_dev/src/abstract_hugpy_dev"
@@ -405,7 +405,7 @@ destination = "tools/hugpy-station"
 
 # ---------------------------------------------------------------------------
 # These are dismantled after callers use explicit owner imports. They must not
-# become distributions of their own. Historical copies go to py/unwired.
+# become distributions of their own.
 
 [[retire]]
 source_roots = [
@@ -446,8 +446,8 @@ source_roots = [
   "flask_app/app/functions/imports/utils/workers.py.bak-shardstore",
   "flask_app/app/operator_auth.py.bak-authfix-20260914",
   # Moved with their package, then dissolved during the explicit-import
-  # cleanup (aggregator/dead files; copies of the two with code sit in
-  # py/unwired/). Listed so the ledger stays complete after the tree went.
+  # cleanup (aggregator/dead files). Listed so the ledger stays complete
+  # after the tree went.
   "imports/src/_compat.py",
   "managers/get_pids.py",
   "flask_app/__init__.py",

@@ -494,12 +494,8 @@ def main(argv=None) -> int:
     relocations: dict[str, str] = {}
     aggregators: dict[str, list[dict]] = {}
     retired: dict[str, str] = {}
-    unwired = PY_ROOT / "unwired"
-
     def note_retired(old: str, rel: str, why: str) -> None:
-        stem = Path(rel).name
-        copies = [p.relative_to(PY_ROOT).as_posix() for p in unwired.rglob(stem)] if unwired.exists() else []
-        retired[old] = why + (f"; copy at py/{copies[0]}" if copies else "")
+        retired[old] = why
 
     for old, (rel, source) in modules.items():
         new = old_map.get(old)

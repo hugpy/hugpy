@@ -16,5 +16,3 @@ py/tools/hugpy-station/pub/*.env
 *.env
 !.env.example
 *.log
-# monolith history bundle (20 MB); keep a copy on the host
-py/unwired/archive/*.bundle

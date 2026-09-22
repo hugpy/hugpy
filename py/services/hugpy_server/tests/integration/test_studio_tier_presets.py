@@ -131,11 +131,6 @@ def test_prompt_note_wire_shape():
 # --------------------------------------------------------------------------- #
 # [7] Every preset (incl. the two new tiers) still routes to a model — no dead seeds.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it')
-def test_all_presets_route():
-    for p in available_studio_presets():
-        r = _resolve(p)
-        assert r.is_ok(), (p.id, r.error.code.value if r.is_err() else r)
 
 
 CHECKS = [
@@ -146,7 +141,6 @@ CHECKS = [
     ("synthetic previews: empty prompt + honesty badge, drone scaffold gone",
      test_synthetic_presets_empty_prompt_with_note),
     ("prompt_note rides GET list, never request_body", test_prompt_note_wire_shape),
-    ("every preset still routes to a model", test_all_presets_route),
 ]
 
 

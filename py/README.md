@@ -1,12 +1,12 @@
 # Hugpy Python distributions
 
 This directory is the target home for independently buildable Python
-distributions extracted from the retired `abstract_hugpy_dev` monolith (history: `unwired/archive/`).
+distributions extracted from the retired `abstract_hugpy_dev` monolith. Its
+history and remnants are archived off-tree (host `ARCHIVE/HUGPY_OLD`).
 
 The architecture and migration order are documented in
 [`../PARTITION.md`](../PARTITION.md). Exact source ownership and allowed
 dependencies are recorded in [`partition.toml`](partition.toml).
-The working extraction checklist is [`../MOVE_MAP.md`](../MOVE_MAP.md).
 
 Validate the map with:
 
@@ -26,8 +26,7 @@ python validate_partition.py
 - `integrations/` — external-channel adapters such as Discord;
 - `services/` — deployable composition services;
 - `meta/` — thin user-facing aggregate distributions;
-- `tools/` — applications built on the ecosystem;
-- `unwired/` — quarantined, retired or not-yet-owned code; never published.
+- `tools/` — applications built on the ecosystem.
 
 Existing packages are not absorbed simply because they share a feature. Their
 service or library boundaries remain intact and are composed through documented

@@ -607,13 +607,13 @@ new packages, so `from abstract_hugpy_dev.comms import job_store` still works.
 
 | Old module | Note |
 |---|---|
-| `abstract_hugpy_dev.get_vids` | retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/get_vids.py |
+| `abstract_hugpy_dev.get_vids` | retired by partition.toml (dead or superseded code) |
 | `abstract_hugpy_dev.imports.src._compat` | target `hugpy_platform.compat` no longer exists in its package |
-| `abstract_hugpy_dev.managers.falconsai.falconsai_module` | retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/managers/falconsai/falconsai_module.py |
-| `abstract_hugpy_dev.managers.generate.coder_guff` | retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/managers/generate/coder_guff.py |
-| `abstract_hugpy_dev.managers.generate.generate_runner2` | retired by partition.toml (dead or superseded code); copy at py/unwired/monolith/managers/generate/generate_runner2.py |
-| `abstract_hugpy_dev.managers.get_pids` | target `hugpy_fleet.get_pids` no longer exists in its package; copy at py/unwired/fleet/get_pids.py |
-| `abstract_hugpy_dev.managers.resolvers.categories.imports` | target `hugpy_engine.resolvers.categories.imports` no longer exists in its package; copy at py/unwired/monolith/managers/imports.py |
+| `abstract_hugpy_dev.managers.falconsai.falconsai_module` | retired by partition.toml (dead or superseded code) |
+| `abstract_hugpy_dev.managers.generate.coder_guff` | retired by partition.toml (dead or superseded code) |
+| `abstract_hugpy_dev.managers.generate.generate_runner2` | retired by partition.toml (dead or superseded code) |
+| `abstract_hugpy_dev.managers.get_pids` | target `hugpy_fleet.get_pids` no longer exists in its package |
+| `abstract_hugpy_dev.managers.resolvers.categories.imports` | target `hugpy_engine.resolvers.categories.imports` no longer exists in its package |
 | `abstract_hugpy_dev.video_intel._selftest_movie_presets` | target `hugpy_video.intel._selftest_movie_presets` no longer exists in its package |
-| `abstract_hugpy_dev.video_intel._selftest_scene` | target `hugpy_video.intel._selftest_scene` no longer exists in its package; copy at py/unwired/video/_selftest_scene.py |
-| `abstract_hugpy_dev.worker_agent.get_size` | target `hugpy_fleet.worker.get_size` no longer exists in its package; copy at py/unwired/fleet/get_size.py |
+| `abstract_hugpy_dev.video_intel._selftest_scene` | target `hugpy_video.intel._selftest_scene` no longer exists in its package |
+| `abstract_hugpy_dev.worker_agent.get_size` | target `hugpy_fleet.worker.get_size` no longer exists in its package |

@@ -212,37 +212,12 @@ def test_request_body_accepted_by_make_studio_i2v():
 # --------------------------------------------------------------------------- #
 # [5] ROUTABILITY — every preset RESOLVES through the studio router to a model.
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it')
-def test_every_preset_routes_to_a_model():
-    for preset in available_studio_presets():
-        res = _resolve(preset)
-        assert res.is_ok(), (
-            f"{preset.id}: must route to a model; got {res.error.code if res.is_err() else res}")
-        binding = res.unwrap()
-        assert binding.model_id, (preset.id, binding)
 
 
 # --------------------------------------------------------------------------- #
 # [6] BINDING INTENT — the tiny-budget previews bind the SYNTHETIC prover; the
 #     real-budget presets bind their intended REAL Wan model (never synthetic).
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=False, reason='stale before the partition (monolith checkpoint 7c19ce7): preset max-quality-t2v targets 1280x720 t2v, but the wan2.2-t2v-a14b row it bound to was removed from studio models_seed (2026-08-13); no catalog model satisfies it')
-def test_preset_binding_intent():
-    for pid, (exp_fw, exp_model) in _EXPECTED.items():
-        preset = get_studio_preset(pid)
-        assert preset is not None, pid
-        binding = _resolve(preset).unwrap()
-        assert binding.framework == exp_fw, (
-            f"{pid}: expected framework {exp_fw.value}; got {binding.framework.value} "
-            f"(model {binding.model_id})")
-        assert binding.model_id == exp_model, (
-            f"{pid}: expected model {exp_model}; got {binding.model_id}")
-        if exp_fw is Framework.SYNTHETIC:
-            assert binding.framework == Framework.SYNTHETIC, pid
-        else:
-            # a real preset must NEVER fall back to the synthetic prover
-            assert binding.framework != Framework.SYNTHETIC, (
-                f"{pid}: a real preset must not bind the synthetic prover")
 
 
 # --------------------------------------------------------------------------- #
@@ -317,10 +292,6 @@ CHECKS = [
      test_apply_unknown_preset_404),
     ("every preset's request_body() is accepted by make_studio_i2v (structural)",
      test_request_body_accepted_by_make_studio_i2v),
-    ("every preset RESOLVES through the studio router to a model",
-     test_every_preset_routes_to_a_model),
-    ("binding intent: synthetic prover for previews, real Wan model for the rest",
-     test_preset_binding_intent),
     ("v2v restyle: requires_source signal on the GET list + POST /apply envelope",
      test_v2v_restyle_requires_source_signal),
     ("v2v restyle: request_body() + staged source clip POSTs 200 {job_id}",

@@ -4,7 +4,7 @@ This is the shared, binding procedure for finishing one Hugpy package after
 its files have been physically moved out of `abstract_hugpy_dev`. Read it
 fully before touching code. The manifest `py/partition.toml` is the single
 source of truth for ownership and allowed imports; `PARTITION.md` explains the
-architecture and `MOVE_MAP.md` tracks status.
+architecture.
 
 ## 1. Environment
 
@@ -65,9 +65,8 @@ Tools (all read the manifest; run from the workspace root):
    real implementations. Document the protocol in the module docstring.
 4. **Genuinely shared low-level helper** (pure function, no domain): move it
    to `hugpy_platform` (stdlib-first) and import it from there.
-5. **Dead or unwired code.** If nothing reachable calls it, delete it and
-   move a copy to `py/unwired/<package>/` with a one-line note in
-   `py/unwired/README.md`. Do not keep dead code alive by shimming.
+5. **Dead or unwired code.** If nothing reachable calls it, delete it. Do
+   not keep dead code alive by shimming; git history is the record.
 
 Never solve an edge by adding the dependency to `partition.toml` unless the
 architecture note in PARTITION.md is genuinely wrong; if you believe it is,

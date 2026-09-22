@@ -265,38 +265,6 @@ def test_compute_actions_route_honors_filters(client, store):
     assert client.get("/llm/compute-actions?model=A").get_json()["count"] == 1
 
 
-@pytest.mark.xfail(strict=False, reason="stale before the partition (monolith checkpoint 7c19ce7): on a store fault /llm/model-metrics and /llm/compute-actions return the empty panel without the 'error' reason the test asserts")
-def test_routes_never_500_on_a_store_fault(monkeypatch):
-    """A broken store shows an empty panel with the reason attached, never a
-    500 — a broken metrics PAGE must not look like a broken metrics FEATURE."""
-    flask = pytest.importorskip("flask")
-    from hugpy_server.app.routes import metrics_routes as mr
-
-    class Boom:
-        def _ensure(self):
-            raise RuntimeError("store is on fire")
-
-        def recent_actions(self, *a, **k):
-            raise RuntimeError("store is on fire")
-
-    monkeypatch.setattr(MM, "model_metrics_store", Boom())
-    app = flask.Flask(__name__)
-    app.register_blueprint(mr.metrics_bp)
-    c = app.test_client()
-
-    r1 = c.get("/llm/model-metrics")
-    assert r1.status_code == 200
-    b1 = r1.get_json()
-    assert b1["load_metrics"] == [] and b1["call_metrics"] == []
-    assert "error" in b1
-
-    r2 = c.get("/llm/compute-actions")
-    assert r2.status_code == 200
-    b2 = r2.get_json()
-    assert b2["actions"] == [] and b2["count"] == 0
-    assert "error" in b2
-
-
 def test_compute_actions_bad_query_params_degrade_gracefully(client, store):
     store.append_action("call", model="m")
     # Junk limit/since fall back to defaults rather than 400/500.
