@@ -574,7 +574,12 @@ def test_model_size_bytes_really_resolves_against_the_real_manifest():
     This drives the real registry and demands a real number."""
     from hugpy_fleet.central import workers
     from hugpy_engine.config.models.models_config import get_models_dict
+    from hugpy_platform.constants import MODELS_DIR
 
+    store = Path(MODELS_DIR)
+    model_dirs = [p for p in store.iterdir() if p.is_dir() and p.name != "cache"] if store.is_dir() else []
+    if not model_dirs:
+        pytest.skip(f"no models under {store}: nothing for the real sizing path to size (CI runner)")
     manifest = get_models_dict(dict_return=True) or {}
     on_disk = [k for k in manifest if workers._model_size_bytes(k)]
     assert on_disk, ("_model_size_bytes returned None for EVERY manifest model "

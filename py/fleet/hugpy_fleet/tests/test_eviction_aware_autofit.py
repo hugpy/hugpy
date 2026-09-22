@@ -345,6 +345,9 @@ def test_moe_split_verdict_is_not_a_size_up(rig, monkeypatch):
                       "expert_count": 128, "expert_used_count": 8,
                       "sparsity": 0.06}})
     monkeypatch.setattr(A, "_free_ram_bytes", lambda: 64 * GIB)
+    # the expert guard prices cpu_bytes against the BOX (2026-08-28 mmap ruling),
+    # so pin the host total too or a small CI runner refuses the split
+    monkeypatch.setattr(A, "_ram_total_bytes", lambda: 128 * GIB)
     rig.residents["idle"] = {"vram_bytes": 1 * GIB, "host_mode": "subprocess"}
 
     plan = A._vram_evict_to_fit(_State(), "flux2-klein-9b")
