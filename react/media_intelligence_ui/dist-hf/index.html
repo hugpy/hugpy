@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>hugpy · media intelligence</title>
+    <style>
+      /*
+       * Standalone shell paint. This document is ONLY ever served standalone at
+       * /media (nothing embeds HugpyChat in a host app), so painting the page
+       * chrome here is safe — it cannot bleed into another site. This guarantees
+       * the dark theme covers the ENTIRE viewport: no default body margin gutter,
+       * and any region the chat scope's small-viewport height doesn't reach stays
+       * black instead of showing bare white.
+       */
+      html,
+      body {
+        margin: 0;
+        background: #050505; /* == --main-surface-primary in the dark scope */
+      }
+      #root {
+        min-height: 100dvh;
+        background: #050505;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/index-CfBt-V7A.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DUBGIk3z.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

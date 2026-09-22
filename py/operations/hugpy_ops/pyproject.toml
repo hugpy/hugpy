@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-ops"
+version = "0.1.0"
+description = "Hugpy operations: sentinel, chaos runner, keeper REPL, todo keeper and provisioner for declared-but-missing model weights"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "operations",
+    "sentinel",
+    "chaos-testing",
+    "provisioning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: Console",
+    "Topic :: System :: Monitoring",
+]
+# Every tool here is stdlib + the ecosystem packages below; there is no
+# third-party runtime dependency (HTTP is urllib, the case store is sqlite3).
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+    "hugpy-video",
+    "hugpy-fleet",
+    "hugpy-curation",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/operations/hugpy_ops/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/operations/hugpy_ops"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-timeout"]
+
+[project.scripts]
+hugpy-sentinel = "hugpy_ops.sentinel.__main__:main"
+hugpy-chaos = "hugpy_ops.chaos.runner:main"
+hugpy-keeper = "hugpy_ops.keeper:main"
+hugpy-todo-keeper = "hugpy_ops.todo_keeper_daemon:main"
+hugpy-provisioner = "hugpy_ops.provisioner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_ops = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

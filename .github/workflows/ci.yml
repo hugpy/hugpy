@@ -1,0 +1,55 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  partition:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python py/validate_partition.py && python py/validate_partition.py --edges
+  python:
+    needs: partition
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - py/foundation/hugpy_platform
+          - py/foundation/hugpy_control
+          - py/storage/hugpy_storage
+          - py/inference/hugpy_engine
+          - py/inference/hugpy_media
+          - py/cinema/hugpy_video
+          - py/cinema/hugpy_oracle
+          - py/fleet/hugpy_fleet
+          - py/curation/hugpy_curation
+          - py/operations/hugpy_ops
+          - py/integrations/hugpy_discord
+          - py/services/hugpy_server
+          - py/meta/hugpy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install -U pip build pytest pytest-timeout
+      # sibling packages from the tree, so the matrix never pulls PyPI versions of itself
+      - run: |
+          for d in py/foundation/* py/storage/* py/inference/hugpy_engine py/inference/hugpy_media \
+                   py/cinema/hugpy_video py/cinema/hugpy_oracle py/fleet/* py/curation/* \
+                   py/operations/* py/integrations/* py/services/* py/meta/*; do
+            pip install -e "$d"
+          done
+      - run: cd ${{ matrix.pkg }} && python -m build --wheel
+      - run: cd ${{ matrix.pkg }} && pytest -q --timeout=120
+      - run: pip install --force-reinstall --no-deps ${{ matrix.pkg }}/dist/*.whl && python -c "import $(basename ${{ matrix.pkg }})"
+  react:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: { pkg: [react/ui, react/agents_ui, react/media_intelligence_ui, react/video_intelligence_ui] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd ${{ matrix.pkg }} && (npm ci || npm install) && npm run build

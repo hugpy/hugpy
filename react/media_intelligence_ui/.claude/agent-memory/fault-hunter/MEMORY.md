@@ -1,0 +1,1 @@
+- [image-analysis fix surface](image-analysis-fix.md) — the 2026-06-25 vision-fix audit: which files changed, the two non-duplicate chat_schemas, /uploads exposure verdict, and clean files

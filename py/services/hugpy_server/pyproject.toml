@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-server"
+version = "0.1.0"
+description = "Hugpy server: the Flask composition root with routes, auth, SSE, API keys and the built web console; wires fleet placement, task plugins and oracle hooks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "openai-compatible",
+    "flask",
+    "api-server",
+    "console",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: Web Environment",
+    "Framework :: Flask",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+]
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+    "hugpy-media",
+    "hugpy-video",
+    "hugpy-oracle",
+    "hugpy-fleet",
+    "hugpy-curation",
+    "flask>=3",
+    "werkzeug>=3",
+    "abstract-flask",
+    "pydantic>=2",
+    "requests",
+    "huggingface_hub",
+    "gunicorn; sys_platform != 'win32'",
+    "waitress; sys_platform == 'win32'",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/services/hugpy_server/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/services/hugpy_server"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-timeout"]
+discord = ["hugpy-discord"]
+ops = ["hugpy-ops"]
+
+[project.scripts]
+hugpy-serve = "hugpy_server.wsgi_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_server = [
+    "py.typed",
+    "**/*.json", "**/*.sh", "**/*.md", "**/*.txt",
+    "console_dist/**/*",
+]

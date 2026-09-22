@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""SUPERSEDED by the `hugpy-chaos` console script (hugpy-ops distribution).
+
+Kept only for operators who run the checkout without installing it:
+    <venv>/bin/python deploy/bin/hugpy-chaos --dry-run
+With `pip install -e py/operations/hugpy_ops` the console script covers this
+file completely; prefer `hugpy-chaos`.
+"""
+import sys
+
+from hugpy_ops.chaos.runner import main
+
+if __name__ == "__main__":
+    sys.exit(main())

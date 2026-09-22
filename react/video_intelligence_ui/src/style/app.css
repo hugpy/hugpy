@@ -1,0 +1,5150 @@
+@import "tailwindcss";
+
+/* Video-intelligence arm — dark editorial-terminal tokens, matching the media
+   arm's family: Newsreader serif for headlines, IBM Plex Mono for labels
+   (fonts loaded in index.html). Kept as plain CSS component classes so the
+   Phase 0 shell has zero styling logic in components. */
+
+:root {
+  --vi-surface: #050505;
+  --vi-surface-raised: #101012;
+  --vi-border: #26262a;
+  --vi-text: #e8e6e1;
+  --vi-text-dim: #9b988f;
+  --vi-accent: #8ab4ff;
+  --vi-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --vi-serif: "Newsreader", Georgia, serif;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--vi-surface);
+  color: var(--vi-text);
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100dvh;
+  background: var(--vi-surface);
+  overflow-x: hidden;
+}
+
+.vi-shell {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--vi-serif);
+}
+
+.vi-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1rem 2rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--vi-border);
+}
+
+.vi-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-family: var(--vi-mono);
+}
+
+.vi-brand-home {
+  color: var(--vi-accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.vi-brand-arm {
+  color: var(--vi-text);
+  letter-spacing: 0.04em;
+}
+
+.vi-brand-stage {
+  color: var(--vi-text-dim);
+  font-size: 0.75rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+}
+
+.vi-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+}
+
+.vi-tab {
+  color: var(--vi-text-dim);
+  text-decoration: none;
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.vi-tab:hover {
+  color: var(--vi-text);
+}
+
+.vi-tab-active {
+  color: var(--vi-text);
+  background: var(--vi-surface-raised);
+  border-color: var(--vi-border);
+}
+
+.vi-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  padding: 1.25rem 1.5rem;
+  overflow: hidden;
+}
+
+.station-card {
+  max-width: 44rem;
+  width: 100%;
+}
+
+.station-phase {
+  font-family: var(--vi-mono);
+  font-size: 0.75rem;
+  color: var(--vi-accent);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.station-card h2 {
+  margin: 0.4rem 0 0.5rem;
+  font-weight: 500;
+  font-size: 2rem;
+}
+
+.station-blurb {
+  color: var(--vi-text-dim);
+  margin: 0 0 1.5rem;
+  font-size: 1.05rem;
+  line-height: 1.5;
+}
+
+.station-planned {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--vi-border);
+}
+
+.station-planned li {
+  padding: 0.7rem 0.2rem;
+  border-bottom: 1px solid var(--vi-border);
+  color: var(--vi-text);
+  font-size: 0.95rem;
+}
+
+.station-planned li::before {
+  content: "○ ";
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+}
+
+.station-foot {
+  margin-top: 1.25rem;
+  color: var(--vi-text-dim);
+  font-size: 0.85rem;
+}
+
+.station-foot code {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Phase 3 — Image Crop station: buttons, spatial editor, region list,       */
+/* result grid. Same dark editorial-terminal tokens as the Phase 0 shell.    */
+/* ------------------------------------------------------------------------- */
+
+/* The real stations want more width than the placeholder reading column. */
+.station-wide {
+  max-width: 68rem;
+}
+
+/* ---- buttons (shared) ---- */
+.vi-btn {
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--vi-border);
+  background: var(--vi-surface-raised);
+  color: var(--vi-text);
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.vi-btn:hover {
+  border-color: var(--vi-accent);
+}
+
+.vi-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: var(--vi-border);
+}
+
+.vi-btn-accent {
+  color: var(--vi-surface);
+  background: var(--vi-accent);
+  border-color: var(--vi-accent);
+  font-weight: 500;
+}
+
+.vi-btn-accent:hover {
+  filter: brightness(1.08);
+}
+
+.vi-btn-ghost {
+  background: transparent;
+  color: var(--vi-text-dim);
+}
+
+.vi-btn-ghost:hover {
+  color: var(--vi-text);
+}
+
+.vi-btn-sm {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+}
+
+/* ---- source bar / file picker ---- */
+.vi-crop-source-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.vi-file-label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.vi-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vi-crop-status,
+.vi-crop-meta {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-crop-meta code {
+  font-family: var(--vi-mono);
+  color: var(--vi-text);
+}
+
+.vi-error {
+  color: #ff8a8a;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  margin: 0.5rem 0;
+}
+
+.vi-crop-warn {
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+}
+
+/* ---- shared drop receptacle (all four stations' empty item-view) ----
+   The station passes its existing upload handler as onFile; this is intake UI
+   only. Sized to fill the studio preview area (~22rem); a --compact variant is
+   used in the Generate video-part picker. */
+.vi-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 22rem;
+  padding: 1.5rem;
+  box-sizing: border-box;
+  border: 2px dashed var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.vi-dropzone:hover,
+.vi-dropzone--active {
+  border-color: var(--vi-accent);
+  background: rgba(138, 180, 255, 0.08);
+  transform: translateY(-1px);
+}
+
+.vi-dropzone:focus-visible {
+  outline: 2px solid var(--vi-accent);
+  outline-offset: 2px;
+}
+
+.vi-dropzone--busy {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.vi-dropzone--compact {
+  min-height: 9rem;
+  padding: 1rem;
+}
+
+.vi-dropzone-title {
+  font-size: 0.95rem;
+  color: var(--vi-text);
+}
+
+.vi-dropzone-hint {
+  font-size: 0.75rem;
+  color: var(--vi-text-dim);
+  line-height: 1.4;
+  max-width: 28rem;
+}
+
+/* ---- required-input attention (Studio Generate preformed shapes) ----
+   When a picked generator REQUIRES an input (an i2v start image, a v2v source
+   clip) and it is still empty, the input is given the eye: an accent solid
+   border + a faint accent fill, matching the dropzone hover language. Optional
+   inputs stay subdued (no class). Tokenized so it reads as one system. */
+.vi-input-required {
+  border: 2px solid var(--vi-accent);
+  background: rgba(138, 180, 255, 0.08);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  box-sizing: border-box;
+}
+
+.vi-input-callout {
+  color: var(--vi-accent);
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+/* An accent-forced dropzone: the hero start-image drop surface when it is the
+   required-and-empty input (border solid + tinted even at rest, not only hover). */
+.vi-dropzone--required {
+  border-style: solid;
+  border-color: var(--vi-accent);
+  background: rgba(138, 180, 255, 0.08);
+}
+
+/* ---- spatial editor ---- */
+.vi-crop-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.vi-crop-canvas {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  max-width: 100%;
+  border: 1px solid var(--vi-border);
+  background: #000;
+  flex: 1 1 22rem;
+  min-width: 16rem;
+}
+
+.vi-crop-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Blank canvas placeholder shown when no image is loaded — keeps the editor
+   chrome laid out (aspect-ratio set inline from the default dimensions). */
+.vi-crop-img--blank {
+  width: 100%;
+  min-height: 12rem;
+  background: #000;
+}
+
+.vi-crop-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.vi-crop-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--vi-accent);
+  background: rgba(138, 180, 255, 0.12);
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+  cursor: move;
+  touch-action: none;
+}
+
+.vi-crop-box-active {
+  background: rgba(138, 180, 255, 0.2);
+}
+
+.vi-crop-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--vi-accent);
+  border: 1px solid var(--vi-surface);
+  border-radius: 2px;
+  touch-action: none;
+}
+
+.vi-crop-handle-nw {
+  top: -6px;
+  left: -6px;
+  cursor: nwse-resize;
+}
+.vi-crop-handle-ne {
+  top: -6px;
+  right: -6px;
+  cursor: nesw-resize;
+}
+.vi-crop-handle-sw {
+  bottom: -6px;
+  left: -6px;
+  cursor: nesw-resize;
+}
+.vi-crop-handle-se {
+  bottom: -6px;
+  right: -6px;
+  cursor: nwse-resize;
+}
+
+/* ---- editor controls ---- */
+.vi-crop-controls {
+  flex: 1 1 18rem;
+  min-width: 14rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  font-family: var(--vi-mono);
+}
+
+.vi-crop-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.vi-crop-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--vi-text-dim);
+  margin-left: 0.25rem;
+}
+
+.vi-crop-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.vi-crop-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.vi-crop-field input {
+  width: 4.5rem;
+  padding: 0.3rem 0.4rem;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  color: var(--vi-text);
+  background: var(--vi-surface-raised);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+}
+
+.vi-crop-native {
+  font-size: 0.75rem;
+  color: var(--vi-text-dim);
+  padding-bottom: 0.4rem;
+}
+
+/* ---- region queue list ---- */
+.vi-region-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--vi-border);
+}
+
+.vi-region-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.1rem;
+  border-bottom: 1px solid var(--vi-border);
+  font-size: 0.82rem;
+}
+
+.vi-region-idx {
+  color: var(--vi-accent);
+  font-family: var(--vi-mono);
+  font-size: 0.78rem;
+}
+
+.vi-region-dims {
+  font-family: var(--vi-mono);
+  color: var(--vi-text);
+  font-size: 0.78rem;
+  margin-right: auto;
+}
+
+/* ---- run bar ---- */
+.vi-crop-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin: 1.25rem 0;
+}
+
+.vi-crop-hint,
+.vi-crop-actions {
+  font-family: var(--vi-mono);
+}
+
+.vi-crop-hint {
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+}
+
+/* ---- result grid ---- */
+.vi-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+  border-top: 1px solid var(--vi-border);
+  padding-top: 1.25rem;
+}
+
+.vi-result-card {
+  margin: 0;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface-raised);
+  overflow: hidden;
+}
+
+.vi-result-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--vi-border);
+  font-family: var(--vi-mono);
+}
+
+.vi-status {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vi-text-dim);
+  margin-right: auto;
+}
+
+.vi-status-running,
+.vi-status-claimed,
+.vi-status-queued,
+/* In-flight statuses from the fleet-wide /llm/jobs feed (worker-call rows in the
+   Active Processes panel) — same accent as the video-bus in-flight states. */
+.vi-status-pending,
+.vi-status-processing,
+.vi-status-streaming {
+  color: var(--vi-accent);
+}
+
+.vi-status-done {
+  color: #7fd88f;
+}
+
+.vi-status-failed {
+  color: #ff8a8a;
+}
+
+.vi-result-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 8rem;
+  padding: 0.5rem;
+}
+
+.vi-result-img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.vi-result-pending {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text-dim);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Phase 4 — Frames & Models station: left-rail knob panel + frame grid.     */
+/* Same dark editorial-terminal tokens; reuses .vi-btn / .vi-status / .vi-error. */
+/* ------------------------------------------------------------------------- */
+
+.vi-frames-layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+/* ---- left rail (the sample image's knob column) ---- */
+.vi-frames-rail {
+  flex: 0 0 17rem;
+  min-width: 15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  font-family: var(--vi-mono);
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface-raised);
+  padding: 1rem;
+}
+
+.vi-knob {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.vi-knob > label,
+.vi-knob-label-row > label {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ---- knob ROW — pairs (or trios) of compact numeric knobs sharing one line
+   instead of each stacking full-width (width+height, steps+guidance+seed).
+   Wraps gracefully if the host rail is too narrow for all children at once. ---- */
+.vi-knob-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.vi-knob-row > .vi-knob {
+  flex: 1 1 5.5rem;
+  min-width: 0;
+}
+
+/* Label + the "ⓘ" info affordance on one line, info pinned to the right. */
+.vi-knob-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+/* ---- knob info affordance (see KnobInfo.tsx) — hover (desktop) / tap (mobile)
+   reveal for the verbose explanation that used to sit permanently under a
+   compacted knob. One pattern, reused by every compacted knob. ---- */
+.vi-knob-info {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.vi-knob-info-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  color: var(--vi-text-dim);
+  padding: 0.05rem 0.2rem;
+  border-radius: 3px;
+}
+
+.vi-knob-info-btn:focus-visible {
+  color: var(--vi-accent);
+  outline: 1px solid var(--vi-accent);
+  outline-offset: 1px;
+}
+
+.vi-knob-info-pop {
+  display: none;
+  position: absolute;
+  z-index: 5;
+  top: 1.3rem;
+  right: 0;
+  width: max-content;
+  max-width: 11rem;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  font-family: var(--vi-mono);
+  color: var(--vi-text);
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Tabbing to the ⓘ reveals it on any device (native focus, not touch-tap —
+   KnobInfo blurs the button on close, so this never gets stuck open). */
+.vi-knob-info:focus-within .vi-knob-info-pop {
+  display: block;
+}
+
+/* Touch/mobile-equivalent: tapping the ⓘ toggles `.vi-knob-info-open`
+   (KnobInfo.tsx) — a fully independent path from :hover below. */
+.vi-knob-info-open .vi-knob-info-pop {
+  display: block;
+}
+
+/* Desktop hover — gated to real hover-capable pointers (mouse/trackpad).
+   Touchscreens are excluded on purpose: many mobile browsers latch `:hover`
+   on tap and don't clear it until the next tap elsewhere ("sticky hover"),
+   which would fight the tap-toggle above. Touch gets ONLY the toggle path. */
+@media (hover: hover) {
+  .vi-knob-info-btn:hover {
+    color: var(--vi-accent);
+    outline: 1px solid var(--vi-accent);
+    outline-offset: 1px;
+  }
+
+  .vi-knob-info:hover .vi-knob-info-pop {
+    display: block;
+  }
+}
+
+.vi-knob-input,
+.vi-knob-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.35rem 0.45rem;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  color: var(--vi-text);
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+}
+
+.vi-knob-input:focus,
+.vi-knob-select:focus {
+  outline: none;
+  border-color: var(--vi-accent);
+}
+
+.vi-knob-input-sm {
+  width: 5.5rem;
+}
+
+/* Seed: numbers-or-blank, but a seed can be a long integer — cap it wider than
+   .vi-knob-input-sm so a big value never clips, while still reading as compact
+   (not a full-width block) against the ~14rem rail. */
+.vi-knob-input-compact {
+  width: auto;
+  max-width: 9rem;
+}
+
+.vi-knob-hint {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  line-height: 1.35;
+}
+
+.vi-knob-range {
+  color: var(--vi-accent);
+}
+
+.vi-knob-flag {
+  font-size: 0.72rem;
+  color: #ffcf8a;
+  line-height: 1.35;
+}
+
+/* Intelligent-default resolution hint (t23) — the honest "using N (auto: …)"
+   note shown when a knob is blank and resolving to its source-derived default.
+   Reads as an accent-tinted affirmative, distinct from the amber .vi-knob-flag
+   warning. */
+.vi-knob-auto {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--vi-accent);
+  line-height: 1.35;
+}
+
+.vi-knob-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.vi-knob-window {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.vi-knob-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Generic run row (button + status, or the poll-cap "Check again" affordance).
+   Lives in the studio bottom prompt bar for both Frames and Generate. */
+.vi-frames-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* ---- main column: frame grid ---- */
+.vi-frames-main {
+  flex: 1 1 24rem;
+  min-width: 18rem;
+}
+
+.vi-frames-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.vi-frames-summary {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text-dim);
+  margin-right: auto;
+}
+
+.vi-frames-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* The frame grid renders as a single-row horizontal thumbnail strip (film-strip)
+   under the center preview. Pagination is unchanged — each page is one strip. */
+.vi-frames-grid {
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+  padding-bottom: 0.4rem;
+  scrollbar-width: thin;
+}
+
+.vi-frame-cell {
+  position: relative;
+  display: block;
+  flex: 0 0 9rem;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  overflow: hidden;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.vi-frame-cell:hover {
+  border-color: var(--vi-accent);
+}
+
+.vi-frame-cell-selected {
+  border-color: var(--vi-accent);
+  box-shadow: 0 0 0 2px var(--vi-accent) inset;
+}
+
+.vi-frame-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.vi-frame-tag {
+  position: absolute;
+  top: 0.25rem;
+  left: 0.25rem;
+  font-family: var(--vi-mono);
+  font-size: 0.65rem;
+  color: var(--vi-text);
+  background: rgba(0, 0, 0, 0.6);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  line-height: 1.2;
+}
+
+.vi-frame-check {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  color: var(--vi-surface);
+  background: var(--vi-accent);
+  width: 1.1rem;
+  height: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  line-height: 1;
+}
+
+.vi-frame-saved {
+  position: absolute;
+  bottom: 0.25rem;
+  left: 0.25rem;
+  font-family: var(--vi-mono);
+  font-size: 0.6rem;
+  color: #7fd88f;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vi-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  justify-content: center;
+}
+
+.vi-pager-label {
+  font-family: var(--vi-mono);
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Phases 6–7 — Generate station: left-rail knobs (reuses .vi-frames-rail /   */
+/* .vi-knob*) + main column with the center preview and the ordered prompt    */
+/* composer. Reuses .vi-btn / .vi-status / .vi-error / .vi-result-img.        */
+/* ------------------------------------------------------------------------- */
+
+/* ---- center preview / result ---- */
+.vi-gen-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 14rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface-raised);
+  padding: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.vi-gen-result {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.vi-gen-note {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: #7fd88f;
+  text-align: center;
+}
+
+/* The auto-archive "Saved to <name> · <dir>" line, appended to the result note. */
+.vi-gen-saved {
+  color: var(--vi-text-dim);
+}
+.vi-gen-saved code {
+  color: #7fd88f;
+}
+
+.vi-gen-preview-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  font-family: var(--vi-mono);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Responsive Options / Add-file / Components splitter (SectionTabs).          */
+/*   Desktop (>=62rem): the Options rail (when present) sits beside a single    */
+/*     flowing work column — compact add-file on top, then the working          */
+/*     components, then the in-panel Run footer. No tab strip, no dead gap.      */
+/*   Mobile (<62rem): the parts collapse behind a [ Options | Add file |        */
+/*     Components ] tab strip reusing the .vi-gen-mode idiom below.             */
+/* ------------------------------------------------------------------------- */
+.vi-section-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  min-width: 0;
+}
+
+/* The tab strip itself — same look as .vi-gen-mode, but allowed to shrink and
+   (on narrow viewports) scroll rather than force horizontal overflow. */
+.vi-section-tablist {
+  max-width: 100%;
+}
+
+.vi-section-tabpanel {
+  min-width: 0;
+}
+
+.vi-section-tabpanel[hidden] {
+  display: none;
+}
+
+.vi-section-tabpanel:focus-visible,
+.vi-section-region:focus-visible {
+  outline: 2px solid var(--vi-accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* Desktop landmark regions. */
+.vi-section-region {
+  min-width: 0;
+}
+
+/* Work column: a single flowing column (compact add-file → components → Run
+   footer). Fills the space beside the options rail — no empty middle band. */
+.vi-section-region--work {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.vi-section-addfile {
+  min-width: 0;
+}
+
+/* Compact file-intake bar (AddFileBar) — the ONLY intake affordance: a
+   "Choose …" button + filename/meta + optional Clear. No dropbox anywhere. */
+.vi-addbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
+}
+
+/* Selected filename — ellipsized so a long name never overflows at 390px. */
+.vi-addbar-name {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text);
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A station's working components — always a stacked column (preview / grid /
+   results / footer). Used inside the desktop work column AND the mobile
+   Components tab, so its internal spacing is layout-independent. */
+.vi-station-components {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* Character tools group (t25) — a titled area inside the Frames station that
+   hosts character-centric work on the loaded video (char360 first; the t19
+   aggregation modes land here later). A bordered section with a header so it
+   reads as its own first-class group, separated from the frame grid above. */
+.vi-character-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+}
+.vi-character-tools-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+/* In-panel footer action row — the Run/primary action + any toolbar. Sticky
+   bottom bar (operator 2026-07-13: "the user should not have to scroll down to
+   press the Run button on any page"): `.vi-workbench-body` (app.css, the
+   "scroll container" block below) is the ONE element that actually scrolls a
+   station's content — the page/navbar/sidebar never do. `position: sticky`
+   only gets real travel from the element's IMMEDIATE parent (its CSS
+   containing block), not from any taller ancestor further up — verified with a
+   throwaway sticky testbed (a short direct parent gives zero effective pin
+   range; sticking this outer row works because its own parent
+   (.vi-station-components / .vi-studio-generate) is the tall flowing column
+   that actually needs scrolling). Sticking only the inner `.vi-station-footer-
+   run` button column (its literal ask) would NOT have worked for that reason,
+   so the whole row (feedback text + Run) is the sticky unit — shared verbatim
+   by GenerateStation, FrameExtractCore, ImageCropCore, AudioCropCore,
+   VideoCropCore and StudioGenerateTab (`vi-station-footer vi-studio-run`). See
+   `.vi-run-bar` below for the bespoke (non-.vi-station-footer) stations. */
+.vi-station-footer,
+.vi-run-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 1.5rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-top: 1px solid var(--vi-border);
+  padding: 1rem 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  /* This app has one (dark) theme only — no --vi-bg/light tokens exist
+     (verified: no prefers-color-scheme or data-theme rule anywhere in this
+     file) — --vi-surface IS the page background, so this blends exactly. */
+  background: var(--vi-surface);
+}
+
+.vi-station-footer-main {
+  flex: 1 1 20rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.vi-station-footer-run {
+  flex: 0 0 auto;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: stretch;
+}
+
+/* Studio run rows (StudioGenerateTab + StudioMovieComposer) tag the footer with
+   BOTH `vi-station-footer` and `vi-studio-run`. `.vi-studio-run` (defined below,
+   part of the ARCHIVED `.vi-studio-prompt` bottom-bar layout — never rendered
+   standalone; verified the class only ever appears combined with
+   `.vi-station-footer`) sets `flex-direction: column`, which flipped the footer to
+   a VERTICAL stack. In a column flex, `.vi-station-footer-main`'s `flex: 1 1 20rem`
+   basis is read as a 320px HEIGHT, so the row ballooned to ~393px with the button
+   floating ~320px below the inputs — measured live 2026-07-13 with Playwright. That
+   was the pre-existing "dead space between the inputs and Run"; once the footer went
+   `position: sticky` (opaque, bottom:0) that 393px block began OCCLUDING the bottom
+   inputs. Pin the combined selector back to the compact ROW footer (0,2,0 specificity
+   beats `.vi-studio-run`'s 0,1,0 regardless of source order), so the studio run rows
+   match every other station's footer: main (flags/status) on the left, Run on the
+   right, ~a button tall, sitting directly under the inputs. No JSX change and the
+   archived standalone `.vi-studio-run` rule is untouched. */
+.vi-station-footer.vi-studio-run {
+  flex-direction: row;
+  align-items: flex-start;
+  min-width: 0;
+  gap: 1rem 1.5rem;
+}
+
+/* ---- Desktop (>=62rem): rail beside the work column, no tab strip ---- */
+@media (min-width: 62rem) {
+  /* Belt-and-suspenders — the component also skips rendering the strip here. */
+  .vi-section-tablist {
+    display: none;
+  }
+
+  /* "beside": the fluid work column on the LEFT + the ~17rem settings rail on
+     the RIGHT. */
+  .vi-section-tabs--beside {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 17rem;
+    gap: 1.25rem 1.5rem;
+    align-items: start;
+  }
+  /* "stacked" (crop stations, no rail): the work column spans full width. */
+  .vi-section-tabs--stacked {
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+/* ---- Mobile (<62rem): stacked tab panels ---- */
+@media (max-width: 62rem) {
+  /* Keep the strip on one line but let it scroll instead of overflowing the
+     390px viewport; the (2–3) short tabs never actually need to scroll. */
+  .vi-section-tablist {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* The Run footer stacks its columns on narrow screens. */
+  .vi-station-footer-run {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* ---- mode switch (Image | Scene) — segmented control above the studio ---- */
+.vi-gen-mode {
+  display: inline-flex;
+  gap: 0;
+  margin: 0 0 1rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.vi-gen-mode-btn {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  padding: 0.35rem 1.1rem;
+  border: 0;
+  background: var(--vi-surface-raised);
+  color: var(--vi-text-dim);
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.vi-gen-mode-btn + .vi-gen-mode-btn {
+  border-left: 1px solid var(--vi-border);
+}
+
+.vi-gen-mode-btn:hover {
+  color: var(--vi-text);
+}
+
+.vi-gen-mode-btn-active {
+  background: var(--vi-accent);
+  color: var(--vi-surface);
+  font-weight: 500;
+}
+
+/* ---- scene result: full-width strip + clip stacked in the studio preview ---- */
+.vi-scene-result {
+  width: 100%;
+  align-items: stretch;
+}
+
+/* Non-interactive frame tile (mirrors .vi-frame-cell without the hover/cursor). */
+.vi-scene-frame-cell {
+  position: relative;
+  display: block;
+  flex: 0 0 9rem;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.vi-scene-frame-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+/* The scene result lives INSIDE .vi-studio-preview (overflow:hidden, centering
+   flex). Without an explicit min-width:0 the figure's default min-width:auto
+   lets it grow to the frame strip's full (non-wrapping) content width, which the
+   preview then CLIPS — so frames past the visible width were unreachable. Cap the
+   figure at the preview width so the inner strip's overflow-x:auto engages. */
+.vi-scene-result {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The scene frame strip: a horizontally-scrollable film-strip (fixed-width,
+   non-wrapping frames). overscroll-behavior-x:contain keeps a sideways scroll
+   inside the strip so the page body never scrolls horizontally. */
+.vi-scene-frames {
+  flex-wrap: nowrap;
+  overscroll-behavior-x: contain;
+}
+
+/* Per-frame download — revealed on hover/focus of its tile (mirrors the
+   .vi-frame-tag corner-chip look, top-right). */
+.vi-frame-dl {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  line-height: 1;
+  text-decoration: none;
+  color: var(--vi-text);
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.vi-scene-frame-cell:hover .vi-frame-dl,
+.vi-frame-dl:focus-visible {
+  opacity: 1;
+}
+
+.vi-frame-dl:hover {
+  border-color: var(--vi-accent);
+  color: var(--vi-accent);
+}
+
+/* Assembled-clip block: the video player + its Download MP4 action beneath. */
+.vi-scene-clip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.vi-scene-clip .vi-btn {
+  text-decoration: none;
+}
+
+/* ---- first video player (modeled on the audio <audio controls> pattern) ---- */
+.vi-video-clip {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.vi-video-player {
+  width: 100%;
+  min-width: 10rem;
+  max-height: 30rem;
+  border-radius: 6px;
+  background: #000;
+}
+
+/* ---- composer ---- */
+/* Lives in the stage column (under the preview + add bar), not the bottom
+   prompt bar — no row-flex basis. */
+.vi-gen-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.vi-gen-add-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Capability-driven requirement banner — states prompt + start-image posture for
+   the selected model, and hosts the explicit required start-image control. */
+.vi-gen-req {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface);
+}
+
+.vi-gen-req-line {
+  font-family: var(--vi-mono);
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+  line-height: 1.4;
+}
+
+/* Emphasize when an edit model still needs its required start image. */
+.vi-gen-req-missing {
+  border-color: var(--vi-accent);
+}
+
+.vi-gen-req-missing .vi-gen-req-line {
+  color: var(--vi-text);
+}
+
+/* Run button + status chip, pinned stationary at the right end of the add row */
+.vi-gen-add-run {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* run feedback (validation flag / job error / poll-cap resume) under the row */
+.vi-gen-run-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.vi-gen-run-notes .vi-error {
+  margin: 0;
+}
+
+.vi-gen-empty {
+  font-family: var(--vi-mono);
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+  line-height: 1.4;
+  border: 1px dashed var(--vi-border);
+  border-radius: 6px;
+  padding: 0.9rem;
+  margin: 0;
+}
+
+/* ---- LLM prompt assist (Enhance / Generate) toolbar ----
+   A subtle toolbar pinned at the top of the image/scene composer. The two ✨
+   buttons reuse .vi-btn-sm/.vi-btn-ghost; only the lead label + inline dismissible
+   error notice are bespoke, and both stay on the surrounding vi-* tokens. */
+.vi-prompt-assist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--vi-border);
+}
+
+.vi-prompt-assist-lead {
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+  margin-right: 0.15rem;
+}
+
+/* Inline, dismissible failure notice — mono red like .vi-error, but sized to sit
+   in the toolbar row rather than as a standalone block. */
+.vi-prompt-assist-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--vi-mono);
+  font-size: 0.78rem;
+  color: #ff8a8a;
+}
+
+.vi-prompt-assist-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.25rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.vi-prompt-assist-dismiss:hover {
+  color: var(--vi-text);
+}
+
+/* ---- library picker panel ---- */
+.vi-gen-picker {
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface-raised);
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.vi-gen-video-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+/* Library picker renders as a horizontal thumbnail strip in the studio stage. */
+.vi-gen-picker-grid {
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+  padding-bottom: 0.4rem;
+  scrollbar-width: thin;
+}
+
+.vi-gen-pick-cell {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 8rem;
+  gap: 0.3rem;
+  padding: 0.35rem;
+  margin: 0;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: var(--vi-surface);
+  cursor: pointer;
+  text-align: left;
+}
+
+.vi-gen-pick-cell:hover {
+  border-color: var(--vi-accent);
+}
+
+.vi-gen-pick-thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+.vi-gen-pick-videoicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 3px;
+  color: var(--vi-accent);
+  font-size: 1.4rem;
+}
+
+.vi-gen-pick-meta {
+  font-family: var(--vi-mono);
+  font-size: 0.65rem;
+  color: var(--vi-text-dim);
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.vi-gen-pick-meta code {
+  color: var(--vi-text);
+}
+
+/* ---- ordered parts list ---- */
+.vi-gen-parts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.vi-gen-part {
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface-raised);
+  padding: 0.6rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.vi-gen-part-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vi-gen-badge {
+  font-family: var(--vi-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid var(--vi-border);
+  color: var(--vi-text-dim);
+}
+
+.vi-gen-badge-text {
+  color: var(--vi-accent);
+  border-color: var(--vi-accent);
+}
+
+.vi-gen-badge-image {
+  color: #7fd88f;
+  border-color: #7fd88f;
+}
+
+.vi-gen-badge-video {
+  color: #ffcf8a;
+  border-color: #ffcf8a;
+}
+
+.vi-gen-part-idx {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-gen-part-actions {
+  display: flex;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
+.vi-gen-part-text {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 0.45rem 0.5rem;
+  font-family: var(--vi-serif);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  color: var(--vi-text);
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+}
+
+.vi-gen-part-text:focus {
+  outline: none;
+  border-color: var(--vi-accent);
+}
+
+.vi-gen-part-media {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+/* per-part "attach image / attach video" row on text-only parts */
+.vi-gen-part-attach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.vi-gen-part-thumb {
+  width: 6rem;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  flex: 0 0 auto;
+}
+
+.vi-gen-part-videoicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 6rem;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  color: var(--vi-accent);
+  font-size: 1.4rem;
+  flex: 0 0 auto;
+}
+
+.vi-gen-part-meta {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.vi-gen-part-meta code {
+  color: var(--vi-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Generation-wide IDENTITY bar — the compact per-part character affordance,  */
+/* sibling of .vi-gen-part-attach. Deliberately slimmer than the Studio-sized */
+/* IdentityProfileControls block: it sits inside every .vi-gen-part card.     */
+.vi-gen-part-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border-top: 1px dashed var(--vi-border);
+  padding-top: 0.5rem;
+}
+
+.vi-gen-part-identity-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* The bound character, shown identically on EVERY part (one identity per run). */
+.vi-gen-identity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  border: 1px solid var(--vi-accent);
+  color: var(--vi-accent);
+}
+
+.vi-gen-identity-chip-icon {
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.vi-gen-identity-note {
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+  line-height: 1.4;
+}
+
+/* Profile picker — a wrapping strip of small thumb+name options. Capped short so
+   it never dwarfs the part card it lives in (the Studio panel uses 12rem). */
+.vi-gen-identity-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  max-height: 7.5rem;
+  overflow-y: auto;
+}
+
+.vi-gen-identity-option {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.4rem 0.25rem 0.25rem;
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  color: var(--vi-text);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.vi-gen-identity-option:hover:not(:disabled) {
+  border-color: var(--vi-accent);
+}
+
+.vi-gen-identity-option:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.vi-gen-identity-option-thumb {
+  width: 1.6rem;
+  height: 1.6rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: #000;
+  flex: 0 0 auto;
+}
+
+/* A profile with no canonical 3D-model views yet (bind would fail loudly) —
+   flagged in the picker itself rather than only after a failed click. */
+.vi-gen-identity-option-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffcf8a;
+  font-size: 0.85rem;
+}
+
+.vi-gen-identity-option-name {
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* CANONICAL VIEW ROW (step 2 of the picker) — the identity's canonical views, of
+   which the user picks the ONE that carries the character. Sized to stay compact
+   inside a .vi-gen-part card while holding an UNKNOWN number of views: 4 today, 8
+   once the azimuth slice lands, N later. Hence scroll-x + no wrap — the row never
+   grows the card's height regardless of count. */
+.vi-gen-identity-views-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vi-gen-identity-views {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.vi-gen-identity-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+  padding: 0.3rem;
+  background: transparent;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.vi-gen-identity-view:hover:not(:disabled),
+.vi-gen-identity-view:focus-visible {
+  border-color: var(--vi-accent);
+}
+
+.vi-gen-identity-view:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Big enough to judge the ANGLE at a glance — that is the whole point of the pick. */
+.vi-gen-identity-view-thumb {
+  width: 3.4rem;
+  height: 3.4rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: #000;
+  display: block;
+}
+
+/* "45° right profile" when the view has real azimuth provenance, else the honest
+   ordinal ("view 3") — see GenIdentityBar.tsx's viewLabel. nowrap + a max-width
+   pegged to the thumbnail keeps the row compact at 8+ views (it already scrolls
+   horizontally via .vi-gen-identity-views) rather than growing tall or wide. */
+.vi-gen-identity-view-label {
+  font-family: var(--vi-mono);
+  font-size: 0.65rem;
+  color: var(--vi-text-dim);
+  white-space: nowrap;
+  max-width: 5.2rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The carrying view's label (real angle when known, else the honest ordinal),
+   shown on the bound chip so the choice stays visible without reopening the
+   picker. */
+.vi-gen-identity-chip-view {
+  font-family: var(--vi-mono);
+  font-size: 0.65rem;
+  opacity: 0.75;
+  margin-left: 0.3rem;
+}
+
+/* The composer's own add-part bar (image + scene), docked under the parts list —
+   the sibling of .vi-movie-timeline-foot's "+ Add goal". */
+.vi-gen-parts-foot {
+  margin-top: 0.6rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Movie mode — goal-timeline editor, director panel, nested progress strip.  */
+/* Reuses the .vi-gen-part / .vi-knob-window / .vi-status-* families + tokens. */
+/* ------------------------------------------------------------------------- */
+
+/* Goal badge — a fourth badge colour alongside text/image/video. */
+.vi-gen-badge.vi-movie-badge {
+  color: var(--vi-accent);
+  border-color: var(--vi-accent);
+}
+
+/* Goal frame-window row: the two numeric inputs + the derived span hint. */
+.vi-movie-window {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.vi-movie-window-span {
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  color: var(--vi-text-dim);
+  padding-bottom: 0.35rem;
+}
+
+/* The timeline container + its footer (Add goal + total-frames summary). */
+.vi-movie-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.vi-movie-timeline-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.vi-movie-summary {
+  font-family: var(--vi-mono);
+  font-size: 0.75rem;
+  color: var(--vi-accent);
+}
+
+/* Running preview: the current-segment block (readout + live frame grid). */
+.vi-movie-current {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  width: 100%;
+}
+
+/* The per-segment strip — a horizontally-scrollable row of segment cells. */
+.vi-movie-seg-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  padding-bottom: 0.3rem;
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.vi-movie-seg {
+  flex: 0 0 11rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--vi-border);
+  border-left: 3px solid var(--vi-border);
+  border-radius: 4px;
+  background: var(--vi-surface-raised);
+}
+
+.vi-movie-seg-idx {
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-movie-seg-label {
+  font-family: var(--vi-serif);
+  font-size: 0.82rem;
+  color: var(--vi-text);
+  line-height: 1.3;
+}
+
+.vi-movie-seg-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-movie-seg-status {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vi-movie-seg-attempt {
+  color: var(--vi-text-dim);
+}
+
+/* Score badge — a small chip; muted when there is no score yet. */
+.vi-movie-score {
+  margin-left: auto;
+  min-width: 1.6rem;
+  text-align: center;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid #7fd88f;
+  color: #7fd88f;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+}
+
+.vi-movie-score.vi-movie-score-none {
+  border-color: var(--vi-border);
+  color: var(--vi-text-dim);
+}
+
+/* Per-status accent on the cell's left border (reusing the status palette). */
+.vi-movie-seg-done {
+  border-left-color: #7fd88f;
+}
+.vi-movie-seg-generating,
+.vi-movie-seg-scoring,
+.vi-movie-seg-resumed {
+  border-left-color: var(--vi-accent);
+}
+.vi-movie-seg-skipped {
+  border-left-color: #ffcf8a;
+}
+.vi-movie-seg-pending {
+  border-left-color: var(--vi-border);
+}
+
+/* Director panel — the opt-in vision knobs, indented under its toggle. */
+.vi-director-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-top: 0.6rem;
+  padding-left: 0.7rem;
+  border-left: 2px solid var(--vi-border);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Phase 5 — Audio Crop station: waveform stage, draggable temporal region,   */
+/* playhead, clip results. Reuses .vi-crop-editor / .vi-crop-controls /        */
+/* .vi-crop-fields / .vi-region-list / .vi-result-* from the Image Crop CSS.   */
+/* ------------------------------------------------------------------------- */
+
+.vi-audio-stage {
+  position: relative;
+  flex: 1 1 22rem;
+  min-width: 16rem;
+  border: 1px solid var(--vi-border);
+  background: #000;
+}
+
+.vi-audio-canvas {
+  display: block;
+  width: 100%;
+  height: 128px;
+}
+
+.vi-audio-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.vi-audio-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  border-left: 1px solid var(--vi-accent);
+  border-right: 1px solid var(--vi-accent);
+  background: rgba(138, 180, 255, 0.14);
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+  cursor: move;
+  touch-action: none;
+}
+
+.vi-audio-region-active {
+  background: rgba(138, 180, 255, 0.22);
+}
+
+.vi-audio-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  background: var(--vi-accent);
+  opacity: 0.85;
+  touch-action: none;
+}
+
+.vi-audio-handle-start {
+  left: -5px;
+  cursor: ew-resize;
+}
+
+.vi-audio-handle-end {
+  right: -5px;
+  cursor: ew-resize;
+}
+
+.vi-audio-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #ffcf8a;
+  pointer-events: none;
+}
+
+.vi-audio-note {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.4rem;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+
+.vi-audio-note-warn {
+  color: #ffcf8a;
+}
+
+.vi-audio-clip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.vi-audio-player {
+  width: 100%;
+  min-width: 10rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Studio composition (Frames + Generate) — the reference layout: a left        */
+/* settings rail, a large center preview stacked over a horizontal thumbnail    */
+/* strip, and a bottom prompt/action bar spanning the full width. Pure layout   */
+/* primitives; the knob / preview / strip / part classes above are reused as-is */
+/* and the image-crop / audio-crop stations do not use any .vi-studio* class.   */
+/* ------------------------------------------------------------------------- */
+
+.vi-studio {
+  display: grid;
+  grid-template-columns: 17rem minmax(0, 1fr);
+  grid-template-areas:
+    "rail stage"
+    "prompt prompt";
+  gap: 1.25rem 1.5rem;
+  align-items: start;
+  min-height: 0;
+}
+
+@media (max-width: 62rem) {
+  .vi-studio {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "rail"
+      "stage"
+      "prompt";
+  }
+}
+
+.vi-studio__rail {
+  grid-area: rail;
+}
+
+/* center column: large preview stacked over the thumbnail strip */
+.vi-studio-stage {
+  grid-area: stage;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.vi-studio-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: #000;
+  padding: 0.75rem;
+  overflow: hidden;
+  text-align: center;
+}
+
+.vi-studio-preview img {
+  max-width: 100%;
+  max-height: 30rem;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+
+/* thumbnail strip wrapper — the frame grid / library picker scroll within it */
+.vi-studio-strip {
+  min-width: 0;
+}
+
+/* bottom prompt bar: composer / toolbar on the left, primary action on right */
+.vi-studio-prompt {
+  grid-area: prompt;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 1.5rem;
+  align-items: flex-start;
+  border-top: 1px solid var(--vi-border);
+  padding-top: 1.1rem;
+}
+
+.vi-studio-prompt-main {
+  flex: 1 1 22rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.vi-studio-run {
+  flex: 0 0 auto;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: stretch;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Studio workbench — the [ sidebar | tabbed main ] shell that hosts the      */
+/* three studio stations as sub-tabs beside the static session-library queue. */
+/* Sits inside .vi-main (which centers). Reuses the dark tokens + the          */
+/* @media (max-width:62rem) breakpoint convention. Wrapped station bodies keep */
+/* their own .station-wide 68rem cap inside the main column.                   */
+/* ------------------------------------------------------------------------- */
+
+.vi-workbench {
+  display: grid;
+  grid-template-columns: 18rem minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: stretch;
+  width: 100%;
+  max-width: 96rem;
+  height: 100%;
+  min-height: 0;
+}
+
+.vi-workbench-main {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The scroll container: every sub-tab is exactly the sidebar's height and
+   scrolls internally, so the page and navbar never scroll. */
+.vi-workbench-body {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Mobile-only hamburger — leading control of the sub-tab strip, toggling the
+   off-canvas drawer. Hidden at >=62rem (the sidebar owns its grid column); the
+   narrow @media block below flips it to inline-flex. */
+.vi-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0.3rem 0.5rem;
+  margin-right: 0.4rem;
+  border-radius: 6px;
+  border: 1px solid var(--vi-border);
+  background: var(--vi-surface-raised);
+  color: var(--vi-text);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.vi-hamburger:hover {
+  border-color: var(--vi-accent);
+}
+
+/* Scrim behind the mobile drawer — hidden on desktop; the @media block shows it. */
+.vi-scrim {
+  display: none;
+}
+
+.vi-workbench-sidebar {
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  padding: 1rem;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+/* ---- sub-tab strip (studio stations) — visually mirrors .vi-tab, own class
+   so it stays independently themeable. ---- */
+.vi-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--vi-border);
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
+.vi-subtab {
+  color: var(--vi-text-dim);
+  text-decoration: none;
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.vi-subtab:hover {
+  color: var(--vi-text);
+}
+
+.vi-subtab-active {
+  color: var(--vi-text);
+  background: var(--vi-surface);
+  border-color: var(--vi-border);
+}
+
+/* ---- session-library queue (the sidebar body) ---- */
+.vi-lib {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  font-family: var(--vi-mono);
+}
+
+.vi-lib-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--vi-border);
+}
+
+.vi-lib-title {
+  margin: 0;
+  font-family: var(--vi-serif);
+  font-weight: 500;
+  font-size: 1.05rem;
+}
+
+.vi-lib-count {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  border: 1px solid var(--vi-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.vi-lib-header .vi-btn {
+  margin-left: auto;
+}
+
+.vi-lib-empty {
+  margin: 0;
+  padding: 0.9rem;
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+  line-height: 1.45;
+  border: 1px dashed var(--vi-border);
+  border-radius: 6px;
+}
+
+.vi-lib-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.vi-lib-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface);
+}
+
+.vi-lib-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vi-lib-badge {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid var(--vi-border);
+  color: var(--vi-accent);
+}
+
+.vi-lib-name {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vi-lib-thumb {
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  overflow: hidden;
+}
+
+.vi-lib-thumb img,
+.vi-lib-thumb video {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  object-fit: contain;
+}
+
+.vi-lib-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  color: var(--vi-text-dim);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.vi-lib-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.vi-lib-meta code {
+  color: var(--vi-text);
+}
+
+.vi-lib-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.vi-lib-hint {
+  font-size: 0.62rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* A failed studio-clip archive (Remove on a durable clip row) — mirrors
+   .vi-proc-err's color; the row itself is restored, this just explains why. */
+.vi-lib-error {
+  margin: 0;
+  font-size: 0.68rem;
+  color: #ff8a8a;
+  line-height: 1.35;
+}
+
+/* ---- studio "Source clip" picker: thumbnailed, previewable rows ----
+   The source-clip summary + each picker row show a poster-frame still (a compact
+   16:9 cover tile) that plays inline on demand, mirroring the Session Library's
+   thumbnail idiom. A row is a flex container (thumb | body) — NOT one big button —
+   so a <video controls> can live inside it. Kept separate from the .vi-lib-* rules. */
+.vi-studio-src-selected {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.vi-studio-src-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.4rem;
+  margin-bottom: 0.4rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface);
+}
+
+.vi-studio-src-thumb {
+  flex: 0 0 auto;
+  width: 104px;
+  padding: 0;
+  position: relative;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  overflow: hidden;
+}
+
+.vi-studio-src-thumb video {
+  display: block;
+  width: 100%;
+  height: 58px;
+  object-fit: cover;
+}
+
+button.vi-studio-src-thumb {
+  cursor: pointer;
+  color: inherit;
+}
+
+/* Playing state: the tile grows so the native <video controls> are usable, and the
+   frame is shown whole (contain) rather than cropped. */
+.vi-studio-src-thumb--playing {
+  width: 220px;
+  max-width: 100%;
+}
+
+.vi-studio-src-thumb--playing video {
+  height: auto;
+  object-fit: contain;
+}
+
+/* ▶ overlay on the poster (non-interactive — the wrapping button takes the click). */
+.vi-studio-src-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+/* The placeholder tile (a clip with no streamable output) reuses .vi-lib-placeholder
+   for its look, but must match the fixed poster width, not the 16:9 auto-height. */
+.vi-studio-src-thumb.vi-lib-placeholder {
+  height: 58px;
+  aspect-ratio: auto;
+}
+
+.vi-studio-src-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.vi-studio-src-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.vi-studio-src-meta code {
+  color: var(--vi-text);
+}
+
+.vi-studio-src-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+/* ---- active-processes section (the session-wide "memory of processes") ----
+   Sits above the library list in the sidebar; visible from every sub-tab. Reuses
+   the .vi-lib* look + the .vi-status-* color conventions. */
+.vi-proc {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-family: var(--vi-mono);
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.3rem;
+  border-bottom: 1px solid var(--vi-border);
+}
+
+.vi-proc-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vi-proc-title {
+  margin: 0;
+  font-family: var(--vi-serif);
+  font-weight: 500;
+  font-size: 1.05rem;
+}
+
+.vi-proc-count {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  border: 1px solid var(--vi-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.vi-proc-header .vi-btn {
+  margin-left: auto;
+}
+
+.vi-proc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.vi-proc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface);
+}
+
+.vi-proc-link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.vi-proc-link:hover .vi-proc-station {
+  color: var(--vi-accent);
+}
+
+.vi-proc-top {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.vi-proc-station {
+  font-size: 0.74rem;
+  color: var(--vi-text);
+}
+
+.vi-proc-top .vi-status {
+  margin-right: 0;
+}
+
+.vi-proc-progress {
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vi-proc-elapsed {
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.vi-proc-label {
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vi-proc-msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+  line-height: 1.35;
+}
+
+.vi-proc-err {
+  color: #ff8a8a;
+}
+
+.vi-proc-btn {
+  flex: 0 0 auto;
+}
+
+/* A spinning ring while a process runs; a static dot otherwise. */
+.vi-proc-spinner {
+  flex: 0 0 auto;
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  border: 2px solid var(--vi-border);
+  border-top-color: var(--vi-accent);
+  animation: vi-proc-spin 0.7s linear infinite;
+}
+
+.vi-proc-dot {
+  flex: 0 0 auto;
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  border: 2px solid var(--vi-border);
+}
+
+@keyframes vi-proc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Worker-call rows: expandable progress / stage / stalled / log ──────────── */
+
+/* The disclosure caret — a bare, keyboard-focusable button that toggles the panel.
+   Reuses the row's mono type; sized to sit inline with the spinner + status. */
+.vi-proc-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--vi-text-dim);
+  cursor: pointer;
+}
+
+.vi-proc-toggle:hover .vi-proc-caret {
+  color: var(--vi-accent);
+}
+
+.vi-proc-caret {
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+/* Stalled indicator — replaces the accent spinner so a wedged render reads AMBER,
+   not live. A slow pulse (never the spinner's active spin) says "stuck", not "busy". */
+.vi-proc-stall-dot {
+  flex: 0 0 auto;
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  background: #ffcf8a;
+  animation: vi-proc-stall-pulse 1.6s ease-in-out infinite;
+}
+
+.vi-proc-stall-badge {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #ffcf8a;
+  border: 1px solid #ffcf8a;
+  border-radius: 999px;
+  padding: 0.02rem 0.4rem;
+}
+
+@keyframes vi-proc-stall-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The expanded detail panel: progress bar + stage, message, last-movement, log. */
+.vi-proc-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.5rem 0 0.15rem;
+  border-top: 1px solid var(--vi-border);
+}
+
+.vi-proc-progbar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vi-proc-progbar {
+  position: relative;
+  flex: 1 1 auto;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--vi-surface-raised);
+  border: 1px solid var(--vi-border);
+  overflow: hidden;
+}
+
+.vi-proc-progbar-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--vi-accent);
+  transition: width 0.4s ease;
+}
+
+/* Unknown progress → a sweeping band (indeterminate "working"), no fabricated %. */
+.vi-proc-progbar-indeterminate .vi-proc-progbar-fill {
+  width: 35%;
+  animation: vi-proc-indeterminate 1.3s ease-in-out infinite;
+}
+
+/* Stalled → the bar goes amber (determinate or indeterminate) and stops sweeping. */
+.vi-proc-progbar-stalled .vi-proc-progbar-fill {
+  background: #ffcf8a;
+  animation: none;
+}
+
+.vi-proc-progbar-stalled.vi-proc-progbar-indeterminate .vi-proc-progbar-fill {
+  width: 100%;
+  opacity: 0.5;
+}
+
+@keyframes vi-proc-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.vi-proc-stage {
+  flex: 0 0 auto;
+  font-size: 0.66rem;
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vi-proc-detail-msg {
+  margin: 0;
+  font-size: 0.68rem;
+  color: var(--vi-text);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.vi-proc-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.vi-proc-lastmove {
+  font-size: 0.66rem;
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.vi-proc-lastmove-stalled {
+  color: #ffcf8a;
+}
+
+/* The scrolling log tail — monospace, capped height with its own scroll, pinned to
+   the newest (bottom) line by the row's effect. */
+.vi-proc-log {
+  margin: 0;
+  max-height: 9rem;
+  overflow: auto;
+  padding: 0.4rem 0.5rem;
+  background: var(--vi-surface-raised);
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  font-family: var(--vi-mono);
+  font-size: 0.64rem;
+  line-height: 1.4;
+  color: var(--vi-text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.vi-proc-log-empty {
+  margin: 0;
+  font-size: 0.66rem;
+  color: var(--vi-text-dim);
+  font-style: italic;
+}
+
+@media (max-width: 62rem) {
+  .vi-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  /* The tab-strip hamburger replaces the retired in-flow toggle. */
+  .vi-hamburger {
+    display: inline-flex;
+  }
+
+  /* Off-canvas session-library drawer: slid out by default, in when .is-open. */
+  .vi-workbench-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100dvh;
+    width: min(20rem, 85vw);
+    z-index: 40;
+    border-radius: 0;
+    box-shadow: 0 0 2.5rem rgba(0, 0, 0, 0.6);
+    overflow: auto;
+    transform: translateX(-100%);
+    transition: transform 160ms ease;
+  }
+  .vi-workbench.is-open .vi-workbench-sidebar {
+    transform: translateX(0);
+  }
+
+  /* Scrim sits above content (z 35) and below the drawer (z 40). */
+  .vi-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: rgba(0, 0, 0, 0.45);
+    border: 0;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Sidebar tab split — [ Active Processes | Session Library ] switcher above   */
+/* the two tab bodies. Reuses the segmented .vi-gen-mode control.              */
+/* ------------------------------------------------------------------------- */
+.vi-side-tabs {
+  display: flex;
+  width: 100%;
+  margin: 0 0 0.9rem;
+}
+
+.vi-side-tabs .vi-gen-mode-btn {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  min-width: 0;
+}
+
+.vi-side-tab-badge {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  line-height: 1;
+  padding: 0.1rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+/* The Active Processes tab body no longer separates from a library section
+   below it, so drop the divider the old stacked layout carried. */
+.vi-proc {
+  border-bottom: 0;
+  padding-bottom: 0;
+  margin-bottom: 0;
+}
+
+/* ---- Session Library: generation-run groups ---- */
+.vi-lib-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface);
+}
+
+.vi-lib-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: var(--vi-mono);
+  cursor: pointer;
+  text-align: left;
+}
+
+.vi-lib-group-caret {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-lib-group-toggle:hover .vi-lib-group-caret {
+  color: var(--vi-accent);
+}
+
+.vi-lib-group-model {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--vi-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vi-lib-group-toggle .vi-lib-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* Collapsed group header: the representative poster sits left of the prompt. */
+.vi-lib-group-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+/* A compact representative poster (image or video still) for the collapsed group
+   header. Small fixed square tile; the inner img/video fill it (cover) so a mix
+   of aspect ratios still reads as a tidy tile. */
+.vi-lib-group-thumb {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: #000;
+  overflow: hidden;
+}
+
+.vi-lib-group-thumb img,
+.vi-lib-group-thumb video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.vi-lib-group-prompt {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.7rem;
+  color: var(--vi-text-dim);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Nested output list inside an expanded group — inset from the group frame. */
+.vi-lib-group-list {
+  margin-top: 0.2rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--vi-border);
+}
+
+/* ------------------------------------------------------------------------- */
+/* ComfyUI viewer station — the editable endpoint bar + the embedded frame.   */
+/* Fills the workbench body height so the embedded ComfyUI has real room. Same */
+/* dark editorial-terminal tokens; reuses .vi-btn / .vi-error / .vi-knob-input.*/
+/* ------------------------------------------------------------------------- */
+.vi-comfy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  height: 100%;
+  min-height: 0;
+}
+
+.vi-comfy-head {
+  flex: 0 0 auto;
+}
+
+.vi-comfy-head h2 {
+  margin: 0.3rem 0 0.4rem;
+  font-weight: 500;
+  font-size: 1.6rem;
+}
+
+.vi-comfy-head .station-blurb {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.vi-comfy-head code {
+  font-family: var(--vi-mono);
+  font-size: 0.82em;
+  color: var(--vi-text);
+}
+
+/* Endpoint bar: field grows, actions sit at the end; wraps on narrow widths. */
+.vi-comfy-bar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem 0.75rem;
+}
+
+.vi-comfy-field {
+  flex: 1 1 20rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+/* Identities settings surface (t17 master-detail): the SettingsPanel renders
+   .vi-comfy-bar as a flex COLUMN, but .vi-comfy-field is authored for a flex
+   ROW bar — `flex: 1 1 20rem` there makes flex-basis the field's HEIGHT and lets
+   each field GROW, so every DIRECT-CHILD field reserved ~its flex-basis of
+   vertical space and the panel bled dead space between rows. In this column
+   context a direct-child field must be its natural content height: no grow,
+   basis auto. Scoped to DIRECT children only, so the fields nested inside the
+   inner ROW groups (Frames/FPS/W/H, which are laid out side-by-side and rely on
+   their flex-basis as WIDTH) keep their row behavior untouched. Purely
+   spacing/structure; the fields' own styling is unchanged. */
+.vi-id-settings > .vi-comfy-field {
+  flex: 0 0 auto;
+  flex-basis: auto;
+}
+/* The direct-child horizontal groups (checkbox row, W/H/frames/fps row,
+   front-ref row) are natural-height too — no phantom vertical basis. */
+.vi-id-settings > div {
+  flex: 0 0 auto;
+}
+/* The "⚙ Settings & advanced" disclosure (active/session tabs): its children
+   (summary, the SettingsPanel, the legacy-action buttons) flow as blocks — give
+   them a small consistent gap so they read at the detail page's density instead
+   of butting together or drifting apart. */
+.vi-id-settings-disclosure[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.vi-id-settings-disclosure > summary {
+  margin-bottom: 0.2rem;
+}
+
+.vi-comfy-label {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.vi-comfy-input {
+  width: 100%;
+}
+
+.vi-comfy-input[aria-invalid="true"] {
+  border-color: #ff8a8a;
+}
+
+.vi-comfy-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vi-comfy-open-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* Warning (mixed content / loopback) — amber, distinct from the red .vi-error. */
+.vi-comfy-warn {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #6b5626;
+  border-radius: 6px;
+  background: rgba(255, 207, 138, 0.08);
+  color: #ffcf8a;
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.vi-comfy-warn code {
+  color: #ffe3b8;
+}
+
+/* The frame fills the remaining height of the workbench body. */
+.vi-comfy-frame {
+  flex: 1 1 auto;
+  min-height: 24rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--vi-surface-raised);
+}
+
+.vi-comfy-iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 24rem;
+  border: 0;
+  background: #fff; /* ComfyUI's own canvas paints over this; avoids a black flash */
+}
+
+/* Empty state when no valid URL is loaded — mirrors the dropzone framing. */
+.vi-comfy-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 22rem;
+  padding: 1.5rem;
+  border: 2px dashed var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+  text-align: center;
+}
+
+.vi-comfy-empty-title {
+  margin: 0;
+  color: var(--vi-text);
+  font-size: 1rem;
+}
+
+.vi-comfy-empty-sub {
+  margin: 0;
+  max-width: 32rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.vi-comfy-empty code {
+  color: var(--vi-text);
+}
+
+.vi-comfy-hint {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.vi-comfy-hint code {
+  color: var(--vi-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Studio PLANE — visual-kinship pass (Round 6). The single Studio plane       */
+/* (generate controls + inline viewer/list) is restyled to read as part of the */
+/* same system as the scene/video tab: house section eyebrows (mirror           */
+/* .station-phase), border-top section separators (mirror .vi-studio-prompt),   */
+/* and a player-forward viewer frame (mirror .vi-studio-preview). Purely        */
+/* additive — no existing rule changes; the plane's structure + preset shapes   */
+/* are intact.                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/* One flowing column, like .vi-section-region--work. */
+.vi-studio-plane {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* Section eyebrow — the mono / accent / uppercase idiom of .station-phase, used to
+   title the Generate and Library regions so the plane reads as workbench sections. */
+.vi-studio-plane-eyebrow {
+  display: block;
+  font-family: var(--vi-mono);
+  font-size: 0.75rem;
+  color: var(--vi-accent);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin: 0 0 0.6rem;
+}
+
+.vi-studio-plane-eyebrow-sub {
+  color: var(--vi-text-dim);
+  letter-spacing: normal;
+  text-transform: none;
+  font-size: 0.72rem;
+}
+
+/* Section separator — the border-top divider idiom of .vi-studio-prompt, replacing
+   the plane's former ad-hoc inline separator between the controls and the viewer. */
+.vi-studio-plane-sep {
+  border-top: 1px solid var(--vi-border);
+  padding-top: 1.25rem;
+  margin-top: 0.25rem;
+}
+
+/* Player-forward viewer frame — mirrors the scene/video tab's .vi-studio-preview stage:
+   a large centered black bordered panel the clip plays inside, so the studio player
+   matches the main video preview. The empty state keeps the house .vi-comfy-empty frame
+   (same 22rem footprint — no layout jump between empty and playing). */
+.vi-studio-viewer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: #000;
+  padding: 0.75rem;
+  overflow: hidden;
+}
+
+.vi-studio-viewer video {
+  max-width: 100%;
+  max-height: 30rem;
+  height: auto;
+  display: block;
+  border-radius: 0.35rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Studio WORKBENCH (Round 7) — the two-column [ tabbed sidebar | generator ]  */
+/* layout that reads as a sibling of the Movie / video tab, plus the Movie      */
+/* knob-grid idiom, the shared goal composer, and the Active-renders panel.     */
+/* Additive — no existing rule is changed. On <62rem everything is one tablist  */
+/* over a single panel, so nothing overflows a phone viewport.                  */
+/* ------------------------------------------------------------------------- */
+
+/* Mobile-first: a single flowing column (the tablist + one panel). */
+.vi-studio-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  min-width: 0;
+}
+
+/* Round 9: the studio no longer carries its OWN sidebar — it folds into the arm shell's
+   ONE left sidebar (Settings / Active / Library, via the sidebar registry). So the
+   workbench is a SINGLE centre column (viewer on top → generator below), the Movie
+   skeleton. The former two-column grid + the __sidebar/__generator rules below are kept,
+   ARCHIVED (the plane no longer emits those elements), per the no-delete house rule. */
+@media (min-width: 62rem) {
+  .vi-studio-workbench {
+    max-width: 62rem;
+  }
+}
+
+.vi-studio-workbench__sidebar {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.vi-studio-workbench__generator {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.vi-studio-tabpanel {
+  min-width: 0;
+}
+
+.vi-studio-tablist {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The Settings tab body — the studio surface portals its knob grid in here. */
+.vi-studio-settings-host {
+  min-width: 0;
+}
+
+/* The center COMPOSER (prompt + negative), where the knob grid used to sit. */
+.vi-studio-composer {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* Round 9: the shell sidebar's guarded "Settings" tab body — the studio surface portals
+   its knob grid (template dropdown + project combobox + geometry/sampler/model) in here.
+   In the narrow shell rail the knob grid collapses to two columns (was one) — compact
+   numeric knobs (width/height/fps/seed/steps/cfg/...) pair up instead of each stacking
+   full-width; `.vi-studio-knob-wide` cells still span both via `grid-column: 1 / -1`. */
+.vi-side-settings {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.25rem 0 0.5rem;
+}
+.vi-side-settings .vi-studio-knobs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* Round 9: studio's in-flight renders portal into the foot of the shared Active
+   Processes tab — a light separator when it follows tracker rows. */
+.vi-proc-extra:not(:empty) {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--vi-border, rgba(128, 128, 128, 0.25));
+}
+
+/* Round 9: required-input callout beside the studio composer (the tier cards that used
+   to carry the "needs input" cue are retired). Accent-toned so it reads as a prompt. */
+.vi-studio-required-callout {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 0.4rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--vi-accent, #d98a2b);
+  background: var(--vi-accent-soft, rgba(217, 138, 43, 0.12));
+  border: 1px solid var(--vi-accent, rgba(217, 138, 43, 0.5));
+}
+
+/* ---- template / tier cards (the primary selector) ---- */
+.vi-studio-templates {
+  min-width: 0;
+}
+
+.vi-studio-card-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.vi-knob-headline {
+  margin: 0 0 0.5rem;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+  color: var(--vi-text);
+}
+
+.vi-knob-subhead {
+  margin: 0.9rem 0 0.4rem;
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text);
+}
+
+.vi-knob-headline-sub {
+  color: var(--vi-text-dim);
+  font-weight: 400;
+  font-size: 0.75rem;
+}
+
+/* ---- Movie-idiom knob GRID (inline in the generator column, NOT a side rail —
+       so the shape-morphing heroes below stay in-flow + dominant) ---- */
+.vi-studio-knobs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.85rem 1rem;
+  align-items: start;
+  min-width: 0;
+}
+
+/* Full-width knob cells (capability, model pin, and the prompt/negative composer). */
+.vi-studio-knob-wide {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.vi-studio-shape {
+  min-width: 0;
+}
+
+/* ---- shared goal composer ---- */
+.vi-goal-composer {
+  min-width: 0;
+}
+
+.vi-goal-composer-field {
+  position: relative;
+  min-width: 0;
+}
+
+.vi-goal-composer-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.vi-goal-composer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.vi-goal-composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.vi-goal-composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 4px;
+  background: var(--vi-surface-raised);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  max-width: 100%;
+}
+
+.vi-goal-composer-chip-thumb {
+  width: 1.6rem;
+  height: 1.6rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: #000;
+}
+
+.vi-goal-composer-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 8rem;
+}
+
+.vi-goal-composer-chip-x {
+  border: 0;
+  background: none;
+  color: var(--vi-text-dim);
+  cursor: pointer;
+  padding: 0 0.15rem;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.vi-goal-composer-chip-x:hover {
+  color: var(--vi-text);
+}
+
+/* ---- Active-renders panel ---- */
+.vi-studio-active {
+  min-width: 0;
+}
+
+.vi-studio-active-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.vi-studio-active-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface-raised);
+  min-width: 0;
+}
+
+.vi-studio-active-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.vi-studio-active-id {
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-text);
+}
+
+.vi-studio-active-meta {
+  display: flex;
+  gap: 0.4rem;
+  margin-right: auto;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── live PROGRESS BAR + latest event line (console-wide Active Processes) ──
+   Both take a full row of their own (the active row is flex-wrap) and sit BEFORE
+   the timeline panel. The bar renders only when the server sent a number, so an
+   empty track never reads as "0%". */
+.vi-job-progress {
+  order: 2;
+  flex-basis: 100%;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.vi-job-progress-track {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--vi-border);
+  overflow: hidden;
+}
+.vi-job-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--vi-accent, #d08b3c);
+  transition: width 0.4s linear;
+}
+.vi-job-progress-label {
+  flex: 0 0 auto;
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.vi-job-latest {
+  order: 2;
+  flex-basis: 100%;
+  width: 100%;
+  min-width: 0;
+  margin: 0.15rem 0 0;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  word-break: break-word;
+}
+.vi-job-filter {
+  display: block;
+  margin: 0 0 0.5rem;
+}
+
+/* ── the per-process STAGE TIMELINE expandable (Active Processes + Library) ── */
+/* Keep the Cancel button on the header line and let the timeline panel take a full
+   row of its own (the row is flex-wrap). */
+.vi-studio-active-row > .vi-btn {
+  order: 1;
+}
+.vi-timeline-panel {
+  order: 2;
+  flex-basis: 100%;
+  width: 100%;
+  min-width: 0;
+  margin-top: 0.35rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--vi-border);
+}
+
+.vi-timeline-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--vi-text-dim);
+  padding: 0 0.15rem;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.vi-timeline-toggle:hover {
+  color: var(--vi-text);
+}
+.vi-timeline-caret {
+  display: inline-block;
+  width: 0.7rem;
+}
+
+.vi-timeline-stall-badge {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #ffcf8a;
+  border: 1px solid #ffcf8a;
+  border-radius: 999px;
+  padding: 0.02rem 0.4rem;
+}
+
+.vi-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+.vi-timeline-empty {
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+  margin: 0;
+}
+
+/* FAILURE — the exact where-it-broke, loud + first. */
+.vi-timeline-failure {
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.4rem;
+  border: 1px solid rgba(255, 138, 138, 0.5);
+  background: rgba(255, 90, 90, 0.1);
+  color: #ff8a8a;
+  line-height: 1.4;
+}
+.vi-timeline-retry {
+  color: var(--vi-text-dim);
+  font-weight: 400;
+}
+.vi-timeline-failmsg {
+  color: var(--vi-text);
+  margin-top: 0.2rem;
+  word-break: break-word;
+  font-family: var(--vi-mono);
+  font-size: 0.74rem;
+}
+
+/* CURRENT ACTIVITY — the live "frame 12/48" / "awaiting capacity …" line. */
+.vi-timeline-current {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 0.4rem;
+  background: rgba(138, 180, 255, 0.1);
+}
+.vi-timeline-current-stalled {
+  background: rgba(255, 207, 138, 0.12);
+}
+.vi-timeline-current-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vi-accent);
+}
+.vi-timeline-current-stalled .vi-timeline-current-label {
+  color: #ffcf8a;
+}
+.vi-timeline-current-text {
+  color: var(--vi-text);
+  font-weight: 500;
+}
+.vi-timeline-stall {
+  color: #ffcf8a;
+  font-size: 0.72rem;
+}
+.vi-timeline-move {
+  color: var(--vi-text-dim);
+  font-size: 0.72rem;
+}
+
+/* THE TIMELINE list — one row per stage the render moved through. */
+.vi-timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.vi-timeline-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.vi-timeline-mark {
+  flex: 0 0 auto;
+  width: 1rem;
+  text-align: center;
+  font-size: 0.7rem;
+  line-height: 1.3;
+}
+.vi-timeline-mark-done {
+  color: var(--vi-accent);
+  opacity: 0.7;
+}
+.vi-timeline-mark-current {
+  color: var(--vi-accent);
+  animation: vi-timeline-pulse 1.4s ease-in-out infinite;
+}
+.vi-timeline-mark-stalled {
+  color: #ffcf8a;
+  animation: none;
+}
+.vi-timeline-mark-fail {
+  color: #ff8a8a;
+}
+@keyframes vi-timeline-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.vi-timeline-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.vi-timeline-stage {
+  color: var(--vi-text);
+  text-transform: capitalize;
+}
+.vi-timeline-count {
+  color: var(--vi-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.vi-timeline-detail {
+  color: var(--vi-text-dim);
+  font-size: 0.74rem;
+  word-break: break-word;
+  font-family: var(--vi-mono);
+}
+.vi-timeline-time {
+  flex: 0 0 auto;
+  color: var(--vi-text-dim);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Placement line (Active Processes) — WHERE a job physically runs. */
+.vi-placement {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+}
+.vi-placement-external {
+  color: var(--vi-accent, #d08b3c);
+  font-weight: 600;
+}
+/* awaiting_capacity — the reservation HOLD phase chip (amber "waiting"). */
+.vi-status-awaiting_capacity {
+  background: rgba(208, 139, 60, 0.16);
+  color: var(--vi-accent, #d08b3c);
+  border: 1px solid rgba(208, 139, 60, 0.4);
+}
+
+.vi-studio-viewer-wrap {
+  min-width: 0;
+}
+
+/* ── Studio item cards (Studio redesign, slice 2b) ──────────────────────────────
+   The strip of first-class StudioItems that sits above the generate surface. Each
+   card shows the item's working preview + an immutable provenance line + the inline
+   ops menu, and expands a drawer hosting the matching op Core. Tokens mirror the
+   existing .vi-studio-src-row / .vi-station-components surfaces. */
+.vi-studio-item-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.8rem 0;
+}
+
+.vi-studio-item {
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  overflow: hidden;
+}
+
+.vi-studio-item-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  padding: 0.6rem;
+}
+
+.vi-studio-item-media {
+  flex: 0 0 auto;
+  width: 140px;
+  max-width: 40%;
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: #000;
+  overflow: hidden;
+}
+
+.vi-studio-item-img {
+  display: block;
+  width: 100%;
+  height: 84px;
+  object-fit: cover;
+}
+
+.vi-studio-item-audio {
+  display: block;
+  width: 100%;
+  padding: 0.3rem;
+}
+
+.vi-studio-item-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* The immutable "where it came from" line — read-only, muted, never editable. */
+.vi-studio-item-prov {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-studio-item-prov-origin {
+  font-weight: 600;
+  color: var(--vi-text);
+}
+
+.vi-studio-item-prov-kind {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 999px;
+}
+
+.vi-studio-item-prov-parent {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vi-studio-item-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* The inline op drawer — the mounted Core lives here; it closes when the op resolves. */
+.vi-studio-item-drawer {
+  border-top: 1px solid var(--vi-border);
+  background: var(--vi-surface);
+  padding: 0.6rem;
+}
+
+.vi-studio-item-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.vi-studio-item-drawer-title {
+  font-weight: 600;
+  color: var(--vi-text);
+}
+
+/* ── Identity 360° turntable — drag-to-rotate stage + scrub slider ───────────── */
+.vi-turntable-stage {
+  cursor: grab;
+}
+.vi-turntable-stage:active {
+  cursor: grabbing;
+}
+.vi-turntable-stage:focus-visible {
+  outline: 2px solid var(--vi-accent);
+  outline-offset: 2px;
+}
+.vi-turntable-scrub {
+  accent-color: var(--vi-accent);
+}
+
+/* ------------------------------------------------------------------------- */
+/* t52 — the sidebar's Console panel: a same-origin iframe embed of the hugpy */
+/* console that expands OVER the screen so the operator never has to keep a  */
+/* second tab open. .vi-side-toolbar hosts the collapsed toggle (always      */
+/* visible above the sidebar tabs); .vi-console-panel/-scrim are portaled to */
+/* <body> (see ConsolePanel.tsx) so they escape the sidebar's own box.       */
+/* z-index sits above the mobile off-canvas drawer (40) and its scrim (35)   */
+/* so the console always layers on top when both are open.                  */
+/* ------------------------------------------------------------------------- */
+.vi-side-toolbar {
+  display: flex;
+  /* WRAP is load-bearing since ComfyUI joined the row (2026-08-04). The sidebar
+     column is 18rem with 1rem padding a side (~16rem of content); three toggles
+     at `flex: 1 1 0` with the default `min-width: auto` cannot shrink below their
+     label width, so without wrapping the row pushes WIDER than the sidebar
+     instead of reflowing. Share is also conditional (SharePanel renders null for
+     a non-operator session), so this row legitimately holds 2 OR 3 buttons —
+     never assume a fixed count here. */
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--vi-border);
+}
+
+/* Console + Share + ComfyUI + Active share the toolbar row (k9, then 2026-08-04,
+   then 2026-08-06). Each grows to fill; when Share is hidden (a non-operator
+   session) the rest fill the row on their own. `min-width: 0` lets them actually
+   shrink — the same override .vi-side-tabs .vi-gen-mode-btn already needs — so a
+   long label truncates within the column rather than widening it. The row's
+   `flex-wrap` above is what keeps 4 toggles inside an 18rem sidebar. */
+.vi-console-toggle,
+.vi-share-toggle,
+.vi-comfy-toggle,
+.vi-active-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  justify-content: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  letter-spacing: 0.01em;
+}
+
+.vi-console-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+
+.vi-console-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100dvh;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: var(--vi-surface-raised);
+  border-left: 1px solid var(--vi-border);
+  box-shadow: 0 0 3rem rgba(0, 0, 0, 0.6);
+  transition: width 160ms ease;
+}
+
+/* "Half": a large share of the viewport (~70%, per spec) — the underlying
+   station stays mounted and visible in the remaining strip, so switching
+   between the console and the station you were on is a glance, not a tab
+   switch. Capped so it doesn't sprawl absurdly wide on an ultrawide monitor,
+   floored so it stays usable on a narrow one. */
+.vi-console-panel-half {
+  width: min(70vw, 84rem);
+  min-width: min(22rem, 100vw);
+}
+
+/* "Full": edge-to-edge, the whole viewport. */
+.vi-console-panel-full {
+  width: 100vw;
+}
+
+.vi-console-panel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex: 0 0 auto;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--vi-border);
+  font-family: var(--vi-mono);
+  /* The bar now carries a TAB STRIP where it used to carry a single title, and
+     on the ComfyUI tab an endpoint form as well — so it reflows on a narrow
+     drawer rather than squeezing either to nothing. (.vi-comfy-panel already
+     asked for this; it belongs on the shared bar now that the strip is always
+     there.) */
+  flex-wrap: wrap;
+  row-gap: 0.5rem;
+}
+
+/* The in-window tab strip (Console | ComfyUI | Active) — 2026-08-06, the operator
+   ask that collapsed three drawers into one window. It reuses the segmented
+   `.vi-gen-mode` control the sidebar's own tab strip uses, so the two read alike;
+   only the block margin that control carries in a page column has to go. */
+.vi-drawer-tabs {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.vi-console-panel-title {
+  font-family: var(--vi-serif);
+  font-weight: 500;
+  color: var(--vi-text);
+}
+
+.vi-console-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* One tab's body. It replaces the panel's direct children as the flex context
+   the bodies were written against (iframe `flex: 1 1 auto`, Comfy's `flex: 0 0
+   auto` message strips, `.vi-active-panel-body`'s own scroll region), so the
+   column and the min-height:0 have to be repeated here or a long body would
+   refuse to shrink. `display:flex` would otherwise beat the `hidden` attribute's
+   UA `display:none`, hence the explicit [hidden] rule — that hiding is what lets
+   the Console/ComfyUI iframes stay alive across a tab switch. */
+.vi-drawer-tabpanel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.vi-drawer-tabpanel[hidden] {
+  display: none;
+}
+
+.vi-console-iframe {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff; /* the console's own theme paints over this; avoids a black flash while it loads */
+}
+
+@media (max-width: 62rem) {
+  /* Below the desktop breakpoint there's no spare viewport to split — the
+     console panel always fills the screen, matching the mobile drawer's own
+     off-canvas-becomes-full posture. The full/half toggle stays available
+     (harmless no-op at this width: both classes now resolve to 100vw). */
+  .vi-console-panel-half,
+  .vi-console-panel-full {
+    width: 100vw;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* k9 — the Share panel: a small centered modal (portaled to <body>) where an */
+/* operator mints/lists/revokes video share links. Distinct from the Console  */
+/* drawer (which fills the screen) — this is a focused dialog.               */
+/* ------------------------------------------------------------------------- */
+.vi-share-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+
+.vi-share-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(34rem, 92vw);
+  max-height: 88dvh;
+  overflow: auto;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: var(--vi-surface-raised);
+  border: 1px solid var(--vi-border);
+  border-radius: 0.5rem;
+  box-shadow: 0 0 3rem rgba(0, 0, 0, 0.6);
+}
+
+.vi-share-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--vi-border);
+}
+
+.vi-share-title {
+  font-family: var(--vi-serif);
+  font-size: 1.05rem;
+  color: var(--vi-text);
+}
+
+.vi-share-body {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.vi-share-hint {
+  margin: 0;
+  color: var(--vi-text-dim);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.vi-share-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+
+.vi-share-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1 1 10rem;
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-share-field input,
+.vi-share-field select {
+  background: var(--vi-surface);
+  color: var(--vi-text);
+  border: 1px solid var(--vi-border);
+  border-radius: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  font-family: var(--vi-mono);
+  font-size: 0.85rem;
+}
+
+.vi-share-error {
+  margin: 0;
+  color: #ff9b9b;
+  font-size: 0.85rem;
+}
+
+.vi-share-minted {
+  border: 1px solid var(--vi-accent);
+  border-radius: 0.4rem;
+  padding: 0.7rem;
+  background: rgba(138, 180, 255, 0.06);
+}
+
+.vi-share-minted-note {
+  margin: 0 0 0.5rem;
+  color: var(--vi-accent);
+  font-size: 0.8rem;
+}
+
+.vi-share-minted-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.vi-share-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--vi-surface);
+  color: var(--vi-text);
+  border: 1px solid var(--vi-border);
+  border-radius: 0.35rem;
+  padding: 0.4rem 0.5rem;
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+}
+
+.vi-share-list-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.vi-share-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.vi-share-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.vi-share-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vi-text);
+}
+
+.vi-share-item-prefix {
+  font-family: var(--vi-mono);
+  color: var(--vi-text-dim);
+  font-size: 0.75rem;
+}
+
+.vi-share-item-exp {
+  color: var(--vi-text-dim);
+  font-size: 0.75rem;
+}
+
+.vi-share-item-exp-dead {
+  color: #ff9b9b;
+}
+
+/* ── STUDIO-ASSIST LIVE LOG (operator directive, 2026-07-31) ──────────────────
+   The live generation log under the studio generator: one row per prompt-generate
+   attempt, the raw model reply expandable. Same dark editorial-terminal tokens as
+   the rest of the arm; the outcome badge is the scan target. */
+.vi-assistlog {
+  margin-top: 14px;
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  font-family: var(--vi-mono);
+  font-size: 12px;
+  color: var(--vi-text);
+}
+.vi-assistlog-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--vi-border);
+}
+.vi-assistlog-collapse {
+  background: none;
+  border: none;
+  color: var(--vi-text);
+  font-family: var(--vi-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 0;
+}
+.vi-assistlog-spacer { flex: 1 1 auto; }
+.vi-assistlog-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vi-text-dim);
+}
+.vi-assistlog-dot--live { background: #6ee7a8; }
+.vi-assistlog-dot--connecting { background: #ffd479; }
+.vi-assistlog-dot--disconnected { background: #ff9b9b; }
+.vi-assistlog-conn { color: var(--vi-text-dim); }
+.vi-assistlog-filter {
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 5px;
+  color: var(--vi-text);
+  font-family: var(--vi-mono);
+  font-size: 12px;
+  padding: 3px 7px;
+  min-width: 180px;
+}
+.vi-assistlog-reconnect,
+.vi-assistlog-count {
+  color: var(--vi-text-dim);
+  background: none;
+  border: none;
+  font-family: var(--vi-mono);
+  font-size: 12px;
+}
+.vi-assistlog-reconnect {
+  cursor: pointer;
+  text-decoration: underline;
+}
+.vi-assistlog-error,
+.vi-assistlog-empty {
+  padding: 10px;
+  color: var(--vi-text-dim);
+}
+.vi-assistlog-error { color: #ff9b9b; }
+.vi-assistlog-list {
+  max-height: 340px;
+  overflow-y: auto;
+}
+.vi-assistlog-row {
+  border-bottom: 1px solid var(--vi-border);
+}
+.vi-assistlog-row:last-child { border-bottom: none; }
+.vi-assistlog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--vi-text);
+  font-family: var(--vi-mono);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.vi-assistlog-head:hover { background: rgba(255, 255, 255, 0.03); }
+.vi-assistlog-caret { color: var(--vi-text-dim); width: 10px; }
+.vi-assistlog-time { color: var(--vi-text-dim); }
+.vi-assistlog-model {
+  color: var(--vi-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.vi-assistlog-mode { color: var(--vi-text-dim); }
+.vi-assistlog-chip {
+  color: #ffd479;
+  border: 1px solid #5a4a20;
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 11px;
+}
+.vi-assistlog-elapsed { color: var(--vi-text-dim); }
+.vi-assistlog-badge {
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid var(--vi-border);
+  color: var(--vi-text-dim);
+}
+.vi-assistlog-badge--ok {
+  color: #052e18;
+  background: #6ee7a8;
+  border-color: #6ee7a8;
+}
+.vi-assistlog-badge--warn {
+  color: #3a2c05;
+  background: #ffd479;
+  border-color: #ffd479;
+}
+.vi-assistlog-badge--err {
+  color: #2e0606;
+  background: #ff9b9b;
+  border-color: #ff9b9b;
+}
+.vi-assistlog-errline {
+  padding: 0 10px 6px 28px;
+  color: #ff9b9b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vi-assistlog-detail {
+  padding: 4px 10px 12px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vi-assistlog-field { display: flex; flex-direction: column; gap: 3px; }
+.vi-assistlog-label {
+  color: var(--vi-text-dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.vi-assistlog-raw,
+.vi-assistlog-text,
+.vi-assistlog-reasoning,
+.vi-assistlog-errbox {
+  margin: 0;
+  padding: 7px 9px;
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  font-family: var(--vi-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.vi-assistlog-raw { color: var(--vi-text); }
+.vi-assistlog-text { color: #6ee7a8; }
+.vi-assistlog-reasoning { color: var(--vi-text-dim); }
+.vi-assistlog-errbox { color: #ff9b9b; }
+
+/* ---- IMAGE TESTER (Generate station, Image mode) --------------------------
+   Per-prompt settings: each row is its own prompt + its own knobs + its own job,
+   laid out so a sweep reads top-to-bottom and the results line up for comparison.
+   Rows reuse .vi-gen-part / .vi-knob / .vi-knob-row, so only the tester-specific
+   layout lives here. */
+.vi-gen-tester {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--vi-border);
+}
+
+.vi-gen-tester-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.vi-gen-tester-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The negative prompt is free text, so give it the whole row rather than letting
+   it share a 5.5rem flex basis with the numeric knobs. */
+.vi-knob-row > .vi-knob.vi-gen-tester-neg,
+.vi-knob-strip-line > .vi-gen-tester-neg {
+  flex: 1 1 100%;
+}
+
+/* ---- CONDENSED KNOB STRIP (CondensedKnobStrip, operator ask 2026-08-04 k63) --
+   The generation settings, absorbed into the prompt component: one inline line
+   —  [model ▾]  ☑ size [512] × [512]  ☑ steps [4]  ☑ guidance [0]  ☑ seed […]  —
+   instead of a column of full-width .vi-knob blocks down the settings rail.
+   Rendered by BOTH the base composer and every tester row, so these rules are the
+   whole visual language for "settings that belong to a prompt". */
+.vi-knob-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.vi-knob-strip-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.8rem;
+}
+
+/* One setting = tick + label + input(s) + ⓘ, kept together when the line wraps. */
+.vi-knob-mini-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.vi-knob-mini-label {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+/* The mini inputs are the point of the condensing: sized to their CONTENT (3–4
+   digits), not to the container. `width` in ch + a tight padding override, since
+   .vi-knob-input is width:100% by default. */
+.vi-knob-input.vi-knob-mini {
+  width: 5ch;
+  box-sizing: content-box;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* Seeds can be long integers — give the seed a little more room than 5ch while
+   keeping it visibly a mini input. */
+.vi-knob-input.vi-knob-mini-seed {
+  width: 7ch;
+  text-align: left;
+}
+
+/* The literal × between width and height. */
+.vi-knob-mini-x {
+  font-size: 0.75rem;
+  color: var(--vi-text-dim);
+}
+
+/* The model select can't shrink to a few ch (model ids are long), but it must not
+   claim the whole line either. */
+.vi-knob-select-mini {
+  width: auto;
+  max-width: 16rem;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.8rem;
+}
+
+/* A tester row's negative is free text — it takes the remaining width of its line. */
+.vi-knob-input.vi-knob-mini-neg {
+  flex: 1 1 8rem;
+  width: auto;
+  min-width: 0;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.8rem;
+}
+
+/* Validation flags stack UNDER the strip so a warning never breaks its single
+   line (the flags themselves keep the shared amber .vi-knob-flag treatment). */
+.vi-knob-strip-flags {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+/* ---- CARRY TICKS (k63) ----------------------------------------------------
+   "Carry this setting into the component created from this one." They ride in
+   FRONT of each label and must stay visually quiet — a condensed strip that
+   grows a row of checkbox captions is no longer condensed. Small, dim until
+   checked, and only the accent when on. */
+.vi-carry-tick {
+  flex: 0 0 auto;
+  width: 0.75rem;
+  height: 0.75rem;
+  margin: 0;
+  accent-color: var(--vi-accent);
+  cursor: pointer;
+}
+
+.vi-carry-tick:not(:checked) {
+  opacity: 0.5;
+}
+
+/* The one place a tick gets a word: beside the negative-prompt composer, which is
+   a block field rather than a strip item. */
+.vi-carry-tick-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.vi-gen-negative-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+/* Result tiles stay small: the point is comparing several at once, not one hero
+   image. Cap the height so N rows remain on screen together. */
+.vi-gen-tester-result .vi-result-img {
+  max-height: 14rem;
+  width: auto;
+  object-fit: contain;
+}
+
+.vi-gen-tester-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ---- ComfyUI OVERLAY (ComfyPanel) ----------------------------------------
+   ComfyUI moved out of the studio tab strip and into a drawer beside Console
+   (operator ask 2026-08-04), and then into a TAB of the one shared drawer
+   window (2026-08-06). It reuses the shell — .vi-console-panel / -scrim / -bar /
+   -actions / -iframe, plus .vi-drawer-tabpanel — so "the same as console" is
+   literal, not approximate. Only the endpoint bar and the message strips are
+   Comfy-specific: the bar's own wrap (which the endpoint form needs on a narrow
+   drawer) moved onto the shared .vi-console-panel-bar with the tab strip, since
+   every tab needs it now.
+
+   NB the .vi-comfy-* namespace is NOT ComfyUI-private: .vi-comfy-bar/-field/
+   -label/-hint are generic form-bar classes reused by unrelated panels (e.g.
+   ops/CharacterGroupsPanel). Everything added here is scoped under
+   .vi-comfy-panel* to stay clear of that. */
+
+.vi-comfy-panel-url {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.vi-comfy-panel-url-label {
+  font-size: 0.78rem;
+  color: var(--vi-text-dim);
+  white-space: nowrap;
+}
+
+.vi-comfy-panel-url .vi-comfy-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Warning / error strips sit under the bar, above the frame, and must not eat
+   the frame's height. */
+.vi-comfy-panel-msg {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.5rem 0.8rem;
+}
+
+.vi-comfy-panel-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  text-align: center;
+  padding: 2rem 1rem;
+}
+
+/* ---- ACTIVE PROCESSES OVERLAY (ActivePanel) ------------------------------
+   Active Processes joined Console + ComfyUI as a drawer, then as the third TAB
+   of the one shared drawer window (operator ask 2026-08-06). Same shell classes
+   — .vi-console-panel / -scrim / -bar / -actions / .vi-drawer-tabpanel — so
+   nothing here re-styles the drawer itself. The one difference is the BODY:
+   Console and ComfyUI fill it with an iframe (which scrolls itself), while this
+   one holds a real `.station-card`, so it needs its own scroll region or a long
+   job list would overflow the fixed-height panel. */
+.vi-active-panel-body {
+  flex: 1 1 auto;
+  min-height: 0; /* without this a flex child refuses to shrink → no scrollbar */
+  overflow-y: auto;
+  padding: 0.9rem;
+}
+
+/* The station card inside the drawer is already framed by the panel — drop its
+   own outer chrome so it doesn't read as a card-in-a-card. */
+.vi-active-panel-body .station-card {
+  margin: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* ═══ TOK/S OVERVIEW (live inference throughput) ══════════════════════════════
+   Reuses the assistlog dot/badge/chip/row language; only the layout that is
+   genuinely new to this panel gets rules here. */
+.vi-toks-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.vi-toks-cadence {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--vi-mono);
+  font-size: 0.78rem;
+}
+.vi-toks-heading {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vi-text-dim);
+}
+.vi-toks-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+.vi-toks-tok {
+  font-family: var(--vi-mono);
+  font-weight: 600;
+  color: var(--vi-text);
+}
+.vi-toks-model {
+  font-family: var(--vi-mono);
+  color: var(--vi-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 16ch;
+}
+.vi-toks-worker { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vi-toks-ago { margin-left: auto; }
+.vi-toks-rank { min-width: 2.2ch; }
+
+/* Per-worker strip: a wrapping row of compact cards. */
+.vi-toks-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.vi-toks-worker-card {
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  background: var(--vi-surface);
+  padding: 0.4rem 0.6rem;
+  min-width: 9rem;
+}
+.vi-toks-worker-name { font-size: 0.8rem; font-weight: 600; }
+.vi-toks-worker-nums { margin-top: 0.15rem; }
+.vi-toks-worker-model {
+  margin-top: 0.15rem;
+  font-family: var(--vi-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Cross-model tester button — deliberately distinct from ghost so it reads as
+   its own affordance on every generate tab (operator: "not seeing the tester"). */
+.vi-btn.vi-btn-tester {
+  border: 1px solid #7a6cff;
+  color: #b9b0ff;
+  background: rgba(122, 108, 255, 0.10);
+}
+.vi-btn.vi-btn-tester:hover:not(:disabled) {
+  background: rgba(122, 108, 255, 0.22);
+  color: #d8d2ff;
+}
+.vi-btn.vi-btn-tester:disabled { opacity: 0.55; }
+
+/* ═══ SHARED PROMPT-CARD SYSTEM (k88 — Studio declutter) ══════════════════════
+   The uniform toolbar / row-card / field-tabs / settings-expander structure the
+   Cinema composer and the Movie goal timeline both render (Scene + Clip follow
+   in k89). Everything leans on the existing .vi-gen-part / .vi-knob / .vi-btn
+   language; only the genuinely new pieces get rules here. */
+
+/* Toolbar above the list: [count][select all][✨ prompts][✨ negatives][standard]. */
+.vi-prompt-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+.vi-prompt-toolbar-count {
+  max-width: 8.5rem;
+}
+.vi-prompt-toolbar-selectall {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* [Prompt][Negative] tab strip over the single editor pane. */
+.vi-prompt-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.vi-prompt-tab {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+}
+.vi-prompt-tab[aria-selected="true"] {
+  color: var(--vi-accent);
+  border-bottom-color: var(--vi-accent);
+}
+.vi-prompt-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* The content marker on the Negative tab — a written negative must stay visible
+   even while the Prompt pane is showing. */
+.vi-prompt-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vi-accent);
+  margin-left: 0.3rem;
+  vertical-align: middle;
+}
+/* The inline [standard negative] tick, pushed to the strip's right edge. */
+.vi-prompt-tab-std {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+/* The uniform Prompt Assist row — the treat-as cluster and the Enhance/Generate
+   cluster read as ONE line (each keeps its own .vi-prompt-assist internals). */
+.vi-prompt-card-assist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+}
+.vi-prompt-card-assist > .vi-prompt-assist {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* The per-card settings expander — collapsed by default, condensed-strip rhythm
+   (mono summary line, knobs flowing inline once open). */
+.vi-prompt-card-settings {
+  border-top: 1px dashed var(--vi-border);
+  padding-top: 0.3rem;
+}
+.vi-prompt-card-settings-summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--vi-text-dim);
+}
+.vi-prompt-card-settings-summary::-webkit-details-marker {
+  display: none;
+}
+.vi-prompt-card-settings-summary::before {
+  content: "▸ ";
+}
+.vi-prompt-card-settings[open] > .vi-prompt-card-settings-summary::before {
+  content: "▾ ";
+}
+.vi-prompt-card-settings-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding-top: 0.4rem;
+}
+
+/* "About <tab>" sidebar expander (k89) — the condensed tab prose, collapsed by
+   default at the top of each tab's Settings content. Same <details> rhythm as
+   .vi-prompt-card-settings, boxed to sit against the sidebar's knob column. */
+.vi-about-expander {
+  border: 1px solid var(--vi-border);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.55rem;
+  margin-bottom: 0.6rem;
+}
+.vi-about-summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+}
+.vi-about-summary::-webkit-details-marker {
+  display: none;
+}
+.vi-about-summary::before {
+  content: "▸ ";
+}
+.vi-about-expander[open] > .vi-about-summary::before {
+  content: "▾ ";
+}
+.vi-about-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-top: 0.4rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--vi-text-dim);
+}
+.vi-about-body p {
+  margin: 0;
+}
+
+/* Session-library grouped sections (LibraryGroups.tsx) */
+.vi-lib-group { margin: 0.35rem 0; }
+.vi-lib-group-head { display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; }
+.vi-lib-count { opacity: 0.65; font-size: 0.8em; }
+
+/* PROMPT ASSIST one-row consolidation (operator 2026-08-13): the model select
+   must never push Enhance/Generate to a second row — it shrinks with an
+   ellipsized closed face (the OPEN dropdown list always shows full names,
+   that is native <select> behavior). Buttons never shrink. */
+.vi-prompt-assist > select.vi-select-sm {
+  flex: 0 1 auto;
+  min-width: 8rem;
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vi-prompt-assist > button { flex: 0 0 auto; }
+
+/* ── k93 — Scene group prompt-assist toolbar + part-card expansions ─────────
+   Three-line toolbar ([model] / [range][select all][negatives][std.] /
+   [generate][enhance][+ video]), the inline attach / pretext panels, the
+   pull-frame row and the per-card assist row. All on the existing .vi-btn /
+   .vi-knob language; only the new pieces get rules. */
+.vi-sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.vi-prompt-toolbar-group {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+}
+.vi-prompt-toolbar-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+.vi-prompt-toolbar-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.vi-prompt-toolbar-range-input {
+  width: 3.6rem;
+  padding: 0.15rem 0.35rem;
+}
+.vi-prompt-toolbar-neg,
+.vi-prompt-toolbar-std {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+/* The on/off switch button — accent when on. */
+.vi-toggle {
+  min-width: 2.6rem;
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.vi-toggle-on,
+.vi-btn-on {
+  color: var(--vi-accent);
+  border-color: var(--vi-accent);
+}
+/* An attach / pretext / identity panel expanded inline under its button row. */
+.vi-gen-inline-attach {
+  margin: 0.35rem 0 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed var(--vi-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.vi-gen-part-media-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.vi-gen-part-pullframe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.vi-gen-pull-input {
+  width: 4.5rem;
+  padding: 0.15rem 0.35rem;
+}
+.vi-gen-part-assist-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+}

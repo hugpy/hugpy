@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-control"
+version = "0.1.0"
+description = "Hugpy control plane: typed event bus, generic jobs, settings, principals, call log and shared control records"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "control-plane",
+    "event-bus",
+    "jobs",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "hugpy-platform",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/foundation/hugpy_control/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/foundation/hugpy_control"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_control = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]

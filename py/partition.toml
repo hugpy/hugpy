@@ -1,0 +1,452 @@
+schema_version = 2
+source_root = "../abstract_hugpy_dev/src/abstract_hugpy_dev"
+monolith_import = "abstract_hugpy_dev"
+
+# Dependency names below are package ids. They describe allowed Python import
+# direction, not optional HTTP calls between independently deployed services.
+#
+# `moves` maps a monolith source path (relative to source_root) to its
+# destination module path inside the package's import namespace. Directory
+# entries move recursively and keep their internal layout. Every key in
+# `moves` is an owned source root; the ordering of packages is the cut order.
+#
+# Revision 2 (2026-09-22) corrections against revision 1:
+# - flask_app/app/functions/imports/utils is not server code. The central
+#   worker registry, peers, enrollment tokens, pool guard, PID attribution and
+#   phone-brick store are fleet-central state; hf_token is storage; the wire
+#   schemas and manifest loader are engine catalog contracts; downloads
+#   helpers are storage; media_extract is media.
+# - engine depends on storage and control (it reads physical inventory,
+#   metadata caches, job/settings stores). storage must NOT import engine.
+#   reclassify/reconcile are catalog operations and therefore engine.
+# - provisioner scans engine, studio and comfy registries: it is an operations
+#   consumer (ops), not storage.
+# - worker_agent/provision.py is model transfer (ensure_model_present) and
+#   belongs to storage; model_sync rides on it.
+# - comms/feeds.py materializes fleet rosters and is fleet. comms/__init__.py
+#   is a re-export layer and is retired.
+# - managers/task_deps.py is a task capability map consumed by fleet, oracle
+#   and server; it is engine, not meta.
+# - video_intel/runners/performance_relay.py and prompt_coordination.py are
+#   Oracle orchestration and move to oracle, removing the video->oracle edge.
+# - constants/categories.py is model-catalog domain and moves to engine.
+#   constants/paths.py (on-disk model layout) and hugpy_marker.py (marker and
+#   GGUF header reading) are physical-storage domain and move to storage;
+#   spill.gguf_moe_detail must move down to storage with them.
+# - Cross-package placement (engine, video, oracle, curation asking "which
+#   worker") goes through hugpy_engine.placement protocols implemented by
+#   fleet and wired by server.
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "platform"
+distribution = "hugpy-platform"
+import_name = "hugpy_platform"
+destination = "foundation/hugpy_platform"
+status = "new"
+depends = []
+
+[package.moves]
+"_platform/async_runtime.py" = "async_runtime.py"
+"_platform/binaries.py" = "binaries.py"
+"_platform/client_liveness.py" = "client_liveness.py"
+"_platform/hardware.py" = "hardware.py"
+"_platform/paths.py" = "app_dirs.py"
+"_platform/procutil.py" = "procutil.py"
+"_platform/__init__.py" = "platform_facade.py"
+"_compat_pydantic.py" = "compat_pydantic.py"
+"central.py" = "central.py"
+"imports/src/constants/constants.py" = "constants.py"
+"imports/src/constants/trust.py" = "trust.py"
+"imports/src/_compat.py" = "compat.py"
+"imports/src/except_utils.py" = "except_utils.py"
+"imports/src/module_imports.py" = "module_imports.py"
+"imports/src/utils.py" = "utils.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "control"
+distribution = "hugpy-control"
+import_name = "hugpy_control"
+destination = "foundation/hugpy_control"
+status = "new"
+depends = ["platform"]
+
+[package.moves]
+"comms/bus.py" = "bus.py"
+"comms/calllog.py" = "calllog.py"
+"comms/jobs.py" = "jobs.py"
+"comms/principals.py" = "principals.py"
+"comms/settings.py" = "settings.py"
+"comms/shared.py" = "shared.py"
+"flask_app/app/functions/imports/utils/schemas/job_schemas.py" = "job_schemas.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "storage"
+distribution = "hugpy-storage"
+import_name = "hugpy_storage"
+destination = "storage/hugpy_storage"
+status = "new"
+depends = ["platform", "control"]
+
+[package.moves]
+"downloader" = "downloader"
+"model_sync.py" = "model_sync.py"
+"worker_agent/provision.py" = "provision.py"
+"imports/src/constants/paths.py" = "model_paths.py"
+"imports/src/constants/hugpy_marker.py" = "hugpy_marker.py"
+"comms/hf_metadata.py" = "hf_metadata.py"
+"comms/model_metadata.py" = "model_metadata.py"
+"comms/model_physical.py" = "model_physical.py"
+"comms/model_status_cache.py" = "model_status_cache.py"
+"imports/apis/download_models.py" = "download_models.py"
+"imports/apis/huggingface_api.py" = "huggingface_api.py"
+"flask_app/app/functions/imports/utils/hf_token.py" = "hf_token.py"
+"flask_app/app/functions/imports/utils/format_select.py" = "format_select.py"
+"flask_app/app/functions/downloads/downloader.py" = "console/downloader.py"
+"flask_app/app/functions/downloads/downloads.py" = "console/downloads.py"
+"flask_app/app/functions/downloads/cancelable_downloads.py" = "console/cancelable_downloads.py"
+"flask_app/app/functions/downloads/model_physical.py" = "console/model_physical.py"
+"flask_app/app/functions/imports/utils/schemas/download_schemas.py" = "schemas/download_schemas.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "engine"
+distribution = "hugpy-engine"
+import_name = "hugpy_engine"
+destination = "inference/hugpy_engine"
+status = "existing-boundary"
+depends = ["platform", "control", "storage"]
+
+[package.moves]
+"engine" = "native"
+"managers/alloc_modes.py" = "alloc_modes.py"
+"managers/spill.py" = "spill.py"
+"managers/eviction.py" = "eviction.py"
+"managers/draft_models.py" = "draft_models.py"
+"managers/task_deps.py" = "task_deps.py"
+"managers/chat_context" = "chat_context"
+"managers/dispatch" = "dispatch"
+"managers/generate" = "generate"
+"managers/llama" = "llama"
+"managers/resolvers" = "resolvers"
+"managers/serve" = "serve"
+"imports/config/main.py" = "config/main.py"
+"imports/config/models/model_meta.py" = "config/models/model_meta.py"
+"imports/config/models/models_config.py" = "config/models/models_config.py"
+"imports/config/models/models_default.py" = "config/models/models_default.py"
+"imports/config/models/models_dict.py" = "config/models/models_dict.py"
+"imports/apis/call_api.py" = "apis/call_api.py"
+"imports/apis/get_module.py" = "apis/get_module.py"
+"imports/apis/serve" = "apis/serve"
+"imports/apis/systemd_units.py" = "apis/systemd_units.py"
+"imports/apis/reclassify.py" = "apis/reclassify.py"
+"imports/apis/reconcile.py" = "apis/reconcile.py"
+"imports/src/constants/categories.py" = "categories.py"
+"imports/src/gguf_election.py" = "gguf_election.py"
+"imports/src/model_classifier.py" = "model_classifier.py"
+"imports/src/model_index" = "model_index"
+"imports/src/peft_adapters.py" = "peft_adapters.py"
+"imports/src/schemas/chat_schemas.py" = "schemas/chat_schemas.py"
+"imports/src/schemas/event_schemas.py" = "schemas/event_schemas.py"
+"imports/src/schemas/metadata_schemas.py" = "schemas/metadata_schemas.py"
+"imports/src/schemas/model_schemas.py" = "schemas/model_schemas.py"
+"imports/src/schemas/runner_schemas.py" = "schemas/runner_schemas.py"
+"imports/src/schemas/task_schemas.py" = "schemas/task_schemas.py"
+"utils/json_scavenge.py" = "utils/json_scavenge.py"
+"utils/no_think.py" = "utils/no_think.py"
+"flask_app/app/functions/imports/utils/manifest.py" = "manifest.py"
+"flask_app/app/functions/imports/utils/schemas/model_schemas.py" = "wire/model_schemas.py"
+"flask_app/app/functions/imports/utils/schemas/specs_schemas.py" = "wire/specs_schemas.py"
+"flask_app/app/functions/imports/utils/schemas/config_schemas.py" = "wire/config_schemas.py"
+"flask_app/app/functions/imports/utils/schemas/chat_schemas.py" = "wire/chat_schemas.py"
+"flask_app/app/functions/imports/utils/schemas/request_schemas.py" = "wire/request_schemas.py"
+"flask_app/app/functions/imports/utils/schemas/install_schemas.py" = "wire/install_schemas.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "media"
+distribution = "hugpy-media"
+import_name = "hugpy_media"
+destination = "inference/hugpy_media"
+status = "new"
+depends = ["platform", "storage", "engine"]
+
+[package.moves]
+"model_battery.py" = "model_battery.py"
+"managers/comfy" = "comfy"
+"managers/embed" = "embed"
+"managers/imagegen" = "imagegen"
+"managers/keywords" = "keywords"
+"managers/summarizers" = "summarizers"
+"managers/tts" = "tts"
+"managers/vision" = "vision"
+"managers/vision_analysis" = "vision_analysis"
+"managers/whisper_model" = "whisper_model"
+"imports/src/chunking.py" = "chunking.py"
+"imports/src/schemas/embeded_schemas.py" = "schemas/embeded_schemas.py"
+"imports/src/schemas/summarizer_schemas.py" = "schemas/summarizer_schemas.py"
+"imports/src/schemas/whisper_schemas.py" = "schemas/whisper_schemas.py"
+"utils/pdfs" = "pdfs"
+"utils/seo" = "seo"
+"utils/text" = "text"
+"flask_app/app/functions/media_extract.py" = "extract.py"
+"video_intel/runners/tts_chatterbox.py" = "tts/chatterbox_runner.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "video"
+distribution = "hugpy-video"
+import_name = "hugpy_video"
+destination = "cinema/hugpy_video"
+status = "existing-skeleton"
+depends = ["platform", "control", "engine", "media"]
+
+[package.moves]
+"video_intel" = "intel"
+"managers/video" = "chat_video"
+"managers/video_gen" = "video_gen"
+"imports/src/schemas/video_schemas.py" = "schemas/video_schemas.py"
+"comms/studio_assist_log.py" = "studio_assist_log.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "oracle"
+distribution = "hugpy-oracle"
+import_name = "hugpy_oracle"
+destination = "cinema/hugpy_oracle"
+status = "new"
+depends = ["platform", "control", "engine", "media", "video"]
+
+[package.moves]
+"oracle" = "."
+"video_intel/runners/performance_relay.py" = "relay/performance_relay.py"
+"video_intel/prompt_coordination.py" = "relay/prompt_coordination.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "fleet"
+distribution = "hugpy-fleet"
+import_name = "hugpy_fleet"
+destination = "fleet/hugpy_fleet"
+status = "new"
+depends = ["platform", "control", "storage", "engine"]
+optional_depends = ["media", "video"]
+
+[package.moves]
+"worker_agent" = "worker"
+"gguf_worker" = "gguf_worker"
+"phone_brick" = "phone_brick"
+"fleet_doctrine" = "doctrine"
+"fleet_runbook.json" = "doctrine/fleet_runbook.json"
+"managers/fleet" = "fleet_manager"
+"managers/phone_brick_orchestrator" = "phone_brick_orchestrator"
+"managers/get_pids.py" = "get_pids.py"
+"managers/toks_report.py" = "toks_report.py"
+"comms/agent_nodes.py" = "central/agent_nodes.py"
+"comms/blocklist.py" = "central/blocklist.py"
+"comms/calibration.py" = "central/calibration.py"
+"comms/evict_policy.py" = "central/evict_policy.py"
+"comms/evictions.py" = "central/evictions.py"
+"comms/feeds.py" = "central/feeds.py"
+"comms/heartbeat_db.py" = "central/heartbeat_db.py"
+"comms/model_metrics.py" = "central/model_metrics.py"
+"comms/priority_groups.py" = "central/priority_groups.py"
+"comms/task_templates.py" = "central/task_templates.py"
+"flask_app/app/functions/imports/utils/workers.py" = "central/workers.py"
+"flask_app/app/functions/imports/utils/worker_http.py" = "central/worker_http.py"
+"flask_app/app/functions/imports/utils/peers.py" = "central/peers.py"
+"flask_app/app/functions/imports/utils/enrollment_tokens.py" = "central/enrollment_tokens.py"
+"flask_app/app/functions/imports/utils/pool_guard.py" = "central/pool_guard.py"
+"flask_app/app/functions/imports/utils/priority_groups.py" = "central/priority_group_settings.py"
+"flask_app/app/functions/imports/utils/phone_brick_store.py" = "central/phone_brick_store.py"
+"flask_app/app/functions/imports/utils/pid_attribution.py" = "central/pid_attribution.py"
+"flask_app/app/functions/imports/utils/model_groups.py" = "central/model_groups.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "curation"
+distribution = "hugpy-curation"
+import_name = "hugpy_curation"
+destination = "curation/hugpy_curation"
+status = "new"
+depends = ["platform", "control", "storage", "engine", "oracle"]
+
+[package.moves]
+"discovery_dossier" = "dossier"
+"review" = "review"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "ops"
+distribution = "hugpy-ops"
+import_name = "hugpy_ops"
+destination = "operations/hugpy_ops"
+status = "new"
+depends = ["platform", "control", "storage", "engine", "video", "fleet", "curation"]
+
+[package.moves]
+"chaos" = "chaos"
+"sentinel" = "sentinel"
+"keeper.py" = "keeper.py"
+"provisioner.py" = "provisioner.py"
+"comms/todo_keeper.py" = "todo_keeper.py"
+"comms/todo_keeper_daemon.py" = "todo_keeper_daemon.py"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "discord"
+distribution = "hugpy-discord"
+import_name = "hugpy_discord"
+destination = "integrations/hugpy_discord"
+status = "new"
+depends = ["platform"]
+
+[package.moves]
+"bot" = "."
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "server"
+distribution = "hugpy-server"
+import_name = "hugpy_server"
+destination = "services/hugpy_server"
+status = "new"
+depends = [
+  "platform",
+  "control",
+  "storage",
+  "engine",
+  "media",
+  "video",
+  "oracle",
+  "fleet",
+  "curation",
+]
+optional_depends = ["discord", "ops"]
+
+[package.moves]
+"flask_app/wsgi_app.py" = "wsgi_app.py"
+"flask_app/__init__.py" = "flask_app_init.py"
+"flask_app/app/__init__.py" = "app/__init__.py"
+"flask_app/app/endpoints_explorer.py" = "app/endpoints_explorer.py"
+"flask_app/app/endpoints_view.py" = "app/endpoints_view.py"
+"flask_app/app/keeper_line.py" = "app/keeper_line.py"
+"flask_app/app/member_auth.py" = "app/member_auth.py"
+"flask_app/app/operator_auth.py" = "app/operator_auth.py"
+"flask_app/app/video_auth.py" = "app/video_auth.py"
+"flask_app/app/routes" = "app/routes"
+"flask_app/app/functions/__init__.py" = "app/functions/__init__.py"
+"flask_app/app/functions/chat" = "app/functions/chat"
+"flask_app/app/functions/imports/__init__.py" = "app/functions/imports/__init__.py"
+"flask_app/app/functions/imports/init_imports.py" = "app/functions/imports/init_imports.py"
+"flask_app/app/functions/imports/options" = "app/functions/imports/options"
+"flask_app/app/functions/imports/utils/__init__.py" = "app/functions/imports/utils/__init__.py"
+"flask_app/app/functions/imports/utils/imports.py" = "app/functions/imports/utils/imports.py"
+"flask_app/app/functions/imports/utils/constants.py" = "app/functions/imports/utils/constants.py"
+"flask_app/app/functions/imports/utils/api_keys.py" = "app/functions/imports/utils/api_keys.py"
+"flask_app/app/functions/imports/utils/video_share_keys.py" = "app/functions/imports/utils/video_share_keys.py"
+"flask_app/app/functions/imports/utils/discord_bindings.py" = "app/functions/imports/utils/discord_bindings.py"
+"flask_app/app/functions/imports/utils/install_links.py" = "app/functions/imports/utils/install_links.py"
+"flask_app/app/functions/imports/utils/schemas/__init__.py" = "app/functions/imports/utils/schemas/__init__.py"
+"flask_app/app/functions/imports/utils/schemas/imports.py" = "app/functions/imports/utils/schemas/imports.py"
+"flask_app/app/functions/downloads/__init__.py" = "app/functions/downloads/__init__.py"
+"flask_app/app/functions/downloads/imports.py" = "app/functions/downloads/imports.py"
+"console_dist" = "console_dist"
+
+# ---------------------------------------------------------------------------
+[[package]]
+id = "meta"
+distribution = "hugpy"
+import_name = "hugpy"
+destination = "meta/hugpy"
+status = "new"
+depends = ["platform"]
+optional_depends = ["server", "fleet", "discord", "ops", "storage", "engine", "oracle", "curation", "video"]
+
+[package.moves]
+"cli.py" = "cli.py"
+"hpy.py" = "hpy.py"
+
+# ---------------------------------------------------------------------------
+# These already have coherent ownership and remain independent. They participate
+# through HTTP/contracts and optional dependencies rather than being absorbed.
+
+[[external_package]]
+id = "identity"
+distribution = "abstract-identity"
+destination = "cinema/abstract_identity"
+
+[[external_package]]
+id = "agent"
+distribution = "hugpy-agent"
+destination = "inference/hugpy_agent"
+
+[[external_package]]
+id = "claude"
+distribution = "abstract-claude"
+destination = "inference/abstract_claude"
+
+[[external_package]]
+id = "gpt"
+distribution = "abstract-gpt"
+destination = "inference/abstract_gpt"
+
+[[external_package]]
+id = "toolserver"
+distribution = "abstract-toolserver"
+destination = "tools/abstract_toolserver"
+
+[[external_package]]
+id = "apply"
+distribution = "abstract-apply"
+destination = "tools/abstract_apply"
+
+[[external_package]]
+id = "station"
+distribution = "hugpy-station"
+destination = "tools/hugpy-station"
+
+# ---------------------------------------------------------------------------
+# These are dismantled after callers use explicit owner imports. They must not
+# become distributions of their own. Historical copies go to py/unwired.
+
+[[retire]]
+source_roots = [
+  "__init__.py",
+  "imports/__init__.py",
+  "imports/apis/__init__.py",
+  "imports/apis/imports.py",
+  "imports/config/__init__.py",
+  "imports/config/imports.py",
+  "imports/config/models/__init__.py",
+  "imports/config/models/imports.py",
+  "imports/src/__init__.py",
+  "imports/src/init_imports.py",
+  "imports/src/constants/__init__.py",
+  "imports/src/constants/imports.py",
+  "imports/src/schemas/__init__.py",
+  "imports/src/schemas/imports.py",
+  "imports/src/standalone_utils.py",
+  "comms/__init__.py",
+  "managers/__init__.py",
+  "managers/imports.py",
+  "utils/__init__.py",
+  "utils/imports.py",
+  "get_vids.py",
+  "console_dist.bak-shardpage",
+  "fleet_runbook.json.bak-remount-20260908",
+  "managers/falconsai",
+  "managers/generate/generate_runner2.py",
+  "managers/generate/coder_guff.py",
+  "flask_app/app/routes/messages_routes.py.bak-modelmap-20260918-122756",
+  "flask_app/app/routes/messages_routes.py.bak-modelmap-20260918-123240",
+  "flask_app/app/routes/worker_routes.py.bak-coverage-20260918-040300",
+  "flask_app/app/functions/imports/utils/workers.py.bak-autosize",
+  "flask_app/app/functions/imports/utils/workers.py.bak-evictaware",
+  "flask_app/app/functions/imports/utils/workers.py.bak-evictcap",
+  "flask_app/app/functions/imports/utils/workers.py.bak-moeskip",
+  "flask_app/app/functions/imports/utils/workers.py.bak-shardstore",
+  "flask_app/app/operator_auth.py.bak-authfix-20260914",
+]

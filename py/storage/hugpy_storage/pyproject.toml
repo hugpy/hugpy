@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-storage"
+version = "0.1.0"
+description = "Hugpy storage: model download queue and daemon, Hugging Face transport and token, resumable transfers, model sync, physical inventory and on-disk model layout"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "huggingface",
+    "downloads",
+    "model-storage",
+    "gguf",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "abstract_essentials",
+    "huggingface_hub>=0.20",
+    "requests>=2.28",
+    "pydantic>=2",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/storage/hugpy_storage/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/storage/hugpy_storage"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-timeout"]
+
+[project.scripts]
+hugpy-storage = "hugpy_storage.cli:main"
+# Transitional alias for the systemd unit / operators (PARTITION.md).
+hugpy-downloader = "hugpy_storage.downloader.daemon:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_storage = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt", "deploy/*.service"]

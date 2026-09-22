@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-curation"
+version = "0.1.0"
+description = "Hugpy curation: discovery dossiers and the search, screen, download, smoke and judge review pipeline for candidate models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "huggingface",
+    "model-discovery",
+    "model-evaluation",
+    "curation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+    "hugpy-oracle",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/curation/hugpy_curation/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/curation/hugpy_curation"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+# HF search / screen (metadata) and the dossier card fetch.
+hf = ["huggingface_hub>=0.20"]
+# Loading survivors on the GPU is done in a subprocess (REVIEW_LLAMA_PYTHON)
+# that must have llama_cpp; declare it here for a box that uses one venv.
+smoke = ["llama-cpp-python"]
+# YouTube transcripts in the community section (k121); never hard-required.
+community = ["youtube-transcript-api"]
+test = ["pytest>=8", "pytest-timeout"]
+
+[project.scripts]
+hugpy-curation = "hugpy_curation.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_curation = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]

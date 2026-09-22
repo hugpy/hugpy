@@ -1,0 +1,40 @@
+# hugpy-review@<criteria>.service — one unattended review run.
+#
+# Install:
+#   sudo cp deploy/hugpy-review@.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hugpy-review@nightly.timer
+#
+# Boxes WITHOUT root (ae) cannot use this file — install the user-unit variant
+# in deploy/user/ instead. That variant also carries the REVIEW_DB /
+# REVIEW_CENTRAL_URL / REVIEW_CENTRAL_TOKEN environment that pushes a finished
+# run into central's DB (the source of truth the console reads); copy those
+# three lines in here if a root box should push too.
+#
+# The instance name is the saved criteria name, so several searches can run on
+# their own schedules:  hugpy-review@coding.timer, hugpy-review@vision.timer …
+# Create the criteria first:
+#   hugpy-curation review criteria set nightly --set query=qwen3
+[Unit]
+Description=hugpy: review HF models against saved criteria "%i"
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=solcatcher
+Group=solcatcher
+WorkingDirectory=/var/lib/hugpy-worker
+Environment=PYTHONUNBUFFERED=1
+# The reviewer loads GGUFs with llama_cpp, which lives in the worker venv.
+Environment=REVIEW_LLAMA_PYTHON=/home/solcatcher/hugpy/hugpy-worker/venv/bin/python
+ExecStart=/home/solcatcher/hugpy/hugpy-worker/venv/bin/hugpy-curation review \
+          run %i --report /var/lib/hugpy-worker/review-%i.md
+# A run downloads weights and loads them on the GPU; give it room but never let
+# a wedged load pin the card indefinitely.
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,64 @@
+/* Demo-mode banner for the video-intelligence arm — mirrors the media arm's
+   banner styling (mi-demo-*) so the two arms read as one product. */
+
+/* Rides in .vi-header-stack directly under the nav — a plain in-flow block; the
+   100dvh shell never scrolls, so no sticky of its own is needed. */
+.vi-demo-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-secondary, #c7c7cc);
+  background: linear-gradient(180deg, #14171f, #0b0d13);
+  border-bottom: 1px solid var(--border-light, rgba(255, 255, 255, 0.09));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.vi-demo-badge {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: #050505;
+  background: #7cc4ff;
+}
+
+.vi-demo-text {
+  flex: 1 1 280px;
+  min-width: 200px;
+  color: var(--text-tertiary, #8e8e93);
+}
+.vi-demo-text strong {
+  color: var(--text-primary, #f2f2f4);
+}
+
+.vi-demo-cmd {
+  flex: 0 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #a8d2ff;
+  background: rgba(124, 196, 255, 0.08);
+  border: 1px solid rgba(124, 196, 255, 0.25);
+  white-space: nowrap;
+}
+.vi-demo-cmd:hover {
+  background: rgba(124, 196, 255, 0.16);
+}
+
+.vi-demo-link {
+  flex: 0 0 auto;
+  color: #7cc4ff;
+  text-decoration: none;
+  font-weight: 600;
+}
+.vi-demo-link:hover {
+  text-decoration: underline;
+}

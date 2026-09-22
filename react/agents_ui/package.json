@@ -1,0 +1,60 @@
+{
+  "name": "@hugpy/agents-ui",
+  "version": "0.3.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "description": "Hugpy agent fleet console: portable runtime, node roster and dispatch for hugpy-agent nodes; a standalone Vite + Tailwind v4 arm served at /fleet over the same-origin Hugpy API",
+  "keywords": [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "react",
+    "agents",
+    "fleet",
+    "console"
+  ],
+  "homepage": "https://hugpy.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hugpy/hugpy.git",
+    "directory": "react/agents_ui"
+  },
+  "bugs": {
+    "url": "https://github.com/hugpy/hugpy/issues"
+  },
+  "author": {
+    "name": "putkoff",
+    "email": "support@hugpy.ai",
+    "url": "https://hugpy.ai"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.16.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
+  },
+  "files": [
+    "src",
+    "ui_shared",
+    "entry.tsx",
+    "index.html",
+    "vite.config.ts",
+    "tsconfig.json",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

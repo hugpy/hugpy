@@ -1,0 +1,11 @@
+/* FixDoc — the 📖 docs click-through on warning/error labels.
+   Quiet until hovered so it doesn't compete with the warning itself. */
+.fixdoc {
+  margin-left: 4px;
+  text-decoration: none;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.65;
+  cursor: pointer;
+}
+.fixdoc:hover { opacity: 1; }

@@ -1,0 +1,109 @@
+{
+  "name": "@hugpy/ui",
+  "version": "0.3.0",
+  "description": "Embeddable React UI for Hugpy: configurable panels (chat, models, workers, API keys, Discord) and a drop-in <HugpyConsole/>; served at / by hugpy-server",
+  "keywords": [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "react",
+    "console",
+    "openai-compatible",
+    "ui"
+  ],
+  "homepage": "https://hugpy.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hugpy/hugpy.git",
+    "directory": "react/ui"
+  },
+  "bugs": {
+    "url": "https://github.com/hugpy/hugpy/issues"
+  },
+  "author": {
+    "name": "putkoff",
+    "email": "support@hugpy.ai",
+    "url": "https://hugpy.ai"
+  },
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "main": "./dist-lib/hugpy-ui.cjs",
+  "module": "./dist-lib/hugpy-ui.mjs",
+  "types": "./dist-lib/ui/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist-lib/ui/src/index.d.ts",
+      "import": "./dist-lib/hugpy-ui.mjs",
+      "require": "./dist-lib/hugpy-ui.cjs"
+    },
+    "./style.css": "./dist-lib/style.css"
+  },
+  "files": [
+    "dist-lib",
+    "src",
+    "index.html",
+    "vite.config.js",
+    "tsconfig.json",
+    "scripts",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "webpack serve --mode development",
+    "build": "webpack --mode production",
+    "postbuild": "node scripts/bundle-media-arm.mjs",
+    "build:lib": "vite build --config vite.lib.config.js",
+    "prepublishOnly": "npm run build:lib",
+    "preview": "npx serve dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@mui/material": "^9.0.0",
+    "@mui/styled-engine": "^9.0.0",
+    "react": ">=18",
+    "react-dom": ">=18",
+    "react-router-dom": "^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@mui/material": {
+      "optional": true
+    },
+    "@mui/styled-engine": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-env": "^7.29.7",
+    "@babel/preset-react": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
+    "@mui/material": "^9.0.1",
+    "@mui/styled-engine": "^9.0.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/three": "^0.185.1",
+    "@vitejs/plugin-react": "^6.0.3",
+    "babel-loader": "^10.1.1",
+    "css-loader": "^7.1.4",
+    "html-webpack-plugin": "^5.6.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.16.0",
+    "style-loader": "^4.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.4",
+    "vite-plugin-dts": "^4.5.4",
+    "webpack": "^5.107.2",
+    "webpack-cli": "^7.0.3",
+    "webpack-dev-server": "^6.0.0"
+  },
+  "dependencies": {
+    "react-helmet-async": "^3.0.0"
+  }
+}

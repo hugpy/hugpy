@@ -1,0 +1,1638 @@
+.workers-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.wp-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.wp-bar:hover { background: var(--surface-2); }
+.wp-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.wp-bar:hover .wp-title { color: var(--text); }
+.wp-count { color: var(--muted); font-size: 11px; }
+.wp-err { color: var(--red); margin-left: auto; }
+.wp-toggle { margin-left: auto; color: var(--muted); font-size: 10px; }
+.wp-err + .wp-toggle { margin-left: 8px; }
+
+.wp-body { padding: 10px 14px 14px; }
+
+.wp-register {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.wp-register input {
+  flex: 1 1 180px;
+  padding: 5px 8px;
+}
+
+/* "models to serve" picker — dropdown that appends, selected shown as chips */
+.wp-models-pick {
+  flex: 1 1 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.wp-models-select { width: 100%; padding: 5px 8px; }
+.wp-models-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.wp-models-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1px 4px 1px 8px;
+}
+.wp-chip-x {
+  padding: 0 4px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+}
+.wp-chip-x:hover:not(:disabled) { color: var(--red); background: none; }
+.wp-register button,
+.wp-assign,
+.wp-remove {
+  padding: 5px 10px;
+}
+
+.wp-hint { color: var(--muted); margin: 4px 0 12px; font-size: 12px; }
+.wp-hint code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+.wp-empty { color: var(--muted); padding: 8px 0; }
+
+.wp-worker {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--surface);
+}
+.wp-worker-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Mobile: the head row carries ~a dozen chips/buttons (pills · ping ·
+     free VRAM · Free RAM · Restart · block · ✕) — without wrapping it runs
+     far past narrow viewports. Wrap only engages when space runs out, so
+     desktop is unchanged. */
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.wp-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted);
+}
+.wp-online .wp-dot { background: var(--green); box-shadow: 0 0 6px rgba(74, 222, 128, 0.7); }
+.wp-offline .wp-dot { background: var(--red); }
+.wp-name { font-weight: 600; color: var(--bright); }
+.wp-status { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+.wp-url { color: var(--muted); font-size: 11px; }
+/* Version pill — running package version beside the name. Same chip idiom as
+   .wp-adm / .wp-state-pill: green = in sync with central's required version,
+   red = skew (the ⬆ Update button converges it), neutral = nothing to compare
+   (no pin, or an older worker that doesn't report version_ok). */
+.wp-ver {
+  font-size: 10px; border-radius: 8px; padding: 0 6px; white-space: nowrap;
+  cursor: help; font-variant-numeric: tabular-nums;
+}
+.wp-ver-ok      { color: var(--green, #3fb950); background: rgba(74, 222, 128, 0.08); border: 1px solid rgba(74, 222, 128, 0.35); }
+.wp-ver-skew    { color: var(--red, #f85149);   background: rgba(248, 81, 73, 0.10);  border: 1px solid rgba(248, 81, 73, 0.45); }
+.wp-ver-unknown { color: var(--muted);          background: var(--surface-2);         border: 1px dashed var(--border); }
+.wp-remove { margin-left: auto; padding: 2px 8px; }
+
+.wp-gpus { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.wp-gpu {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 4px 8px;
+}
+.wp-gpu em { color: var(--muted); font-style: normal; }
+.wp-nogpu { color: var(--muted); }
+
+/* host RAM free (bounds load alongside VRAM) */
+.wp-ram { font-size: 11px; color: var(--text); margin: 2px 0 6px; }
+.wp-ram-vram { color: var(--muted); }
+
+/* fit-guard hint next to the Load control */
+.wp-load-hint {
+  align-self: center; font-size: 11px; color: var(--green, #3fb950);
+  white-space: nowrap; cursor: help;
+}
+
+/* Serving entries are ROWS in a scrollable per-worker list (not wrap-chips):
+   each row = state · model · size/alloc/spill% facts · controls. */
+.wp-models { display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+             margin: 6px 0; max-height: 220px; overflow-y: auto; }
+.wp-models-label { color: var(--muted); font-size: 11px; }
+.wp-none { color: var(--muted); }
+.wp-model {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 3px 9px;
+}
+.wp-model-facts { font-size: 10px; color: var(--muted); white-space: nowrap;
+                  margin-left: auto; cursor: help; }
+/* DECLARED on-disk size (a file size, effective quant for GGUF) — dimmed and
+   dotted-underlined so it reads distinctly from the MEASURED VRAM figure next to it. */
+.wp-fact-disk { opacity: 0.8; border-bottom: 1px dotted currentColor; }
+/* Ruling 3 — the honest three-quantity memory display: resident (VRAM+RAM) with
+   the layer count. Resident is the true footprint; the split + layers are dimmer. */
+.wp-fact-resident { color: var(--text); }
+.wp-fact-split { color: var(--muted); font-size: 9px; }
+.wp-fact-layers { color: var(--muted); font-size: 9px; }
+.wp-model .wp-model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+.wp-model.wp-warm { border-color: var(--yellow); }
+.wp-model-x {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px;
+}
+.wp-model-x:hover:not(:disabled) { color: var(--red); background: none; }
+.wp-model-x:disabled { opacity: 0.35; cursor: default; }
+
+/* Model BLOCK (global serving-pool primitive) — the ⛔ toggle + chip. Muted
+   until active; when the model is blocked it reads red, and the whole serving
+   row dims to signal "inert (still designated, but out of the pool)". */
+.wp-model-block {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; margin-left: 2px;
+}
+.wp-model-block:hover { color: var(--red, #f85149); }
+.wp-model-block.wp-model-block-on { color: var(--red, #f85149); opacity: 1; }
+.wp-blocked-chip {
+  display: inline-block; margin-left: 6px; padding: 0 5px;
+  font-size: 10px; font-weight: 600; line-height: 15px; border-radius: 4px;
+  color: var(--red, #f85149);
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  vertical-align: middle; white-space: nowrap;
+}
+/* Blocked rows dim per-CELL, never on the <tr> — a translucent frozen cell
+   would let the horizontally-scrolled columns show through it. */
+.wp-servtable-row.wp-servtable-blocked > td:not(.wp-servtable-selcol):not(.wp-servtable-stickycol) { opacity: 0.55; }
+.wp-servtable-row.wp-servtable-blocked > td.wp-servtable-stickycol { color: var(--muted); }
+.wp-servtable-row.wp-servtable-blocked .wp-servtable-name { text-decoration: line-through; text-decoration-color: rgba(248, 81, 73, 0.5); }
+
+.wp-load-toggle {
+  margin-top: 6px;
+  background: none;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.wp-load-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.wp-load-cancel {
+  align-self: center;
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 14px; padding: 0 4px;
+}
+.wp-load-cancel:hover { color: var(--red); }
+.wp-assign-row { display: flex; gap: 8px; margin-top: 6px; }
+.wp-assign-row select {
+  flex: 1;
+  padding: 5px 8px;
+}
+
+.wp-spill {
+  margin-left: auto;
+  margin-right: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+.wp-spill em { font-style: normal; color: var(--muted); }
+/* When spill badge is present it takes the auto margin, so the remove button
+   shouldn't also push left. */
+.wp-spill + .wp-remove { margin-left: 0; }
+
+.wp-adv-toggle {
+  padding: 5px 8px;
+  color: var(--muted);
+}
+.wp-adv-toggle:hover:not(:disabled) { color: var(--text); }
+
+.wp-spill-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--surface-1);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+.wp-spill-form label {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--muted);
+  gap: 3px;
+}
+.wp-spill-form input { width: 90px; padding: 4px 6px; }
+.wp-spill-hint {
+  font-size: 11px;
+  color: var(--muted);
+  flex: 1 1 100%;
+}
+
+.wp-ping-btn {
+  padding: 4px 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.wp-ping-btn:hover:not(:disabled) { color: var(--text); }
+.wp-ping {
+  font-size: 11px;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+.wp-ping-ok  { color: var(--green); background: rgba(74, 222, 128, 0.1);  border: 1px solid rgba(74, 222, 128, 0.35); }
+.wp-ping-bad { color: var(--red);   background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.35); }
+
+.wp-prune {
+  font-size: 11px;
+  padding: 2px 8px;
+  margin-left: 4px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: var(--radius);
+  color: var(--red);
+}
+.wp-prune:hover:not(:disabled) { background: rgba(248, 113, 113, 0.2); }
+
+.wp-install {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: var(--surface-1);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  border-radius: var(--radius-lg);
+}
+.wp-install-label { font-size: 12px; color: var(--muted); }
+.wp-install-cmd {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  color: var(--green);
+  cursor: pointer;
+  word-break: break-all;
+}
+.wp-install-cmd:hover { border-color: var(--green); }
+.wp-install-note { font-size: 11px; color: var(--muted); }
+.wp-install-warn { font-size: 11px; color: var(--amber, #d29922); }
+
+/* ── Setup disclosure: demotes install/tokens/manual so the worker list leads ── */
+.wp-setup {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.wp-setup > .wp-setup-summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 12px;
+}
+.wp-setup > .wp-setup-summary::-webkit-details-marker { display: none; }
+.wp-setup > .wp-setup-summary::before {
+  content: '▸ ';
+  display: inline-block;
+  color: var(--muted);
+}
+.wp-setup[open] > .wp-setup-summary::before { content: '▾ '; }
+.wp-setup > .wp-setup-summary:hover { color: var(--text); }
+/* Inner setup blocks get breathing room only once the disclosure is open. */
+.wp-setup[open] > .wp-install { margin-top: 4px; }
+.wp-setup > .wp-install,
+.wp-setup > .wp-tokens,
+.wp-setup > .wp-manual { padding-left: 12px; padding-right: 12px; }
+.wp-setup > .wp-manual { padding-bottom: 8px; }
+
+.wp-manual { margin-bottom: 10px; }
+.wp-manual summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0;
+}
+.wp-manual summary:hover { color: var(--text); }
+
+/* ── Fleet rollup (in the collapsed bar) ─────────────────────────────────── */
+.wp-fleet {
+  font-size: 10px; color: var(--muted);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 1px 8px;
+}
+.wp-fleet-loaded {
+  font-size: 10px; color: var(--yellow);
+  background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 10px; padding: 1px 8px;
+}
+
+/* ── Worker role + free-VRAM controls ────────────────────────────────────── */
+.wp-role {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--purple); background: rgba(192, 132, 252, 0.1);
+  border: 1px solid rgba(192, 132, 252, 0.35);
+  border-radius: 8px; padding: 0 6px;
+}
+.wp-free-all {
+  font-size: 11px; padding: 2px 8px;
+  background: rgba(96, 165, 250, 0.1); border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: var(--radius); color: var(--blue);
+}
+.wp-free-all:hover:not(:disabled) { background: rgba(96, 165, 250, 0.2); }
+/* Free host RAM: consistent chip idiom, teal to read as "reclaim" not "danger". */
+.wp-free-ram {
+  font-size: 11px; padding: 2px 8px;
+  background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.35);
+  border-radius: var(--radius); color: #34d399;
+}
+.wp-free-ram:hover:not(:disabled) { background: rgba(52, 211, 153, 0.2); }
+/* Restart: same chip, warning-toned amber — it drops loaded models. */
+.wp-restart {
+  font-size: 11px; padding: 2px 8px;
+  background: rgba(217, 145, 47, 0.12); border: 1px solid rgba(217, 145, 47, 0.4);
+  border-radius: var(--radius); color: #d9912f;
+}
+.wp-restart:hover:not(:disabled) { background: rgba(217, 145, 47, 0.22); }
+.wp-restart:disabled { opacity: .6; cursor: default; }
+/* Update: same chip. Quiet/dimmed when the worker is already at central's
+   required version (the call is a no-op); red-accented when it's skewed, to
+   match the red version pill it's the fix for. */
+.wp-update {
+  font-size: 11px; padding: 2px 8px;
+  border-radius: var(--radius);
+}
+.wp-update-noop {
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--muted); opacity: .65;
+}
+.wp-update-noop:hover:not(:disabled) { opacity: 1; }
+.wp-update-skew {
+  background: rgba(248, 81, 73, 0.12); border: 1px solid rgba(248, 81, 73, 0.45);
+  color: var(--red, #f85149);
+}
+.wp-update-skew:hover:not(:disabled) { background: rgba(248, 81, 73, 0.22); }
+.wp-update:disabled { opacity: .6; cursor: default; }
+
+/* ── Per-GPU VRAM used/free bar ──────────────────────────────────────────── */
+.wp-gpu { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.wp-gpu-head { white-space: nowrap; font-size: 11px; }
+.wp-vram-bar {
+  height: 5px; border-radius: 3px; overflow: hidden;
+  background: rgba(74, 222, 128, 0.18);   /* free portion */
+}
+.wp-vram-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue), var(--yellow));  /* used portion */
+}
+
+/* ── Resource-pool budget bar (read-only; slot-budget redesign slice 1) ──────
+   The worker's UNIFIED pool = VRAM + host RAM. Occupancy is EMERGENT — how many
+   models are packed in right now, never a fixed seat count. Modeled on the
+   per-GPU VRAM bar (.wp-vram-*) but SEGMENTED: a used fill plus an optional
+   striped reserve held out of the pool. Display only — no controls live here. */
+.wp-budget { margin: 8px 0 6px; display: flex; flex-direction: column; gap: 4px; }
+.wp-budget-head {
+  font-size: 11px; color: var(--text); cursor: help;
+}
+.wp-budget-row { display: flex; align-items: center; gap: 6px; }
+.wp-budget-label {
+  font-size: 10px; color: var(--muted); width: 30px; flex-shrink: 0;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.wp-budget-bar {
+  position: relative; flex: 1 1 auto;
+  height: 6px; border-radius: 3px; overflow: hidden;
+  background: rgba(74, 222, 128, 0.18);   /* free portion (mirrors .wp-vram-bar) */
+}
+.wp-budget-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, var(--blue), var(--yellow));  /* used portion */
+}
+/* Reserve = held out of the pool, not allocatable. Right-aligned, hatched and
+   dimmer than the used fill so it never reads as "in use". */
+.wp-budget-reserve {
+  position: absolute; right: 0; top: 0; bottom: 0;
+  background: repeating-linear-gradient(45deg,
+    rgba(148, 163, 184, 0.5) 0, rgba(148, 163, 184, 0.5) 3px,
+    rgba(148, 163, 184, 0.14) 3px, rgba(148, 163, 184, 0.14) 6px);
+}
+
+/* Resident chips: one per pool occupant (engine-agnostic) — state pill + name +
+   kind badge + footprint. A read-only mirror of the Serving rows' state; the
+   per-model actions still live on those rows, never here. */
+.wp-budget-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.wp-budget-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 1px 7px; font-size: 11px;
+}
+.wp-budget-chip-name {
+  color: var(--text); max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wp-budget-foot { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.wp-budget-comfy { font-size: 10px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.wp-slots-count { font-style: normal; color: var(--muted); font-size: 10px; }
+
+/* ── Resource strip: VRAM · RAM · Storage compact chips + click-to-expand ──── */
+.wp-resources { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.wp-res-chip {
+  flex: 1 1 170px; min-width: 150px; text-align: left; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 9px; font: inherit; color: inherit;
+  transition: border-color .12s ease, background .12s ease;
+}
+.wp-res-chip:hover:not(:disabled) { border-color: rgba(74, 222, 128, 0.6); }
+.wp-res-active { border-color: rgba(74, 222, 128, 0.8); background: rgba(74, 222, 128, 0.08); }
+.wp-res-disabled { opacity: 0.5; cursor: default; }
+.wp-res-chip .wp-gpu-head { display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; }
+.wp-res-name { overflow: hidden; text-overflow: ellipsis; }
+.wp-res-nodata { color: var(--muted); font-style: normal; }
+.wp-res-count {
+  margin-left: auto; font-size: 10px; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0 6px; min-width: 16px; text-align: center;
+}
+.wp-res-limit {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.45); border-radius: 6px; padding: 0 4px; margin-left: 2px;
+}
+.wp-res-caret { color: var(--muted); font-size: 10px; margin-left: 4px; }
+.wp-res-active .wp-res-caret { color: rgba(74, 222, 128, 0.9); }
+
+/* Honest budget-bar chrome (t13/t14). A pre-slice worker's bar is a legacy
+   estimate — labelled, not hidden. An over-limit box gets a hard red warning
+   (mirrors the storage over-budget treatment); encroachment gets an amber note. */
+.wp-res-legacy {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px; padding: 0 4px; margin-left: 2px;
+  font-style: italic;
+}
+.wp-res-warn {
+  font-size: 9px; font-weight: 600; color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.5); border-radius: 6px; padding: 0 4px; margin-left: 2px;
+  white-space: nowrap;
+}
+.wp-res-encroach { color: #f59e0b; border-color: rgba(245, 158, 11, 0.5); }
+/* Over-limit chip: a red edge so the row reads as a problem at a glance. */
+.wp-res-overlimit { border-color: rgba(248, 113, 113, 0.6) !important; }
+.wp-res-overlimit:hover:not(:disabled) { border-color: rgba(248, 113, 113, 0.85) !important; }
+/* Over-limit fill: solid red, pinned full (the raw overrun lives in the badge). */
+.wp-vram-bar-over { background: rgba(248, 113, 113, 0.18); }
+.wp-vram-fill-over { background: #ef4444; }
+/* Encroachment slice: an amber segment floated at the tail of the fill so the
+   operator sees budget eaten by external usage vs the worker's own models. */
+.wp-vram-bar { position: relative; }
+.wp-vram-encroach {
+  position: absolute; top: 0; right: 0; height: 100%;
+  background: repeating-linear-gradient(45deg,
+    rgba(245, 158, 11, 0.55) 0, rgba(245, 158, 11, 0.55) 3px,
+    rgba(245, 158, 11, 0.30) 3px, rgba(245, 158, 11, 0.30) 6px);
+}
+/* The VRAM overhead term surfaced under the chip (mirror storage's unattributed). */
+.wp-res-extraterm { font-size: 9px; color: var(--muted); margin-top: 2px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.wp-vram-attributed { font-weight: 600; color: var(--text); }
+.wp-res-detail {
+  margin: 0 0 8px; padding: 8px 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.wp-res-detail-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.wp-res-empty { font-size: 11px; color: var(--muted); font-style: italic; }
+.wp-res-models { margin: 0; }
+.wp-vram-reconcile { font-size: 10px; color: var(--muted); margin-top: 2px;
+  padding-top: 4px; border-top: 1px dashed var(--border, rgba(128,128,128,.3)); }
+.wp-vram-overhead { color: var(--muted); }
+/* Estimated (declared placement × file size) — never styled like a measurement. */
+.wp-vram-est { color: var(--muted); font-style: italic; opacity: .85; }
+.wp-fact-est { font-style: italic; opacity: .75; }
+.wp-vram-used { font-weight: 600; }
+.wp-storage-warn-solo { margin-bottom: 4px; }
+
+/* ── Per-worker PID registry (model→pid→VRAM + foreign squatters) ──────────── */
+.wp-pidreg { display: flex; flex-direction: column; gap: 4px; margin-top: 2px;
+  padding-top: 4px; border-top: 1px dashed var(--border, rgba(128,128,128,.3)); }
+.wp-pidreg-list { display: flex; flex-direction: column; gap: 3px; }
+.wp-pidreg-row {
+  display: flex; align-items: center; gap: 8px; font-size: 11px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 8px;
+}
+.wp-pidreg-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 40%; font-weight: 500; }
+.wp-pidreg-meta { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.wp-pidreg-mode { color: var(--muted); font-size: 10px; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.wp-pidreg-vram { margin-left: auto; font-variant-numeric: tabular-nums;
+  white-space: nowrap; font-weight: 600; }
+.wp-pidreg-x { margin-left: 4px; }
+.wp-pidreg-dot { font-size: 8px; line-height: 1; }
+.wp-pidreg-alive { color: var(--green, #3fb950); }
+.wp-pidreg-dead { color: var(--muted); }
+/* Foreign (unattributed) processes — muted + dashed so they read as NOT ours. */
+.wp-pidreg-foreign-label { margin-top: 4px; }
+.wp-pidreg-foreign-row { border-style: dashed; opacity: 0.8; }
+.wp-pidreg-foreign-dot { color: var(--amber, #d29922); font-size: 10px; }
+
+/* ── Per-model state pill ────────────────────────────────────────────────── */
+.wp-state-pill {
+  font-size: 10px; border-radius: 8px; padding: 0 6px; white-space: nowrap;
+}
+.wp-pill-serving { color: var(--yellow); background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.35); }
+/* Live attribution: the slot is mid-request RIGHT NOW — hotter than serving,
+   with a subtle pulse so a busy fleet reads at a glance. */
+.wp-pill-answering {
+  color: var(--orange, #fb923c); background: rgba(251, 146, 60, 0.14);
+  border: 1px solid rgba(251, 146, 60, 0.55);
+  animation: wp-answering-pulse 1.6s ease-in-out infinite;
+}
+@keyframes wp-answering-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 146, 60, 0); }
+  50%      { box-shadow: 0 0 6px 1px rgba(251, 146, 60, 0.35); }
+}
+.wp-pill-pulling { color: var(--blue);   background: rgba(96, 165, 250, 0.08); border: 1px solid rgba(96, 165, 250, 0.35); }
+.wp-pill-heating { color: var(--amber, #d29922); background: rgba(210, 153, 34, 0.10); border: 1px solid rgba(210, 153, 34, 0.4); }
+.wp-pill-loaded  { color: #b8a1e8; background: rgba(184, 161, 232, 0.08); border: 1px solid rgba(184, 161, 232, 0.35); }
+.wp-pill-warming { color: var(--muted);  background: rgba(96, 165, 250, 0.05); border: 1px dashed rgba(96, 165, 250, 0.35); }
+.wp-pill-hot     { color: var(--fg);     background: var(--surface-2);          border: 1px solid var(--border); }
+.wp-pill-cold    { color: var(--muted);  background: var(--surface-2);          border: 1px dashed var(--border); }
+/* disk-truth relabel 2026-09-10: files on central storage — same visual tier as the old cold */
+.wp-pill-central { color: var(--muted);  background: var(--surface-2);          border: 1px dashed var(--border); }
+/* ○ missing = assigned but NOT YET DOWNLOADED — the lazy-download RESTING
+   state ("missing until called", operator 2026-07-16), not a fault. Was solid
+   red, which alarmed about a perfectly healthy model that simply hasn't been
+   called yet. Now dashed + muted like ○ cold (the "normal, nothing to do here"
+   language), with a faint slate tint to stay distinguishable from cold (on
+   disk) — and deliberately NOT amber, which this panel reserves for the
+   actionable ⊘ refused ("won't fit"). */
+.wp-pill-missing { color: var(--muted);  background: rgba(139, 148, 158, 0.06); border: 1px dashed rgba(139, 148, 158, 0.45); }
+.wp-pill-idle    { color: var(--muted);  background: var(--surface-2);          border: 1px solid var(--border); }
+/* ◌ allocated = an allocation is ATTRIBUTED to this model but nothing measured
+   its residency (a hollow runner, or worker-side recency with no footprint
+   behind it — the ENOSPC phantom of 2026-07-28). Amber and dashed: unlike ○ idle
+   there IS something here to explain, and unlike 🔥 serving it is emphatically
+   not the serving yellow — an unmeasured row must never read as a hot model. */
+.wp-pill-allocated { color: var(--amber, #d29922); background: rgba(210, 153, 34, 0.06); border: 1px dashed rgba(210, 153, 34, 0.45); }
+/* Warm-failure badge beside a cold pill: the recorded reason the last
+   activate/probe left this model cold (hover for the full error). */
+.wp-warmfail { margin-left: 6px; font-size: 11px; color: var(--amber, #d29922);
+               border: 1px dashed rgba(210, 153, 34, 0.5); border-radius: 8px;
+               padding: 1px 6px; cursor: help; white-space: nowrap; }
+.wp-model-name { font-size: 12px; }
+.wp-model.wp-st-serving { border-color: rgba(251, 191, 36, 0.4); }
+.wp-model.wp-st-answering { border-color: rgba(251, 146, 60, 0.55); }
+.wp-model.wp-st-pulling { border-color: rgba(96, 165, 250, 0.4); }
+.wp-model.wp-st-heating { border-color: rgba(210, 153, 34, 0.45); }
+.wp-model.wp-st-loaded  { border-color: rgba(184, 161, 232, 0.4); }
+.wp-model.wp-st-warming { border-color: rgba(96, 165, 250, 0.25); }
+/* idle-resident: a runner cached on the worker with NO measured footprint — a
+   hollow shell, deliberately muted so it never reads as loaded (the flap fix). */
+.wp-model.wp-st-idle    { border-color: var(--border); opacity: 0.85; }
+/* allocated-not-measured: dashed so the row reads as a CLAIM, not a fact. */
+.wp-model.wp-st-allocated { border-color: rgba(210, 153, 34, 0.35); border-style: dashed; }
+.wp-model.wp-st-cold    { border-color: var(--border); }
+
+.wp-residency {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  font-size: 10px; padding: 0 6px; cursor: pointer; white-space: nowrap;
+  color: var(--muted);
+}
+.wp-residency-warm      { color: var(--amber, #d29922); border-color: rgba(210, 153, 34, 0.35); }
+.wp-residency-on-demand { color: var(--blue, #60a5fa);  border-color: rgba(96, 165, 250, 0.35); }
+/* static: seat-locked, always-on — solid green, unmistakably "bolted down". */
+.wp-residency-static    { color: var(--green, #4ade80); border-color: rgba(74, 222, 128, 0.45);
+                          background: rgba(74, 222, 128, 0.07); }
+
+/* Slot-chip residency marker for the occupant: 🔒 static / ⏲ on-demand. */
+.wp-slot-res { font-size: 10px; opacity: 0.85; cursor: default; }
+
+/* Residency POLICY picker (slice 8) — inline expansion inside the model chip,
+   same idiom as .wp-alloc. One explicit pick = one deliberate agent restart. */
+.wp-model .wp-res-menu { flex-basis: 100%; margin-top: 4px; }
+.wp-res-menu {
+  display: flex; flex-direction: column; gap: 2px; max-width: 460px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px;
+}
+.wp-res-opt {
+  display: flex; align-items: baseline; gap: 6px; text-align: left;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 3px 8px; cursor: pointer; font-size: 11px; color: var(--text);
+}
+.wp-res-opt:hover { border-color: var(--border-strong); background: var(--surface-1); }
+.wp-res-opt-on { border-color: var(--border-strong); }
+.wp-res-opt-label { white-space: nowrap; }
+.wp-res-opt-desc { color: var(--muted); font-size: 10px; }
+.wp-res-opt-mark { margin-left: auto; color: var(--green, #4ade80); font-size: 10px; }
+
+/* In-place alloc-mode picker (operator ask 2026-07-24): a compact menu anchored
+   AT THE CLICK SITE. The anchor span is the positioning context; the menu
+   floats over the table without disturbing column layout. Mirrors .wp-res-menu
+   styling so the two pickers read as one family. */
+.wp-allocmode-anchor { position: relative; display: inline-block; }
+/* Positioned fixed from the trigger's viewport rect (JS) so the popover floats
+   over the serving table's overflow:auto scroll box instead of being clipped.
+   The static rule here is only the fallback before JS measures. */
+.wp-allocmode-menu {
+  position: absolute; top: 100%; left: 0; z-index: 200; margin-top: 4px;
+  display: flex; flex-direction: column; gap: 2px; min-width: 240px; max-width: 340px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.wp-allocmode-opt {
+  display: flex; align-items: baseline; gap: 6px; text-align: left;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 3px 8px; cursor: pointer; font-size: 11px; color: var(--text);
+}
+.wp-allocmode-opt:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-1); }
+.wp-allocmode-opt-on { border-color: var(--border-strong); }
+.wp-allocmode-opt:disabled { opacity: 0.4; cursor: not-allowed; }
+.wp-allocmode-opt-label { white-space: nowrap; }
+.wp-allocmode-opt-desc { color: var(--muted); font-size: 10px; }
+.wp-allocmode-opt-mark { margin-left: auto; color: var(--green, #4ade80); font-size: 10px; }
+/* Ruling 2 — the "↺ Auto / revert-to-derived" entry: the always-available
+   default. Set apart from the concrete modes by an italic label + a divider. */
+.wp-allocmode-opt-auto { border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0;
+  margin-bottom: 2px; padding-bottom: 5px; }
+.wp-allocmode-opt-auto .wp-allocmode-opt-label { font-style: italic; color: var(--muted); }
+
+/* Explicit-budget knobs — the ONLY mode with extra chrome, inline in the menu. */
+.wp-allocmode-explicit { display: flex; flex-direction: column; gap: 6px; padding: 2px; }
+.wp-allocmode-explicit-head { font-size: 11px; color: var(--amber, #d29922); font-style: italic; }
+.wp-allocmode-split {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text);
+}
+.wp-allocmode-split-gpu { color: var(--blue, #60a5fa); white-space: nowrap; }
+.wp-allocmode-split-ram { color: var(--green, #4ade80); white-space: nowrap; }
+.wp-allocmode-split-sep { color: var(--muted); }
+.wp-allocmode-split-need { color: var(--muted); font-size: 10px; margin-left: auto; white-space: nowrap; }
+.wp-allocmode-floor { font-size: 10px; color: var(--muted); }
+.wp-allocmode-prio { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+.wp-allocmode-prio-btn {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--muted); cursor: pointer; font-size: 10px; padding: 1px 8px;
+}
+.wp-allocmode-prio-btn:hover { border-color: var(--border-strong); color: var(--text); }
+.wp-allocmode-prio-on { border-color: var(--border-strong); color: var(--text);
+  background: var(--surface-1); }
+.wp-allocmode-explicit-actions { display: flex; align-items: center; gap: 6px; }
+
+.wp-pin {
+  background: none; border: 1px dashed var(--border); border-radius: 8px;
+  font-size: 10px; padding: 0 5px; cursor: pointer; color: var(--muted); opacity: 0.55;
+}
+/* Apply-blip window: the agent is re-execing to adopt a config change. */
+.wp-applying { font-size: 10px; color: var(--amber, #d29922); font-style: italic; white-space: nowrap; }
+.wp-chip-applying { opacity: 0.55; cursor: default; }
+.wp-residency:disabled, .wp-pin:disabled { opacity: 0.4; cursor: default; }
+.wp-pin.wp-pin-on { border-style: solid; opacity: 1;
+  border-color: rgba(240, 198, 116, 0.5); background: rgba(240, 198, 116, 0.08); }
+
+.wp-alloc-edit {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--muted); cursor: pointer; font-size: 10px; padding: 0 6px;
+}
+.wp-alloc-edit:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); background: none; }
+/* Ruling 2 — a DERIVED (unpinned) allocation is dimmed + italic with an "auto"
+   affix, so tracking-the-derivation reads distinctly from a solid, pinned pick. */
+.wp-alloc-derived { font-style: italic; opacity: 0.72; border-style: dashed; }
+.wp-alloc-auto-affix { color: var(--muted); font-size: 9px; opacity: 0.85; }
+.wp-free {
+  background: none; border: none; color: var(--blue);
+  cursor: pointer; font-size: 13px; line-height: 1;
+}
+.wp-free:hover:not(:disabled) { color: var(--accent); background: none; }
+
+/* Activate: allocate the worker's resources to a model now (engine-agnostic —
+   slot load or in-RAM load). Reads as an action, greys while in flight. */
+.wp-activate {
+  background: none; border: 1px solid rgba(96, 165, 250, 0.4); border-radius: 8px;
+  color: var(--blue); cursor: pointer; font-size: 10px; padding: 0 6px; white-space: nowrap;
+}
+.wp-activate:hover:not(:disabled) { background: rgba(96, 165, 250, 0.14); border-color: var(--blue); }
+.wp-activate:disabled { opacity: 0.5; cursor: default; }
+
+/* Bulk pin / unpin controls next to the Serving: label. */
+.wp-bulkpin { display: inline-flex; gap: 4px; margin-left: 8px; }
+/* Operator report 2026-07-28: on a narrow card this row (pin all / unpin all /
+   ⟲ MoE auto / ▦ 4-bit all / ▦✕ clear 4-bit) RAN OFF THE VIEW BOX. It is now a
+   single non-wrapping line that scrolls HORIZONTALLY inside itself, so it can
+   never widen the bar (and therefore never the panel/page): min-width:0 lets
+   the flex item shrink below its content width, max-width:100% caps it, and
+   the overflow is owned here — the sibling filter/task/bulk-residency controls
+   in .wp-servtable-bar keep wrapping exactly as before. */
+.wp-bulkpin {
+  flex-wrap: nowrap; min-width: 0; max-width: 100%;
+  overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 2px;                 /* room for the thin scrollbar */
+  scrollbar-width: thin;               /* Firefox */
+  scrollbar-color: var(--border) transparent;
+}
+.wp-bulkpin > * { flex: 0 0 auto; }
+.wp-bulkpin::-webkit-scrollbar { height: 6px; }
+.wp-bulkpin::-webkit-scrollbar-track { background: transparent; }
+.wp-bulkpin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.wp-bulkpin::-webkit-scrollbar-thumb:hover { background: var(--border-strong, #3a4050); }
+.wp-bulkpin-btn {
+  background: none; border: 1px dashed var(--border); border-radius: 8px;
+  color: var(--muted); cursor: pointer; font-size: 10px; padding: 0 6px; white-space: nowrap;
+}
+.wp-bulkpin-btn:hover:not(:disabled) {
+  color: var(--text); border-color: rgba(240, 198, 116, 0.55); background: rgba(240, 198, 116, 0.08);
+}
+.wp-bulkunpin-btn:hover:not(:disabled) {
+  border-color: var(--border-strong); background: var(--surface-1);
+}
+.wp-bulkpin-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Bulk residency (todo t12): the selection action bar, shown in the servtable
+   filter bar once one or more rows are checked. Sits to the LEFT of the bulk-pin
+   controls (which are pushed right by margin-left:auto). Green-leaning to echo
+   the 🔒 static residency accent without shouting; on-demand stays neutral. */
+.wp-bulkres { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wp-bulkres-count {
+  font-size: 10px; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 1px 7px; white-space: nowrap;
+}
+.wp-bulkres-label { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.wp-bulkres-btn {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--muted); cursor: pointer; font-size: 10px; padding: 0 6px; white-space: nowrap;
+}
+.wp-bulkres-ondemand:hover:not(:disabled) {
+  color: var(--blue, #60a5fa); border-color: rgba(96, 165, 250, 0.5); background: rgba(96, 165, 250, 0.10);
+}
+.wp-bulkres-static:hover:not(:disabled) {
+  color: var(--green, #4ade80); border-color: rgba(74, 222, 128, 0.55); background: rgba(74, 222, 128, 0.10);
+}
+.wp-bulkres-btn:disabled { opacity: 0.4; cursor: default; }
+.wp-bulkres-clear {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 10px; text-decoration: underline; padding: 0 2px;
+}
+.wp-bulkres-clear:hover { color: var(--text); }
+/* Separator between the residency and alloc groups in the one bulk bar. */
+.wp-bulkres-sep { color: var(--border); font-size: 12px; }
+/* Bulk alloc (todo t15) — amber-leaning to read distinct from residency's
+   blue/green, and to signal "resource contract" (same family as the ⚙ editor). */
+.wp-bulkres-alloc:hover:not(:disabled), .wp-bulkres-alloc-open {
+  color: var(--yellow, #f0c674); border-color: rgba(240, 198, 116, 0.5); background: rgba(240, 198, 116, 0.10);
+}
+/* The bulk-alloc editor expanded below the filter bar (full row so the custom
+   budget inputs have room) — mirrors the per-row .wp-servtable-expand. */
+.wp-bulkalloc-editor {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 4px 0 2px; padding: 6px 8px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+}
+.wp-bulkalloc-hint { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+/* Bulk alloc parity (2026-07-24): the multi-select editor reuses the per-model
+   .wp-allocmode-* option chrome, but INLINE (flat in the bar) — not the fixed/
+   absolute click-popover. Reset the positioning + let it flow full-width. */
+.wp-bulkalloc { flex-direction: column; align-items: stretch; gap: 6px; flex-basis: 100%; }
+.wp-bulkalloc-menu {
+  position: static; top: auto; left: auto; z-index: auto; margin-top: 0;
+  min-width: 0; max-width: none; box-shadow: none;
+  background: none; border: none; padding: 0;
+}
+.wp-bulkalloc-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Select column: a narrow leading column for the row/select-all checkboxes.
+   Its width is FIXED (--wp-selcol-w, declared on .wp-servtable-t) rather than
+   content-derived, because the frozen Model column's sticky `left` offset is
+   exactly this width — a shrink-to-fit checkbox column would misalign them. */
+.wp-servtable-selcol-col { width: var(--wp-selcol-w, 30px); }
+.wp-servtable-selcol {
+  width: var(--wp-selcol-w, 30px); min-width: var(--wp-selcol-w, 30px);
+  text-align: center; padding-left: 8px; padding-right: 4px;
+}
+.wp-servtable-selall, .wp-servtable-selrow { cursor: pointer; margin: 0; vertical-align: middle; }
+.wp-servtable-selall:disabled { cursor: default; opacity: 0.4; }
+/* Selected row: a soft highlight, layered under the live-state left accent. */
+.wp-servtable-row.wp-servtable-sel { background: rgba(96, 165, 250, 0.10); }
+.wp-servtable-t tbody tr.wp-servtable-sel:hover { background: rgba(96, 165, 250, 0.16); }
+
+/* Subtle allocation-kind badge: 🎰 slot seat vs 🧠 in-RAM resident. */
+.wp-alloc-kind { font-size: 9px; opacity: 0.75; cursor: default; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 6px; padding: 0 4px; color: var(--muted); }
+.wp-alloc-slot { border-color: rgba(96, 165, 250, 0.35); }
+.wp-alloc-ram  { border-color: rgba(74, 222, 128, 0.35); }
+
+/* ── Concise allocation control (mode + optional GiB) ────────────────────── */
+.wp-alloc { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wp-alloc select {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.wp-alloc-apply { padding: 5px 10px; }
+.wp-alloc-cancel {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 14px; line-height: 1;
+}
+.wp-alloc-cancel:hover:not(:disabled) { color: var(--red); background: none; }
+/* When the per-model alloc editor opens, let it wrap onto its own line. */
+.wp-model .wp-alloc { flex-basis: 100%; margin-top: 4px; }
+/* Engine-gating note (non-GGUF autofit-only / GGUF-only-in-mixed) — a quiet
+   amber hint so the operator sees why some modes are absent / will skip. */
+.wp-alloc-note { font-size: 10px; color: var(--amber, #d29922); font-style: italic; white-space: nowrap; }
+/* t49: VRAM/RAM coupling hint (editor-wide) + the per-side live "% of
+   required" readout, right beside the value slider it describes. Both quiet
+   and secondary — the slider values themselves are still the primary read. */
+.wp-alloc-coupled { display: block; margin-bottom: 2px; }
+.wp-alloc-share { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+/* ── t39: every value + its tolerance band is a slider, no number-spinner
+   inputs anywhere in this editor (operator: "the up and down arrows are
+   useless and a hindrance"). One bordered stack per variable — the value
+   slider on top, its ± band slider directly underneath — so the pairing
+   reads at a glance. VRAM / RAM / CTX each get a stack; cores/priority have
+   no band so they sit as compact standalone sliders (.wp-alloc-solo). ── */
+.wp-alloc-group {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 5px 8px 6px; min-width: 172px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+}
+.wp-alloc-solo { padding: 2px 0; }
+
+/* One slider row: label · track · editable readout. Shared by the dual
+   GiB/% value slider (BudgetInput) and every plain slider (PlainSlider). */
+.wp-plain-slider, .wp-alloc-value {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.wp-slider-label {
+  font-size: 10px; color: var(--muted); white-space: nowrap; min-width: 26px;
+}
+/* The %-preview trails the value row; wrap it onto its own line inside the
+   group rather than fighting the slider for width. */
+.wp-alloc-value .wp-budget-preview { flex-basis: 100%; }
+/* The band row sits directly below its value row, slightly indented + muted
+   so it visually reads as "loosening the control above it", not a peer. */
+.wp-alloc-band {
+  padding-left: 10px; border-left: 2px solid var(--border);
+  opacity: 0.9;
+}
+.wp-alloc-band .wp-slider-label { min-width: 14px; }
+
+/* The range track itself — themed to match the panel, compact thumb, amber
+   accent (same family as the ⚙ allocation controls elsewhere in this panel). */
+input.wp-range {
+  -webkit-appearance: none; appearance: none;
+  flex: 1 1 72px; width: 72px; height: 4px; margin: 0;
+  background: var(--surface-3); border-radius: 3px; cursor: pointer;
+}
+input.wp-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--yellow, #f0c674); border: 1px solid var(--surface-1);
+  cursor: pointer; margin-top: -0.5px;
+}
+input.wp-range::-moz-range-thumb {
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--yellow, #f0c674); border: 1px solid var(--surface-1); cursor: pointer;
+}
+input.wp-range::-moz-range-track { background: var(--surface-3); border-radius: 3px; height: 4px; }
+input.wp-range:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+input.wp-range:disabled { opacity: 0.4; cursor: default; }
+.wp-alloc-band input.wp-range { background: rgba(240, 198, 116, 0.10); }
+
+/* The live numeric readout — click it to type an exact value. Renders as a
+   quiet button; swaps for a matching text input while editing. */
+.wp-slider-readout {
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--text); cursor: text; font: inherit; font-size: 11px;
+  padding: 1px 5px; white-space: nowrap; min-width: 34px; text-align: right;
+}
+.wp-slider-readout:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.wp-slider-edit {
+  width: 52px; padding: 1px 5px; font-size: 11px; text-align: right;
+  background: var(--surface-2); border: 1px solid var(--accent); border-radius: 6px; color: var(--text);
+}
+
+/* Dual GiB ⇄ % budget slider (operator addendum): a slider + a unit toggle +
+   a live-resolved preview of what the % becomes at apply. */
+.wp-budget-unit {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--muted); cursor: pointer; font-size: 10px; padding: 2px 6px; line-height: 1;
+}
+.wp-budget-unit:hover { color: var(--text); border-color: var(--border-strong); }
+/* k16: the percent-basis toggle ("of worker" / "of model") — same idiom as
+   the GiB/% unit toggle just before it, kept visually distinct (accent tint)
+   since it changes what 100% MEANS, not just the unit. Only rendered when the
+   model's own size is known (see BudgetInput) — no dead/disabled state to style. */
+.wp-budget-basis {
+  background: none; border: 1px solid var(--accent, #58a6ff); border-radius: 6px;
+  color: var(--accent, #58a6ff); cursor: pointer; font-size: 10px; padding: 2px 6px; line-height: 1;
+}
+.wp-budget-basis:hover { background: var(--surface-2); }
+.wp-budget-preview { font-size: 9px; color: var(--muted); white-space: nowrap; }
+
+/* ── Worker admission gate + enrollment tokens ───────────────────────────── */
+.wp-adm { font-size: 11px; padding: 1px 6px; border-radius: 8px; text-transform: uppercase; letter-spacing: .03em; }
+/* A worker whose llama.cpp build can't offload — its GPU sits idle. */
+.wp-cpu-only { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #5a4a16; color: #ffe39a; cursor: help; }
+.wp-noncanon { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #5a2f16; color: #ffcf9a; cursor: help; white-space: pre-line; }
+
+/* ── Two-tier resource governance (box caps vs central limits) ─────────── */
+.wp-caps { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0; }
+.wp-cap-chip { font-size: 10px; padding: 1px 7px; border-radius: 8px; background: var(--surface-2, #1b2230); color: var(--muted); cursor: help; white-space: nowrap; }
+.wp-limit-chip { color: #9ecbff; background: rgba(80, 140, 220, 0.12); }
+.wp-limits-edit { font-size: 11px; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); cursor: pointer; padding: 1px 7px; }
+.wp-limits-form { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.wp-limits-form input { width: 76px; padding: 2px 6px; font-size: 11px; }
+/* Ruling 4 — the unmistakable subtitle: this editor is the box-level ceiling for
+   ALL models, never a per-model allocation. Takes the full row above the inputs. */
+.wp-limits-title { flex-basis: 100%; font-size: 10px; color: var(--muted);
+  font-style: italic; cursor: help; }
+
+/* Central-as-worker row: same anatomy, subtle accent to mark "this host".
+   Wrapper renders it as a footer, visually separated below the real
+   worker rows — secondary context, not the headline. */
+.wp-central-footer { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border, rgba(128,128,128,.3)); }
+.wp-central { border-left: 3px solid var(--accent, #6ab0f3); }
+.wp-adm-pill-approved { background: #1f5132; color: #b6f0c8; }
+.wp-adm-pill-pending  { background: #5a4a16; color: #ffe39a; }
+.wp-adm-pill-blocked  { background: #5a1f1f; color: #ffb3b3; }
+/* Pending rows draw the eye — they need an operator decision. */
+.wp-worker.wp-adm-pending { outline: 1px dashed #b9912f; }
+.wp-worker.wp-adm-blocked { opacity: .6; }
+
+.wp-admit, .wp-block { font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer; border: none; }
+.wp-admit { background: #1f5132; color: #d6ffe2; }
+.wp-block { background: #5a1f1f; color: #ffd9d9; }
+
+.wp-pending-chip { background: #5a4a16; color: #ffe39a; padding: 1px 8px; border-radius: 8px; font-size: 12px; }
+
+.wp-tokens { margin: 8px 0; }
+.wp-tokens-body { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.wp-token-issue { align-self: flex-start; padding: 3px 10px; cursor: pointer; }
+.wp-token-new { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid #b9912f; border-radius: 6px; background: #2a2410; }
+.wp-token-secret { font-family: monospace; word-break: break-all; cursor: pointer; background: #111; padding: 4px 6px; border-radius: 4px; }
+.wp-token-dismiss { align-self: flex-start; padding: 2px 10px; cursor: pointer; }
+.wp-token-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.wp-token-revoked { opacity: .5; }
+.wp-token-label { font-weight: 600; }
+.wp-token-id { font-family: monospace; opacity: .6; font-size: 11px; }
+.wp-token-revoke { padding: 1px 8px; cursor: pointer; background: #5a1f1f; color: #ffd9d9; border: none; border-radius: 4px; }
+.wp-token-state { color: #ffb3b3; font-size: 12px; }
+
+/* Dedicated-pool pill (click to set/clear) */
+.wp-pool {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  cursor: pointer;
+  color: var(--muted);
+  border: 1px dashed var(--border-strong, #555);
+  white-space: nowrap;
+  user-select: none;
+}
+.wp-pool.wp-pool-set {
+  color: var(--bright);
+  border-style: solid;
+  border-color: var(--amber, #e0a44a);
+  background: rgba(224, 164, 74, 0.12);
+}
+
+/* ── Group assign (dedicate one model to a set of workers) ───────────── */
+.wp-group { margin: 6px 0 10px; }
+.wp-group-toggle {
+  width: 100%; text-align: left; background: var(--surface-2);
+  border: 1px dashed var(--border); border-radius: 8px; color: var(--muted);
+  font-size: 12px; padding: 6px 12px; cursor: pointer;
+}
+.wp-group-toggle:hover { color: var(--text); border-color: rgba(124, 196, 255, 0.45); }
+.wp-group-body {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.wp-group-head { display: flex; align-items: center; justify-content: space-between; }
+.wp-group-head strong { font-size: 13px; }
+.wp-group-x { background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+.wp-group-x:hover { color: var(--red); }
+.wp-group-selall { border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.wp-group-check, .wp-group-row {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer;
+}
+.wp-group-check { font-weight: 600; color: var(--text); }
+.wp-group-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.wp-group-row { padding: 2px 0; }
+.wp-group-locked { opacity: 0.55; cursor: not-allowed; }
+.wp-group-wname { color: var(--text); }
+.wp-group-note { font-size: 11px; color: var(--muted); }
+.wp-group-disk { font-size: 10px; color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+.wp-group-actions { display: flex; justify-content: flex-end; }
+.wp-group-go {
+  background: var(--accent-dim); color: var(--accent);
+  border: 1px solid rgba(86, 212, 232, 0.35); border-radius: var(--radius);
+  padding: 4px 14px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.wp-group-go:hover:not(:disabled) { background: var(--accent); color: #0b0d13; border-color: var(--accent); }
+.wp-group-go:disabled { opacity: 0.5; cursor: not-allowed; }
+.wp-group-results { display: flex; flex-direction: column; gap: 2px; font-size: 11px; border-top: 1px solid var(--border); padding-top: 6px; }
+.wp-group-ok  { color: var(--green); }
+.wp-group-bad { color: var(--red); }
+
+/* ── Reaper (disk reclaim) ───────────────────────────────────────────── */
+.wp-reap {
+  margin-left: 8px; background: none; border: 1px solid var(--border);
+  border-radius: 6px; font-size: 10px; padding: 0 6px; cursor: pointer;
+  color: var(--muted);
+}
+.wp-reap:hover { color: var(--red); border-color: var(--red); }
+
+/* ── Per-worker local STORAGE (model cache depiction + eviction review) ── */
+.wp-storage { margin: 6px 0; display: flex; flex-direction: column; gap: 5px; }
+.wp-storage-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text); cursor: help;
+}
+.wp-storage-icon { color: var(--muted); white-space: nowrap; }
+.wp-storage-figs { font-variant-numeric: tabular-nums; }
+.wp-storage-basis {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 6px;
+  padding: 0 5px;
+}
+.wp-storage-warn {
+  font-size: 10px; color: var(--red, #f85149); white-space: nowrap;
+  background: rgba(248, 81, 73, 0.10); border: 1px solid rgba(248, 81, 73, 0.4);
+  border-radius: 8px; padding: 0 7px; font-weight: 600;
+}
+/* Unattributed-on-disk (orphaned residue): amber, distinct from the red
+   over-budget/over-allocation warnings — it is drive junk to clean up, not a
+   budget breach. */
+.wp-storage-orphan {
+  font-size: 10px; color: var(--amber, #d29922); white-space: nowrap;
+  background: rgba(210, 153, 34, 0.10); border: 1px solid rgba(210, 153, 34, 0.4);
+  border-radius: 8px; padding: 0 7px; font-weight: 600; cursor: help;
+}
+/* Shared central catalog: on disk here, never evictable from here, never priced
+   against this worker's budget (k60). Cyan/informational — deliberately NOT the
+   red budget-breach language nor the amber "junk to clean up" of orphans: there
+   is nothing to act on, it is simply not this box's cache. */
+.wp-storage-shared-chip {
+  font-size: 10px; color: #22d3ee; white-space: nowrap;
+  background: rgba(34, 211, 238, 0.08); border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 8px; padding: 0 7px; font-weight: 600; cursor: help;
+}
+.wp-storage-shared { display: flex; flex-direction: column; gap: 4px; }
+.wp-storage-shared-head {
+  font-size: 10px; color: var(--muted); cursor: help;
+  border-left: 2px solid rgba(34, 211, 238, 0.5); padding-left: 6px;
+}
+.wp-storage-shared .wp-storage-list { border-color: rgba(34, 211, 238, 0.25); }
+.wp-pill-shared { color: #22d3ee; background: rgba(34, 211, 238, 0.07); border: 1px solid rgba(34, 211, 238, 0.35); }
+
+/* Distinct DISK color for the storage fill (cyan → blue) so it never reads as
+   the VRAM/RAM pool bar (blue → yellow). Reuses BudgetTrack markup. */
+.wp-storage .wp-budget-fill { background: linear-gradient(90deg, #22d3ee, #0ea5e9); }
+.wp-storage-over .wp-budget-fill { background: linear-gradient(90deg, #fb923c, #f85149); }
+
+.wp-storage-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px 6px;
+  background: var(--surface-1);
+}
+.wp-storage-row {
+  display: flex; align-items: center; gap: 8px; font-size: 11px;
+  padding: 1px 0;
+}
+.wp-storage-row.wp-storage-protected { opacity: 0.62; }   /* protected = greyed, un-actionable */
+.wp-storage-row.wp-storage-proposed {
+  background: rgba(248, 81, 73, 0.07);
+  box-shadow: inset 2px 0 0 0 var(--red, #f85149);
+  border-radius: 3px; padding-left: 4px; opacity: 1;
+}
+.wp-storage-name {
+  flex: 1 1 auto; min-width: 0; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wp-storage-quant { color: var(--muted); font-style: normal; font-size: 10px; opacity: 0.85; }
+.wp-storage-size {
+  flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums;
+  min-width: 62px; text-align: right;
+}
+.wp-storage-served {
+  flex: 0 0 auto; color: var(--muted); min-width: 78px; text-align: right;
+  white-space: nowrap;
+}
+
+/* Eviction review (only when over budget): exactly what would be freed, and
+   the explicit Approve control. Nothing deletes without this click. */
+.wp-storage-review {
+  border: 1px solid rgba(248, 81, 73, 0.4); border-radius: 8px;
+  background: rgba(248, 81, 73, 0.06); padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.wp-storage-review-head { font-size: 11px; color: var(--text); }
+.wp-storage-review-list { display: flex; flex-direction: column; gap: 2px; }
+.wp-storage-review-row {
+  display: flex; align-items: center; gap: 8px; font-size: 11px;
+}
+.wp-storage-approve {
+  align-self: flex-start; cursor: pointer;
+  background: rgba(248, 81, 73, 0.14); color: var(--red, #f85149);
+  border: 1px solid rgba(248, 81, 73, 0.5); border-radius: 8px;
+  font-size: 12px; font-weight: 600; padding: 4px 12px;
+}
+.wp-storage-approve:hover { background: rgba(248, 81, 73, 0.24); }
+
+/* "will free" pill for a proposed model (mirrors the state-pill palette). */
+.wp-pill-evict {
+  color: var(--red, #f85149); background: rgba(248, 81, 73, 0.10);
+  border: 1px solid rgba(248, 81, 73, 0.45);
+}
+
+/* "⊘ missing" pill: the pull was REFUSED for storage — it won't fit even after
+   a full FIFO, so the files were never downloaded. Solid amber (a state to act
+   on) vs. the dashed/muted ○ cold (a normal, healthy on-disk model). */
+.wp-pill-refused {
+  color: var(--yellow, #d29922); background: rgba(210, 153, 34, 0.10);
+  border: 1px solid rgba(210, 153, 34, 0.5);
+}
+/* The row itself: tinted so a missing model is findable in a long list. */
+.wp-storage-refused { background: rgba(210, 153, 34, 0.06); }
+
+/* ── Per-worker load table (sortable, multi-select, anti-duplicate) ───── */
+.wp-loadtable { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 8px; margin-top: 6px; }
+.wp-loadtable-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.wp-loadtable-q { flex: 1 1 180px; min-width: 120px; }
+.wp-loadtable-task { flex: 0 1 auto; max-width: 200px; }
+.wp-breaker { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--yellow); cursor: pointer; white-space: nowrap; }
+.wp-loadtable-scroll { max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.wp-loadtable-t { width: 100%; border-collapse: collapse; font-size: 12px; }
+.wp-loadtable-t th, .wp-loadtable-t td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.wp-loadtable-t th { position: sticky; top: 0; background: var(--surface-2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); z-index: 2; }
+.wp-lt-sortable { cursor: pointer; user-select: none; }
+.wp-lt-sortable:hover { color: var(--text); }
+.wp-lt-check { width: 28px; text-align: center; }
+.wp-lt-num { text-align: right; font-variant-numeric: tabular-nums; }
+.wp-lt-muted { color: var(--muted); }
+.wp-lt-size { color: var(--muted); }
+.wp-lt-dup { color: var(--yellow); }
+.wp-loadtable-t tbody tr:hover { background: rgba(255,255,255,0.03); }
+.wp-lt-locked { opacity: 0.5; }
+/* Measured headroom strip in the load-a-model table: the honest free space each
+   pick is fit-checked against (VRAM free = nvidia-smi, RAM free = worker-measured). */
+.wp-load-headroom {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  margin-top: 8px; font-size: 11px; color: var(--muted);
+}
+.wp-load-headroom-label { font-weight: 600; color: var(--text); }
+.wp-load-headroom-item { white-space: nowrap; }
+.wp-load-headroom-item em { color: var(--text); font-style: normal; }
+.wp-load-headroom-sel { white-space: nowrap; margin-left: auto; color: var(--accent); }
+.wp-loadtable-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 8px; }
+.wp-loadtable-go { background: var(--accent-dim); color: var(--accent); border: 1px solid rgba(86,212,232,0.35); border-radius: var(--radius); padding: 4px 14px; font-size: 12px; font-weight: 600; cursor: pointer; }
+.wp-loadtable-go:hover:not(:disabled) { background: var(--accent); color: #0b0d13; border-color: var(--accent); }
+.wp-loadtable-go:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Central-provisioning cell: a readiness pill (reusing the .wp-state-pill base
+   sizing) + a Download action for models central doesn't fully hold. This is
+   what turns post-hoc "central doesn't have X on disk" refusals into an
+   up-front, actionable state. */
+.wp-cprov-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wp-cprov-ready       { color: var(--green, #4ade80); background: rgba(74, 222, 128, 0.08); border: 1px solid rgba(74, 222, 128, 0.35); }
+.wp-cprov-downloading { color: var(--blue);            background: rgba(96, 165, 250, 0.08); border: 1px solid rgba(96, 165, 250, 0.35); }
+.wp-cprov-incomplete  { color: var(--amber, #d29922);  background: rgba(210, 153, 34, 0.10); border: 1px solid rgba(210, 153, 34, 0.4); }
+.wp-cprov-absent      { color: var(--muted);           background: var(--surface-2);         border: 1px dashed var(--border); }
+.wp-cprov-error       { color: var(--red, #f85149);    background: rgba(248, 81, 73, 0.08);   border: 1px solid rgba(248, 81, 73, 0.4); cursor: help; }
+.wp-cprov-dl {
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 1px 8px; font-size: 10px; cursor: pointer; white-space: nowrap;
+}
+.wp-cprov-dl:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.wp-cprov-dl:disabled { opacity: 0.5; cursor: wait; }
+.wp-cprov-err { font-size: 10px; color: var(--red, #f85149); cursor: help; white-space: nowrap; }
+
+/* ── Serving TABLE ───────────────────────────────────────────────────────────
+   The per-worker Serving list rendered as a sortable table — same visual system
+   as the "load a model" table (.wp-loadtable-* / .wp-lt-*), reused so the whole
+   assignment (every stage of the attribution ladder) reads at a glance. */
+/* Neutralize the old chip-list clipping on the wrapper: the inner scroll owns
+   the overflow now (this is a table, not a wrapping flex of chips). */
+.wp-servtable { max-height: none; overflow: visible; display: block; }
+/* Pinned while the TAB PANE scrolls — measured, not guessed: a headless
+   Chromium reports the bar's nearest scrolling ancestor as .tab-pane
+   (779/1773), so that is what sticky must resolve against. .wp-servtable's
+   `overflow: visible` keeps .wp-models' overflow-y:auto out of the chain, and
+   the flex context comes from .wp-models — which is why the bar must NOT be a
+   flex item itself; see .wp-servtable { display: block } below. */
+.wp-servtable-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 2px;
+  position: sticky; top: 0; z-index: 12;
+  background: var(--surface, #141722);
+  padding: 4px 0 5px;
+}
+.wp-servtable-q { flex: 1 1 180px; min-width: 120px; }
+.wp-servtable-task { flex: 0 1 auto; max-width: 200px; }
+/* Bulk pin/unpin pushed to the right edge of the filter bar. */
+.wp-servtable-bulk { margin-left: auto; }
+/* Horizontal scroll (12 columns inside a worker card) + the vertical scroll the
+   chip list used to have; the header row stays sticky. */
+/* No inner vertical scroll box. MEASURED reason: a sticky element is clamped
+   to its PARENT's box, and with the table boxed at 260px the bar's parent
+   (.wp-servtable) was only 299px tall — so the bar pinned for ~260px and was
+   then dragged out by the parent's bottom edge (headless Chromium: top 385 ->
+   145 over a 500px scroll). Letting the table render at full height makes the
+   parent span the whole serving section, so the bar pins for the entire card
+   against .tab-pane (the only real scroller in the chain). overflow-x stays
+   auto for the 12 columns; overflow-y MUST be left alone — setting it to
+   `visible` here would compute back to `auto` and re-create the inner
+   scroller. */
+/* AMENDMENT 2026-07-28 (operator ask: "headers always visible"). The note above
+   is still true about .wp-servtable-BAR, and it stays sticky against .tab-pane.
+   But the header ROW never actually pinned: `overflow-x: auto` already computes
+   overflow-y to `auto`, so .wp-servtable-scroll IS the th's nearest scrolling
+   ancestor — and with no height cap it could never scroll, so the ths simply
+   rode off the top with the table. Giving the box a max-height makes it a REAL
+   vertical scroller, which is the only element sticky ths can resolve against.
+   65vh is well clear of the 260px that broke the bar's own pinning (the bar's
+   parent now spans bar + 65vh, so it pins for the whole card as measured). */
+.wp-servtable-scroll {
+  overflow-x: auto; overflow-y: auto; max-height: 65vh;
+  border: 1px solid var(--border); border-radius: 6px;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.wp-servtable-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.wp-servtable-scroll::-webkit-scrollbar-track { background: transparent; }
+.wp-servtable-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.wp-servtable-scroll::-webkit-scrollbar-thumb:hover { background: var(--border-strong, #3a4050); }
+/* --wp-selcol-w: the ONE declaration of the frozen checkbox column's width —
+   the <col>, the cells, and the Model column's sticky `left` offset all read
+   it, so the two frozen columns can never drift apart. */
+.wp-servtable-t { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; --wp-selcol-w: 30px; }
+.wp-servtable-t th, .wp-servtable-t td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+.wp-servtable-t th { position: sticky; top: 0; background: var(--surface-2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); z-index: 2; }
+
+/* ── Frozen (sticky-left) columns ─────────────────────────────────────────────
+   The select checkbox and the Model column stay put while the rest of the table
+   scrolls sideways under them. Layering, low → high, all BELOW the alloc /
+   residency popovers (z-index 200, position:fixed) so those still overlay:
+     2  normal sticky-top <th>
+     3  frozen <td>            (scrolled cells pass under it)
+     4  frozen <th>            (the corner — above both sticky axes)
+   The drag-over drop indicator is an inset box-shadow on a <th>, so it paints
+   inside its own cell and simply passes under the frozen pair like any column. */
+.wp-servtable-t td.wp-servtable-selcol,
+.wp-servtable-t td.wp-servtable-stickycol { position: sticky; z-index: 3; }
+.wp-servtable-t th.wp-servtable-selcol,
+.wp-servtable-t th.wp-servtable-stickycol { z-index: 4; }
+.wp-servtable-t th.wp-servtable-selcol, .wp-servtable-t td.wp-servtable-selcol { left: 0; }
+.wp-servtable-t th.wp-servtable-stickyname, .wp-servtable-t td.wp-servtable-stickyname { left: var(--wp-selcol-w); }
+/* Frozen BODY cells must be fully opaque or the scrolled columns read through.
+   The row-state tints (hover / selected) are re-applied as a flat layer ON TOP
+   of that opaque base so a frozen cell always matches its row. */
+.wp-servtable-t td.wp-servtable-selcol,
+.wp-servtable-t td.wp-servtable-stickycol { background: var(--surface, #141722); }
+.wp-servtable-t tbody tr:hover > td.wp-servtable-selcol,
+.wp-servtable-t tbody tr:hover > td.wp-servtable-stickycol {
+  background: linear-gradient(rgba(255,255,255,0.03), rgba(255,255,255,0.03)), var(--surface, #141722);
+}
+.wp-servtable-t tbody tr.wp-servtable-sel > td.wp-servtable-selcol,
+.wp-servtable-t tbody tr.wp-servtable-sel > td.wp-servtable-stickycol {
+  background: linear-gradient(rgba(96,165,250,0.10), rgba(96,165,250,0.10)), var(--surface, #141722);
+}
+.wp-servtable-t tbody tr.wp-servtable-sel:hover > td.wp-servtable-selcol,
+.wp-servtable-t tbody tr.wp-servtable-sel:hover > td.wp-servtable-stickycol {
+  background: linear-gradient(rgba(96,165,250,0.16), rgba(96,165,250,0.16)), var(--surface, #141722);
+}
+/* The boundary between the frozen pair and the scrolling body. */
+.wp-servtable-t th.wp-servtable-stickyname, .wp-servtable-t td.wp-servtable-stickyname {
+  box-shadow: inset -1px 0 0 var(--border), 6px 0 8px -8px rgba(0, 0, 0, 0.55);
+}
+/* border-collapse: separate (needed so sticky cells keep their borders) drops
+   the shared header rule — restore it as the header's own bottom border. */
+.wp-servtable-t thead th { border-bottom: 1px solid var(--border); }
+/* Non-sortable control-column headers: same look, no pointer affordance. */
+.wp-servtable-h { cursor: default; }
+/* User-adjustable columns (order + width, persisted per browser). Every non-
+   checkbox header is a drag-reorder handle AND carries a right-edge resize grip.
+   position:relative anchors the grip; padding-right leaves room for it. */
+/* NOTE: this rule used to say `position: relative`, which SILENTLY CANCELLED
+   the sticky header on every data column (it is more specific and later than
+   the base th rule) — the second reason the headers never pinned. `position:
+   sticky` is itself a positioned element, so it anchors the absolute resize
+   grip just as well; the declaration is simply dropped. */
+.wp-servtable-t th.wp-col-th { padding-right: 12px; }
+/* The drop-target indicator while a header is being dragged over it. */
+.wp-servtable-t th.wp-col-dragover { box-shadow: inset 2px 0 0 var(--accent, #60a5fa); }
+.wp-servtable-t th.wp-col-dragging { opacity: 0.45; }
+/* The 8px right-edge grip: col-resize cursor, invisible until hovered. Sits
+   above the sticky header's z-index so the pointer always lands on it. */
+.wp-col-resize {
+  position: absolute; top: 0; right: 0; width: 8px; height: 100%;
+  cursor: col-resize; z-index: 3; touch-action: none;
+}
+.wp-col-resize:hover { background: var(--accent, #60a5fa); opacity: 0.5; }
+/* Reset-layout affordance in the serving bar — quiet until the layout diverges. */
+.wp-servtable-resetcols {
+  flex: 0 0 auto; font-size: 11px; padding: 2px 8px; cursor: pointer;
+  color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 4px;
+}
+.wp-servtable-resetcols:hover { color: var(--text); border-color: var(--accent, #60a5fa); }
+.wp-servtable-t tbody tr:hover { background: rgba(255,255,255,0.03); }
+/* Model name — FLUID column (operator ask 2026-07-28). The width is a clamp,
+   never a px the operator drags: 9ch keeps a mid-truncated name legible on a
+   phone, 28vw lets it breathe, 220px is the old cap. The <col> carries it (one
+   place, like every other column width); the cell keeps the CSS ellipsis purely
+   as a BACKSTOP — the real shortening is midTrunc()'s middle ellipsis in JS,
+   because a model key differentiates at BOTH ends. */
+.wp-servtable-namecol { width: clamp(9ch, 28vw, 220px); }
+.wp-servtable-name {
+  max-width: clamp(9ch, 28vw, 220px); overflow: hidden; text-overflow: ellipsis;
+}
+/* Memory facts sit inline in their own cell (drop the flex margin-left:auto). */
+.wp-servtable-mem .wp-model-facts { margin-left: 0; }
+.wp-servtable-actions { display: flex; align-items: center; gap: 6px; }
+/* Full-width expansion row for the AllocControl / ResidencyMenu editors. */
+.wp-servtable-expand > td { padding: 6px 8px; background: var(--surface-1); }
+/* Filter matched nothing — a DISTINCT empty state, never "nothing assigned"
+   (which would misread as an unassigned worker). */
+.wp-servtable-nomatch { color: var(--muted); font-style: italic; text-align: center; padding: 10px 8px; }
+/* Live-state accent on the row's left edge (mirrors the chip border colors).
+   The row's leftmost cell is now the OPAQUE frozen checkbox cell, which would
+   paint over a <tr>-level shadow — so the accent is carried by that cell. */
+.wp-servtable-row.wp-st-answering > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(251, 146, 60, 0.55); }
+.wp-servtable-row.wp-st-serving   > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(251, 191, 36, 0.40); }
+.wp-servtable-row.wp-st-pulling   > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(96, 165, 250, 0.40); }
+.wp-servtable-row.wp-st-heating   > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(210, 153, 34, 0.45); }
+.wp-servtable-row.wp-st-loaded    > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(184, 161, 232, 0.40); }
+.wp-servtable-row.wp-st-missing   > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(248, 81, 73, 0.40); }
+.wp-servtable-row.wp-st-allocated > td.wp-servtable-selcol { box-shadow: inset 2px 0 0 rgba(210, 153, 34, 0.35); }
+/* Dim the DE-EMPHASISED rows on their cells, not the <tr>: an opacity on the
+   row would make the frozen cells translucent and let the scrolled columns
+   read straight through them. The frozen pair stays opaque and reads muted. */
+.wp-servtable-row.wp-st-allocated > td:not(.wp-servtable-selcol):not(.wp-servtable-stickycol) { opacity: 0.9; }
+.wp-servtable-row.wp-st-idle      > td:not(.wp-servtable-selcol):not(.wp-servtable-stickycol) { opacity: 0.85; }
+.wp-servtable-row.wp-st-allocated > td.wp-servtable-stickycol,
+.wp-servtable-row.wp-st-idle      > td.wp-servtable-stickycol { color: var(--muted); }
+
+/* ── load_reports "why" annotation (beside the State pill) ─────────────────────
+   The recorded outcome of the LAST warm/probe central attempted on a model,
+   shown ONLY where the model is not resident now (cold/missing/idle/heating) so
+   a no-op "▶ activate" always has a visible why. Same compact badge idiom as
+   the pills (cf. .wp-warmfail) — it annotates, never restates, the derived
+   state. */
+.wp-loadwhy {
+  margin-left: 6px; font-size: 11px; border-radius: 8px;
+  padding: 0 5px; cursor: help; white-space: nowrap;
+}
+/* bad = the probe failed or the model won't fit — amber warning, dashed. */
+.wp-loadwhy-bad {
+  color: var(--amber, #d29922);
+  border: 1px dashed rgba(210, 153, 34, 0.5);
+}
+/* ok-but-stale = the last warm succeeded yet the model has since gone
+   non-resident — muted/solid so it never competes with a live state pill. */
+.wp-loadwhy-ok {
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+/* ── Per-worker TABS (operator, 2026-07-26) ──────────────────────────────────
+   One worker card at a time. The pool used to stack every card down the page,
+   which got long once the serving list stopped being a fixed-height box
+   (b1b2222 — the sticky "Serving:" bar needs a tall parent to pin against).
+   The strip only renders with 2+ workers; a single-worker pool is unchanged. */
+.wp-tabs {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.wp-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.wp-tab:hover { color: var(--text); border-color: var(--accent, #60a5fa); }
+.wp-tab-on {
+  background: var(--surface-2); color: var(--text);
+  border-color: var(--accent, #60a5fa);
+}
+.wp-tab-name { font-weight: 600; }
+/* Assignment count — quiet, so the strip reads as names first. */
+.wp-tab-count {
+  font-size: 10px; color: var(--muted);
+  background: var(--surface); border-radius: 8px; padding: 0 6px;
+}
+/* Live status dot, same vocabulary as the worker card's own pills. */
+.wp-tab-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); flex: 0 0 auto;
+}
+.wp-tab-online .wp-tab-dot  { background: var(--green, #3fb950); }
+.wp-tab-offline .wp-tab-dot { background: var(--red, #f85149); }
+.wp-tab-failed .wp-tab-dot  { background: var(--red, #f85149); }
+
+/* ── 4-bit column (bitsandbytes lever, operator 2026-07-26) ────────────────
+   A COMPRESSION choice, distinct from the Alloc column's PLACEMENT choice —
+   ticking it re-prices the model (~30% of fp16) so Alloc re-derives beside it. */
+.wp-4bit { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.wp-4bit-box { cursor: pointer; margin: 0; vertical-align: middle; }
+.wp-4bit-box:disabled { cursor: default; opacity: 0.4; }
+/* Only labelled when ON, so an untouched column stays visually quiet. */
+.wp-4bit-tag {
+  font-size: 9px; letter-spacing: .04em; color: var(--accent, #60a5fa);
+  text-transform: uppercase;
+}
+/* Not eligible (gguf / CPU-only worker / already-quantized): a quiet em-dash
+   with the reason on hover, never a dead disabled checkbox. */
+.wp-4bit-na { color: var(--muted); cursor: help; }
+
+/* Bulk 4-bit, in the pin-all row. Accent-tinted so it reads as a state change
+   rather than a destructive action (unlike the unpin/clear variants). */
+.wp-bulk4bit-btn { border-color: var(--accent, #60a5fa); color: var(--accent, #60a5fa); }
+.wp-bulk4bit-btn:hover:not(:disabled) { background: rgba(96, 165, 250, 0.12); }
+
+/* MoE expert-split lever. The ⟲ appears only when the operator has PINNED a
+   state, so an auto row (the default) stays a plain checkbox. */
+.wp-moe { display: inline-flex; align-items: center; gap: 4px; }
+/* Own class, not a borrowed .wp-4bit-box: two different levers in adjacent
+   columns must be distinguishable in the DOM. */
+.wp-moe-box { cursor: pointer; margin: 0; vertical-align: middle; }
+.wp-moe-box:disabled { cursor: default; opacity: 0.4; }
+.wp-moe-auto {
+  border: none; background: transparent; cursor: pointer; padding: 0 2px;
+  color: var(--muted); font-size: 11px; line-height: 1;
+}
+.wp-moe-auto:hover:not(:disabled) { color: var(--accent, #60a5fa); }
+.wp-bulkmoe-btn { border-color: var(--border); }
+
+/* Memory column, NOT-yet-resident rows: the PLANNED vram/ram division rather
+   than a second copy of the Size column. Dimmed + tagged so a projection is
+   never mistaken for a measurement. */
+.wp-fact-planned { color: var(--muted); }
+.wp-fact-planned-tag { font-size: 9px; opacity: 0.7; letter-spacing: .03em; }
+
+/* ── Compact (narrow-container) serving table ─────────────────────────────────
+   Toggled by .wp-servtable-compact, which the panel sets from a ResizeObserver
+   on the table's WRAPPER (< 720px), so a narrow panel inside a wide window
+   compacts too. The table keeps only checkbox / Model / State / Memory; every
+   other column moves into a per-row drawer (.wp-servdrawer) rendered from the
+   SAME column defs. Rules here only ever apply INSIDE .wp-servtable-compact —
+   the desktop layout above is untouched. */
+.wp-servtable-compact .wp-servtable-scroll {
+  /* Three columns fit: no horizontal scroll at all. The vertical scroller (and
+     therefore the sticky header) stays exactly as it is on desktop. */
+  overflow-x: hidden;
+}
+/* Nothing to freeze against without horizontal scroll — the sticky-left offsets
+   would only paint an opaque column over a table that never moves sideways. The
+   sticky HEADER (top) is a separate rule and deliberately survives. */
+.wp-servtable-compact .wp-servtable-t td.wp-servtable-selcol,
+.wp-servtable-compact .wp-servtable-t td.wp-servtable-stickycol { position: static; }
+.wp-servtable-compact .wp-servtable-t th.wp-servtable-stickyname,
+.wp-servtable-compact .wp-servtable-t td.wp-servtable-stickyname { box-shadow: none; }
+/* Headers keep sticking to the TOP; their sticky-LEFT offset goes away with the
+   horizontal scroll it existed for. */
+.wp-servtable-compact .wp-servtable-t th.wp-servtable-selcol,
+.wp-servtable-compact .wp-servtable-t th.wp-servtable-stickycol { position: sticky; top: 0; left: auto; }
+/* Rows are tap targets in this mode. */
+.wp-servtable-compact .wp-servtable-row { cursor: pointer; }
+.wp-servtable-compact .wp-servtable-t td { white-space: normal; }
+.wp-servtable-compact .wp-servtable-name { max-width: none; }
+/* Disclosure marker on the Model cell — ▸ closed, ▾ open. */
+.wp-servtable-compact .wp-servtable-name::after { content: ' ▸'; color: var(--muted); font-size: 10px; }
+.wp-servtable-compact .wp-servtable-rowopen .wp-servtable-name::after { content: ' ▾'; }
+.wp-servtable-compact .wp-servtable-rowopen > td { background: rgba(255,255,255,0.04); }
+
+/* The drawer itself: full name, then the displaced columns as labeled chips,
+   then the actions as a touch-target row. */
+.wp-servdrawer { display: flex; flex-direction: column; gap: 8px; }
+/* FULL, untruncated, wrapping and selectable — the drawer is the one place the
+   whole name is always readable (midTrunc only shortens the table cell). */
+.wp-servdrawer-name {
+  font-size: 12px; font-weight: 600; line-height: 1.35;
+  overflow-wrap: anywhere; user-select: text;
+}
+.wp-servdrawer-key {
+  font-size: 10px; color: var(--muted); overflow-wrap: anywhere; user-select: text;
+  margin-top: -4px;
+}
+.wp-servdrawer-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* One chip per displaced column: the def's label above, the def's own render()
+   below — so the Alloc menu / residency / pin / 4-bit / MoE controls are the
+   very same interactive elements as desktop. */
+.wp-servdrawer-chip {
+  display: flex; flex-direction: column; gap: 2px;
+  min-height: 40px; justify-content: center;
+  padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); max-width: 100%;
+}
+.wp-servdrawer-chip-label {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+}
+.wp-servdrawer-chip-body { font-size: 12px; overflow-wrap: anywhere; }
+/* Actions row: full width, ≥40px targets, wrapping rather than overflowing. */
+.wp-servdrawer-actions {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  border-top: 1px solid var(--border); padding-top: 8px;
+}
+.wp-servdrawer-actions > button {
+  flex: 1 1 auto; min-height: 40px; min-width: 64px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* Compact-only sort control in the filter bar (the sortable headers are off
+   screen in this mode; this drives the SAME servSort/servDir state). */
+.wp-servtable-sortsel { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; }
+.wp-servtable-sortsel select { max-width: 150px; }
+.wp-servtable-sortdir {
+  font-size: 11px; padding: 2px 7px; cursor: pointer; min-height: 28px;
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.wp-servtable-sortdir:hover { color: var(--text); border-color: var(--accent, #60a5fa); }
+/* The alloc popover is position:fixed and clamped to the viewport in JS; cap its
+   width too so a 340px menu can't exceed a 360px phone. */
+.wp-servtable-compact .wp-allocmode-menu { max-width: calc(100vw - 8px); }
+
+/* External gpu_lease residents (ExternalLeases.jsx): batch jobs as
+   pseudo-models with live evictable/resume policy toggles. */
+.wp-lease-chip { display: inline-flex; align-items: center; gap: 5px; cursor: default; }
+.wp-lease-chip strong { font-weight: 600; }
+.wp-lease-chip em { font-style: normal; color: var(--muted); }
+.wp-lease-toggle { font-size: 10px; padding: 0 6px; border-radius: 7px; border: 1px solid var(--border, #2a3346); background: var(--surface-3, #232c3d); color: inherit; cursor: pointer; }
+.wp-lease-toggle:hover { filter: brightness(1.2); }
+.wp-lease-toggle:disabled { opacity: .5; cursor: wait; }
+.wp-lease-toggle.wp-lease-off { border-color: var(--warn, #b58a2a); color: var(--warn, #d9a63c); }
+.wp-lease-err { font-size: 10px; color: var(--danger, #e05c5c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+
+/* ---- explicit priority-group clusters in the serving table (k119) ------ */
+.wp-pgroup-row td {
+  background: var(--panel-2, rgba(127, 127, 127, 0.08));
+  border-top: 1px solid var(--border);
+  padding: 0;
+}
+.wp-pgroup-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 8px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+.wp-pgroup-caret { flex: 0 0 auto; }
+.wp-pgroup-name { font-weight: 600; white-space: nowrap; }
+.wp-pgroup-count { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.wp-pgroup-workers {
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,18 @@
+# Default
+*                                   @putkoff
+# Package owners (edit when a second maintainer joins)
+/py/foundation/                     @putkoff
+/py/storage/                        @putkoff
+/py/inference/hugpy_engine/         @putkoff
+/py/inference/hugpy_media/          @putkoff
+/py/cinema/                         @putkoff
+/py/fleet/                          @putkoff
+/py/curation/                       @putkoff
+/py/operations/                     @putkoff
+/py/integrations/                   @putkoff
+/py/services/                       @putkoff
+/py/meta/                           @putkoff
+/react/                             @putkoff
+/PARTITION.md                       @putkoff
+/py/partition.toml                  @putkoff
+/py/WIRING.md                       @putkoff

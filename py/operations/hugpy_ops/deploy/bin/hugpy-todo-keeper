@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""SUPERSEDED by the `hugpy-todo-keeper` console script (hugpy-ops distribution).
+
+Kept only for operators who run the checkout without installing it:
+    <venv>/bin/python deploy/bin/hugpy-todo-keeper
+With `pip install -e py/operations/hugpy_ops` the console script covers this
+file completely; prefer `hugpy-todo-keeper` (the unit's ExecStart uses it).
+"""
+import sys
+
+from hugpy_ops.todo_keeper_daemon import main
+
+if __name__ == "__main__":
+    sys.exit(main())

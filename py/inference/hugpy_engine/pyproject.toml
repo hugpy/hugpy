@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-engine"
+version = "0.1.0"
+description = "Hugpy engine: model discovery and classification, allocation and eviction, native llama.cpp and GGUF runners, and the prompt-to-reply inference path with task and placement seams"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "inference",
+    "llama.cpp",
+    "gguf",
+    "transformers",
+    "model-serving",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "abstract-essentials",
+    "pydantic>=2",
+    "httpx",
+    "requests",
+    "huggingface-hub",
+    "psutil",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/inference/hugpy_engine/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/inference/hugpy_engine"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+# In-process GGUF inference (LlamaCppPythonRunner). Without it the engine
+# still serves GGUF models through llama-server slots or remote workers.
+gguf = ["llama-cpp-python"]
+# transformers text-generation runner (DeepCoderChatRunner).
+transformers = ["torch", "transformers", "accelerate", "safetensors"]
+# PEFT adapter loading on top of a transformers base.
+finetune = ["peft"]
+# Postgres-backed model index (HUGPY_REGISTRY_DB=pg); inert without it.
+index = ["psycopg[binary]"]
+test = ["pytest>=8", "pytest-timeout"]
+
+[project.scripts]
+hugpy-serve = "hugpy_engine.serve.serve_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_engine = ["py.typed"]

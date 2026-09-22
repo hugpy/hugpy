@@ -1,0 +1,31 @@
+[
+  {
+    "sheet": 1,
+    "components": [
+      "ApiAccess",
+      "AuthProvider",
+      "BridgePanel",
+      "ChangePassword",
+      "ChatPanel",
+      "DiscordPanel",
+      "HFSearch",
+      "HugpyConsole",
+      "HugpyProvider",
+      "Landing",
+      "Login",
+      "LoginForm",
+      "Logout",
+      "ModelTable",
+      "PeersBar",
+      "PhoneBrickPanel"
+    ]
+  },
+  {
+    "sheet": 2,
+    "components": [
+      "PrivateRoute",
+      "Register",
+      "WorkersPanel"
+    ]
+  }
+]

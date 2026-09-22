@@ -1,0 +1,303 @@
+/*
+ * components.css — convo-style component classes, against the real
+ * convo CSS variables (--main-surface-primary, --bg-elevated-primary,
+ * --text-primary, --border-*, --surface-hover, --message-surface).
+ *
+ * Class names mirror convo's vocabulary 1:1 (composer-btn,
+ * composer-send-btn, __menu-item, icon) so DOM greps line up.
+ *
+ * Added in this version:
+ *   - .control-chip / .control-chip-* — the thin sampling-knob strip
+ *     that lives below the composer (Hugpy-specific).
+ */
+
+@layer components {
+  /* Everything is nested under the chat root so these convo-vocabulary
+     class names (.btn, .icon, …) can't collide with the host app. */
+  .hugpy-chat-scope {
+  /* ── generic button --------------------------------------------------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 30px;
+    padding-inline: 0.7rem;
+    font-size: 0.8125rem;
+    line-height: 1.2;
+    font-weight: 500;
+    border: 1px solid transparent;
+    border-radius: 9999px;
+    cursor: pointer;
+    flex-shrink: 0;
+    pointer-events: auto;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease,
+      border-color 120ms ease,
+      opacity 120ms ease,
+      transform 120ms ease;
+  }
+
+  .btn:hover:not(:disabled) {
+    transform: translateY(-0.5px);
+  }
+
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .btn-primary {
+    background-color: var(--text-primary);
+    color: var(--text-primary-inverse);
+    background-clip: padding-box;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  .btn-secondary {
+    background-color: rgba(255, 255, 255, 0.035);
+    color: var(--text-primary);
+    border-color: var(--border-light);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background-color: var(--surface-hover);
+  }
+
+  /* ── composer buttons ------------------------------------------------ */
+  .composer-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+    width: 30px;
+    min-height: 30px;
+    min-width: 30px;
+    border-radius: 9999px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    position: relative;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease,
+      transform 120ms ease;
+  }
+
+  .composer-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background-color: var(--surface-hover);
+    transform: translateY(-0.5px);
+  }
+
+  .composer-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .composer-send-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    min-height: 28px;
+    width: 28px;
+    min-width: 28px;
+    border-radius: 9999px;
+    background-color: var(--text-primary);
+    color: var(--text-primary-inverse);
+    border: 0;
+    cursor: pointer;
+    transition:
+      opacity 120ms ease,
+      background-color 120ms ease,
+      transform 120ms ease;
+  }
+
+  .composer-send-btn:hover:not(:disabled) {
+    opacity: 0.92;
+    transform: translateY(-0.5px);
+  }
+
+  .composer-send-btn:disabled {
+    cursor: not-allowed;
+    background-color: rgba(255, 255, 255, 0.12);
+    color: var(--text-quaternary);
+  }
+
+  .corner-superellipse\/1\.1 {
+    border-radius: var(--composer-radius);
+  }
+
+  /* ── sidebar / menu items ------------------------------------------- */
+  .__menu-item {
+    --menu-item-color: var(--text-secondary);
+    --menu-item-icon-opacity: 0.92;
+
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 30px;
+    padding-inline: 0.55rem;
+    padding-block: 0.25rem;
+    border-radius: 8px;
+    color: var(--menu-item-color);
+    font-size: 0.8125rem;
+    line-height: 1.2;
+    text-decoration: none;
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease;
+  }
+
+  .__menu-item.hoverable:hover {
+    --menu-item-color: var(--text-primary);
+    background-color: var(--surface-hover);
+  }
+
+  .__menu-item .icon {
+    width: 17px;
+    height: 17px;
+    flex-shrink: 0;
+    opacity: var(--menu-item-icon-opacity, 1);
+    color: var(--sidebar-icon, var(--text-secondary));
+  }
+
+  /* ── icon sizes ------------------------------------------------------ */
+  .icon {
+    width: 17px;
+    height: 17px;
+  }
+
+  .icon-sm {
+    width: 14px;
+    height: 14px;
+  }
+
+  .icon-lg {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* ── composer textarea ─────────────────────────────────────────────── */
+  .composer-textarea {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 16px;       /* iOS no-zoom threshold */
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    padding: 0.45rem 0;
+    max-height: 30svh;
+    min-height: 1.5rem;
+    overflow-y: auto;
+  }
+  .composer-textarea::placeholder { color: var(--text-tertiary); }
+
+  /* ── control chip (the strip below the composer) ───────────────────── */
+  .control-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1;
+  }
+  .control-chip-key {
+    color: var(--text-tertiary);
+    text-transform: lowercase;
+    letter-spacing: 0.01em;
+  }
+  .control-chip-input,
+  .control-chip-select {
+    background: transparent;
+    border: 0;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 6px;
+    transition: background-color 120ms ease;
+  }
+  .control-chip-input { width: 4.5ch; text-align: right; }
+
+  /* kill the native steppers that overlap the digits */
+  .control-chip-input::-webkit-outer-spin-button,
+  .control-chip-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .control-chip-input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  .control-chip-input:hover:not(:disabled),
+  .control-chip-select:hover:not(:disabled) {
+    background-color: var(--surface-hover);
+  }
+  .control-chip-input:focus,
+  .control-chip-select:focus {
+    outline: 1px solid var(--border-medium);
+    outline-offset: 1px;
+  }
+  .control-chip-input:disabled,
+  .control-chip-select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .control-chip-select { max-width: 180px; }
+  .control-chip-link {
+    background: transparent;
+    border: 0;
+    color: var(--link);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .control-chip-link:hover:not(:disabled) { color: var(--link-hover); }
+  .control-chip-link:disabled { opacity: 0.55; cursor: not-allowed; }
+  .control-chip-check {
+    accent-color: var(--text-primary);
+    width: 12px;
+    height: 12px;
+    margin: 0;
+  }
+  .control-chip-sep { color: var(--text-quaternary); user-select: none; }
+  }
+}
+
+/* ── animations (keyframes can't live in @layer) ─────────────────────── */
+@keyframes typing-blink {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%           { opacity: 1;    transform: scale(1); }
+}
+
+.hugpy-chat-scope .typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.hugpy-chat-scope .typing-dots > span {
+  width: 6px;
+  height: 6px;
+  background: var(--text-tertiary);
+  border-radius: 50%;
+  animation: typing-blink 1.2s infinite ease-in-out;
+}
+.hugpy-chat-scope .typing-dots > span:nth-child(2) { animation-delay: 0.2s; }
+.hugpy-chat-scope .typing-dots > span:nth-child(3) { animation-delay: 0.4s; }

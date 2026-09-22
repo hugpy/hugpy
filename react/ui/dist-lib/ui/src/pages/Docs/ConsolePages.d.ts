@@ -1,0 +1,14 @@
+export function ConsoleChatPage(): import("react").JSX.Element;
+export function ConsoleModelsPage(): import("react").JSX.Element;
+export function ConsoleWorkersPage(): import("react").JSX.Element;
+export function ConsoleServingPage(): import("react").JSX.Element;
+export function ConsoleImagesPage(): import("react").JSX.Element;
+export function ConsoleDiscordPage(): import("react").JSX.Element;
+export function ConsoleGlossaryPage(): import("react").JSX.Element;
+export const CHAT_TOC: (string | any[])[][];
+export const MODELS_TOC: (string | any[])[][];
+export const WORKERS_TOC: (string | any[])[][];
+export const SERVING_TOC: (string | any[])[][];
+export const IMAGES_TOC: (string | any[])[][];
+export const DISCORD_TOC: (string | string[][])[][];
+export const GLOSSARY_TOC: (string | any[])[][];

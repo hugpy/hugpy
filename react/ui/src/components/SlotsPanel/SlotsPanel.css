@@ -1,0 +1,265 @@
+.slots-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sp-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.sp-bar-static { cursor: default; }
+.sp-bar:not(.sp-bar-static):hover { background: var(--surface-2); }
+.sp-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sp-bar:not(.sp-bar-static):hover .sp-title { color: var(--text); }
+.sp-count { color: var(--muted); font-size: 11px; }
+.sp-down-chip { color: var(--red); font-size: 11px; }
+.sp-res { color: var(--muted); font-size: 11px; font-family: var(--mono, monospace); }
+.sp-res-pool { color: var(--text); }
+.sp-tag-ram { color: var(--text); }
+/* Not a measured occupancy figure (VmRSS incl. mmap'd file pages) — muted. */
+.sp-tag-est { color: var(--muted); font-style: italic; }
+.sp-err { color: var(--red); margin-left: auto; }
+.sp-toggle { margin-left: auto; color: var(--muted); font-size: 10px; }
+.sp-err + .sp-toggle { margin-left: 8px; }
+
+.sp-body { padding: 10px 14px 14px; }
+
+/* load row */
+.sp-load-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.sp-load-row select { flex: 1 1 auto; padding: 5px 8px; min-width: 0; }
+.sp-load-btn { padding: 5px 12px; white-space: nowrap; }
+.sp-load-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* optional per-load compute knobs */
+.sp-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -4px 0 12px;
+}
+.sp-opts label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.sp-opts input {
+  width: 64px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+/* slot cards */
+.sp-slots { display: flex; flex-direction: column; gap: 8px; }
+.sp-none { color: var(--muted); font-style: italic; }
+
+.sp-slot {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+.sp-st-serving { border-left: 3px solid var(--green, #3fb950); }
+.sp-st-idle    { border-left: 3px solid var(--border); }
+.sp-st-down    { border-left: 3px solid var(--red); opacity: 0.85; }
+
+.sp-slot-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sp-state-pill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.sp-pill-serving { color: var(--green, #3fb950); }
+.sp-pill-idle    { color: var(--muted); }
+.sp-pill-down    { color: var(--red); }
+
+.sp-slot-id { font-weight: 600; }
+.sp-slot-url {
+  color: var(--muted);
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.sp-unload { margin-left: auto; padding: 2px 8px; font-size: 11px; }
+.sp-unload:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.sp-slot-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.sp-model-name { font-weight: 600; color: var(--text); }
+.sp-tag {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+.sp-tag-dim { opacity: 0.8; }
+.sp-dedicated { color: var(--green, #3fb950); border-color: var(--green, #3fb950); }
+
+/* loading state */
+.sp-st-loading { border-left: 3px solid var(--amber, #d29922); }
+.sp-pill-loading { color: var(--amber, #d29922); }
+.sp-loading-tag { color: var(--amber, #d29922); border-color: var(--amber, #d29922); }
+.sp-slot-progress {
+  margin-top: 6px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.sp-slot-progress-bar {
+  height: 100%;
+  width: 40%;
+  border-radius: 3px;
+  background: var(--amber, #d29922);
+  animation: sp-indeterminate 1.1s ease-in-out infinite;
+}
+@keyframes sp-indeterminate {
+  0%   { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.sp-slot-progress-bar.sp-determinate {
+  animation: none;
+  margin-left: 0;
+  transition: width 0.6s ease;
+}
+
+.sp-slot-vram { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.sp-slot-err { margin-top: 5px; font-size: 11px; color: var(--red); }
+
+/* install (when slot pool disabled) */
+.sp-install-label { color: var(--muted); margin: 0 0 8px; line-height: 1.4; }
+.sp-install-btn { padding: 5px 12px; }
+.sp-steps { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.sp-step-kind { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.sp-step-payload {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.sp-step-cmd {
+  display: block;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+}
+.sp-install-note { color: var(--muted); font-size: 11px; margin: 4px 0 0; }
+
+/* systemd always-on visibility + double-GPU-residency warning */
+.sp-warn-banner {
+  margin: 8px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--yellow, #d29922);
+  border-left: 3px solid var(--yellow, #d29922);
+  border-radius: 6px;
+  background: rgba(210, 153, 34, 0.10);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.sp-tag-warn {
+  color: var(--yellow, #d29922) !important;
+  border-color: var(--yellow, #d29922) !important;
+}
+.sp-pinned {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.sp-pinned-head { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+.sp-pinned-sub { opacity: 0.7; }
+.sp-pinned-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 3px 0; font-size: 11.5px;
+}
+.sp-pinned-name { color: var(--text); font-weight: 500; }
+.sp-unit-state {
+  font-size: 10.5px; font-family: var(--mono, monospace);
+  padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.sp-unit-up   { color: var(--green, #3fb950); border-color: var(--green, #3fb950); }
+.sp-unit-down { color: var(--muted); }
+.sp-unit-unk  { color: var(--muted); opacity: 0.7; }
+
+/* VM memory breakdown bar: used | reclaimable cache | free */
+.sp-mem { margin: 4px 0 12px; }
+.sp-mem-bar {
+  display: flex; height: 9px; border-radius: 5px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.sp-mem-used  { background: var(--accent, #58a6ff); }
+.sp-mem-cache { background: var(--muted); opacity: 0.4; }
+.sp-mem-free  { background: transparent; }
+.sp-mem-legend {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 5px; font-size: 11px; color: var(--muted);
+  font-family: var(--mono, monospace);
+}
+.sp-sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+         margin-right: 4px; vertical-align: middle; }
+.sp-sw-used  { background: var(--accent, #58a6ff); }
+.sp-sw-cache { background: var(--muted); opacity: 0.4; }
+.sp-sw-free  { border: 1px solid var(--border); }
+.sp-mem-avail { color: var(--text); }
+.sp-mem-cores { opacity: 0.8; }
+.sp-free-btn {
+  margin-left: auto; font-size: 10.5px; padding: 2px 8px;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface-2); color: var(--muted); cursor: pointer;
+}
+.sp-free-btn:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.sp-free-btn:disabled { opacity: 0.5; cursor: default; }
+.sp-warm-btn {
+  font-size: 12px; padding: 3px 10px; border: 1px solid var(--border);
+  border-radius: 5px; background: var(--surface-2); color: var(--muted); cursor: pointer;
+}
+.sp-warm-btn:hover:not(:disabled) { color: var(--accent, #58a6ff); border-color: var(--accent, #58a6ff); }
+.sp-warm-btn:disabled { opacity: 0.5; cursor: default; }
+.sp-cache-line {
+  margin-top: 5px; font-size: 11px; color: var(--muted);
+  font-family: var(--mono, monospace);
+}
+.sp-tag-gen { color: var(--green, #3fb950) !important; border-color: var(--green, #3fb950) !important; }

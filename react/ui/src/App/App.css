@@ -1,0 +1,423 @@
+.layout {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  flex-shrink: 0;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.logo {
+  color: var(--bright);
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.logo:hover { color: var(--accent); }
+.logo-mark { color: var(--accent); font-size: 15px; }
+.logo-img {
+  height: 22px;
+  width: auto;
+  align-self: center;
+  /* the mark sits on solid black in the source PNG; blend onto our bg */
+  mix-blend-mode: screen;
+}
+.logo-sub {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Brand stays pinned on the left; the rest of the nav scrolls. */
+.topbar > .brandmark { flex-shrink: 0; }
+
+.topbar-scroll {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.topbar-scroll::-webkit-scrollbar { display: none; }
+/* Items in the sliding bar keep their size and scroll, never compress/wrap. */
+.topbar-scroll > * { flex-shrink: 0; }
+
+.topbar-stats {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.topbar-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.topbar-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.topbar-filter input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Model-list controls, bound to the Models tab (moved off the global topbar). */
+.models-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 2px 0 12px;
+}
+
+/* Header link to the public docs — styled to match the topbar buttons */
+.topbar-doclink {
+  font-size: 12px;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.topbar-doclink:hover { background: var(--surface-3); border-color: var(--border-strong); color: var(--text); }
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* The Models tab's left side is a VERTICAL SPLIT: the model list on top, the
+   live eviction feed below (operator, 2026-07-28 — call a model from chat and
+   watch its eviction behaviour on the same screen). The pane itself no longer
+   scrolls; each half owns its own scroll so the feed stays put while the list
+   moves. Heights come from the inline % the drag handle writes. */
+.models-pane {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Host for the list/feed vertical split. The two children are sized in PERCENT
+   and must sum to one box, so anything else in .models-pane (the priority-group
+   strip) has to live OUTSIDE this host or the percentages would over-run the
+   pane and clip the feed. */
+.models-pane-split-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.models-pane-list {
+  min-height: 0;
+  overflow: auto;
+  flex-shrink: 0;
+}
+
+.models-pane-feed {
+  min-height: 0;
+  overflow: hidden;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* A 5px grab strip that grows a visible rail on hover — same affordance as the
+   AssessmentPanel column resizer, rotated. */
+.models-split {
+  height: 5px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: var(--surface-1);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.models-split:hover { background: var(--surface-3); }
+
+.models-split-grip {
+  width: 34px;
+  height: 1px;
+  background: var(--border-strong);
+}
+.models-split:hover .models-split-grip { background: var(--accent); }
+
+/* A collapsed feed keeps its handle — otherwise there is no way to get it back
+   without knowing the double-click. */
+.models-pane-feed:empty { display: none; }
+
+/* Mobile: an open chat takes over the whole Models frame — the model list is
+   hidden (and therefore unscrollable) until the chat is closed. */
+@media (max-width: 640px) {
+  .models-pane[data-chat-open="true"] { display: none; }
+}
+
+.placeholder {
+  padding: 32px 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.placeholder.error {
+  color: var(--red);
+}
+
+/* ---- tabbed console nav (replaces the old collapsible section strips) ---- */
+.tabbar {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  flex-shrink: 0;
+  /* Scroll the tabs instead of extruding the page when they don't fit (mobile). */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.tabbar::-webkit-scrollbar { display: none; }
+.tab { flex-shrink: 0; }
+
+.tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 9px 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.tab:hover:not(.tab-active) {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: transparent;
+}
+.tab-active {
+  color: var(--bright);
+  border-bottom-color: var(--accent);
+}
+
+.tab-badge {
+  font-size: 10px;
+  line-height: 16px;
+  min-width: 16px;
+  text-align: center;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 0 5px;
+}
+.tab-active .tab-badge {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* container for whichever tab is active */
+.tab-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* generic scroll pane for the non-Models tabs */
+.tab-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* embedded panel bars are headers now, not toggles */
+.wp-bar-static,
+.pb-bar-static {
+  cursor: default;
+}
+
+/* /console gate: brief splash while probing the visitor's own localhost central
+   (brochure → real local console vs. showroom). See App.jsx LocalCentralGate. */
+.console-probe {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  min-height: 100vh;
+  font-size: 0.95rem;
+  color: #9aa3b2;
+  background: #0b0e14;
+}
+.console-probe-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #6ea8fe;
+  animation: console-probe-pulse 1s ease-in-out infinite;
+}
+@keyframes console-probe-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.1); }
+}
+
+/* Help is reachable from the Navbar ("Help" -> openHelpWidget), so hide the
+   shared widget's floating action button in the console — it overlapped UI
+   components. Only the closed-state fab is hidden; the panel still opens and
+   closes normally (the panel renders .hgh-x / .hgh-tab, not .hgh-fab). */
+#hugpy-help-widget .hgh-fab { display: none !important; }
+
+/* ── Compute tab: floating chat overlay ───────────────────────────────────
+   The Models tab renders <ChatPanel> as an INLINE 44% flex column (see
+   ChatPanel.css) that shares the row with the model list. The Compute tab
+   reuses the very same component, but as a FLOATING panel: it must never
+   compress or reflow the workers grid. position:fixed takes it out of normal
+   flow entirely, so opening it costs the compute layout zero space, and it's
+   docked bottom-right (not top:0) so it never covers the nav/tabbar. No portal
+   is needed — none of the .layout/.tab-body/.tab-pane ancestors establish a
+   containing block for fixed elements (no transform/filter), matching the
+   existing fixed-position .rv-modal overlay pattern. */
+.compute-chat-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+.compute-chat-toggle {
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+}
+.compute-chat-toggle.is-open {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.compute-chat-overlay {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;                                  /* above content; cf. .rv-modal-back */
+  width: min(460px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 120px));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;                             /* clip the panel to the rounded card */
+}
+
+/* Re-host the reused ChatPanel: as an inline column it's a 44%-wide, left-
+   bordered flex child; as a floating card it simply fills the overlay. The
+   component and its own CSS are untouched — only its footprint is re-scoped. */
+.compute-chat-overlay .chat-panel {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  border-left: none;
+}
+
+/* Empty state (no conversation open yet): a small header + a ModelPicker to
+   start one from Compute, where there's no model table to click. */
+.compute-chat-empty {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.compute-chat-empty-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.compute-chat-empty-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Mobile: dock the overlay to the bottom edge as a near-full-height sheet. */
+@media (max-width: 640px) {
+  .compute-chat-overlay {
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: 82vh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+}

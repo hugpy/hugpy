@@ -1,0 +1,146 @@
+/*
+ * tokens.css — design tokens for the Hugpy chat shell.
+ *
+ * Two layers, on purpose:
+ *
+ *   1. CSS custom properties on .hugpy-chat-scope (+ [data-theme="dark"])
+ *      These are the *values*. Light + dark live side by side and you switch
+ *      themes by toggling a single attribute on <html>. No prefers-color-scheme
+ *      auto-switching — explicit wiring only.
+ *
+ *   2. Tailwind v4 @theme block
+ *      These bind the custom props to Tailwind utility names so
+ *      `bg-token-bg-primary`, `text-token-text-primary`, `border-token-border-light`
+ *      etc. work as classes in TSX, mirroring convo's class vocabulary.
+ *
+ * If you want to add a token, add it in BOTH places. If you want to add a
+ * theme variant (high-contrast, oled), add a third [data-contrast="high"] etc.
+ * block — don't fork the @theme.
+ */
+
+.hugpy-chat-scope {
+  /* Surface ------------------------------------------------------------- */
+  --main-surface-primary:   #ffffff;
+  --main-surface-secondary: #f9f9f9;
+  --sidebar-surface-primary: var(--main-surface-secondary);
+
+  --bg-primary:             #ffffff;
+  --bg-elevated-primary:    #f4f4f4;
+  --bg-elevated-secondary:  #ececec;
+
+  --surface-hover:          #ececec;
+  --surface-secondary:      #f4f4f4;
+
+  /* Text ---------------------------------------------------------------- */
+  --text-primary:           #0d0d0d;
+  --text-secondary:         #5d5d5d;
+  --text-tertiary:          #8e8e8e;
+  --text-quaternary:        #b4b4b4;
+  --text-inverted:          #ffffff;
+
+  /* Borders ------------------------------------------------------------- */
+  --border-extra-light:     rgba(0, 0, 0, 0.06);
+  --border-light:           rgba(0, 0, 0, 0.10);
+  --border-medium:          rgba(0, 0, 0, 0.15);
+  --border-heavy:           rgba(0, 0, 0, 0.30);
+
+  /* Brand / accent ------------------------------------------------------ */
+  --accent-primary:         #0d0d0d;
+  --accent-primary-hover:   #2f2f2f;
+  --link:                   #2964aa;
+
+  /* Status -------------------------------------------------------------- */
+  --status-queued:          #93c5fd;
+  --status-streaming:       #c4b5fd;
+  --status-complete:        #86efac;
+  --status-cancelled:       #d1d5db;
+  --status-error:           #fca5a5;
+
+  /* Layout / chrome ----------------------------------------------------- */
+  --sidebar-width:          260px;
+  --sidebar-rail-width:     52px;
+  --header-height:          52px;
+
+  --thread-content-margin-xs: 1rem;
+  --thread-content-margin-sm: 1.5rem;
+  --thread-content-margin-lg: 4rem;
+  --thread-content-max-width-sm: 40rem;
+  --thread-content-max-width-lg: 48rem;
+
+  /* Composer ------------------------------------------------------------ */
+  --composer-radius:        28px;
+  --composer-shadow:        0 2px 6px rgba(0, 0, 0, 0.04),
+                            0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+.hugpy-chat-scope[data-theme="dark"] {
+  --main-surface-primary:   #212121;
+  --main-surface-secondary: #171717;
+  --sidebar-surface-primary: var(--main-surface-secondary);
+
+  --bg-primary:             #212121;
+  --bg-elevated-primary:    #2f2f2f;
+  --bg-elevated-secondary:  #424242;
+
+  --surface-hover:          #2a2b32;
+  --surface-secondary:      #2f2f2f;
+
+  --text-primary:           #ececec;
+  --text-secondary:         #b4b4b4;
+  --text-tertiary:          #8e8e8e;
+  --text-quaternary:        #6e6e6e;
+  --text-inverted:          #0d0d0d;
+
+  --border-extra-light:     rgba(255, 255, 255, 0.08);
+  --border-light:           rgba(255, 255, 255, 0.12);
+  --border-medium:          rgba(255, 255, 255, 0.18);
+  --border-heavy:           rgba(255, 255, 255, 0.40);
+
+  --accent-primary:         #ffffff;
+  --accent-primary-hover:   #ececec;
+  --link:                   #7cb1f0;
+
+  --composer-shadow:        0 2px 6px rgba(0, 0, 0, 0.3),
+                            0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Tailwind v4 token bindings ----------------------------------------------
+ * Anything declared here is reachable as a Tailwind utility class.
+ * Pattern: `--color-token-<slug>` → `bg-token-<slug>` / `text-token-<slug>` /
+ * `border-token-<slug>`.
+ */
+@theme {
+  --color-token-main-surface-primary:    var(--main-surface-primary);
+  --color-token-main-surface-secondary:  var(--main-surface-secondary);
+  --color-token-sidebar-surface-primary: var(--sidebar-surface-primary);
+
+  --color-token-bg-primary:              var(--bg-primary);
+  --color-token-bg-elevated-primary:     var(--bg-elevated-primary);
+  --color-token-bg-elevated-secondary:   var(--bg-elevated-secondary);
+
+  --color-token-surface-hover:           var(--surface-hover);
+  --color-token-surface-secondary:       var(--surface-secondary);
+
+  --color-token-text-primary:            var(--text-primary);
+  --color-token-text-secondary:          var(--text-secondary);
+  --color-token-text-tertiary:           var(--text-tertiary);
+  --color-token-text-quaternary:         var(--text-quaternary);
+  --color-token-text-inverted:           var(--text-inverted);
+
+  --color-token-border-extra-light:      var(--border-extra-light);
+  --color-token-border-light:            var(--border-light);
+  --color-token-border-medium:           var(--border-medium);
+  --color-token-border-heavy:            var(--border-heavy);
+
+  --color-token-accent-primary:          var(--accent-primary);
+  --color-token-accent-primary-hover:    var(--accent-primary-hover);
+  --color-token-link:                    var(--link);
+
+  --color-token-status-queued:           var(--status-queued);
+  --color-token-status-streaming:        var(--status-streaming);
+  --color-token-status-complete:         var(--status-complete);
+  --color-token-status-cancelled:        var(--status-cancelled);
+  --color-token-status-error:            var(--status-error);
+
+  --shadow-short-composer:               var(--composer-shadow);
+}

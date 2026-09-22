@@ -1,0 +1,17 @@
+{
+  "pkg": "@hugpy/ui",
+  "globalName": "HugpyUI",
+  "shape": "package",
+  "projectId": "e9b198fd-7111-4619-8b4d-b4ec0a32af4b",
+  "buildCmd": "npm run build:lib",
+  "cssEntry": "./dist-lib/style.css",
+  "extraFonts": ".design-sync/fonts-src/brand-mono.css",
+  "extraEntries": ["./.design-sync/preview-runtime.jsx"],
+  "provider": { "component": "DemoProvider" },
+  "readmeHeader": ".design-sync/conventions.md",
+  "overrides": {
+    "HugpyConsole": { "cardMode": "single", "primaryStory": "Console", "viewport": "1280x900" },
+    "ChatPanel": { "cardMode": "column" },
+    "WorkersPanel": { "cardMode": "column" }
+  }
+}

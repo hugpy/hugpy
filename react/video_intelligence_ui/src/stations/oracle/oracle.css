@@ -1,0 +1,467 @@
+/*
+ * or-k18 / k114 — the Oracle station.
+ *
+ * Own file, colocated with the component that imports it (the scriptFirst.css
+ * pattern) because app.css is a foreign dirty file today. Everything here is
+ * prefixed `vi-oracle-`; the shared primitives (`station-card`, `vi-btn`,
+ * `vi-error`, `vi-status`, `vi-knob-hint`) come from app.css and are NOT
+ * redefined.
+ */
+
+.vi-oracle {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.vi-oracle-panel {
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  padding: 0.85rem 1rem 1rem;
+  min-width: 0;
+}
+
+.vi-oracle-panel > h3 {
+  margin: 0 0 0.6rem;
+  font-family: var(--vi-mono);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.vi-oracle-panel > h3 .vi-oracle-sub {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.75rem;
+  color: var(--vi-text-dim);
+  opacity: 0.85;
+}
+
+.vi-oracle-panel > h4 {
+  margin: 0.8rem 0 0.4rem;
+  font-family: var(--vi-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+}
+
+.vi-oracle-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.vi-oracle-row + .vi-oracle-row {
+  margin-top: 0.5rem;
+}
+
+.vi-oracle-grow {
+  flex: 1 1 14rem;
+  min-width: 8rem;
+}
+
+.vi-oracle-kv {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) 1fr;
+  gap: 0.25rem 0.9rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.vi-oracle-kv dt {
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+}
+
+.vi-oracle-kv dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.vi-oracle-kv code,
+.vi-oracle-table code,
+.vi-oracle-digest {
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  color: var(--vi-text-dim);
+}
+
+/* --- tags / severities ---------------------------------------------------- */
+
+.vi-oracle-tag {
+  display: inline-block;
+  font-family: var(--vi-mono);
+  font-size: 0.66rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  color: var(--vi-text-dim);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.vi-oracle-tag-info {
+  border-color: var(--vi-border);
+}
+
+.vi-oracle-tag-warn {
+  border-color: #8a7a3a;
+  color: #f2d16b;
+}
+
+.vi-oracle-tag-alarm {
+  border-color: #6b4a4a;
+  color: #ff8a8a;
+}
+
+.vi-oracle-tag-ok {
+  border-color: #3f6b4a;
+  color: #7fd88f;
+}
+
+.vi-oracle-tag-accent {
+  border-color: var(--vi-accent);
+  color: var(--vi-accent);
+}
+
+/* node / run states — same palette as .vi-status-* so a DAG state reads like a
+   job phase elsewhere in the console */
+.vi-oracle-state {
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vi-text-dim);
+}
+
+.vi-oracle-state-running,
+.vi-oracle-state-leased,
+.vi-oracle-state-pending,
+.vi-oracle-state-awaiting_approval,
+.vi-oracle-state-paused {
+  color: var(--vi-accent);
+}
+
+.vi-oracle-state-succeeded,
+.vi-oracle-state-completed {
+  color: #7fd88f;
+}
+
+.vi-oracle-state-failed,
+.vi-oracle-state-rejected,
+.vi-oracle-state-cancelled {
+  color: #ff8a8a;
+}
+
+/* --- the steward ---------------------------------------------------------- */
+
+.vi-oracle-stale {
+  border: 1px solid #8a7a3a;
+  background: rgba(242, 209, 107, 0.08);
+  color: #f2d16b;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.78rem;
+  margin: 0.5rem 0;
+}
+
+.vi-oracle-findings {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.vi-oracle-finding {
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.78rem;
+  background: var(--vi-surface);
+}
+
+.vi-oracle-finding-alarm {
+  border-color: #6b4a4a;
+}
+
+.vi-oracle-finding-warn {
+  border-color: #8a7a3a;
+}
+
+.vi-oracle-finding-head {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.vi-oracle-finding-action {
+  margin: 0.25rem 0 0;
+  color: var(--vi-text-dim);
+  font-size: 0.74rem;
+}
+
+/* --- tables --------------------------------------------------------------- */
+
+.vi-oracle-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+}
+
+.vi-oracle-table th,
+.vi-oracle-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--vi-border);
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.vi-oracle-table th {
+  font-family: var(--vi-mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vi-text-dim);
+  font-weight: normal;
+}
+
+.vi-oracle-table tr.is-selected td {
+  background: rgba(138, 180, 255, 0.08);
+}
+
+.vi-oracle-table tr.is-clickable {
+  cursor: pointer;
+}
+
+.vi-oracle-table tr.is-clickable:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* --- the DAG list + the per-node drawer ----------------------------------- */
+
+.vi-oracle-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+
+@media (min-width: 62rem) {
+  .vi-oracle-split.has-drawer {
+    grid-template-columns: minmax(0, 1fr) minmax(20rem, 26rem);
+  }
+}
+
+.vi-oracle-drawer {
+  border: 1px solid var(--vi-accent);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  padding: 0.85rem 1rem 1rem;
+  min-width: 0;
+  align-self: start;
+  position: sticky;
+  top: 0.5rem;
+  max-height: calc(100dvh - 8rem);
+  overflow: auto;
+}
+
+.vi-oracle-drawer > h3 {
+  margin: 0 0 0.6rem;
+  font-family: var(--vi-mono);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vi-text);
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.vi-oracle-drawer > h3 .vi-oracle-close {
+  margin-left: auto;
+}
+
+.vi-oracle-drawer > h4 {
+  margin: 0.9rem 0 0.35rem;
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+}
+
+.vi-oracle-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.vi-oracle-candidate {
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.76rem;
+  background: var(--vi-surface);
+}
+
+.vi-oracle-candidate.is-selected {
+  border-color: var(--vi-accent);
+}
+
+.vi-oracle-candidate.is-rejected {
+  opacity: 0.8;
+}
+
+.vi-oracle-candidate-head {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.vi-oracle-candidate-head code {
+  font-family: var(--vi-mono);
+  font-size: 0.74rem;
+  color: var(--vi-text);
+}
+
+.vi-oracle-reasons {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+  color: var(--vi-text-dim);
+  font-size: 0.72rem;
+}
+
+.vi-oracle-steps {
+  margin: 0.25rem 0 0;
+  padding-left: 1.2rem;
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  color: var(--vi-text-dim);
+}
+
+/* --- scorecard ------------------------------------------------------------ */
+
+.vi-oracle-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.74rem;
+}
+
+.vi-oracle-meter-track {
+  flex: 1 1 6rem;
+  height: 0.35rem;
+  border-radius: 999px;
+  background: var(--vi-border);
+  overflow: hidden;
+}
+
+.vi-oracle-meter-fill {
+  height: 100%;
+  background: var(--vi-accent);
+}
+
+/* --- raw JSON (provenance) ------------------------------------------------ */
+
+.vi-oracle-raw {
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 18rem;
+  overflow: auto;
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  color: var(--vi-text-dim);
+  margin: 0.3rem 0 0;
+}
+
+.vi-oracle-raw-toggle {
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  cursor: pointer;
+  margin-top: 0.4rem;
+}
+
+.vi-oracle-raw-toggle summary {
+  font-family: var(--vi-mono);
+}
+
+.vi-oracle-note {
+  font-size: 0.76rem;
+  color: var(--vi-text-dim);
+  margin: 0.4rem 0 0;
+}
+
+.vi-oracle-gap {
+  border: 1px dashed #6b4a4a;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.76rem;
+  color: #ff8a8a;
+  margin: 0.4rem 0 0;
+}
+
+.vi-oracle-limits {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.76rem;
+  color: var(--vi-text-dim);
+}
+
+/* --- tabs (DAG / spatial) ------------------------------------------------- */
+
+.vi-oracle-tabs {
+  display: flex;
+  gap: 0.3rem;
+  border-bottom: 1px solid var(--vi-border);
+  margin-bottom: 0.8rem;
+}
+
+.vi-oracle-tab {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--vi-text-dim);
+  font-family: var(--vi-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+}
+
+.vi-oracle-tab[aria-selected="true"] {
+  color: var(--vi-text);
+  border-bottom-color: var(--vi-accent);
+}
+
+.vi-oracle-runs {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.vi-oracle-runs .vi-btn {
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+}

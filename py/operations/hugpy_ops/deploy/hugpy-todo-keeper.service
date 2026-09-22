@@ -1,0 +1,78 @@
+# hugpy todo-keeper agent node — the standing P3 agent node that answers the
+# console's ☑ todo drawer assists (todo.add / todo.tidy) as durable dispatched
+# tasks instead of stateless one-shot completions.
+#
+# NOT INSTALLED/ENABLED BY THIS FILE. The keeper writes it; the OPERATOR installs
+# it after review (deliberate — a standing daemon that enrolls a node and holds a
+# credential is an operator decision, not a subagent's):
+#
+#   sudo cp <hugpy_ops>/deploy/hugpy-todo-keeper.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hugpy-todo-keeper
+#   systemctl status hugpy-todo-keeper; journalctl -u hugpy-todo-keeper -f
+#
+# The daemon is the `hugpy-todo-keeper` console script of the hugpy-ops
+# distribution (`pip install hugpy-ops`); adjust the venv path below per box.
+#
+# RESTART SURVIVAL: enrollment happens ONCE; the node id + one-time agt_ token
+# persist to ~/.config/hugpy/todo-keeper.json (0600, outside any checkout), so a
+# reboot resumes the SAME node rather than orphaning it. Restart=always + a
+# 10s backoff covers a central that is briefly down.
+
+[Unit]
+Description=hugpy todo-keeper agent node (P3 /agent node; answers todo.add + todo.tidy)
+After=network.target hugpy-api-dev.service
+Wants=hugpy-api-dev.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStartPre=/usr/bin/test -x /home/ubuntu/hugpy/venv/bin/hugpy-todo-keeper
+ExecStart=/home/ubuntu/hugpy/venv/bin/hugpy-todo-keeper
+Restart=always
+RestartSec=10
+
+Environment=PYTHONUNBUFFERED=1
+# Central base URL — HUGPY_BASE_URL is canonical; the legacy HUGPY_CENTRAL
+# alias is still honoured by hugpy_platform.central_base_url.
+Environment=HUGPY_BASE_URL=http://127.0.0.1:7002
+Environment=HUGPY_TODO_KEEPER_MODEL=Qwen2.5-3B-Instruct-GGUF
+# The token/cursor state file. MUST be on durable storage under $HOME — /tmp and
+# XDG_RUNTIME_DIR are cleared on boot, which would orphan the node every reboot.
+Environment=HUGPY_TODO_KEEPER_STATE=/home/ubuntu/.config/hugpy/todo-keeper.json
+# REQUIRED — /agent/register is PERMANENTLY key-gated (operator ruling 2026-07-16:
+# agent keys are "a separate api category entirely… gated permanently"). The gate
+# ignores the sitewide api_key_required toggle AND HUGPY_AGENT_OPEN, because
+# register MINTS credentials and is publicly reachable. Enrolling bare 401s.
+#
+# Sourced from the share, NOT written here: d-env/env holds CONSOLE_API=<key>, so
+# the secret never enters git (the repo tracks this unit; it must stay clean).
+# EnvironmentFile is optional-prefixed (-) so a missing file doesn't block boot —
+# enrollment then fails loudly with an explicit 401 message instead, which is the
+# honest failure. Once enrolled the node uses its own agt_ token; the console key
+# is only needed for the one-time bootstrap (and any re-enroll).
+# ⚠️ systemd does NOT shell-expand: `Environment=HUGPY_API_KEY=${CONSOLE_API}` passes the
+# LITERAL string "${CONSOLE_API}" (verified 2026-07-16 via `systemctl show -p Environment`),
+# and the node would 401 on enroll. EnvironmentFile already puts CONSOLE_API in the
+# environment under its own name — so the daemon reads CONSOLE_API directly and no
+# expansion is needed. Don't "fix" this back into an Environment= line.
+EnvironmentFile=-/srv/share/projects/hugpy/d-env/env
+
+# Hardening: this daemon needs the network, its state file, and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ...except its own state directory, which it must write (the token + cursor).
+ReadWritePaths=/home/ubuntu/.config/hugpy
+# The platform's per-user dirs (HUGPY_HOME, default ~/.hugpy) are created on
+# first resolve; grant them rather than loosening ProtectHome.
+ReadWritePaths=/home/ubuntu/.hugpy
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

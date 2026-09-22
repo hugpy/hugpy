@@ -1,0 +1,294 @@
+/* Evictions panel — live make-room trace.
+   Tokens only (see src/index.css): no raw hex in this file. Translucent
+   fills are built with color-mix() off the same tokens so a token change
+   carries through the tints too. */
+
+.ev-panel {
+  font-size: 13px;
+  padding: 4px 0 18px;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+.ev-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  border-radius: var(--radius);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.ev-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.ev-dot-live         { background: var(--green);  box-shadow: 0 0 5px var(--green); }
+.ev-dot-connecting   { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
+.ev-dot-disconnected { background: var(--red);    box-shadow: 0 0 5px var(--red); }
+
+.ev-conn {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  min-width: 84px;
+}
+
+.ev-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.ev-btn-paused { color: var(--yellow); border-color: var(--border-strong); }
+.ev-btn-quiet  { color: var(--muted); }
+
+.ev-filter {
+  flex: 1 1 220px;
+  max-width: 340px;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.ev-count {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ev-spacer { flex: 1 1 auto; }
+
+.ev-err {
+  color: var(--red);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+/* ── Empty state ──────────────────────────────────────────────────────── */
+.ev-empty {
+  border: 1px dashed var(--border);
+  background: var(--surface-1);
+  border-radius: var(--radius-lg);
+  padding: 18px 16px;
+}
+.ev-empty-line { color: var(--text); margin: 0 0 6px; }
+.ev-empty-sub  { color: var(--muted); margin: 0; font-size: 12px; line-height: 1.6; max-width: 68ch; }
+
+/* ── Run cards ────────────────────────────────────────────────────────── */
+.ev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ev-card {
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  border-radius: var(--radius-lg);
+  padding: 8px 10px 9px;
+}
+.ev-card-running {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.ev-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 5px;
+}
+
+.ev-model {
+  color: var(--bright);
+  font-weight: 600;
+  word-break: break-all;
+}
+.ev-model-sweep {
+  color: var(--muted);
+  font-weight: 500;
+  font-style: italic;
+}
+
+.ev-chip {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+.ev-trigger { color: var(--text); border-color: var(--border-strong); }
+.ev-trigger-load        { color: var(--blue); }
+.ev-trigger-sweep       { color: var(--muted); }
+.ev-trigger-hot_cache   { color: var(--purple); }
+.ev-trigger-reservation { color: var(--accent); }
+.ev-worker { color: var(--accent); background: var(--accent-dim); border-color: var(--border-strong); }
+/* Serve-pipeline chips: WHERE the weights were coming from, and WHICH engine was
+   asked to load them. Quiet by default — on a failed row the row's own colour
+   already carries the alarm. */
+.ev-source { color: var(--blue); }
+.ev-engine { color: var(--purple); }
+
+.ev-tier {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ev-tier-in-process  { color: var(--blue); }
+.ev-tier-slot-child  { color: var(--purple); }
+.ev-tier-hot_cache   { color: var(--accent); }
+.ev-tier-reservation { color: var(--yellow); }
+.ev-tier-comfy       { color: var(--green); }
+
+.ev-time,
+.ev-elapsed { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ev-elapsed::before { content: '· '; }
+
+.ev-outcome {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.ev-out-fit     { color: var(--green);  border-color: var(--green);  background: color-mix(in srgb, var(--green) 12%, transparent); }
+.ev-out-partial { color: var(--yellow); border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 12%, transparent); }
+.ev-out-refused { color: var(--red);    border-color: var(--red);    background: color-mix(in srgb, var(--red) 12%, transparent); }
+.ev-out-unfit   { color: var(--yellow); border-color: var(--border-strong); background: var(--surface-3); }
+/* FAILED — the run died in the serve pipeline (provision/resolve/load) and will
+   never report headroom.done, so it has no outcome of its own. Same red as
+   refused: from the caller's seat both are "you did not get your model". */
+.ev-out-failed  { color: var(--red);    border-color: var(--red);    background: color-mix(in srgb, var(--red) 12%, transparent); }
+.ev-out-running {
+  color: var(--muted);
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.ev-need {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 3px;
+}
+
+/* ── Candidate / victim rows ──────────────────────────────────────────── */
+.ev-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 2px 4px 2px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Widened from 52px when the serve-pipeline rows arrived — "PROVISION" is the
+   longest mark and must not spill out of the gutter. One shared width so every
+   row kind stays on the same left rail. */
+.ev-mark {
+  flex: none;
+  width: 66px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: right;
+}
+
+.ev-key { color: var(--text); word-break: break-all; }
+.ev-why { color: var(--muted); }
+.ev-num { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ev-num-strong { color: var(--text); }
+
+/* SKIPPED — the protected candidates. Deliberately the quietest row: it's the
+   one the operator reads for the WHY, not for alarm. */
+.ev-row-skip .ev-key,
+.ev-row-skip .ev-mark,
+.ev-row-skip .ev-why { color: var(--muted); }
+
+/* EVICTED */
+.ev-row-evict { background: color-mix(in srgb, var(--yellow) 6%, transparent); border-radius: 4px; }
+.ev-row-evict .ev-mark,
+.ev-row-evict .ev-key  { color: var(--yellow); }
+.ev-row-evict .ev-num-strong { color: var(--yellow); }
+
+/* FAILED */
+.ev-row-fail { background: color-mix(in srgb, var(--red) 8%, transparent); border-radius: 4px; }
+.ev-row-fail .ev-mark,
+.ev-row-fail .ev-key,
+.ev-row-fail .ev-why { color: var(--red); }
+
+/* in-flight eviction */
+.ev-row-inflight .ev-mark,
+.ev-row-inflight .ev-key { color: var(--text); }
+.ev-row-inflight .ev-why { color: var(--muted); font-style: italic; }
+
+.ev-row-fitfail .ev-mark { color: var(--red); }
+.ev-row-fitfail .ev-why  { color: var(--muted); }
+
+.ev-row-quiet { color: var(--muted); }
+.ev-row-quiet .ev-mark, .ev-row-quiet .ev-why { color: var(--muted); }
+
+/* VERDICT — one inline line, coloured by action. */
+.ev-row-verdict {
+  margin-top: 2px;
+  padding-top: 3px;
+  border-top: 1px dotted var(--border);
+}
+.ev-row-verdict .ev-key {
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.ev-verdict-proceed .ev-key { color: var(--green); }
+.ev-verdict-evicted .ev-key { color: var(--yellow); }
+.ev-verdict-partial .ev-key { color: var(--yellow); }
+.ev-verdict-refuse  .ev-key { color: var(--red); }
+
+/* ── Card footer (headroom.done detail) ───────────────────────────────── */
+.ev-foot {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
+.ev-foot-evicted { color: var(--yellow); }
+.ev-foot-reason  { color: var(--muted); }
+.ev-foot-note    { color: var(--muted); font-style: italic; }
+
+/* MODEL GROUPS — the member.select row. It is the FIRST line of a card when a
+   group was consulted, so it reads as a decision, not a warning: accent, not
+   the yellow/red the eviction rows use. member.skip reuses .ev-row-skip. */
+.ev-row-member .ev-mark,
+.ev-row-member .ev-key { color: var(--accent); }

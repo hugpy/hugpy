@@ -1,0 +1,242 @@
+// Docs.jsx — HUGPY documentation shell (user-first, multi-page)
+// Three-column docs: left page tree · article · right on-page TOC (scrollspy).
+// Hash routing (#page or #page/section) — no router dependency.
+//
+// Restructured 2026-07-05 (user-first overhaul): the docs open on "Start
+// here" and lead with task pages written against the actual console UI
+// (Using the console); the architecture tour / env knobs / CLI are demoted
+// to Reference, content intact. Page bodies live in per-group modules
+// (StartPage / ConsolePages / InstallationPage / TroubleshootingGeneralPage /
+// TroubleshootingPage / ReferencePages); this file owns the shell, the sidebar
+// tree, and routing.
+//
+// Troubleshooting (2026-07-07): the operator dossier's symptom-indexed fixes
+// (config/env · routing/API · models/memory · workers/publishing · Discord ·
+// concurrency · GPU engine) live on the `troubleshooting` page; the older
+// worker-box field guide stays as `worker-troubleshooting`. Roadmap dropped
+// from the docs (it lives in the repo).
+//
+// ANCHOR STABILITY — these ids are load-bearing (FixDoc.jsx links them):
+//   installation/engine · installation/workers · troubleshooting/engine-cpu-only ·
+//   worker-troubleshooting/{admission,unreachable,missing-files,over-budget,
+//   sigill,registry-error}
+// The `quickstart` slug is kept for the Start-here page so old deep links
+// (#quickstart, #quickstart/call) keep resolving.
+import { useState, useEffect, useId } from 'react'
+import { Helmet } from 'react-helmet-async'
+import Navbar from '../../components/Navbar'
+import StartPage, { START_TOC } from './StartPage'
+import {
+  ConsoleChatPage, CHAT_TOC,
+  ConsoleModelsPage, MODELS_TOC,
+  ConsoleWorkersPage, WORKERS_TOC,
+  ConsoleServingPage, SERVING_TOC,
+  ConsoleImagesPage, IMAGES_TOC,
+  ConsoleDiscordPage, DISCORD_TOC,
+  ConsoleGlossaryPage, GLOSSARY_TOC,
+} from './ConsolePages'
+import InstallationPage, { INSTALL_TOC } from './InstallationPage'
+import AgentsPage, { AGENTS_TOC } from './AgentsPage'
+import TroubleshootingGeneralPage, { TROUBLE_GENERAL_TOC } from './TroubleshootingGeneralPage'
+import TroubleshootingPage, { TROUBLE_TOC } from './TroubleshootingPage'
+import RunbookPage, { RUNBOOK_TOC } from './RunbookPage'
+import FleetConsolePage, { FLEET_CONSOLE_TOC } from './FleetConsolePage'
+import { ArchitecturePage, ARCH_TOC, CliPage, CLI_TOC } from './ReferencePages'
+import './Docs.css'
+
+/* ---- inline Constellation mark ---- */
+function HugpyMark({ size = 26, style }) {
+  const uid = useId().replace(/:/g, '')
+  const sd = `dsd-${uid}`, ad = `dad-${uid}`
+  return (
+    <svg width={size} height={size} viewBox="0 0 240 240" role="img" aria-label="hugpy" style={style}>
+      <defs>
+        <linearGradient id={sd} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#f4f6f8" /><stop offset=".52" stopColor="#c6cbd1" /><stop offset="1" stopColor="#878d95" /></linearGradient>
+        <linearGradient id={ad} x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#9fd9e4" /><stop offset="1" stopColor="#4d93ac" /></linearGradient>
+      </defs>
+      <g fill="none" stroke="#9aa1a9" strokeOpacity="0.3" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="120" y1="40" x2="104" y2="152" /><line x1="184" y1="80" x2="96" y2="96" /><line x1="184" y1="160" x2="86" y2="124" /><line x1="56" y1="160" x2="150" y2="92" /><line x1="56" y1="80" x2="160" y2="140" /><line x1="120" y1="200" x2="150" y2="92" /><line x1="96" y1="96" x2="160" y2="140" /><line x1="150" y1="92" x2="104" y2="152" />
+      </g>
+      <g fill="none" stroke="#9aa1a9" strokeOpacity="0.5" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="96" y1="96" x2="150" y2="92" /><line x1="150" y1="92" x2="140" y2="118" /><line x1="140" y1="118" x2="160" y2="140" /><line x1="160" y1="140" x2="104" y2="152" /><line x1="104" y1="152" x2="86" y2="124" /><line x1="86" y1="124" x2="96" y2="96" />
+      </g>
+      <g fill="none" stroke={`url(#${sd})`} strokeWidth="4.4" strokeLinecap="round" strokeLinejoin="round"><polygon points="120,40 184,80 184,160 120,200 56,160 56,80" /></g>
+      <g fill="#9aa1a9" fillOpacity="0.7"><circle cx="96" cy="96" r="2.5" /><circle cx="150" cy="92" r="2.5" /><circle cx="160" cy="140" r="2.5" /><circle cx="104" cy="152" r="2.5" /><circle cx="86" cy="124" r="2.5" /><circle cx="140" cy="118" r="2.5" /></g>
+      <circle cx="120" cy="120" r="10.5" fill={`url(#${ad})`} fillOpacity=".14" /><circle cx="120" cy="120" r="5.5" fill={`url(#${ad})`} /><circle cx="120" cy="120" r="5.5" fill="none" stroke="#dfeef2" strokeOpacity=".5" strokeWidth="1" />
+    </svg>
+  )
+}
+
+/* ---- sidebar page tree (route = slug or slug/section or ext:url) ---- */
+const NAV = [
+  ['Start here', [
+    ['What hugpy does & quickstart', 'quickstart'],
+  ]],
+  ['Using the console', [
+    ['Chat with a model', 'console-chat'],
+    ['Find & download models', 'console-models'],
+    ['Put models on workers', 'console-workers'],
+    ['Keep models serving', 'console-serving'],
+    ['Generate images', 'console-images'],
+    ['Discord & comms sessions', 'console-discord'],
+    ['Reading the panels', 'console-glossary'],
+  ]],
+  ['Run it yourself', [
+    ['Installation', 'installation'],
+    ['hugpy Station (desktop)', 'station'],
+  ]],
+  ['Agents', [
+    ['Working the agent system', 'agents'],
+  ]],
+  ['Fix it', [
+    ['Troubleshooting', 'troubleshooting'],
+    ['Worker troubleshooting', 'worker-troubleshooting'],
+    ['Fleet remediation runbook', 'fleet-runbook'],
+  ]],
+  ['Reference', [
+    ['Architecture tour', 'architecture'],
+    ['Environment variables', 'architecture/env'],
+    ['CLI', 'cli'],
+  ]],
+  ['Project', [
+    ['Source ↗', 'ext:https://github.com/hugpy/hugpy'],
+    ['PyPI ↗', 'ext:https://pypi.org/project/hugpy/'],
+  ]],
+]
+
+function useScrollSpy(ids) {
+  const [active, setActive] = useState(ids[0])
+  useEffect(() => {
+    const obs = new IntersectionObserver(
+      (entries) => { entries.forEach((e) => { if (e.isIntersecting) setActive(e.target.id) }) },
+      { rootMargin: '-90px 0px -68% 0px', threshold: 0 }
+    )
+    ids.forEach((id) => { const el = document.getElementById(id); if (el) obs.observe(el) })
+    return () => obs.disconnect()
+  }, [ids.join(',')])
+  return active
+}
+
+/* ---- page registry + routing ---- */
+const PAGES = {
+  // Start here (keeps the historical `quickstart` slug for deep-link stability)
+  quickstart: { label: 'Start here', Comp: StartPage, toc: START_TOC },
+  // Using the console
+  'console-chat': { label: 'Chat with a model', Comp: ConsoleChatPage, toc: CHAT_TOC },
+  'console-models': { label: 'Find & download models', Comp: ConsoleModelsPage, toc: MODELS_TOC },
+  'console-workers': { label: 'Put models on workers', Comp: ConsoleWorkersPage, toc: WORKERS_TOC },
+  'console-serving': { label: 'Keep models serving', Comp: ConsoleServingPage, toc: SERVING_TOC },
+  'console-images': { label: 'Generate images', Comp: ConsoleImagesPage, toc: IMAGES_TOC },
+  'console-discord': { label: 'Discord & comms sessions', Comp: ConsoleDiscordPage, toc: DISCORD_TOC },
+  'console-glossary': { label: 'Reading the panels', Comp: ConsoleGlossaryPage, toc: GLOSSARY_TOC },
+  // Run it yourself
+  installation: { label: 'Installation', Comp: InstallationPage, toc: INSTALL_TOC },
+  station: { label: 'hugpy Station (desktop)', Comp: FleetConsolePage, toc: FLEET_CONSOLE_TOC },
+  // renamed 2026-08-13 (fleet-console -> hugpy Station); old slug stays a deep-link alias
+  'fleet-console': { label: 'hugpy Station (desktop)', Comp: FleetConsolePage, toc: FLEET_CONSOLE_TOC },
+  // Agents
+  agents: { label: 'Working the agent system', Comp: AgentsPage, toc: AGENTS_TOC },
+  // Fix it
+  troubleshooting: { label: 'Troubleshooting', Comp: TroubleshootingGeneralPage, toc: TROUBLE_GENERAL_TOC },
+  'worker-troubleshooting': { label: 'Worker troubleshooting', Comp: TroubleshootingPage, toc: TROUBLE_TOC },
+  'fleet-runbook': { label: 'Fleet remediation runbook', Comp: RunbookPage, toc: RUNBOOK_TOC },
+  // Reference
+  architecture: { label: 'Architecture tour', Comp: ArchitecturePage, toc: ARCH_TOC },
+  cli: { label: 'CLI', Comp: CliPage, toc: CLI_TOC },
+}
+function parseHash() {
+  const h = (window.location.hash || '').replace(/^#\/?/, '')
+  const parts = h.split('/')
+  const slug = PAGES[parts[0]] ? parts[0] : 'quickstart'
+  return { slug, sec: parts[1] || '' }
+}
+
+export default function Docs() {
+  const [route, setRoute] = useState(parseHash())
+  const [navOpen, setNavOpen] = useState(false)
+  useEffect(() => {
+    const f = () => setRoute(parseHash())
+    window.addEventListener('hashchange', f)
+    return () => window.removeEventListener('hashchange', f)
+  }, [])
+
+  const page = PAGES[route.slug] || PAGES.quickstart
+  const PageComp = page.Comp
+  const ids = page.toc.flatMap((t) => [t[0], ...t[2].map((s) => s[0])])
+  const active = useScrollSpy(ids)
+
+  useEffect(() => {
+    setNavOpen(false)
+    if (route.sec) {
+      const el = document.getElementById(route.sec)
+      if (el) setTimeout(() => el.scrollIntoView(), 70)
+    } else {
+      window.scrollTo(0, 0)
+    }
+  }, [route.slug, route.sec])
+
+  const navTo = (e, r) => {
+    if (!r || r === '#') { e.preventDefault(); return }
+    if (r.indexOf('ext:') === 0) { e.preventDefault(); window.open(r.slice(4), '_blank'); return }
+    e.preventDefault(); window.location.hash = '#' + r
+  }
+  const tocGo = (e, id) => { e.preventDefault(); const el = document.getElementById(id); if (el) el.scrollIntoView({ behavior: 'smooth' }) }
+  const cur = route.slug + (route.sec ? '/' + route.sec : '')
+
+  return (
+    <div className="docs" id="top">
+      <Helmet>
+        <title>Docs — Hugpy · Self-Hosted LLM Server &amp; OpenAI-Compatible API</title>
+        <meta name="description" content="Hugpy documentation: chat with local models, pull models from Hugging Face, spread them across your machines, generate images, wire Discord — plus install and troubleshooting guides." />
+        <link rel="canonical" href="https://hugpy.ai/docs" />
+        <meta property="og:title" content="Hugpy Docs" />
+        <meta property="og:url" content="https://hugpy.ai/docs" />
+        <meta property="og:description" content="Chat with local models, pull HF models, run them across your machines, generate images, wire Discord." />
+      </Helmet>
+      <Navbar
+        left={
+          <button className="docs-burger" onClick={() => setNavOpen((v) => !v)} aria-label="Toggle navigation">≡</button>
+        }
+      />
+
+      <div className="docs-shell">
+        <aside className={`docs-sidebar ${navOpen ? 'open' : ''}`}>
+          <div className="docs-search" aria-hidden="true"><span>⌕</span> Search docs<kbd>/</kbd></div>
+          <nav>
+            {NAV.map((grp) => (
+              <div className="docs-navgroup" key={grp[0]}>
+                <div className="docs-navgroup-t">{grp[0]}</div>
+                {grp[1].map((it) => {
+                  const r = it[1]
+                  const on = r === cur || (r === route.slug && !route.sec)
+                  return (
+                    <a key={it[0]} href={r.indexOf('ext:') === 0 ? r.slice(4) : `#${r}`} className={on ? 'on' : ''} onClick={(e) => navTo(e, r)}>{it[0]}</a>
+                  )
+                })}
+              </div>
+            ))}
+          </nav>
+        </aside>
+
+        <main className="docs-article">
+          <PageComp />
+        </main>
+
+        <aside className="docs-toc">
+          <div className="docs-toc-t">On this page</div>
+          <nav>
+            {page.toc.map((t) => (
+              <div key={t[0]}>
+                <a href={`#${t[0]}`} onClick={(e) => tocGo(e, t[0])} className={active === t[0] ? 'on' : ''}>{t[1]}</a>
+                {t[2].map((s) => (
+                  <a key={s[0]} href={`#${s[0]}`} onClick={(e) => tocGo(e, s[0])} className={`sub ${active === s[0] ? 'on' : ''}`}>{s[1]}</a>
+                ))}
+              </div>
+            ))}
+          </nav>
+          <a className="docs-toc-edit" href="https://github.com/hugpy/hugpy" target="_blank" rel="noreferrer">Edit on GitHub ↗</a>
+        </aside>
+      </div>
+    </div>
+  )
+}

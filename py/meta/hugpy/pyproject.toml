@@ -1,0 +1,147 @@
+# hugpy — the meta distribution of the Hugpy ecosystem.
+#
+# `pip install hugpy` gives you the `hugpy` and `hpy` commands and nothing
+# heavier than hugpy-platform. Every feature is an extra that pulls the owning
+# distribution (and that distribution's own extras); the profiles below mirror
+# the install sets the monolith used to ship as a single package.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy"
+version = "0.1.0"
+description = "Self-hosted LLM console and OpenAI-compatible API: model registry and downloads, streaming chat, on-site API keys, GPU worker fleet with cross-machine RPC sharding. Meta distribution: the hugpy/hpy commands and install profiles for the hugpy-* packages"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "openai-compatible",
+    "llama.cpp",
+    "transformers",
+    "gpu",
+    "model-serving",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: Console",
+]
+dependencies = [
+    "hugpy-platform",
+]
+
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/meta/hugpy/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/meta/hugpy"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.scripts]
+hugpy = "hugpy.cli:main"
+# Stdlib-only fleet browser + emergency-inference client: `hpy workers|models|where|call|ask`.
+hpy = "hugpy.hpy:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-timeout"]
+
+# ---- single-package extras (one distribution each) --------------------------
+control = ["hugpy-control"]
+storage = ["hugpy-storage"]
+engine = ["hugpy-engine"]
+fleet = ["hugpy-fleet"]
+discord = ["hugpy-discord"]
+ops = ["hugpy-ops"]
+oracle = ["hugpy-oracle"]
+curation = ["hugpy-curation"]
+
+# ---- capability extras (the monolith's leaf extras, re-homed) ---------------
+# Real pydantic + validation, for platforms where pydantic-core installs. Omit
+# on the phone: hugpy_platform.compat_pydantic covers import + construction.
+validate = ["pydantic>=2"]
+# Native/compiled deps with no Android wheel (psutil, pyyaml, numpy, pillow, bcrypt).
+native = ["psutil", "pyyaml", "numpy<2.4", "pillow", "bcrypt"]
+# In-process GGUF engine (llama-cpp-python). `llama` is the historic alias.
+gguf = ["hugpy-engine[gguf]"]
+llama = ["hugpy[gguf]"]
+# The native llama-server / rpc-server provisioner (`hugpy install-engine`).
+native-engine = ["hugpy-engine"]
+transformers = ["hugpy-engine[transformers]", "hugpy-media[transformers]"]
+finetune = ["hugpy-engine[finetune]"]
+gpu = ["pynvml"]
+vision = ["hugpy-media[vision]"]
+embed = ["hugpy-media[embed]"]
+keywords = ["hugpy-media[keywords]"]
+audio = ["hugpy-media[audio]"]
+imagegen = ["hugpy-media[imagegen]"]
+extract = ["hugpy-media[extract]"]
+tts = ["hugpy-media[tts]"]
+# Umbrella: the full server-side media toolset in one opt-in.
+media = ["hugpy-media[all]"]
+# Video intelligence (media bus, runners) plus the Oracle that plans over it.
+video = ["hugpy-video[render]", "hugpy-oracle"]
+# Discord UI arm (`hugpy bot`): drives a hugpy central over HTTP.
+bot = ["hugpy-discord[bot]"]
+
+# ---- box profiles -----------------------------------------------------------
+# A worker box: the fleet agent, the GGUF engine and the model store.
+worker = ["hugpy-fleet", "hugpy-engine[gguf]", "hugpy-storage", "hugpy-control"]
+# CPU transformers box: full text/vision/audio/keyword/extract stack, no GPU-only pieces.
+cpu-worker = [
+    "hugpy[worker,native,validate]",
+    "hugpy-engine[transformers]",
+    "hugpy-media[transformers,embed,audio,keywords,extract,vision]",
+    "hugpy-fleet[media]",
+]
+# GPU box: everything cpu-worker has PLUS image generation, fine-tuning, video
+# runners and richer GPU probing.
+gpu-worker = [
+    "hugpy[cpu-worker,gpu]",
+    "hugpy-engine[finetune]",
+    "hugpy-media[all]",
+    "hugpy-video[render]",
+    "hugpy-fleet[media,video]",
+]
+# Central/coordinator (the box that runs the API + console + fleet registry).
+server = [
+    "hugpy-server",
+    "hugpy-fleet",
+    "hugpy-engine[gguf]",
+    "hugpy-media",
+    "hugpy-video",
+    "hugpy-oracle",
+    "hugpy-curation",
+    "hugpy-storage",
+    "hugpy-control",
+    "hugpy-discord[bot]",
+    "hugpy[gpu,validate]",
+    # gunicorn is POSIX-only; on Windows `hugpy serve` uses waitress.
+    "gunicorn; platform_system != 'Windows'",
+    "waitress; platform_system == 'Windows'",
+]
+# Everything: a full desktop/server install.
+all = ["hugpy[server,gpu-worker,ops,video,media,bot,native-engine]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["hugpy*"]
+
+[tool.setuptools.package-data]
+hugpy = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

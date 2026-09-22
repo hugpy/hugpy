@@ -1,0 +1,86 @@
+"""Backend injection point for the standalone inference boundary."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, AsyncIterator, Mapping, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class InferenceBackend(Protocol):
+    """Operations needed to carry a request from discovery through reply."""
+
+    def catalog_rows(self) -> Mapping[str, Mapping[str, Any]]: ...
+    def resolve_model(self, **kwargs: Any) -> str: ...
+    def refresh_models(self, *, discover: bool = True) -> Any: ...
+
+    def feasible_allocations(self, *args: Any, **kwargs: Any) -> tuple[str, ...]: ...
+    def choose_allocation(self, *args: Any, **kwargs: Any) -> dict: ...
+    def allocation_spill(self, mode: Any, **options: Any) -> dict: ...
+    def resource_status(self) -> dict: ...
+    def plan_admission(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def native_engine_status(self, *, probe: bool = True) -> dict: ...
+    def native_engine_binaries(self) -> dict: ...
+    def install_native_engine(self, **options: Any) -> dict: ...
+    def build_native_engine(self, **options: Any) -> dict: ...
+    def llama_runner(self, model_key: str) -> Any: ...
+    def loaded_llama_runners(self) -> dict: ...
+    def evict_llama_runner(self, model_key: str) -> bool: ...
+
+    def resolve_request(self, request: Mapping[str, Any]) -> Any: ...
+    def runner_for(self, model_key=None, *, task=None) -> Any: ...
+    def execute_request(self, *args: Any, **kwargs: Any) -> Any: ...
+    def stream_request(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]: ...
+    def stream_chat_request(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]: ...
+    def run_sync(self, awaitable: Any) -> Any: ...
+    def loaded_models(self) -> tuple[tuple[str, str], ...]: ...
+    def loading_models(self) -> tuple[str, ...]: ...
+    def evict_model(self, model_key: str, *, task: str | None = None) -> bool: ...
+    def clear_models(self) -> None: ...
+    def supported_tasks(self) -> tuple[tuple[str, str], ...]: ...
+
+
+_default_backend: InferenceBackend | None = None
+_active_backend: ContextVar[InferenceBackend | None] = ContextVar(
+    "hugpy_engine_backend", default=None
+)
+
+
+def configure_backend(backend: InferenceBackend | None) -> None:
+    """Set the process-default backend; ``None`` restores the in-process ``LocalBackend``."""
+    global _default_backend
+    _default_backend = backend
+
+
+def get_backend() -> InferenceBackend:
+    """Return the active backend; by default the in-process :class:`LocalBackend`
+    built lazily from the engine's own implementation modules."""
+    active = _active_backend.get()
+    if active is not None:
+        return active
+    global _default_backend
+    if _default_backend is None:
+        from .backends.local import LocalBackend
+
+        _default_backend = LocalBackend()
+    return _default_backend
+
+
+@contextmanager
+def backend_scope(backend: InferenceBackend):
+    """Temporarily use ``backend`` in the current async/thread context."""
+    token = _active_backend.set(backend)
+    try:
+        yield backend
+    finally:
+        _active_backend.reset(token)
+
+
+__all__ = [
+    "InferenceBackend",
+    "backend_scope",
+    "configure_backend",
+    "get_backend",
+]

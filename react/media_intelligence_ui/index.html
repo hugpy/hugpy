@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hugpy Media Intelligence — Self-Hosted Audio, Image &amp; Document AI</title>
+    <meta
+      name="description"
+      content="Hugpy Media Intelligence: a self-hosted console that transcribes audio with Whisper, analyzes images, extracts and summarizes documents, pulls keywords, and embeds text — all on your own hardware, no data leaving your box. Try the live demo."
+    />
+    <meta
+      name="keywords"
+      content="self-hosted whisper transcription, document AI, image analysis, audio transcription, text summarization, keyword extraction, embeddings, local media AI, hugpy media intelligence"
+    />
+    <meta name="theme-color" content="#050505" />
+    <link rel="canonical" href="https://hugpy.ai/media/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Hugpy" />
+    <meta property="og:title" content="Hugpy Media Intelligence" />
+    <meta
+      property="og:description"
+      content="Self-hosted media AI: transcribe audio, analyze images, summarize documents, extract keywords, embed text — all on your own hardware."
+    />
+    <meta property="og:url" content="https://hugpy.ai/media/" />
+    <meta property="og:image" content="https://hugpy.ai/og-media.png" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Hugpy Media Intelligence" />
+    <meta
+      name="twitter:description"
+      content="Self-hosted media AI: transcribe audio, analyze images, summarize documents, extract keywords, embed text — on your hardware."
+    />
+    <meta name="twitter:image" content="https://hugpy.ai/og-media.png" />
+
+    <!-- Structured data -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Hugpy Media Intelligence",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "url": "https://hugpy.ai/media/",
+        "description": "Self-hosted media-intelligence console: Whisper audio transcription, image analysis, document extraction and summarization, keyword extraction, and text embeddings — on your own hardware.",
+        "isPartOf": { "@type": "WebSite", "name": "Hugpy", "url": "https://hugpy.ai/" },
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
+
+    <!-- Media Intelligence type system (editorial-terminal design ref):
+         Newsreader serif for headlines + output, IBM Plex Mono for labels. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /*
+       * Standalone shell paint. This document is ONLY ever served standalone at
+       * /media (nothing embeds HugpyChat in a host app), so painting the page
+       * chrome here is safe — it cannot bleed into another site. This guarantees
+       * the dark theme covers the ENTIRE viewport: no default body margin gutter,
+       * and any region the chat scope's small-viewport height doesn't reach stays
+       * black instead of showing bare white.
+       */
+      html,
+      body {
+        margin: 0;
+        background: #050505; /* == --main-surface-primary in the dark scope */
+        /* Hard guard against horizontal extrusion on phones: keep the page
+           pinned to the device width so a stray wide child can't trigger the
+           browser's zoom-out. Vertical scroll + sticky headers are unaffected. */
+        overflow-x: hidden;
+      }
+      #root {
+        min-height: 100dvh;
+        background: #050505;
+        overflow-x: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <main style="color:#ddd;max-width:42rem;margin:2rem auto;padding:0 1rem;font-family:system-ui,sans-serif">
+        <h1>Hugpy Media Intelligence</h1>
+        <p>
+          A self-hosted media-AI console. Transcribe audio with Whisper, analyze images,
+          extract and summarize documents, pull keywords, and embed text — all on your own
+          hardware, with nothing leaving your box.
+        </p>
+        <p><a style="color:#8ab4ff" href="/">Hugpy — Inference You Own</a></p>
+      </main>
+    </noscript>
+    <script type="module" src="./entry.tsx"></script>
+  </body>
+</html>

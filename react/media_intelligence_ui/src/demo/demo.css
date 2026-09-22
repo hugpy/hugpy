@@ -1,0 +1,115 @@
+/* Demo-mode banner for the media-intelligence arm. Lives inside .hugpy-arm (so
+   the dark token context applies) and mirrors the dev UI showroom banner. */
+
+/* Rides in .hugpy-header-stack (the sticky element) directly under the nav, so
+   it's a plain in-flow block here — the wrapper does the pinning. */
+.mi-demo-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-secondary, #c7c7cc);
+  background: linear-gradient(180deg, #14171f, #0b0d13);
+  border-bottom: 1px solid var(--border-light, rgba(255, 255, 255, 0.09));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.mi-demo-badge {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: #050505;
+  background: #7cc4ff;
+}
+.mi-demo-badge.is-live {
+  background: #6ee7a8;
+}
+
+.mi-demo-text {
+  flex: 1 1 280px;
+  min-width: 200px;
+  color: var(--text-tertiary, #8e8e93);
+}
+.mi-demo-text strong {
+  color: var(--text-primary, #f4f4f5);
+  font-weight: 600;
+}
+.mi-demo-text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #a7c7ff;
+}
+
+/* canned ⇄ live segmented toggle */
+.mi-demo-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-light, rgba(255, 255, 255, 0.12));
+  border-radius: 7px;
+  overflow: hidden;
+}
+.mi-demo-toggle a {
+  font-size: 12px;
+  padding: 4px 10px;
+  color: var(--text-tertiary, #8e8e93);
+  text-decoration: none;
+  cursor: pointer;
+}
+.mi-demo-toggle a + a {
+  border-left: 1px solid var(--border-light, rgba(255, 255, 255, 0.12));
+}
+.mi-demo-toggle a:hover {
+  color: var(--text-primary, #f4f4f5);
+}
+.mi-demo-toggle a.is-current {
+  color: #050505;
+  background: var(--text-secondary, #c7c7cc);
+  font-weight: 600;
+}
+
+.mi-demo-cmd {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-light, rgba(255, 255, 255, 0.12));
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary, #c7c7cc);
+  cursor: pointer;
+  font: inherit;
+}
+.mi-demo-cmd:hover {
+  border-color: var(--border-medium, rgba(255, 255, 255, 0.2));
+}
+.mi-demo-cmd code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  color: #6ee7a8;
+}
+.mi-demo-cmd-ico {
+  font-size: 11px;
+  color: var(--text-tertiary, #8e8e93);
+}
+
+.mi-demo-cta {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-radius: 7px;
+  font-weight: 700;
+  font-size: 13px;
+  text-decoration: none;
+  color: #050505;
+  background: #6ee7a8;
+}
+.mi-demo-cta:hover {
+  filter: brightness(1.07);
+}

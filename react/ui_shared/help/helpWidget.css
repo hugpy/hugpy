@@ -1,0 +1,118 @@
+/*
+ * ui_shared/help/helpWidget.css — the Help widget's stylesheet.
+ *
+ * Shared exactly like ui_shared/navbar/navbar.css: ONE file imported straight
+ * from the module that needs it, so all four surfaces (webpack ui/, and the
+ * media / video / fleet Vite+Tailwind arms) render byte-identical chrome.
+ *
+ * Everything is namespaced .hgh-* and scoped under #hugpy-help-widget so it can
+ * never collide with a host page's classes (three arms are Tailwind; the main
+ * SPA is hand-written CSS). Colors are literal rather than variables for the
+ * same reason: the widget must look the same on a dark arm and on the console
+ * without inheriting either one's theme.
+ */
+#hugpy-help-widget, #hugpy-help-widget * { box-sizing: border-box; }
+#hugpy-help-widget {
+  position: fixed; right: 18px; bottom: 18px; z-index: 2147483000;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px; line-height: 1.5; color: #e6e6e6;
+}
+#hugpy-help-widget .hgh-fab {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid rgba(255,255,255,.16); border-radius: 999px;
+  background: #14161a; color: #f2f2f2; cursor: pointer;
+  padding: 9px 15px; font: inherit; font-weight: 500;
+  box-shadow: 0 6px 22px rgba(0,0,0,.42);
+}
+#hugpy-help-widget .hgh-fab:hover { background: #1d2026; border-color: rgba(255,255,255,.3); }
+#hugpy-help-widget .hgh-fab-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #34d399;
+}
+#hugpy-help-widget .hgh-panel {
+  width: min(380px, calc(100vw - 24px));
+  height: min(520px, calc(100vh - 96px));
+  display: flex; flex-direction: column;
+  border: 1px solid rgba(255,255,255,.14); border-radius: 14px;
+  background: #101216; box-shadow: 0 18px 48px rgba(0,0,0,.55);
+  overflow: hidden;
+}
+#hugpy-help-widget .hgh-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.1);
+  background: #14171c;
+}
+#hugpy-help-widget .hgh-title { font-weight: 600; color: #fff; }
+#hugpy-help-widget .hgh-sub { color: #8b93a1; font-size: 11px; }
+#hugpy-help-widget .hgh-x {
+  margin-left: auto; background: none; border: 0; color: #8b93a1;
+  cursor: pointer; font: inherit; font-size: 17px; line-height: 1; padding: 2px 4px;
+}
+#hugpy-help-widget .hgh-x:hover { color: #fff; }
+#hugpy-help-widget .hgh-tabs {
+  display: flex; gap: 4px; padding: 8px 10px 0;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+#hugpy-help-widget .hgh-tab {
+  border: 0; background: none; color: #8b93a1; cursor: pointer;
+  font: inherit; padding: 6px 10px; border-radius: 7px 7px 0 0;
+}
+#hugpy-help-widget .hgh-tab:hover { color: #dfe3ea; }
+#hugpy-help-widget .hgh-tab[aria-selected="true"] {
+  color: #fff; background: #191d24; box-shadow: inset 0 -2px 0 #4b8cff;
+}
+#hugpy-help-widget .hgh-body {
+  flex: 1 1 auto; overflow-y: auto; padding: 12px; display: flex;
+  flex-direction: column; gap: 9px;
+}
+#hugpy-help-widget .hgh-foot {
+  border-top: 1px solid rgba(255,255,255,.1); padding: 9px 10px;
+  display: flex; flex-direction: column; gap: 7px; background: #14171c;
+}
+#hugpy-help-widget .hgh-msg {
+  padding: 8px 10px; border-radius: 10px; white-space: pre-wrap;
+  word-break: break-word; max-width: 92%;
+}
+#hugpy-help-widget .hgh-msg.user { align-self: flex-end; background: #24303f; color: #eaf1ff; }
+#hugpy-help-widget .hgh-msg.keeper { align-self: flex-start; background: #191d24; color: #dfe3ea; }
+#hugpy-help-widget .hgh-msg.err { align-self: stretch; background: #2c1618; color: #ffbdbd; border: 1px solid #5b2429; }
+#hugpy-help-widget .hgh-msg.ok { align-self: stretch; background: #14251c; color: #b6f0cf; border: 1px solid #235437; }
+#hugpy-help-widget .hgh-hint { color: #79818f; font-size: 11px; }
+#hugpy-help-widget textarea, #hugpy-help-widget input[type="text"] {
+  width: 100%; resize: vertical; font: inherit; color: #e9edf3;
+  background: #0c0e12; border: 1px solid rgba(255,255,255,.14);
+  border-radius: 8px; padding: 7px 9px;
+}
+#hugpy-help-widget textarea:focus, #hugpy-help-widget input:focus {
+  outline: none; border-color: #4b8cff;
+}
+#hugpy-help-widget .hgh-row { display: flex; align-items: center; gap: 8px; }
+#hugpy-help-widget .hgh-btn {
+  border: 1px solid rgba(255,255,255,.16); border-radius: 8px;
+  background: #4b8cff; border-color: #4b8cff; color: #06111f;
+  font: inherit; font-weight: 600; cursor: pointer; padding: 7px 12px;
+}
+#hugpy-help-widget .hgh-btn:hover:not(:disabled) { background: #66a0ff; }
+#hugpy-help-widget .hgh-btn:disabled { opacity: .5; cursor: default; }
+#hugpy-help-widget .hgh-btn.ghost {
+  background: transparent; color: #cfd6e2; border-color: rgba(255,255,255,.18);
+}
+#hugpy-help-widget .hgh-btn.ghost:hover:not(:disabled) { background: rgba(255,255,255,.06); }
+#hugpy-help-widget .hgh-check {
+  display: flex; align-items: center; gap: 6px; color: #9aa3b2; font-size: 11px;
+  cursor: pointer; user-select: none;
+}
+#hugpy-help-widget .hgh-check input { accent-color: #4b8cff; margin: 0; }
+#hugpy-help-widget .hgh-label { color: #9aa3b2; font-size: 11px; }
+#hugpy-help-widget .hgh-note {
+  color: #9aa3b2; font-size: 11px; background: #191d24;
+  border: 1px dashed rgba(255,255,255,.14); border-radius: 8px; padding: 7px 9px;
+}
+#hugpy-help-widget a { color: #7fb0ff; }
+#hugpy-help-widget .hgh-ctx {
+  color: #79818f; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace;
+  white-space: pre-wrap; word-break: break-all; max-height: 96px; overflow-y: auto;
+}
+@media (max-width: 480px) {
+  #hugpy-help-widget { right: 10px; bottom: 10px; }
+  #hugpy-help-widget .hgh-panel { height: min(70vh, calc(100vh - 80px)); }
+}

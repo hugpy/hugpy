@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-media"
+version = "0.1.0"
+description = "Hugpy media: engine task plugins for speech recognition, TTS, embeddings, keywords, summaries, vision, image generation, ComfyUI and document/URL extraction"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "whisper",
+    "embeddings",
+    "vision",
+    "image-generation",
+    "tts",
+    "media-intelligence",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Base = importable and able to build requests / run the model-less extractors
+# on any box. Every model stack is an extra, imported lazily inside its runner.
+dependencies = [
+    "hugpy-platform",
+    "hugpy-storage",
+    "hugpy-engine",
+    "abstract_essentials",   # derive_media_type / read_from_file / safe_dump_to_json
+    "pydantic>=2",
+    "requests",
+    "beautifulsoup4",        # url-extraction, seo/text helpers
+    "PyPDF2",                # pure-python PDF reading (pdfs/, text/)
+    "pdfplumber",            # document-extraction PDF page text
+    "pillow",                # image decoding in vision/imagegen request paths
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/inference/hugpy_media/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/inference/hugpy_media"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-timeout"]
+# Mirrors the monolith's extras, one per media stack.
+audio = ["openai-whisper"]
+imagegen = ["diffusers>=0.39", "accelerate", "transformers>=5.12", "bitsandbytes>=0.48.0"]
+embed = ["sentence-transformers"]
+transformers = ["torch", "transformers", "accelerate", "sentencepiece", "timm"]
+vision = ["opencv-python-headless", "onnxruntime", "aiohttp"]
+extract = ["python-docx", "openpyxl", "brotli", "zstandard"]
+tts = ["chatterbox-tts"]
+comfy = ["aiohttp"]
+all = ["hugpy-media[keywords,audio,imagegen,embed,transformers,vision,extract,tts,comfy]"]
+
+[project.entry-points."hugpy_engine.tasks"]
+media = "hugpy_media.plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_media = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120

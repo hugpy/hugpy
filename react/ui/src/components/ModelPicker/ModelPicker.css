@@ -1,0 +1,70 @@
+/* ModelPicker — select-like trigger + column-grid popover. Uses the same
+   design tokens as WorkersPanel/SlotsPanel so it drops into either. */
+
+.mp-root { position: relative; display: inline-block; min-width: 260px; }
+
+.mp-trigger {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 4px 10px; font-size: 12px; text-align: left;
+  color: var(--text, #e6e6e9); background: var(--surface-2, #1a1d24);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px; cursor: pointer;
+}
+.mp-trigger:disabled { opacity: 0.5; cursor: default; }
+.mp-trigger.mp-empty .mp-trigger-label { color: var(--muted, #8e8e93); }
+.mp-trigger-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-caret { flex: 0 0 auto; color: var(--muted, #8e8e93); font-size: 10px; }
+
+.mp-pop {
+  position: absolute; z-index: 40; top: calc(100% + 4px); left: 0;
+  min-width: 480px; max-width: 640px;
+  background: var(--surface, #12141a);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+}
+
+.mp-filter {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px;
+  padding: 4px 8px; font-size: 12px;
+  color: var(--text, #e6e6e9); background: var(--surface-2, #1a1d24);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12)); border-radius: 6px;
+}
+
+.mp-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.6fr) minmax(120px, 1.2fr) 90px 48px 72px 82px;
+  gap: 0 10px; align-items: center;
+  padding: 3px 8px; font-size: 12px;
+}
+.mp-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted, #8e8e93);
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.09));
+  padding-bottom: 5px; margin-bottom: 2px;
+}
+
+.mp-rows { max-height: 300px; overflow-y: auto; }
+.mp-row { border-radius: 6px; cursor: pointer; }
+.mp-row:hover { background: var(--surface-2, #1a1d24); }
+.mp-row.mp-current { background: rgba(124, 196, 255, 0.10); }
+.mp-none { padding: 10px; font-size: 12px; color: var(--muted, #8e8e93); }
+
+.mp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-task { color: var(--text-secondary, #c7c7cc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-more { color: var(--muted, #8e8e93); font-style: normal; font-size: 10px; }
+.mp-ctx { color: var(--muted, #8e8e93); text-align: right; }
+.mp-size { color: var(--text-secondary, #c7c7cc); text-align: right; font-variant-numeric: tabular-nums; }
+.mp-size.mp-size-none { color: var(--muted, #8e8e93); }
+
+.mp-fw { font-size: 10px; padding: 1px 6px; border-radius: 5px; text-align: center;
+         background: var(--surface-2, #1a1d24); border: 1px solid var(--border, rgba(255,255,255,0.12));
+         color: var(--text-secondary, #c7c7cc); overflow: hidden; text-overflow: ellipsis; }
+.mp-fw-gguf         { color: #f0c674; border-color: rgba(240, 198, 116, 0.35); }
+.mp-fw-transformers { color: #7cc4ff; border-color: rgba(124, 196, 255, 0.35); }
+.mp-fw-diffusers    { color: #d29ae8; border-color: rgba(210, 154, 232, 0.35); }
+
+.mp-status { font-size: 11px; }
+.mp-status-installed     { color: var(--green, #3fb950); }
+.mp-status-partial       { color: var(--amber, #d29922); }
+.mp-status-not_installed { color: var(--muted, #8e8e93); }

@@ -1,0 +1,151 @@
+
+> @hugpy/ui@0.2.0 dev
+> webpack serve --mode development
+
+<i> [webpack-dev-server] [HPM] Proxy created: /api  -> http://127.0.0.1:7002
+<i> [webpack-dev-server] [HPM] Proxy rewrite rule created: "^/api" ~> ""
+<i> [webpack-dev-server] Project is running at:
+<i> [webpack-dev-server] Loopback: http://localhost:7001/, http://[::1]:7001/
+<i> [webpack-dev-server] On Your Network (IPv4): http://192.168.1.250:7001/
+<i> [webpack-dev-server] Content not from webpack is served from '/srv/share/projects/hugpy/dev/media_intelligence_ui/dist' directory
+<i> [webpack-dev-server] 404s will fallback to '/index.html'
+<i> [webpack-dev-middleware] wait until bundle finished: /api/llm/queue
+<i> [webpack-dev-middleware] wait until bundle finished: /api/discord/bridges
+<i> [webpack-dev-middleware] wait until bundle finished: /api/llm/queue
+<i> [webpack-dev-middleware] wait until bundle finished: /api/llm/workers
+assets by path assets/ 2.42 MiB
+  asset assets/main.4e1de13e9324cb06947c.js 2.39 MiB [emitted] [immutable] (name: main)
+  asset assets/hugpy.75b0380a164d2f2c08e9.png 19.1 KiB [emitted] [immutable] [from: src/assets/hugpy.png] (auxiliary name: main)
+  asset assets/hugpy-mark.005dbad6b15491649f17.png 11.1 KiB [emitted] [immutable] [from: src/assets/hugpy-mark.png] (auxiliary name: main)
+asset hugpy-favicon-hex.svg 2.55 KiB [emitted]
+asset index.html 368 bytes [emitted]
+orphan modules 137 KiB [orphan] 20 modules
+runtime modules 28 KiB 14 modules
+javascript modules 2.01 MiB
+  modules by path ./src/ 421 KiB
+    modules by path ./src/components/ 265 KiB 41 modules
+    modules by path ./src/Auth/ 16.1 KiB 6 modules
+    modules by path ./src/App/ 22.3 KiB 3 modules
+    modules by path ./src/pages/Docs/ 105 KiB 3 modules
+    modules by path ./src/*.css 7.27 KiB 2 modules
+    + 3 modules
+  modules by path ./node_modules/ 1.6 MiB 32 modules
+asset modules 30.2 KiB (asset) 84 bytes (javascript)
+  ./src/assets/hugpy-mark.png 11.1 KiB (asset) 42 bytes (javascript) [built] [code generated]
+  ./src/assets/hugpy.png 19.1 KiB (asset) 42 bytes (javascript) [built] [code generated]
+webpack 5.107.2 compiled successfully in 1484 ms
+(node:586839) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/auth-svc/login to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/auth/config to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/auth/config to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/1d520d0278904764ae48588fdceb43e6/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/1d520d0278904764ae48588fdceb43e6/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/channels to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/1d520d0278904764ae48588fdceb43e6/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/1d520d0278904764ae48588fdceb43e6/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/1d520d0278904764ae48588fdceb43e6/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/1d520d0278904764ae48588fdceb43e6/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers/84d9376ee46944fabbe59a70c40a379a/heartbeat to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/bridges to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/discord/outbox/drain to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/auth/config to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/readiness to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/queue to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/llm/workers to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+<e> [webpack-dev-server] [HPM] Error occurred while proxying request dev.hugpy.ai/phone-brick/phones to http://127.0.0.1:7002/ [ECONNREFUSED] (https://nodejs.org/api/errors.html#errors_common_system_errors)
+asset main.3c12f6efed4d6d33c21a.hot-update.json 4.96 KiB [emitted] [immutable] [hmr]
+asset main.3c12f6efed4d6d33c21a.hot-update.js 852 bytes [emitted] [immutable] [hmr] (name: main)
+asset index.html 144 bytes [emitted]
+runtime modules 25.9 KiB 8 modules
+
+ERROR in main
+Module not found: Error: Can't resolve './src/main.jsx' in '/srv/share/projects/hugpy/dev/ui'
+
+ERROR in Module not found: Error: Can't resolve '/srv/share/projects/hugpy/dev/ui/node_modules/webpack-dev-server/client/index.js?protocol=wss%3A&username=&password=&hostname=dev.hugpy.ai&port=&pathname=%2Fws&logging=info&overlay=%7B%22errors%22%3Atrue%2C%22warnings%22%3Afalse%2C%22runtimeErrors%22%3A%22%28error%29%2520%253D%253E%2520%21%252FResizeObserver%2520loop%252F.test%28error%2520%2526%2526%2520error.message%2520%257C%257C%2520%27%27%29%22%7D&reconnect=10&hot=true&live-reload=true' in '/srv/share/projects/hugpy/dev/ui'
+
+ERROR in Module not found: Error: Can't resolve '/srv/share/projects/hugpy/dev/ui/node_modules/webpack/hot/dev-server.js' in '/srv/share/projects/hugpy/dev/ui'
+
+ERROR in Error: Child compilation failed:
+Module not found: Error: Can't resolve '/srv/share/projects/hugpy/dev/ui/node_modules/html-webpack-plugin/lib/loader.js' in '/srv/share/projects/hugpy/dev/ui'
+ModuleNotFoundError: Module not found: Error: Can't resolve '/srv/share/projects/hugpy/dev/ui/node_modules/html-webpack-plugin/lib/loader.js' in '/srv/share/projects/hugpy/dev/ui'
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/Compilation.js:2156:28
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:1092:13
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:10:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:476:22
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:9:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:658:22
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:199:10
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:894:23
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:1406:5
+    at /srv/share/projects/hugpy/dev/ui/node_modules/neo-async/async.js:2830:7
+    at done (/srv/share/projects/hugpy/dev/ui/node_modules/neo-async/async.js:2925:13)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/webpack/lib/NormalModuleFactory.js:1369:23
+    at finishWithoutResolve (/srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:946:11)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1035:14
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:16:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:16:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:15:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:15:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:16:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:16:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:16:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/Resolver.js:1112:5
+    at eval (eval at create (/srv/share/projects/hugpy/dev/ui/node_modules/tapable/lib/HookCodeFactory.js:31:10), <anonymous>:15:1)
+    at /srv/share/projects/hugpy/dev/ui/node_modules/enhanced-resolve/lib/DirectoryExistsPlugin.js:52:15
+    at process.processTicksAndRejections (node:internal/process/task_queues:88:21)
+
+ERROR in Error: HtmlWebpackPlugin: could not load file /srv/share/projects/hugpy/dev/ui/src/assets/hugpy-favicon-hex.svg
+
+1 ERROR in child compilations (Use 'stats.children: true' resp. '--stats-children' for more details)
+
+3 errors have detailed information that is not shown.
+Use 'stats.errorDetails: true' resp. '--stats-error-details' to show it.
+
+webpack 5.107.2 compiled with 6 errors in 38 ms

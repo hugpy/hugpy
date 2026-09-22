@@ -1,0 +1,127 @@
+/*
+ * ui_shared/navbar/navbar.css — the ONE canonical top-nav *presentation* for the
+ * whole hugpy site, the styling companion to links.js.
+ *
+ * links.js is the single source of truth for WHICH links appear; this file is the
+ * single source of truth for how the nav LOOKS. Every CSS-based arm imports it and
+ * renders the same class contract, so the bar reads pixel-identically everywhere:
+ *   - ui/                     (main app, webpack)  — welcome/docs/console
+ *   - media_intelligence_ui/  (vite)               — /media
+ *   - video_intelligence_ui/  (vite)               — /video
+ * (agents_ui/ renders its own Tailwind-utility nav and is not yet on this contract.)
+ *
+ * The class contract, rendered identically by each arm's thin <Navbar> component:
+ *   .hugpy-navbar          the bar (grid: brand | links | side)
+ *     .hugpy-navbar-brand  brand pinned left at natural width
+ *     .hugpy-navbar-links  primary links — left-aligned, horizontally scrollable
+ *     .hugpy-navbar-side   page-specific controls pinned right
+ *       .hugpy-navbar-action  optional compact button dropped into -side
+ *
+ * What stays PER-ARM (deliberately NOT here): the sticky "header stack" wrapper
+ * around the nav+banner. Each arm names and pins it differently (main app's
+ * .hugpy-navbar-stack, media's .hugpy-header-stack, video's .vi-header-stack) with
+ * its own z-index and sticky strategy, so that wrapper lives in the arm's own CSS.
+ *
+ * Dark token context is carried on .hugpy-navbar itself (not an outer wrapper) so
+ * the bar is self-sufficient in arms that have no .hugpy-arm ancestor (e.g. the
+ * main app). Arms that also define these on a wrapper (media's .hugpy-arm) use the
+ * same values, so there is no conflict.
+ */
+.hugpy-navbar {
+  --main-surface-primary: #050505;
+  --text-primary: #f4f4f5;
+  --text-secondary: #c7c7cc;
+  --text-tertiary: #8e8e93;
+  --border-light: rgba(255, 255, 255, 0.09);
+  --border-medium: rgba(255, 255, 255, 0.14);
+  --link: #a7c7ff;
+
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--border-light);
+  background: rgba(11, 13, 19, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  flex-shrink: 0;
+}
+
+/* Brand pinned to the left edge at its natural width — never shrinks or scrolls. */
+.hugpy-navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: start;
+  flex: none;
+}
+
+/* Primary nav: a left-aligned, horizontally scrollable row filling the middle
+   column. Scrolls if it can't fit instead of pushing content off-frame — no
+   hamburger. */
+.hugpy-navbar-links {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  font-size: 13px;
+  justify-self: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.hugpy-navbar-links::-webkit-scrollbar {
+  display: none;
+}
+.hugpy-navbar-links a {
+  color: var(--text-tertiary);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.hugpy-navbar-links a:hover {
+  color: var(--text-primary);
+}
+.hugpy-navbar-links a.is-current {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Page-specific controls (passed as children) pinned to the right edge. */
+.hugpy-navbar-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-self: end;
+  min-width: 0;
+}
+
+/* Page-specific actions dropped in as children (e.g. the console "Sign out"):
+   a compact button that sits inline with the links, on the shared token palette. */
+.hugpy-navbar-action {
+  appearance: none;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius, 6px);
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.hugpy-navbar-action:hover {
+  color: var(--text-primary);
+  border-color: var(--border-medium);
+}
+
+@media (max-width: 640px) {
+  .hugpy-navbar {
+    padding: 12px 14px;
+    gap: 12px;
+  }
+  .hugpy-navbar-links {
+    gap: 16px;
+  }
+}

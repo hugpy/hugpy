@@ -1,0 +1,58 @@
+[Unit]
+# The model-download daemon. Downloads used to run INSIDE the console API's
+# gunicorn: the transfer child was parented to a gunicorn worker and the
+# monitor/watch/estimate threads (one of them walking the destination tree every
+# second) shared the thread pool that also serves /llm/workers/<id>/heartbeat.
+# Starve that for 45s (HEARTBEAT_TIMEOUT_SECONDS) and every worker reads
+# `offline` — operator, 2026-07-27: "a download from hf in the add models tab
+# seems to push off all of the workers".
+#
+# This unit owns the transfer plane. The API only enqueues/reads/cancels; the
+# queue is the existing comms mirror (HUGPY_COMMS_DB), so both units MUST point
+# at the same database file.
+#
+# Install:
+#   sudo cp $(python -c "import hugpy_storage,os;print(os.path.dirname(hugpy_storage.__file__))")/deploy/hugpy-downloader-dev.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hugpy-downloader-dev
+Description=hugpy model-download daemon (dev; claims download jobs off the comms queue)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/station/dev
+# The daemon is the `hugpy-storage daemon` subcommand (hugpy-storage package);
+# `hugpy-downloader` remains as an alias console script.
+ExecStart=/home/ubuntu/station/dev/venv/bin/hugpy-storage daemon
+Restart=always
+RestartSec=5
+
+# Mirrored from hugpy-api-dev: the daemon resolves the SAME store root and the
+# SAME comms mirror, or it would be serving a different queue than the API fills.
+Environment=PYTHONUNBUFFERED=1
+Environment=DEFAULT_ROOT=/mnt/llm_storage
+Environment=HUGPY_COMMS_DB=/mnt/llm_storage/comms/hugpy-comms.db
+# Two concurrent transfers, matching what the API used to allow in practice.
+Environment=HUGPY_DOWNLOADER_MAX_CONCURRENT=2
+
+# The HF token is NOT an Environment= line here on purpose: it is read from the
+# console-managed 0600 file (hugpy_platform.constants seeds HF_TOKEN
+# into the process env at import), so a token saved in the console reaches this
+# daemon on its next restart with no unit edit.
+
+# Same fd headroom as the API: concurrent transfers + the sqlite mirror + the
+# virtiofs store all hold fds, and this mount has thrown EMFILE under bursts.
+LimitNOFILE=65536
+
+# A stop/restart kills in-flight transfers with the cgroup. That is SAFE and
+# intended: partial files stay on disk, the next daemon start re-queues every row
+# a previous owner left claimed (Downloader.adopt) and download_one adopts the
+# staging dir, so the transfer RESUMES rather than restarting from zero.
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

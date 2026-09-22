@@ -1,0 +1,23 @@
+"""Test session guard: this package's tests must pass without the monolith."""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# The retired monolith must never satisfy an import from these tests. Blocking
+# the name makes any leftover `abstract_hugpy_dev` import fail loudly. During
+# the transition, HUGPY_ALLOW_MONOLITH=1 lifts the block for integration runs.
+if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
+    sys.modules.setdefault("abstract_hugpy_dev", None)
+
+# The per-call selector ledgers every execute_route outcome. Tests must never
+# write evidence into the operator's ~/.hugpy; point the reliability ledger at
+# a scratch file (individual tests build their own ledgers under tmp_path).
+# ``hugpy_oracle.config`` honours ORACLE_LEDGER_PATH first, so this override
+# keeps working exactly as it did under the monolith's conftest.
+import tempfile
+
+os.environ.setdefault(
+    "ORACLE_LEDGER_PATH",
+    os.path.join(tempfile.gettempdir(), "hugpy-oracle-tests", "test-reliability.sqlite"))

@@ -1,0 +1,326 @@
+/*
+ * receptacle.module.css — tabbed media input (text / url / file).
+ *
+ * Consumes the --hp-* palette set by the console page root (falls back
+ * to the same dark values so the receptacle also works standalone).
+ */
+
+.receptacle {
+  margin: 1.25rem auto;
+  width: min(900px, 100%);
+  border: 1px solid var(--hp-border, rgba(255, 255, 255, 0.09));
+  border-radius: 1.25rem;
+  background: var(--hp-surface, #101010);
+  box-shadow: var(--hp-shadow, 0 18px 45px rgba(0, 0, 0, 0.45));
+  overflow: hidden;
+  color: var(--hp-text, #f4f4f5);
+}
+
+/* ── mode tabs ───────────────────────────────────────────────────────── */
+
+.modeTabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  background: var(--hp-surface-sunken, #0a0a0a);
+  padding: 0.35rem;
+  gap: 0.35rem;
+  border-bottom: 1px solid var(--hp-border-faint, rgba(255, 255, 255, 0.055));
+}
+
+.modeTab {
+  border: 1px solid transparent;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  background: transparent;
+  color: var(--hp-text-muted, #8e8e93);
+  font-weight: 600;
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition:
+    color 140ms ease,
+    background 140ms ease,
+    border-color 140ms ease;
+}
+
+.modeTab:hover {
+  color: var(--hp-text-soft, #c7c7cc);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.modeTab.active {
+  background: var(--hp-surface-raised, #161616);
+  border-color: var(--hp-border-strong, rgba(255, 255, 255, 0.16));
+  color: var(--hp-text, #f4f4f5);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.inputStage {
+  /* Static input area: text / url / file each fill the SAME constant height, so
+     switching modes never resizes the receptacle or shifts the Run row below.
+     The largest natural stage (the 240px drop zone) sets the floor; min-height
+     (not height) lets legitimate content — a long paste, a file list — extend. */
+  padding: 1rem;
+  min-height: 272px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Whatever mode is active, its primary control stretches to fill the area. */
+.inputStage > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ── text / url stages ───────────────────────────────────────────────── */
+
+.textBox {
+  width: 100%;
+  min-height: 180px;
+  max-height: 55vh;
+  resize: vertical;
+  box-sizing: border-box;
+  border: 1px solid var(--hp-border, rgba(255, 255, 255, 0.09));
+  border-radius: 0.9rem;
+  padding: 1rem;
+  font: inherit;
+  line-height: 1.6;
+  background: var(--hp-surface-sunken, #0a0a0a);
+  color: var(--hp-text, #f4f4f5);
+  transition: border-color 140ms ease;
+}
+
+.urlBar {
+  /* Same box as the text area (not a short pill) so url mode is the same size
+     as text / file mode — see .inputStage for the static-height rationale. */
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hp-border, rgba(255, 255, 255, 0.09));
+  border-radius: 0.9rem;
+  padding: 1rem 1.25rem;
+  font: inherit;
+  font-size: 1.05rem;
+  background: var(--hp-surface-sunken, #0a0a0a);
+  color: var(--hp-text, #f4f4f5);
+  transition: border-color 140ms ease;
+}
+
+.textBox::placeholder,
+.urlBar::placeholder {
+  color: var(--hp-text-muted, #8e8e93);
+}
+
+.textBox:hover,
+.urlBar:hover {
+  border-color: var(--hp-border-strong, rgba(255, 255, 255, 0.16));
+}
+
+.textBox:focus,
+.urlBar:focus {
+  outline: 2px solid var(--hp-accent-soft, rgba(99, 102, 241, 0.16));
+  border-color: var(--hp-accent, #6366f1);
+}
+
+/* ── file stage ──────────────────────────────────────────────────────── */
+
+.dropZone {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  border: 2px dashed var(--hp-border-strong, rgba(255, 255, 255, 0.16));
+  border-radius: 0.9rem;
+  background: var(--hp-surface-sunken, #0a0a0a);
+  color: var(--hp-text, #f4f4f5);
+  cursor: pointer;
+  padding: 1.25rem;
+  text-align: center;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.dropZone:hover,
+.dropZone.dragActive {
+  border-color: var(--hp-accent, #6366f1);
+  background: var(--hp-accent-soft, rgba(99, 102, 241, 0.16));
+  transform: translateY(-1px);
+}
+
+/* Phase 11: visible keyboard focus ring for the (role="button") drop zone. */
+.dropZone:focus-visible {
+  outline: 2px solid var(--hp-accent, #6366f1);
+  outline-offset: 2px;
+}
+
+.hiddenInput {
+  display: none;
+}
+
+.dropTitle {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dropSubtext {
+  margin-top: 0.35rem;
+  color: var(--hp-text-muted, #8e8e93);
+}
+
+/* ── uploaded / local file lists ─────────────────────────────────────── */
+
+.fileListWrap {
+  width: min(680px, 100%);
+  margin-top: 1rem;
+  cursor: default;
+  text-align: left;
+}
+
+.selectionToolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.4rem 0.25rem;
+  font-size: 0.85rem;
+  color: var(--hp-text-muted, #8e8e93);
+}
+
+.selectionActions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.linkBtn {
+  border: 0;
+  background: transparent;
+  color: var(--hp-accent-strong, #818cf8);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.linkBtn:hover {
+  text-decoration: underline;
+}
+
+.fileList {
+  width: min(680px, 100%);
+  display: grid;
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  list-style: none;
+  text-align: left;
+}
+
+.fileList li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  border: 1px solid var(--hp-border, rgba(255, 255, 255, 0.09));
+  border-radius: 0.7rem;
+  background: var(--hp-surface-raised, #161616);
+  padding: 0.65rem 0.8rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.fileList li:hover {
+  border-color: var(--hp-border-strong, rgba(255, 255, 255, 0.16));
+}
+
+.fileList li.fileRowSelected,
+.fileRowSelected {
+  border-color: var(--hp-accent, #6366f1);
+  background: var(--hp-accent-soft, rgba(99, 102, 241, 0.16));
+}
+
+.fileRowLabel {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.fileRowLabel input[type="checkbox"] {
+  accent-color: var(--hp-accent, #6366f1);
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.fileList span {
+  color: var(--hp-text-muted, #8e8e93);
+  white-space: nowrap;
+}
+
+.fileList small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--hp-text-muted, #8e8e93);
+  word-break: break-all;
+}
+
+.uploadError {
+  margin-top: 1rem;
+  border: 1px solid var(--hp-danger, #f87171);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  color: var(--hp-danger, #f87171);
+  background: var(--hp-danger-soft, rgba(248, 113, 113, 0.12));
+}
+
+/* ── inherited-source chips (shared with UtilityPage) ────────────────── */
+
+.inherited {
+  border: 1px solid var(--hp-border, rgba(255, 255, 255, 0.09));
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--hp-surface-raised, #161616);
+}
+
+.inherited_ok { border-left: 3px solid var(--hp-ok, #4ade80); }
+.inherited_empty { border-left: 3px solid var(--hp-warn, #fbbf24); }
+.inherited_mismatch { border-left: 3px solid var(--hp-danger, #f87171); }
+
+.inheritedHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+
+.inheritedBadge {
+  font-size: 0.7rem;
+  color: var(--hp-text-muted, #8e8e93);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.inheritedSummary {
+  margin-top: 0.25rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: var(--hp-text-soft, #c7c7cc);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inheritedEmpty {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--hp-warn, #fbbf24);
+}

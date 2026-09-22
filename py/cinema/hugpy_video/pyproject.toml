@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-video"
+version = "0.1.0"
+description = "Hugpy video: media library and job bus, ffmpeg, synthetic and studio runners, reservations and studio sessions for video intelligence"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "video",
+    "ffmpeg",
+    "video-generation",
+    "media-intelligence",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Heavy engine deps (torch, wan, ltx, rife, opencv, ...) are deliberately NOT
+# listed: declare only what import-time needs and keep every heavy import
+# lazy inside the function that uses it so the package imports on a CPU-only box.
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-engine",
+    "hugpy-media",
+    "pydantic>=2",
+    "abstract-essentials",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/cinema/hugpy_video/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/cinema/hugpy_video"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+# ffmpeg/diffusers-plane runners and the identity relays (HTTP).
+render = ["numpy", "Pillow", "requests"]
+# The studio spine's GPU zoo (Wan / VACE / LTX / RIFE).
+studio = ["torch", "diffusers", "transformers", "numpy", "Pillow", "opencv-python-headless", "imageio", "imageio-ffmpeg", "requests"]
+# Identity rendering stays behind the external abstract-identity service client.
+identity = ["abstract-identity", "requests"]
+test = ["pytest>=8", "pytest-timeout"]
+
+[project.scripts]
+hugpy-video = "hugpy_video.cli:main"
+
+[project.entry-points."hugpy_engine.tasks"]
+video = "hugpy_video.plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_video = ["py.typed", "**/*.json", "**/*.md", "**/*.txt"]

@@ -1,0 +1,67 @@
+/* Media-intelligence arm-shell layout. The nav LOOK now comes from the sitewide
+ * shared stylesheet (ui_shared/navbar/navbar.css, imported by Navbar.tsx); only
+ * the arm shell + header-stack wrapper stay local here.
+ *
+ * The shared nav + the demo banner live OUTSIDE .hugpy-chat-scope, where the
+ * scoped dark tokens (tokens.css / chat.css) don't reach. So .hugpy-arm carries
+ * the small subset of dark token values those chrome pieces need — notably the
+ * ones BrandMark's `token-*` Tailwind classes bind to (--text-primary, etc.) —
+ * and lays out navbar → (banner) → chat as a single full-height column. */
+
+.hugpy-arm {
+  display: flex;
+  flex-direction: column;
+  /* A fixed-height, non-scrolling shell: the header stack pins at the top and
+     the chat scope (flex:1, its message list scrolls internally) fills the rest,
+     so the WINDOW never scrolls and the sticky header stays truly pinned to the
+     viewport (operator directive 2026-07-21). Previously min-height:100svh let
+     the arm grow taller than the viewport → the body scrolled and carried the
+     "sticky" header off-screen with it. */
+  height: 100dvh;
+  overflow: hidden;
+  width: 100%;
+  max-width: 100vw;
+
+  /* Dark token context for the chrome above the chat scope. Mirrors chat.css's
+     in-scope dark palette so BrandMark + links read identically to the rest.
+     (The shared navbar.css also carries these on .hugpy-navbar itself; same
+     values, so there is no conflict — this set also feeds the demo banner.) */
+  --main-surface-primary: #050505;
+  --text-primary: #f4f4f5;
+  --text-secondary: #c7c7cc;
+  --text-tertiary: #8e8e93;
+  --border-light: rgba(255, 255, 255, 0.09);
+  --border-medium: rgba(255, 255, 255, 0.14);
+  --link: #a7c7ff;
+
+  color: var(--text-primary);
+  background: var(--main-surface-primary);
+}
+
+/* Inside the arm the chat scope fills the height left under the nav/banner,
+   instead of each claiming the full viewport (which would overflow). Beats the
+   bare `.hugpy-chat-scope { height: calc(100svh …) }` rule on specificity. */
+.hugpy-arm .hugpy-chat-scope {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* The sidebar fills the chat scope's full height. Because the scope is
+   height:auto + flex:1, the aside's Tailwind `h-full` (height:100%) can't
+   resolve against it and collapses to content height — which also disables
+   flex stretch. Override to auto so the row's align-items:stretch sizes the
+   aside to the full screen height, keeping the profile/"You" pinned to the
+   bottom. (#id beats the `.h-full` utility on specificity.) */
+.hugpy-arm #stage-slideover-sidebar { height: auto; }
+
+/* Nav + demo banner ride together in .hugpy-header-stack, and it is THAT wrapper
+   that sticks — so the whole header (nav on top, banner directly beneath) pins to
+   the viewport top as one unit and neither slides under the other on scroll
+   (operator directive 2026-07-21). */
+.hugpy-header-stack {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  flex-shrink: 0;
+}

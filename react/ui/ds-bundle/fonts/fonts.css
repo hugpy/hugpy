@@ -1,0 +1,35 @@
+@font-face{
+  font-family: 'Fira Code';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./firacode-400.woff2') format('woff2');
+}
+@font-face{
+  font-family: 'Fira Code';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./firacode-500.woff2') format('woff2');
+}
+@font-face{
+  font-family: 'Fira Code';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./firacode-700.woff2') format('woff2');
+}
+@font-face{
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./jetbrainsmono-400.woff2') format('woff2');
+}
+@font-face{
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./jetbrainsmono-700.woff2') format('woff2');
+}

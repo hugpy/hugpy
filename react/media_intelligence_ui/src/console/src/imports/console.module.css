@@ -1,0 +1,462 @@
+/*
+ * console.module.css — Hugpy Media Intelligence console.
+ *
+ * Editorial-terminal aesthetic (design ref: assets/Media Intelligence.html):
+ * Newsreader serif for headlines + output text, IBM Plex Mono for every
+ * label / eyebrow / meta / button (uppercase, wide tracking), a single
+ * periwinkle accent (#6172ff) on near-black. Fonts load in index.html.
+ *
+ * The console lives inside the chat shell's `.hugpy-chat-scope`, so the dark
+ * surface already matches; these tokens add the type system + accent on top.
+ */
+
+.mediaMain,
+.page {
+  --hp-canvas: #000000;
+  --hp-surface: #000000;
+  --hp-surface-raised: #0a0a0b;
+  --hp-surface-sunken: #070708;
+  --hp-border: rgba(255, 255, 255, 0.1);
+  --hp-border-strong: rgba(255, 255, 255, 0.18);
+  --hp-border-faint: rgba(255, 255, 255, 0.07);
+  --hp-text: #f2f2f2;
+  --hp-text-soft: #dcdcdc;
+  --hp-text-muted: rgba(255, 255, 255, 0.42);
+  --hp-text-faint: rgba(255, 255, 255, 0.3);
+  --hp-accent: #6172ff;
+  --hp-accent-strong: #aab2ff;
+  --hp-accent-soft: rgba(97, 114, 255, 0.14);
+  --hp-accent-border: rgba(97, 114, 255, 0.5);
+  --hp-ok: #4ade80;
+  --hp-warn: #fbbf24;
+  --hp-danger: #ff9a9a;
+  --hp-danger-soft: rgba(255, 90, 90, 0.06);
+  --hp-danger-border: rgba(255, 90, 90, 0.3);
+  --hp-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  --hp-radius: 16px;
+
+  --hp-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+  --hp-serif: "Newsreader", Georgia, "Times New Roman", serif;
+  --hp-sans: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+
+  color-scheme: dark;
+}
+
+/* Full-bleed dark canvas under the (light) site navbar. */
+.mediaMain {
+  min-height: calc(100svh - 64px);
+  background:
+    radial-gradient(circle at top center, rgba(97, 114, 255, 0.06), transparent 36rem),
+    var(--hp-canvas);
+}
+
+.page {
+  width: min(1000px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 2.5rem 0 3.5rem;
+  color: var(--hp-text);
+  font-family: var(--hp-sans);
+}
+
+/* ── header ──────────────────────────────────────────────────────────── */
+
+.header {
+  margin-bottom: 1.75rem;
+  text-align: center;
+}
+
+.eyebrow {
+  margin: 0 0 0.55rem;
+  font-family: var(--hp-mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--hp-accent);
+}
+
+.header h1 {
+  margin: 0;
+  font-family: var(--hp-serif);
+  font-size: clamp(1.9rem, 4vw, 2.75rem);
+  line-height: 1.05;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--hp-text);
+}
+
+.subtitle {
+  max-width: 460px;
+  margin: 0.85rem auto 0;
+  font-family: var(--hp-sans);
+  color: var(--hp-text-muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+/* ── connected console deck ──────────────────────────────────────────── */
+
+.inputConsoleDeck {
+  width: min(860px, 100%);
+  margin: 1.25rem auto 2rem;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  background: var(--hp-canvas);
+  box-shadow: var(--hp-shadow);
+  overflow: hidden;
+}
+
+/* Top segment: MediaInputReceptacle (renders its own section). */
+.inputConsoleDeck > section:first-child {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* Middle segment: tool / module grid. */
+.inputConsoleDeck .toolGrid {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 1.1rem 1.25rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+  border-top: 1px solid var(--hp-border-faint);
+  background: var(--hp-surface);
+}
+
+.inputConsoleDeck .toolCard {
+  flex: none;
+}
+
+/* Filter segment: the two-layer media + operation selectors. */
+.inputConsoleDeck .filterPanel {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--hp-border-faint);
+  border-radius: 0;
+  background: var(--hp-surface);
+}
+
+/* Bottom segment: execution console. */
+.inputConsoleDeck .executionArea {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 1.5rem;
+  border: 0;
+  border-top: 1px solid var(--hp-border-faint);
+  background: var(--hp-surface);
+}
+
+/* UtilityPage renders its own main.page — flatten it inside the deck. */
+.inputConsoleDeck .executionArea > main {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── tool / module cards ─────────────────────────────────────────────── */
+
+.toolGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+}
+
+.toolCard {
+  background: var(--hp-surface-raised);
+  border: 1px solid var(--hp-border-faint);
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+.toolCard:hover {
+  border-color: var(--hp-border-strong);
+}
+
+.toolCard h3 {
+  margin: 0 0 3px;
+  font-family: var(--hp-sans);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #e8e8e8;
+}
+
+.toolCard p {
+  margin: 0;
+  font-family: var(--hp-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--hp-text-faint);
+}
+
+.toolCard.selectedTool {
+  border-color: var(--hp-accent-border);
+  background: var(--hp-accent-soft);
+}
+
+.toolCard.selectedTool h3 {
+  color: #ffffff;
+}
+
+.toolCard.selectedTool p {
+  color: var(--hp-accent-strong);
+}
+
+/* ── filters: media (layer 1) + operation (layer 2) ──────────────────── */
+
+.filterPanel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--hp-border);
+  border-radius: var(--hp-radius);
+  background: var(--hp-surface);
+}
+
+.filterPanel label {
+  display: grid;
+  gap: 0.5rem;
+  font-family: var(--hp-mono);
+  font-weight: 500;
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--hp-text-faint);
+}
+
+.filterPanel select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hp-border);
+  border-radius: 12px;
+  padding: 0.7rem 0.8rem;
+  font-family: var(--hp-sans);
+  font-size: 0.9rem;
+  background: var(--hp-surface-raised);
+  color: var(--hp-text);
+  transition: border-color 150ms ease;
+}
+
+.filterPanel select:hover {
+  border-color: var(--hp-border-strong);
+}
+
+.filterPanel select:focus {
+  outline: none;
+  border-color: var(--hp-accent-border);
+}
+
+.filterPanel option {
+  background: #0b0b0c;
+  color: var(--hp-text);
+}
+
+/* The selected tool's options extend the row: text / number / textarea inputs
+   match the operation select; a checkbox lays out inline. */
+.filterPanel input,
+.filterPanel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hp-border);
+  border-radius: 12px;
+  padding: 0.7rem 0.8rem;
+  font-family: var(--hp-sans);
+  font-size: 0.9rem;
+  background: var(--hp-surface-raised);
+  color: var(--hp-text);
+  transition: border-color 150ms ease;
+}
+
+.filterPanel textarea {
+  resize: vertical;
+}
+
+.filterPanel input:hover,
+.filterPanel textarea:hover {
+  border-color: var(--hp-border-strong);
+}
+
+.filterPanel input:focus,
+.filterPanel textarea:focus {
+  outline: none;
+  border-color: var(--hp-accent-border);
+}
+
+.filterPanel .optionCheckbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+  align-self: end;
+  padding: 0.7rem 0;
+  font-family: var(--hp-sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--hp-text-soft, #c7c7cc);
+}
+
+.filterPanel .optionCheckbox input {
+  width: auto;
+  padding: 0;
+  accent-color: var(--hp-accent, #6366f1);
+}
+
+/* ── execution / misc shared pieces ──────────────────────────────────── */
+
+.executionArea {
+  border-top: 1px solid var(--hp-border);
+  padding-top: 2rem;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 2.25rem 1.25rem;
+  text-align: center;
+  font-family: var(--hp-sans);
+  font-size: 0.85rem;
+  color: var(--hp-text-faint);
+  border-top: 1px solid var(--hp-border-faint);
+  background: var(--hp-surface-sunken);
+}
+
+.selectorPanel {
+  border: 1px solid var(--hp-border);
+  border-radius: var(--hp-radius);
+  background: var(--hp-surface);
+  box-shadow: var(--hp-shadow);
+  padding: 1rem;
+  margin-bottom: 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.selectorPanel label {
+  font-family: var(--hp-mono);
+  font-weight: 500;
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--hp-text-faint);
+}
+
+.select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hp-border);
+  border-radius: 12px;
+  padding: 0.7rem 0.8rem;
+  font-family: var(--hp-sans);
+  background: var(--hp-surface-raised);
+  color: var(--hp-text);
+}
+
+.description {
+  margin: 0.25rem 0 0;
+  font-family: var(--hp-sans);
+  color: var(--hp-text-muted);
+  line-height: 1.5;
+}
+
+.button {
+  font-family: var(--hp-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hp-accent-strong);
+  background: var(--hp-accent-soft);
+  border: 1px solid var(--hp-accent-border);
+  border-radius: 10px;
+  padding: 0.7rem 1.4rem;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.button:hover {
+  background: rgba(97, 114, 255, 0.26);
+}
+
+.resultText {
+  font-family: var(--hp-serif);
+  font-size: 1.05rem;
+  line-height: 1.62;
+  background: var(--hp-surface-sunken);
+  color: var(--hp-text-soft);
+}
+
+/* ── mode slider (legacy segmented control) ──────────────────────────── */
+
+.modeContainer {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.modeSlider {
+  position: relative;
+  display: flex;
+  background: var(--hp-surface-sunken);
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--hp-border);
+  width: 100%;
+  max-width: 500px;
+}
+
+.modeButton {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  padding: 12px;
+  font-family: var(--hp-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  z-index: 2;
+  color: var(--hp-text-faint);
+  transition: color 0.3s ease;
+}
+
+.modeButton.active {
+  color: var(--hp-text);
+}
+
+.sliderHighlight {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: calc(33.33% - 4px);
+  background: var(--hp-surface-raised);
+  border: 1px solid var(--hp-border-strong);
+  border-radius: 8px;
+  transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 1;
+}
+
+@media (max-width: 760px) {
+  .filterPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .inputConsoleDeck .toolGrid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,17 @@
+# hugpy-sentinel.timer — 10-minute cadence for the sentinel's run-once pass.
+#   sudo systemctl enable --now hugpy-sentinel.timer
+[Unit]
+Description=hugpy sentinel: periodic bound-exceeded sweep
+
+[Timer]
+# Every 10 minutes, first run 2m after boot. A pass that finds nothing is
+# four HTTP GETs; a pass that opens a case runs one bounded agent.
+OnBootSec=2m
+OnUnitActiveSec=10m
+# Jitter so several boxes running a sentinel don't all poll central at once.
+RandomizedDelaySec=60
+Persistent=true
+Unit=hugpy-sentinel.service
+
+[Install]
+WantedBy=timers.target

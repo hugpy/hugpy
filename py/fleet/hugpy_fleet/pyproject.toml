@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-fleet"
+version = "0.1.0"
+description = "Hugpy fleet: central worker registry, enrollment, heartbeats, evictions, doctrine and placement, plus the full, GGUF and phone worker agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "gpu",
+    "fleet",
+    "workers",
+    "distributed-inference",
+    "rpc-sharding",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/fleet/hugpy_fleet/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/fleet/hugpy_fleet"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.scripts]
+hugpy-worker = "hugpy_fleet.worker.agent:main"
+hugpy-gguf-worker = "hugpy_fleet.gguf_worker.agent:main"
+hugpy-phone-brick = "hugpy_fleet.phone_brick.__main__:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+media = ["hugpy-media"]
+video = ["hugpy-video"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_fleet = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]

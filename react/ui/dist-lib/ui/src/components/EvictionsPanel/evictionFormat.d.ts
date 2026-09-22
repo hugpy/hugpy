@@ -1,0 +1,36 @@
+export function fmtBytes(n: any): string;
+export function fmtMs(ms: any): string;
+export function fmtClock(ts: any): string;
+export function fmtReason(r: any): any;
+export function eventKey(ev: any): string;
+export function tierClass(tier: any): string;
+export function provisionFailText(r: any): any;
+export function failCode(r: any): any;
+export function failSummary(r: any): string;
+export function failDetail(r: any): any;
+export function buildRun(run: any): {
+    id: any;
+    worker_id: any;
+    startTs: any;
+    endTs: any;
+    incoming: any;
+    trigger: any;
+    tier: any;
+    needBytes: any;
+    rows: any[];
+    done: any;
+    touched: Set<any>;
+    group: any;
+    failure: string;
+    failureDetail: any;
+    failureRow: any;
+    haystack: string;
+};
+export function runVictims(run: any): any;
+export function runFreedBytes(run: any): number;
+export const OUTCOME_CLASS: {
+    fit: string;
+    partial: string;
+    refused: string;
+    'proceeded-unfit': string;
+};

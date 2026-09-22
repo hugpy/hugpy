@@ -1,0 +1,27 @@
+.cp-panel { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; font-size: 13px; }
+.cp-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.cp-filter { flex: 1; min-width: 260px; background: #0b0d11; color: inherit; border: 1px solid #262b36; border-radius: 6px; padding: 4px 8px; font: inherit; }
+.cp-dim { color: #8b93a7; font-size: 12px; }
+.cp-note { color: #ffd479; background: #3a2a00; border: 1px solid #6b4f00; padding: 4px 8px; border-radius: 6px; font-size: 12px; }
+.cp-callers { display: flex; gap: 8px; flex-wrap: wrap; }
+.cp-caller { border: 1px solid #262b36; border-radius: 10px; padding: 2px 8px; font-size: 12px; background: #171a21; }
+.cp-tablewrap { overflow: auto; max-height: calc(100vh - 220px); border: 1px solid #262b36; border-radius: 8px; }
+.cp-table { width: 100%; border-collapse: collapse; }
+.cp-table th, .cp-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #262b36; vertical-align: top; white-space: nowrap; }
+.cp-table th { position: sticky; top: 0; background: #171a21; color: #8b93a7; font-weight: 500; z-index: 1; }
+.cp-num { text-align: right; font-variant-numeric: tabular-nums; }
+.cp-mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.cp-model { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.cp-err { color: #ffb3b3; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.cp-row-bad td { background: rgba(248, 81, 73, 0.06); }
+.cp-st { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #232a38; }
+.cp-st-ok { background: #123b1f; color: #7ee787; }
+.cp-st-bad { background: #3b1212; color: #ffb3b3; }
+.cp-st-warn { background: #3b2f0f; color: #ffd479; }
+.cp-st-live { background: #1f3b5a; color: #9cd0ff; }
+/* Weights locality at job start: hot = on the worker's local NVMe hot-cache;
+   cold = served off the shared array. na/— = unknown (tier off / reused model). */
+.cp-loc-hot { color: #ff9d5c; }
+.cp-loc-cold { color: #9cd0ff; }
+.cp-loc-na { color: #8b93a7; }
+.cp-foot { font-family: ui-monospace, monospace; font-size: 11px; }

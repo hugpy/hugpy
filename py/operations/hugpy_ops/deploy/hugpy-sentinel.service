@@ -1,0 +1,76 @@
+# hugpy-sentinel.service — one sentinel pass (k95): detect bound-exceeded
+# conditions on central's read surfaces, open deduplicated cases, spawn ONE
+# bounded document-only `hugpy-agent case` run per NEW case, exit.
+#
+# NOT INSTALLED/ENABLED BY THIS FILE. The keeper writes it; the OPERATOR
+# installs after review (a checker that spawns agent runs — and could one
+# day apply remedies — is an operator decision):
+#
+#   sudo cp <hugpy_ops>/deploy/hugpy-sentinel.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hugpy-sentinel.timer
+#   systemctl list-timers hugpy-sentinel*; journalctl -u hugpy-sentinel -f
+#
+# The sentinel is the `hugpy-sentinel` console script of the hugpy-ops
+# distribution (`pip install hugpy-ops`); adjust the venv path below per box.
+#
+# REMEDIES ARE OFF BY DEFAULT and stay off until the operator adds
+# Environment=HUGPY_SENTINEL_REMEDIES=1 below — until then every case is
+# document+escalate only. The prod worker "ae" is excluded in code
+# (hugpy_ops/sentinel/remedies.py PROD_EXCLUDED_WORKERS), not by this file.
+
+[Unit]
+Description=hugpy sentinel: one detect -> case -> diagnose pass
+After=network-online.target hugpy-api-dev.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStartPre=/usr/bin/test -x /home/ubuntu/hugpy/venv/bin/hugpy-sentinel
+ExecStart=/home/ubuntu/hugpy/venv/bin/hugpy-sentinel run-once
+# One pass polls four HTTP GETs and possibly runs one diagnosis agent per new
+# case (each internally capped at HUGPY_SENTINEL_AGENT_TIMEOUT_S, default
+# 900s). 30m is the outer backstop for a pass that opens several cases.
+TimeoutStartSec=30m
+Nice=10
+
+Environment=PYTHONUNBUFFERED=1
+# Central base URL: HUGPY_SENTINEL_CENTRAL overrides; else the platform
+# resolver (HUGPY_BASE_URL and its legacy aliases), else loopback central.
+Environment=HUGPY_SENTINEL_CENTRAL=http://127.0.0.1:7002
+# Case db, per-case dirs, cases.md ledger, scorecard history — durable, and
+# outside any checkout. Default without this line: <HUGPY_HOME>/state/sentinel.
+Environment=HUGPY_SENTINEL_DIR=/home/ubuntu/.local/state/hugpy-sentinel
+# The one-shot diagnosis agent. Pin the absolute path (PATH inside systemd
+# is minimal); adjust per box.
+Environment=HUGPY_SENTINEL_AGENT=/home/ubuntu/.local/bin/hugpy-agent
+# The agent talks to the fleet through central too.
+Environment=HUGPY_BASE=http://127.0.0.1:7002
+# k96 BRAIN LADDER for spawned case agents (inherited env; csv, best-first).
+# The run starts on the first WARM entry and walks down one entry per
+# capacity/permanent-verdict refusal; the LAST entry is the PILOT LIGHT — keep
+# it small (cheap cold load) and pinned warm (see deploy/SENTINEL.md "Pilot
+# light"). The sentinel also derives its pilot-light-not-resident check from
+# this line (override with HUGPY_SENTINEL_PILOT_LIGHT). Recommended for THIS
+# fleet (ae 3090 + computron 4060-8GB + op; 2026-08-06):
+# Environment=HUGPY_AGENT_BRAINS=Qwen~Qwen3-Coder-Next-GGUF,Qwen~Qwen2.5-3B-Instruct-GGUF
+# Remedy gate — LEAVE UNSET until the operator deliberately enables:
+# Environment=HUGPY_SENTINEL_REMEDIES=1
+
+# Hardening: network + its own state dir, nothing else writable.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/.local/state/hugpy-sentinel
+# The platform's per-user dirs (HUGPY_HOME, default ~/.hugpy) are created on
+# first resolve; grant them so a ProtectHome box does not die at import.
+ReadWritePaths=/home/ubuntu/.hugpy
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

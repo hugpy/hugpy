@@ -1,0 +1,42 @@
+{
+  "name": "@hugpy/ui-shared",
+  "version": "0.3.0",
+  "description": "Shared UI pieces for every Hugpy surface: the floating Help widget and the cross-app navbar links (plain DOM + CSS, zero dependencies, framework-agnostic)",
+  "keywords": [
+    "hugpy",
+    "ui",
+    "navbar",
+    "help-widget",
+    "zero-dependency"
+  ],
+  "homepage": "https://hugpy.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hugpy/hugpy.git",
+    "directory": "react/ui_shared"
+  },
+  "bugs": {
+    "url": "https://github.com/hugpy/hugpy/issues"
+  },
+  "author": {
+    "name": "putkoff",
+    "email": "support@hugpy.ai",
+    "url": "https://hugpy.ai"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "files": [
+    "help",
+    "navbar",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    "./help/helpWidget.js": "./help/helpWidget.js",
+    "./help/helpWidget.css": "./help/helpWidget.css",
+    "./navbar/links.js": "./navbar/links.js",
+    "./navbar/navbar.css": "./navbar/navbar.css"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,65 @@
+/* BrandMark — replicated 1:1 from the main site's BrandMark.css so the brand
+   mark reads identically in the media arm's nav: hexagon symbol + the two-row
+   "H U G P Y" / rule / "inference you own" lockup. Variables map to the media
+   arm's dark token context (.hugpy-arm), with literal fallbacks. */
+.brandmark {
+  color: var(--text-primary, #f4f4f5);
+  font-family: "Fira Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.brandmark:hover { color: var(--link, #a7c7ff); }
+.brandmark-img {
+  /* scaled up to stand in proportion to the taller two-row text lockup */
+  height: 34px;
+  width: auto;
+  align-self: center;
+  /* the mark sits on solid black in the source PNG; blend onto our bg + brighten
+     so the thin hexagon carries weight rather than reading as a faint outline. */
+  mix-blend-mode: screen;
+  filter: brightness(1.6) saturate(1.2);
+}
+
+/* wordmark + tagline stack vertically, split by a hairline rule, all sharing one
+   width (the wordmark is tracked out below to match the tagline). */
+.brandmark-text {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+}
+.brandmark-word {
+  font-size: 16px;
+  line-height: 1;
+  letter-spacing: 0.92em;
+  margin-right: -0.92em;
+}
+.brandmark-rule {
+  height: 1px;
+  width: 100%;
+  background: currentColor;
+  opacity: 0.35;
+}
+.brandmark-sub {
+  color: var(--text-tertiary, #8e8e93);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+/* On phones drop the tagline + rule, collapsing to the compact single-line mark
+   (symbol + wordmark) at the original symbol size — matches the main site. */
+@media (max-width: 640px) {
+  .brandmark-rule,
+  .brandmark-sub { display: none; }
+  .brandmark-img { height: 22px; }
+  .brandmark-word { letter-spacing: 0.12em; margin-right: 0; }
+}

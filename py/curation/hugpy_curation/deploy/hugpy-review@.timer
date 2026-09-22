@@ -1,0 +1,15 @@
+# Nightly model review for one saved criteria.
+#   sudo systemctl enable --now hugpy-review@nightly.timer
+[Unit]
+Description=hugpy: nightly HF model review for criteria "%i"
+
+[Timer]
+# 03:20 local, off-peak — a run can download tens of GB and will take the GPU.
+OnCalendar=*-*-* 03:20:00
+# Spread instances so two criteria don't collide on the card.
+RandomizedDelaySec=45m
+Persistent=true
+Unit=hugpy-review@%i.service
+
+[Install]
+WantedBy=timers.target

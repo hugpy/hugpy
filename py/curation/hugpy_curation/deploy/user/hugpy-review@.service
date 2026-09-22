@@ -1,0 +1,66 @@
+# hugpy-review@<criteria>.service — USER-unit variant of the nightly reviewer.
+#
+# WHY A USER UNIT: the target box (ae) has no sudo, so nothing can be written to
+# /etc/systemd/system. Paths are the LIVE ae worker's (the systemctl --user
+# hugpy-worker unit under /home/solcatcher/hugpy-worker — NOT the inactive
+# system unit's /var/lib/hugpy-worker, which is hugpyw-owned mode 750 and
+# unwritable rootless). Everything here is identical to the system unit except
+# User=/Group=, which are INVALID in a user unit (the manager already runs as
+# the user) and would make systemd refuse to load the file.
+#
+# Install (no root; linger is already enabled on ae):
+#   mkdir -p ~/.config/systemd/user && cp deploy/user/hugpy-review@.* ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now hugpy-review@nightly.timer
+#
+# The instance name is the saved criteria name, so several searches can run on
+# their own schedules:  hugpy-review@coding.timer, hugpy-review@vision.timer …
+# Create the criteria first:
+#   hugpy-curation review criteria set nightly --set query=qwen3
+[Unit]
+Description=hugpy: review HF models against saved criteria "%i"
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/solcatcher/hugpy-worker
+Environment=PYTHONUNBUFFERED=1
+# The reviewer loads GGUFs with llama_cpp, which lives in the worker venv.
+Environment=REVIEW_LLAMA_PYTHON=/home/solcatcher/hugpy-worker/venv/bin/python
+
+# ── the local record ──────────────────────────────────────────────────────
+# The on-box sqlite. Durable across reboots and independent of the network, so
+# a run is never lost because central was unreachable. It is NOT what the
+# console reads — see REVIEW_CENTRAL_URL below.
+Environment=REVIEW_DB=/home/solcatcher/hugpy-worker/review/reviews.db
+
+# ── the source of truth ───────────────────────────────────────────────────
+# After each run the pipeline pushes the run + its results to central's DB,
+# which is what /llm/review/* serves and what the operator actually looks at.
+# Best-effort: a failed push logs one line and never fails the run; replay with
+#   hugpy-curation review push --all
+Environment=REVIEW_CENTRAL_URL=https://dev.hugpy.ai/api
+# Bearer credential for that push. REPLACE THE PLACEHOLDER. It is the SAME
+# worker enrollment token this box already presents on register/heartbeat and
+# on /llm/evictions/ingest — central's ingest gate is that same enrollment
+# check, so there is no new secret to mint or rotate. The live value is the
+# WORKER_ENROLL_TOKEN in the worker service's systemd drop-in on this box
+# (`systemctl --user cat hugpy-worker` / the system unit's override.conf); an
+# operator can mint a fresh one from the console's worker-token panel
+# (POST /llm/workers/enrollment-tokens). If you leave this unset, push.py falls
+# back to WORKER_ENROLL_TOKEN and then HUGPY_OPERATOR_TOKEN from the
+# environment — this line exists so the credential is explicit for a unit that
+# does not inherit the worker's drop-in.
+Environment=REVIEW_CENTRAL_TOKEN=REPLACE_WITH_WORKER_ENROLL_TOKEN
+# Name the pushed rows are attributed to on central. Defaults to the hostname.
+Environment=REVIEW_PUSH_HOST=ae
+
+ExecStart=/home/solcatcher/hugpy-worker/venv/bin/hugpy-curation review \
+          run %i --report /home/solcatcher/hugpy-worker/review-%i.md
+# A run downloads weights and loads them on the GPU; give it room but never let
+# a wedged load pin the card indefinitely.
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

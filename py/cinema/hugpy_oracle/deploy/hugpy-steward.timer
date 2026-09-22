@@ -1,0 +1,14 @@
+# hugpy-steward.timer — 15-minute cadence for the oracle steward pass.
+#   sudo systemctl enable --now hugpy-steward.timer
+[Unit]
+Description=hugpy oracle steward: periodic self-check
+
+[Timer]
+OnBootSec=3m
+OnUnitActiveSec=15m
+RandomizedDelaySec=60
+Persistent=true
+Unit=hugpy-steward.service
+
+[Install]
+WantedBy=timers.target

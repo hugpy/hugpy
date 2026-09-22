@@ -1,0 +1,51 @@
+.login-page {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* subtle radial glow behind the card, on the page bg */
+  background:
+    radial-gradient(600px 400px at 50% 38%, rgba(86, 212, 232, 0.06), transparent 70%),
+    var(--bg);
+}
+
+.login-card {
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 36px 32px 32px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.login-lockup {
+  width: 200px;
+  align-self: center;
+  margin-bottom: 10px;
+  /* source PNG sits on solid black; screen-blend onto our near-black card */
+  mix-blend-mode: screen;
+  user-select: none;
+  pointer-events: none;
+}
+
+.login-error {
+  color: var(--red);
+  font-size: 12px;
+  text-align: center;
+}
+
+.login-card input {
+  padding: 9px 11px;
+  font-size: 13px;
+  border-radius: var(--radius-lg);
+}
+
+.login-card button[type="submit"] {
+  margin-top: 4px;
+  padding: 9px 0;
+  font-size: 13px;
+  border-radius: var(--radius-lg);
+}

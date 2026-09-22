@@ -1,0 +1,153 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* ── palette ─────────────────────────────────────────────────────────
+     Single source of truth. Components must use these tokens — no raw
+     hexes in component CSS. surface-0 is the page, surface-1 panels,
+     surface-2 raised strips/controls, surface-3 menus/popovers. */
+  --bg:        #0b0d13;
+  --surface:   #141722;
+  --surface-1: #10131c;
+  --surface-2: #181c2a;
+  --surface-3: #1f2435;
+  --border:    #262b3f;
+  --border-strong: #353c58;
+  --muted:     #6b73a0;
+  --text:      #c9d1f0;
+  --bright:    #eef2ff;
+
+  --accent:    #56d4e8;
+  --accent-dim: rgba(86, 212, 232, 0.12);
+  --green:     #4ade80;
+  --yellow:    #fbbf24;
+  --red:       #f87171;
+  --blue:      #60a5fa;
+  --purple:    #c084fc;
+
+  /* semantic aliases (some components reference these names) */
+  --cyan:      var(--accent);
+  --success:   var(--green);
+  --danger:    var(--red);
+  --warning:   var(--yellow);
+
+  --radius:    6px;
+  --radius-lg: 10px;
+  --shadow-menu: 0 10px 30px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+
+  --font-mono: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', ui-monospace, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+::selection { background: rgba(86, 212, 232, 0.25); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+button:hover:not(:disabled) { background: var(--surface-3); border-color: var(--border-strong); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Primary action — filled accent */
+.btn-primary,
+button.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0d13;
+  font-weight: 700;
+}
+.btn-primary:hover:not(:disabled) { background: #7be5f5; border-color: #7be5f5; }
+
+select, input, textarea {
+  font-family: inherit;
+  font-size: 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 4px 8px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+select:focus, input:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(86, 212, 232, 0.15);
+}
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
+
+:is(button, select, a):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── shared section strip ────────────────────────────────────────────────
+   Every stacked panel (peers, workers, HF search) opens with one of these,
+   so the page reads as labeled sections instead of undifferentiated rows. */
+.section-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.section-strip.clickable { cursor: pointer; }
+.section-strip.clickable:hover { background: var(--surface-2); }
+
+.section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.section-strip.clickable:hover .section-title { color: var(--text); }
+
+.section-caret { color: var(--muted); font-size: 10px; width: 1em; }
+
+.section-count {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+/* ── status dot ── */
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.dot-green  { background: var(--green);  box-shadow: 0 0 5px rgba(74, 222, 128, 0.6); }
+.dot-red    { background: var(--red);    box-shadow: 0 0 5px rgba(248, 113, 113, 0.6); }
+.dot-yellow { background: var(--yellow); box-shadow: 0 0 5px rgba(251, 191, 36, 0.6); }

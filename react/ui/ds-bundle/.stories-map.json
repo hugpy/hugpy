@@ -1,0 +1,187 @@
+{
+  "global": "HugpyUI",
+  "pkg": "@hugpy/ui",
+  "pkgDir": "/srv/vm_mgr/share/projects/hugpy/dev/ui",
+  "extraEntries": [
+    "./.design-sync/preview-runtime.jsx"
+  ],
+  "exported": [
+    "ApiAccess",
+    "AuthProvider",
+    "BridgePanel",
+    "ChangePassword",
+    "ChatPanel",
+    "DemoProvider",
+    "DiscordPanel",
+    "HFSearch",
+    "HugpyConsole",
+    "HugpyProvider",
+    "Landing",
+    "Login",
+    "LoginForm",
+    "Logout",
+    "ModelTable",
+    "PeersBar",
+    "PhoneBrickPanel",
+    "PrivateRoute",
+    "Register",
+    "WorkersPanel"
+  ],
+  "storybookStatic": null,
+  "keyRecipe": 7,
+  "cfgSliceGlobal": "4f77db21a20ed42eb7d3070d0d5dded4c9db6f4a553477ff417a31c1c30286e9",
+  "components": [
+    {
+      "name": "ApiAccess",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "b81f02040d05362a",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "AuthProvider",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "4a7886e0bdc18d64",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "BridgePanel",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "13c548f280724045",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "ChangePassword",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "f4a9a0af2beec178",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "ChatPanel",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "486500f174751e79",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "DiscordPanel",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "a15a73672b080bbc",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "HFSearch",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "99a327679cfac395",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "HugpyConsole",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "5c9bb518f002b3a9",
+      "cfgSlice": "f778563ec4e7e9122b2838698f938bdc630939433ee7794ee48b0b860fcbdb08",
+      "stories": []
+    },
+    {
+      "name": "HugpyProvider",
+      "group": "runtime",
+      "srcSha": null,
+      "sourceKey": "4a7886e0bdc18d64",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Landing",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "626c722d93a2b0be",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Login",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "5a1bf5b87913c05f",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "LoginForm",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "642ea277837ba4a7",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Logout",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "171d2dab3fd38e7a",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "ModelTable",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "90f67fca1def8f37",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "PeersBar",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "73b78585460fc864",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "PhoneBrickPanel",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "6006fc6394d57c16",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "PrivateRoute",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "4a7886e0bdc18d64",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Register",
+      "group": "auth",
+      "srcSha": null,
+      "sourceKey": "d63b9ea5ef43e73b",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "WorkersPanel",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "51c56ff40cfed694",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    }
+  ]
+}

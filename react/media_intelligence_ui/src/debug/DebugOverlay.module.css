@@ -1,0 +1,90 @@
+.debugRoot {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 99999;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.toggleButton {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: #111827;
+  color: white;
+  padding: 0.5rem 0.75rem;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.panel {
+  position: absolute;
+  right: 0;
+  bottom: 3rem;
+  width: min(1060px, calc(100vw - 2rem));
+  height: min(1040px, calc(100vh - 6rem));
+  background: #0b1020;
+  color: #e5e7eb;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: #111827;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.header button {
+  background: transparent;
+  color: white;
+  border: 0;
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.body {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  height: calc(100% - 48px);
+}
+
+.keyList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  overflow: auto;
+  background: #0f172a;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.keyList button {
+  text-align: left;
+  background: transparent;
+  color: #cbd5e1;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  cursor: pointer;
+}
+
+.keyList button:hover,
+.keyList .activeKey {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.valueBox {
+  margin: 0;
+  padding: 1rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}

@@ -1,0 +1,24 @@
+/*
+ * chat.css — single entry point for the Hugpy chat styling.
+ *
+ * Import order is load-bearing:
+ *   1. Tailwind core (utilities/components/base layers register here).
+ *   2. tokens.css — defines CSS custom props + binds them to @theme.
+ *   3. components.css — composer-btn, btn, __menu-item, status pills.
+ *
+ * Anywhere this module is consumed, the host app should import this file
+ * exactly once. If the host already has a Tailwind v4 entry, copy the
+ * @theme block from tokens.css into it instead and keep the rest.
+ */
+
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./components.css";
+
+/* App-level resets ---------------------------------------------------------
+ * Scope kept narrow on purpose — we don't want to fight the host app.
+ */
+html, body {
+  background: var(--main-surface-primary);
+  color: var(--text-primary);
+}

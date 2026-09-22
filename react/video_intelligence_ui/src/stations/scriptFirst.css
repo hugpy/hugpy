@@ -1,0 +1,373 @@
+/*
+ * k114 — the Script station.
+ *
+ * Its own file, colocated with the component that imports it (the pattern
+ * BrandMark.tsx and DemoBanner.tsx already use), because app.css belongs to
+ * another task today. Everything here is prefixed `vi-script-`; the shared
+ * primitives (`station-card`, `vi-btn`, `vi-error`, `vi-status`) come from
+ * app.css and are NOT redefined — a second definition of a shared button is
+ * how two stations end up looking almost the same.
+ *
+ * The one visual idea worth naming: `.vi-script-fanout` is a PARENT BOX above a
+ * ROW OF CHILDREN with one connector each. It is deliberately not a chain, and
+ * it is not a chain in CSS either — there is no rule that could draw an edge
+ * between two `.vi-script-seg` cards, so the layout cannot drift into implying
+ * the dependency the pipeline forbids.
+ */
+
+.vi-script {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.vi-script-panel {
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  padding: 0.85rem 1rem 1rem;
+}
+
+.vi-script-panel > h3 {
+  margin: 0 0 0.6rem;
+  font-family: var(--vi-mono);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vi-text-dim);
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.vi-script-panel > h3 .vi-script-sub {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.75rem;
+  color: var(--vi-text-dim);
+  opacity: 0.85;
+}
+
+.vi-script-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.vi-script-row + .vi-script-row {
+  margin-top: 0.5rem;
+}
+
+.vi-script-grow {
+  flex: 1 1 14rem;
+  min-width: 8rem;
+}
+
+.vi-script-kv {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) 1fr;
+  gap: 0.25rem 0.9rem;
+  font-size: 0.8rem;
+}
+
+.vi-script-kv dt {
+  font-family: var(--vi-mono);
+  color: var(--vi-text-dim);
+}
+
+.vi-script-kv dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.vi-script-digest {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  color: var(--vi-text-dim);
+  word-break: break-all;
+}
+
+.vi-script-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.vi-script-table th,
+.vi-script-table td {
+  border-bottom: 1px solid var(--vi-border);
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.vi-script-table th {
+  font-family: var(--vi-mono);
+  font-weight: 500;
+  color: var(--vi-text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.vi-script-table tr.vi-script-excluded td {
+  opacity: 0.55;
+  text-decoration-color: var(--vi-text-dim);
+}
+
+.vi-script-tag {
+  display: inline-block;
+  font-family: var(--vi-mono);
+  font-size: 0.68rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  color: var(--vi-text-dim);
+  white-space: nowrap;
+}
+
+.vi-script-tag-on {
+  border-color: var(--vi-accent);
+  color: var(--vi-accent);
+}
+
+.vi-script-tag-off {
+  border-color: #6b4a4a;
+  color: #ff8a8a;
+}
+
+.vi-script-json {
+  width: 100%;
+  min-height: 12rem;
+  font-family: var(--vi-mono);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  background: var(--vi-surface);
+  color: var(--vi-text);
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  padding: 0.6rem;
+  resize: vertical;
+}
+
+.vi-script-json:disabled {
+  opacity: 0.7;
+}
+
+.vi-script-pre {
+  font-family: var(--vi-mono);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0.4rem 0 0;
+  color: #ff8a8a;
+}
+
+.vi-script-raw {
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 14rem;
+  overflow: auto;
+  background: var(--vi-surface);
+  border: 1px solid var(--vi-border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-script-note {
+  font-size: 0.76rem;
+  color: var(--vi-text-dim);
+  margin: 0.4rem 0 0;
+}
+
+.vi-script-limits {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.76rem;
+  color: var(--vi-text-dim);
+}
+
+/* --- the fan-out: ONE parent, N children, never a chain ------------------ */
+
+.vi-script-fanout {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.vi-script-parent {
+  border: 1px solid var(--vi-accent);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  background: var(--vi-surface);
+  align-self: center;
+  max-width: 46rem;
+  text-align: center;
+}
+
+.vi-script-parent h4 {
+  margin: 0 0 0.3rem;
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+  color: var(--vi-accent);
+}
+
+.vi-script-stem {
+  width: 1px;
+  height: 1.1rem;
+  background: var(--vi-border);
+  align-self: center;
+}
+
+.vi-script-children {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  gap: 0.9rem;
+  border-top: 1px solid var(--vi-border);
+  padding-top: 1.1rem;
+  position: relative;
+}
+
+.vi-script-seg {
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface);
+  padding: 0.7rem 0.8rem 0.8rem;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+/* the ONE connector each child gets, straight up to the shared top border */
+.vi-script-seg::before {
+  content: "";
+  position: absolute;
+  top: -1.1rem;
+  left: 50%;
+  width: 1px;
+  height: 1.1rem;
+  background: var(--vi-border);
+}
+
+.vi-script-seg-busy {
+  border-color: var(--vi-accent);
+}
+
+.vi-script-seg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-family: var(--vi-mono);
+  font-size: 0.8rem;
+}
+
+.vi-script-seg-prompt {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  max-height: 9rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--vi-text);
+  margin: 0;
+}
+
+.vi-script-attempts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-family: var(--vi-mono);
+  font-size: 0.7rem;
+}
+
+.vi-script-attempts li {
+  border-left: 2px solid var(--vi-border);
+  padding-left: 0.5rem;
+  color: var(--vi-text-dim);
+}
+
+.vi-script-attempts li.vi-script-attempt-ok {
+  border-left-color: #7fd88f;
+}
+
+.vi-script-attempts li.vi-script-attempt-gap {
+  border-left-color: #d8a04a;
+}
+
+.vi-script-gap {
+  border: 1px solid #6b5a3a;
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.72rem;
+  color: #e8c98a;
+  background: rgba(216, 160, 74, 0.06);
+}
+
+.vi-script-gap strong {
+  font-family: var(--vi-mono);
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.vi-script-runs {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.vi-script-runbtn {
+  text-align: left;
+  max-width: 22rem;
+}
+
+.vi-script-confirm {
+  border: 1px solid var(--vi-accent);
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+  background: var(--vi-surface);
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+@media (max-width: 720px) {
+  .vi-script-children {
+    grid-template-columns: 1fr;
+  }
+  .vi-script-kv {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- Template steps panel (TemplateStepsPanel.tsx) ---- */
+.vi-template-steps {
+  margin: 0.5rem 0 0;
+  padding-left: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.vi-template-step-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.vi-template-step-head > select {
+  max-width: 24rem;
+}
+.vi-template-step-desc {
+  margin: 0.15rem 0 0;
+  font-size: 0.85em;
+  opacity: 0.75;
+}

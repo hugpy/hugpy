@@ -1,0 +1,273 @@
+/* Settings panel — mirrors SessionsPanel.css conventions/tokens. */
+.sp-panel {
+  font-size: 13px;
+  padding: 4px 0 18px;
+}
+
+.sp-err {
+  color: var(--red);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+}
+.sp-note {
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+}
+
+.sp-sec {
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  border-radius: 8px;
+  padding: 12px 14px 14px;
+  margin-bottom: 14px;
+}
+
+.sp-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.sp-sec-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+}
+.sp-scope {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.sp-scope-fleet  { color: var(--text); }
+.sp-scope-worker { color: var(--muted); }
+
+.sp-desc {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0 0 8px;
+}
+.sp-desc strong { color: var(--text); font-weight: 600; }
+.sp-desc code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.sp-desc-why  { font-style: italic; }
+.sp-desc-warn { border-left: 2px solid var(--border); padding-left: 10px; }
+
+.sp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.sp-val {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 260px;
+}
+.sp-wid { color: var(--muted); font-size: 12px; }
+.sp-val-main { color: var(--text); font-weight: 600; }
+
+.sp-src {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.sp-src-settings, .sp-src-fleet { color: var(--text); }
+
+.sp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.sp-in {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 12px;
+  width: 110px;
+}
+
+.sp-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sp-btn:hover:not(:disabled) { background: var(--surface-1); }
+.sp-btn:disabled { opacity: 0.5; cursor: default; }
+.sp-btn-on { border-color: var(--text); font-weight: 600; }
+.sp-btn-quiet { color: var(--muted); }
+
+.sp-loading, .sp-empty { color: var(--muted); padding: 8px 0; }
+
+.sp-foot {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── model discovery (automated search) — 2026-08-13 ─────────────────────── */
+.sp-md-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: var(--surface-2, #181c2a);
+}
+.sp-md-card-off { opacity: 0.65; }
+.sp-md-edit { flex-wrap: wrap; gap: 10px; }
+.sp-md-lbl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.sp-md-lbl .sp-in { min-width: 180px; }
+.sp-md-in-task { min-width: 140px !important; width: 140px; }
+.sp-md-in-cap { min-width: 60px !important; width: 60px; }
+.sp-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0 4px;
+}
+.sp-md-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sp-md-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); color: var(--text); }
+.sp-md-model a { color: var(--blue); text-decoration: none; }
+.sp-md-model a:hover { text-decoration: underline; }
+.sp-md-dim { color: var(--muted); }
+.sp-md-err { color: var(--red); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── k120: model dossiers ─────────────────────────────────────────────────
+   The discovery leaderboard expands into a full dossier. Everything here is
+   additive to the .sp-md-* discovery styles above; nothing existing changed. */
+.sp-md-rowlink { cursor: pointer; }
+.sp-md-rowlink:hover { background: var(--hover, rgba(127,127,127,0.08)); }
+.sp-dos-caret { color: var(--muted); margin-right: 6px; font-size: 10px; }
+.sp-dos-good-t { color: var(--green, #3fb950); }
+.sp-dos-bad-t  { color: var(--red); }
+
+.sp-dos { padding: 8px 4px 12px; font-size: 12px; }
+.sp-dos-sec { margin: 0 0 14px; }
+.sp-dos-sec-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+  border-bottom: 1px solid var(--border); padding-bottom: 3px;
+}
+.sp-dos-sec-title {
+  text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px;
+  color: var(--muted); font-weight: 600;
+}
+.sp-dos-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.sp-dos-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 10px;
+  border: 1px solid var(--border); color: var(--muted); font-size: 11px;
+  margin-right: 4px;
+}
+.sp-dos-good { border-color: var(--green, #3fb950); color: var(--green, #3fb950); }
+.sp-dos-bad  { border-color: var(--red); color: var(--red); }
+.sp-dos-warn { border-color: var(--yellow, #d29922); color: var(--yellow, #d29922); }
+/* Model-generated text is always badged. See ModelDossier.jsx's display rules. */
+.sp-dos-gen  { border-color: var(--blue); color: var(--blue); }
+
+.sp-dos-reasons { margin: 6px 0 0 16px; padding: 0; }
+.sp-dos-reasons li { margin-bottom: 3px; color: var(--text); }
+.sp-dos-ref {
+  margin-left: 6px; font-size: 10px; color: var(--muted);
+  background: var(--hover, rgba(127,127,127,0.1)); padding: 0 4px; border-radius: 3px;
+}
+.sp-dos-ref-link { margin-left: 4px; color: var(--blue); text-decoration: none; }
+
+.sp-dos-weights { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+.sp-dos-weight {
+  position: relative; display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px;
+  overflow: hidden; color: var(--text);
+}
+.sp-dos-weight i {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: var(--blue); opacity: 0.16; z-index: 0;
+}
+.sp-dos-weight b { font-weight: 600; color: var(--muted); font-size: 10px; z-index: 1; }
+
+.sp-dos-quotes { margin: 4px 0 6px 16px; padding: 0; }
+.sp-dos-quotes li { margin-bottom: 4px; }
+.sp-dos-links { margin: 4px 0 6px 16px; padding: 0; list-style: none; }
+.sp-dos-links li { margin-bottom: 2px; }
+.sp-dos-links a { color: var(--blue); text-decoration: none; }
+.sp-dos-notes { margin: 6px 0; color: var(--text); line-height: 1.5; }
+.sp-dos-claims { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 6px 0; }
+.sp-dos-det { margin: 4px 0; color: var(--muted); }
+.sp-dos-det summary { cursor: pointer; }
+.sp-dos-snippet {
+  white-space: pre-wrap; word-break: break-word; margin: 4px 0;
+  background: var(--hover, rgba(127,127,127,0.07)); padding: 6px 8px;
+  border-radius: 4px; max-height: 220px; overflow: auto;
+  font-size: 11px; color: var(--text);
+}
+.sp-dos-best td { font-weight: 600; }
+
+.sp-dos-cmp { margin: 8px 0; }
+.sp-dos-cmp-op { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.sp-dos-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.sp-dos-bar-lbl { width: 150px; color: var(--muted); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-dos-bar { flex: 1; height: 8px; background: var(--hover, rgba(127,127,127,0.12));
+  border-radius: 4px; overflow: hidden; }
+.sp-dos-bar i { display: block; height: 100%; background: var(--blue); }
+.sp-dos-bar-inc i { background: var(--muted); }
+.sp-dos-bar-num { width: 42px; text-align: right; color: var(--muted); font-size: 11px; }
+.sp-dos-basis { margin-top: 2px; font-size: 10px; }
+
+.sp-dos-samples { margin-top: 6px; }
+.sp-dos-sample { margin-bottom: 8px; }
+.sp-dos-sample-head { display: flex; gap: 8px; align-items: center; }
+.sp-dos-artifact { font-size: 10px; }
+.sp-dos-radar { margin-top: 10px; }
+.sp-dos-knobs { border-top: 1px dashed var(--border); padding-top: 8px; }
+.sp-dos-check { flex-direction: row; align-items: center; gap: 4px; }

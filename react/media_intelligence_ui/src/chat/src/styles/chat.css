@@ -1,0 +1,142 @@
+/*
+ * chat.css — single CSS entry for the Hugpy chat shell.
+ *
+ * Tailwind v4 is imported WITHOUT preflight on purpose: this page lives
+ * inside the abstractendeavors app, which has its own global styling.
+ * Pulling in preflight would reset every other route on the site.
+ * Utilities are class-scoped, so they are safe to load globally.
+ *
+ * Everything theme-related is scoped under `.hugpy-chat-scope` (set on
+ * the chat root element in main.tsx) so the dark hugpy look stays on
+ * this page only.
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@import "./tokens.css";
+@import "./components.css";
+
+/*
+ * Mini-preflight, scoped. The component markup assumes Tailwind's
+ * preflight reset (transparent buttons, unstyled inputs, no element
+ * margins). Since global preflight is intentionally NOT loaded (it
+ * would reset the whole host app), the same resets are recreated here
+ * for the chat subtree only.
+ */
+@layer base {
+  .hugpy-chat-scope {
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border-light);
+      margin: 0;
+      padding: 0;
+    }
+
+    button,
+    input,
+    optgroup,
+    select,
+    textarea {
+      font: inherit;
+      font-feature-settings: inherit;
+      font-variation-settings: inherit;
+      letter-spacing: inherit;
+      color: inherit;
+      background-color: transparent;
+      border-radius: 0;
+    }
+
+    button,
+    [role="button"] {
+      cursor: pointer;
+      appearance: button;
+    }
+
+    ul,
+    ol {
+      list-style: none;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    img,
+    svg,
+    video,
+    canvas {
+      display: block;
+      vertical-align: middle;
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    ::placeholder {
+      color: var(--text-tertiary);
+      opacity: 1;
+    }
+  }
+}
+
+/* Hugpy dark polish — scoped to the chat page root ----------------------- */
+.hugpy-chat-scope {
+  color-scheme: dark;
+
+  --main-surface-primary: #050505;
+  --sidebar-surface-primary: #080808;
+  --bg-elevated-primary: #101010;
+  /* Was missing from the dark scope → fell back to the light default (#ececec),
+     which is why surfaces using it (e.g. the attachment bar) rendered light. */
+  --bg-elevated-secondary: #1a1a1a;
+
+  --message-surface: #171717;
+  --surface-hover: rgba(255, 255, 255, 0.075);
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #c7c7cc;
+  --text-tertiary: #8e8e93;
+  --text-quaternary: #5f5f66;
+  --text-primary-inverse: #050505;
+
+  --border-light: rgba(255, 255, 255, 0.09);
+  --border-medium: rgba(255, 255, 255, 0.14);
+  --border-extra-light: rgba(255, 255, 255, 0.055);
+
+  --sidebar-icon: #a1a1aa;
+  --link: #a7c7ff;
+  --link-hover: #d4e4ff;
+
+  --composer-radius: 24px;
+
+  /* Fill the full viewport. The arm is served standalone at /media with no host
+     navbar, so reserve nothing by default; the black page shell (index.html)
+     backs any area this small-viewport height doesn't reach. A future host embed
+     can re-introduce an offset by setting --nav-height on the scope. */
+  --nav-height: 0px;
+  height: calc(100svh - var(--nav-height));
+  min-height: 480px;
+
+  background:
+    radial-gradient(circle at top center, rgba(255, 255, 255, 0.055), transparent 34rem),
+    var(--main-surface-primary);
+  color: var(--text-primary);
+}
+
+.hugpy-chat-scope .btn {
+  min-height: 30px;
+  padding-inline: 0.7rem;
+}

@@ -1,0 +1,33 @@
+# hugpy-steward.service — one oracle steward pass (k113c / TODO-17): the
+# selection system checks itself — calibration of selection scores against
+# judge verdicts, failure streaks per (capability, model), starvation of
+# eligible models, gap share of failures, routing-matrix staleness, cache
+# honesty — and applies BOUNDED rebalancing to the live selection policy.
+#
+# NOT INSTALLED/ENABLED BY THIS FILE. Operator installs after review:
+#
+#   sudo cp deploy/hugpy-steward.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hugpy-steward.timer
+#   systemctl list-timers hugpy-steward*; journalctl -u hugpy-steward -f
+#
+# ``hugpy-oracle steward`` (entry point of the hugpy-oracle distribution).
+# With HUGPY_API set it POSTs to the running central's /api/oracle/steward so
+# the rebalance lands on the LIVE selector; without it the pass runs
+# in-process against the shared reliability ledger (report + rebalance of a
+# throwaway selector, i.e. report-only). ``--apply`` applies rebalancing
+# (bounded ±0.05 weight steps, exploration 6..30); drop it for report-only.
+# The report is JSON on stdout (journal); alarms (streak / gap_rate) exit
+# non-zero so the unit shows failed in systemctl — that IS the alert until
+# the UI feed renders it (TODO-18).
+
+[Unit]
+Description=hugpy oracle steward: self-check + bounded rebalance
+After=network-online.target hugpy-api-dev.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# central API port on this box (sentinel uses 7002)
+Environment=HUGPY_API=http://127.0.0.1:7002
+ExecStart=/usr/bin/env hugpy-oracle steward --apply

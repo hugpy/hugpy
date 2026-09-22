@@ -1,0 +1,201 @@
+.page {
+  width: min(1200px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 2rem 0;
+  color: #111827;
+}
+
+.header {
+  margin-bottom: 1.5rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #4f46e5;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 1;
+}
+
+.subtitle {
+  max-width: 720px;
+  margin: 0.75rem 0 0;
+  color: #4b5563;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.selectorPanel {
+  border: 1px solid #e5e7eb;
+  border-radius: 1rem;
+  background: #ffffff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+  padding: 1rem;
+  margin-bottom: 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.selectorPanel label {
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+
+.select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d1d5db;
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  font: inherit;
+  background: #fff;
+  color: #111827;
+}
+
+.description {
+  margin: 0.25rem 0 0;
+  color: #4b5563;
+  line-height: 1.5;
+}
+.button {
+  background: #111827;
+  color: #ffffff;
+}
+
+.resultText {
+  background: #0f172a;
+  color: #e5e7eb;
+}
+
+.modeContainer {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.modeSlider {
+  position: relative;
+  display: flex;
+  background: #f3f4f6;
+  padding: 4px;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 500px;
+}
+
+.modeButton {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  padding: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  z-index: 2;
+  color: #6b7280;
+  transition: color 0.3s ease;
+}
+
+.modeButton.active {
+  color: #111827;
+}
+
+.sliderHighlight {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: calc(33.33% - 4px);
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 1;
+}
+
+.toolGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.toolCard {
+  background: #fff;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 1rem;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.toolCard h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #111827;
+}
+
+.toolCard p {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+}
+
+.toolCard.selectedTool {
+  border-color: #4f46e5;
+  background: #f5f3ff;
+  box-shadow: 0 0 0 1px #4f46e5;
+}
+
+.executionArea {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 2rem;
+}
+
+.filterPanel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 1rem;
+  background: #ffffff;
+}
+
+.filterPanel label {
+  display: grid;
+  gap: 0.4rem;
+  font-weight: 800;
+  color: #111827;
+}
+
+.filterPanel select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d1d5db;
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  font: inherit;
+  background: #ffffff;
+  color: #111827;
+}
+
+.filterPanel option {
+  background: #ffffff;
+  color: #111827;
+}
+
+@media (max-width: 760px) {
+  .filterPanel {
+    grid-template-columns: 1fr;
+  }
+}

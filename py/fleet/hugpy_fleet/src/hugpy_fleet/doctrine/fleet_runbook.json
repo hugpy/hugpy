@@ -1,0 +1,95 @@
+{
+  "_comment": "SINGLE SOURCE OF TRUTH for fleet image-gen remediations. Consumed by the hugpy-agent (loads this via importlib.resources) AND rendered by the console Docs 'Fleet remediation runbook' page. Each entry: a failure SIGNATURE the agent can match in an error/heartbeat, a DETECT check, and a REMEDY it can execute via the worker /ops endpoints (evict, pip, restart, free-ram, config) or a shell action. Keep edits HERE only.",
+  "version": 1,
+  "updated": "2026-08-10",
+  "ops_endpoints": {
+    "evict": "POST http://<worker>:9100/ops/evict {\"model_key\":..., \"force\":true}",
+    "pip": "POST http://<worker>:9100/ops/pip {\"args\":[\"install\",\"-U\",\"<pkg>\"]}",
+    "restart": "POST http://<worker>:9100/ops/restart",
+    "free_ram": "POST http://<worker>:9100/ops/free-ram",
+    "config": "POST/GET http://<worker>:9100/ops/config"
+  },
+  "remediations": [
+    {
+      "id": "vram-loadrefusal-polite",
+      "signature": "LoadRefusal: won't fit on GPU; POLITE LOAD (no_evict): N evictable idle resident(s) were SPARED",
+      "cause": "A big model (e.g. 17GB FLUX) can't load because idle image models hold VRAM and the polite/no_evict load won't reclaim them.",
+      "detect": "nvidia-smi free VRAM < needed; worker pid_registry has image-model residents (vram_bytes>1GB, host_mode not comfy/cuda_context, key not gguf/llama/qwen).",
+      "remedy": "Evict each idle image resident via /ops/evict {force:true}. Keep llama-server (gguf) + ComfyUI. Evicted models reload on next call.",
+      "automated_by": "ae: systemd --user timer vram-reaper.timer runs /home/solcatcher/bashScripts/vram-reaper.sh every 3min (VRAM_FREE_MIN_MIB=18000).",
+      "agent_action": {"type": "ops_evict_idle_image", "threshold_free_mib": 18000}
+    },
+    {
+      "id": "corrupt-safetensors",
+      "signature": "CheckpointLoaderSimple ... json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+      "cause": "The .safetensors file is a truncated/incomplete download: its 8-byte header length is 0, so the safetensors JSON header is empty.",
+      "detect": "struct '<Q' first 8 bytes == 0 (or > filesize). Note: on this fleet the misc/comfy/<key>/ copies are often corrupt while /mnt/16T_toshiba/llm_storage/checkpoints/<canonical> is VALID.",
+      "remedy": "Replace the corrupt file with a valid copy. Canonical valid copies live on the central store at /mnt/16T_toshiba/llm_storage/checkpoints/<canonical-name>. scp to the worker's ComfyUI models/checkpoints farm, or re-assign the model to trigger ensure_comfy_checkpoint download.",
+      "agent_action": {"type": "replace_from_central_checkpoints", "source": "/mnt/16T_toshiba/llm_storage/checkpoints/"}
+    },
+    {
+      "id": "comfy-ckpt-not-in-list",
+      "signature": "value_not_in_list ... ckpt_name: '<name>' not in [...]",
+      "cause": "The worker's ComfyUI does not expose a checkpoint under the exact canonical name central sends. New workers have no extra_model_paths.yaml, or the farm used local (non-canonical) names.",
+      "detect": "GET http://<worker>:8188/object_info/CheckpointLoaderSimple ckpt_name list lacks the requested name.",
+      "remedy": "Build a FLAT symlink farm at <store>/ComfyUI/models/checkpoints where every checkpoint is symlinked under its CANONICAL name (match ae's /object_info list). Point extra_model_paths.yaml checkpoints at that farm. Restart comfyui.service. For models the worker lacks, assign them (triggers ensure_comfy_checkpoint pull from central).",
+      "agent_action": {"type": "rebuild_canonical_checkpoint_farm"}
+    },
+    {
+      "id": "comfy-filename-none",
+      "signature": "comfy model rows must set `filename` to the checkpoint name inside ComfyUI's models/checkpoints",
+      "cause": "get_model_config(key).filename is None — the comfy model row / manifest has no filename, so the runner can't name the checkpoint. Often duplicate bare rows (e.g. dreamshaper-8, dreamshaper-8-pruned) created by a discover-models sweep.",
+      "detect": "get_model_config(model_key).filename in (None, ''). Multiple registry rows share a name with filename None.",
+      "remedy": "Set the row's filename to the canonical checkpoint name in the model's hugpy.json manifest (and dedupe stale rows), OR assign the model so provisioning re-derives it. The comfy_runner reads cfg.filename.",
+      "agent_action": {"type": "set_comfy_filename_or_dedupe"}
+    },
+    {
+      "id": "missing-pip-dep",
+      "signature": "ImportError: Using `bitsandbytes` ... requires bitsandbytes  |  cannot run task '<task>' (missing optional dependency)  |  llama-cpp-python is installed WITHOUT GPU offload support",
+      "cause": "The worker's python lacks an optional dep: bitsandbytes (4-bit quant), diffusers/accelerate/transformers (imagegen / text-to-image capability), CUDA llama-cpp-python (GGUF GPU offload).",
+      "detect": "task_capabilities[task]==False, or an ImportError at serve time. task_deps: text-to-image->diffusers[imagegen], image-text-to-text->llama_cpp[engine].",
+      "remedy": "Install into the WORKER's python via /ops/pip. Common: 'bitsandbytes>=0.46.1'; 'diffusers accelerate transformers>=4.50.3 safetensors' (imagegen); rebuild CUDA llama-cpp-python with CMAKE_ARGS=-DGGML_CUDA=on (needs gcc<=12 vs nvcc). Restart the worker to re-advertise capability.",
+      "agent_action": {"type": "ops_pip_install", "examples": ["bitsandbytes>=0.46.1", "diffusers", "accelerate", "transformers>=4.50.3"]}
+    },
+    {
+      "id": "no-local-serving-fallback",
+      "signature": "local model serving is disabled on this box (HUGPY_NO_LOCAL_SERVING) ... no registered worker is available to serve",
+      "cause": "A model is assigned to an incapable/offline worker (e.g. computron lacked the image dep) and the serving box refuses to fall back.",
+      "detect": "Error names HUGPY_NO_LOCAL_SERVING or 'assigned but no worker could serve'.",
+      "remedy": "On the capable GPU worker set Environment=HUGPY_LOCAL_FALLBACK=always (drop-in) so it serves any routed model, then restart. Also repair/assign the model to a healthy worker.",
+      "agent_action": {"type": "set_env", "worker": "capable-gpu", "env": {"HUGPY_LOCAL_FALLBACK": "always"}}
+    },
+    {
+      "id": "small-card-oversize-stall",
+      "signature": "'<model>' failed to become ready on '<small-worker>' after 90s with no forward progress",
+      "cause": "central routed a model larger than the worker's GPU (e.g. FLUX to an 8GB card), which stalls then fails.",
+      "detect": "worker vram_total small (<10GB) and a big model routed to it.",
+      "remedy": "Cap the small worker's routable VRAM budget: Environment=HUGPY_GPU_MEM_GIB=<cardGB-1> (e.g. 7 for an 8GB 4060). Restart. central then won't assign models that don't fit.",
+      "agent_action": {"type": "set_env", "env_template": {"HUGPY_GPU_MEM_GIB": "<gpu_total_gib - 1>"}}
+    },
+    {
+      "id": "picture-frame-artifact",
+      "signature": "Generations come out as framed paintings / gallery walls (visual, not an error).",
+      "cause": "guidance/CFG too low for the model: at CFG 0 (sd-turbo default) the negative prompt has NO effect, so the standard anti-frame negative is ignored; SD1.5/SDXL also need ~25 steps.",
+      "detect": "Model is SD1.5/SDXL but request guidance ~0 and/or steps ~4.",
+      "remedy": "Use CFG ~7 + ~25 steps for SD1.5/SDXL (composer default now). Turbo/lightning models are the exception: CFG ~1, steps ~4. Ensure the standard negative (frame, picture frame, ornate frame, border, framed painting, gallery wall, watermark, signature, text) is composed in.",
+      "agent_action": {"type": "note_model_cfg_defaults"}
+    },
+    {
+      "id": "clip-input-invalid",
+      "signature": "CLIPTextEncode ... clip input is invalid: None ... checkpoint does not contain a valid clip or text encoder",
+      "cause": "The checkpoint is a UNET/diffusion-component only (no CLIP baked in, e.g. some FLUX/component models). The vanilla t2i graph (CheckpointLoaderSimple->CLIPTextEncode) can't drive it.",
+      "detect": "Model framework=comfy but the checkpoint lacks a CLIP; error at the CLIPTextEncode node.",
+      "remedy": "Use a component workflow that loads unet/clip/vae separately (UNETLoader + DualCLIPLoader + VAELoader) with the model's comfy-kinds components. Register that (framework, task) runner/builder pair. This is per-model workflow work, not an auto-fix.",
+      "agent_action": {"type": "manual_register_component_workflow"}
+    },
+    {
+      "id": "new-image-worker-provision",
+      "signature": "Bringing a new GPU box online as an image worker (comfy_available False / t2i False).",
+      "cause": "Fresh worker has no ComfyUI and/or no imagegen deps.",
+      "detect": "worker comfy.available False or task_capabilities.text-to-image False.",
+      "remedy": "1) Install vanilla comfyanonymous/ComfyUI + torch (matching cuXXX) + ComfyUI-Manager (venv via get-pip if no python3-venv). 2) systemd --user comfyui.service on 127.0.0.1:8188 (--listen 0.0.0.0 if it must be proxied). 3) extra_model_paths.yaml + a canonical flat checkpoint farm. 4) /ops/pip diffusers+accelerate+transformers. 5) restart worker -> it adopts comfy + advertises t2i. 6) optional: nginx vhost (e.g. comfy2.hugpy.ai) + certbot --nginx. 7) HUGPY_GPU_MEM_GIB cap for a small card.",
+      "agent_action": {"type": "provision_image_worker"}
+    }
+  ]
+}

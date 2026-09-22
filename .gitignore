@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+node_modules/
+.pytest_cache/
+# packages and components that carry their own git history
+abstract_hugpy_dev/
+py/cinema/abstract_identity/
+py/inference/hugpy_agent/
+py/tools/abstract_toolserver/
+# never publish station credentials
+py/tools/hugpy-station/.station-install.*
+py/tools/hugpy-station/pub/*.env
+*.env
+!.env.example

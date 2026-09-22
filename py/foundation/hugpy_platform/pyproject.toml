@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-platform"
+version = "0.1.0"
+description = "Hugpy platform: stdlib-first foundation shared by every Hugpy package (env-backed configuration, app dirs, hardware and process probes, central URL, pydantic compatibility shim)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "llm",
+    "self-hosted",
+    "platform",
+    "configuration",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "abstract_essentials",
+    "platformdirs",
+]
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/foundation/hugpy_platform/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/foundation/hugpy_platform"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+# hardware.free_ram_bytes() prefers psutil off-Linux; /proc/meminfo otherwise.
+hardware = ["psutil"]
+# constants.hfApi (lazy) — only callers that talk to the Hub need it.
+hf = ["huggingface_hub"]
+test = ["pytest>=8", "pytest-timeout"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_platform = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]

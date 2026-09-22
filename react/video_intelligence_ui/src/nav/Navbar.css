@@ -1,0 +1,13 @@
+/* Video-intelligence arm — nav LOOK now comes from the sitewide shared stylesheet
+   (ui_shared/navbar/navbar.css, imported by Navbar.tsx). Only this arm-specific
+   header-stack wrapper stays local.
+
+   Nav + demo banner ride together in this header stack. .vi-shell is a 100dvh
+   flex column that itself never scrolls (content scrolls inside the workbench
+   body), so the stack just needs to be the non-growing first flex item — the
+   whole header stays pinned at the top and the banner sits directly under the
+   nav (operator directive 2026-07-21). */
+.vi-header-stack {
+  flex-shrink: 0;
+  z-index: 30;
+}

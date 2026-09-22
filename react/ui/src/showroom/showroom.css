@@ -1,0 +1,182 @@
+/* Showroom demo-mode chrome: a slim banner above the real console + toasts +
+   the theme switcher. All colors use the console's design tokens so the chrome
+   re-skins automatically with whatever theme is active (the canned demo doubles
+   as a style sandbox — see themes.js). */
+
+.showroom {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  background-color: var(--bg);
+}
+
+.showroom-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Column so the embedded media iframe can flex to fill it. The operator
+     surface's single child (<Console/> → .layout, height:100%) is unaffected. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── demo banner ───────────────────────────────────────────────────────────
+   The banner rides in the nav's own sticky header stack (.navbar-stack) on the
+   console surface — so it is a plain in-flow block here, no sticky of its own
+   (the wrapper does the pinning). On the media surface it's the iframe's header,
+   also fine as a plain block since the frame fills the remaining flex height. */
+.sr-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.sr-badge {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: var(--bg);
+  background: var(--accent);
+}
+
+/* operator-console ⇄ media-chat surface toggle */
+.sr-surface {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.sr-surface button {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 11px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sr-surface button + button {
+  border-left: 1px solid var(--border);
+}
+.sr-surface button:hover {
+  color: var(--text);
+}
+.sr-surface button.is-current {
+  color: var(--bg);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+/* embedded media-intelligence arm (its own canned demo, served at /media).
+   Flexes to fill the showroom body (definite height via html/body/#root:100%),
+   so it's exact on desktop and robust when the banner wraps — no magic offset. */
+.sr-media-frame {
+  display: block;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 480px;
+  border: 0;
+  background: #050505;
+}
+
+.sr-text {
+  flex: 1 1 300px;
+  min-width: 220px;
+  color: var(--muted);
+}
+.sr-text strong { color: var(--bright); }
+.sr-text em { color: var(--accent); font-style: normal; }
+
+.sr-cmd {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-1);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.sr-cmd:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.sr-cmd code { font-family: var(--font-mono); font-size: 12.5px; color: var(--green); }
+.sr-cmd-ico { font-size: 11px; color: var(--muted); }
+
+/* theme switcher */
+.sr-theme-pick {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.sr-theme-pick select {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text);
+  cursor: pointer;
+}
+.sr-theme-pick select:hover { border-color: var(--border-strong); }
+
+.sr-connect {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 7px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--bg);
+  background: var(--green);
+  cursor: pointer;
+}
+.sr-connect:hover { filter: brightness(1.08); }
+
+/* ── toasts ──────────────────────────────────────────────────────────────── */
+.sr-toasts {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.sr-toast {
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  animation: sr-toast-in 160ms ease-out;
+}
+
+@keyframes sr-toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

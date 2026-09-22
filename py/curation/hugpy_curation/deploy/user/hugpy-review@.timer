@@ -1,0 +1,18 @@
+# Nightly model review for one saved criteria — USER-unit variant (no sudo).
+#   mkdir -p ~/.config/systemd/user && cp deploy/user/hugpy-review@.* ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now hugpy-review@nightly.timer
+#
+# Needs linger so the timer fires without the user logged in (already enabled
+# on ae; elsewhere: loginctl enable-linger <user>, which DOES need root once).
+[Unit]
+Description=hugpy: nightly HF model review for criteria "%i"
+
+[Timer]
+# 03:20 local, off-peak — a run can download tens of GB and will take the GPU.
+OnCalendar=*-*-* 03:20:00
+# Spread instances so two criteria don't collide on the card.
+RandomizedDelaySec=45m
+Persistent=true
+Unit=hugpy-review@%i.service
+
+[Install]
+WantedBy=timers.target
