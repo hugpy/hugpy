@@ -44,6 +44,7 @@ import argparse
 import asyncio
 import threading
 import subprocess
+import tempfile
 import urllib.request
 import urllib.error
 import weakref
@@ -4030,10 +4031,11 @@ def build_app(state: "WorkerState") -> Flask:
                 "code": "NoVersion",
                 "message": 'body must include {"version": "x.y.z"} '
                            '(central sends its required_pkg_version)'}}), 400
-        cmd = [sys.executable, "-m", "pip", "install", "-U", "--no-deps"]
-        if args.pkg_index:
-            cmd += ["--index-url", args.pkg_index]
-        cmd.append(f"{args.pkg_name}=={target}")
+        # Same lockstep converge as the heartbeat self-update (constraints.txt
+        # from central, siblings pinned; --no-deps fallback when unreachable).
+        # Central may name its constraints URL; otherwise derived from --central.
+        constraints_hint = str(body.get("constraints_url") or "").strip() or None
+        cmd, constraints_path = _prepare_converge(args, target, constraints_hint)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=560)
@@ -4041,6 +4043,8 @@ def build_app(state: "WorkerState") -> Flask:
         except Exception as exc:
             return jsonify({"ok": False, "error": {
                 "code": type(exc).__name__, "message": str(exc)}}), 502
+        finally:
+            _discard_constraints(constraints_path)
         if rc == 0:
             # kill_slots: a fresh version is installed — any orphaned slot child
             # would keep serving the OLD code (the adoption probe can't tell
@@ -4048,6 +4052,7 @@ def build_app(state: "WorkerState") -> Flask:
             # them on the new code. Same discipline as the heartbeat self-update.
             _schedule_restart(state, "ops/update", kill_slots=True)
             return jsonify({"ok": True, "installed": f"{args.pkg_name}=={target}",
+                            "constrained": constraints_path is not None,
                             "restarting": True})
         return jsonify({"ok": False, "error": {
             "code": "PipFailed", "message": f"pip rc={rc}", "detail": tail}}), 502
@@ -5671,6 +5676,18 @@ def _save_worker_id(path: str, worker_id: str) -> None:
 # can already reach outbound) and re-exec the process. The worker-id is
 # persisted, so the restarted agent re-registers as the same worker — central
 # sees a brief reconnect, not a new worker.
+#
+# WP5 worker convergence (post-partition): a worker runs hugpy-fleet PLUS its
+# lockstep siblings (hugpy-platform, -control, -storage, -engine, -media, ...
+# per install profile), all carrying ONE git-derived version. Upgrading the
+# tracked distribution alone leaves the siblings behind — the same silent skew
+# the 2026-07-20 incident class is made of. So the converge fetches central's
+# ``/api/llm/workers/constraints.txt`` (``name==<required>`` for every workspace
+# distribution) and runs ``pip install -U --upgrade-strategy only-if-needed
+# -c <that file> <pkg>==<required> [<installed sibling>==<required> ...]``:
+# the whole set moves together under the pins. When the constraints cannot be
+# fetched (old central, network) the pre-partition single-package ``--no-deps``
+# install still runs — with a LOUD warning that the fleet may be skewed.
 # ---------------------------------------------------------------------------
 
 # Don't re-attempt the same target version more than once per this window. A
@@ -5707,9 +5724,10 @@ def _installed_pkg_version(pkg_name: str) -> str | None:
 # That is COSMETIC convergence: central believes the fleet is up to date while a
 # worker silently serves stale code.
 #
-# The honest source is ``abstract_hugpy_dev.__version__`` — a source-file literal
-# bound when the package was imported at process start. A pip upgrade rewrites
-# that file on disk, but the in-memory module object keeps the old value until a
+# The honest source is ``hugpy_fleet.__version__`` — the installed distribution
+# version (git-derived, one lockstep value for the whole workspace) read ONCE
+# when the package was imported at process start. A pip upgrade rewrites the
+# dist-info on disk, but the in-memory module object keeps the old value until a
 # genuinely fresh process re-imports it. So this constant tells the truth across
 # a not-yet-effective upgrade: report OLD until the process really re-execs, and
 # central's version_ok stays FALSE (a visible skew) instead of going cosmetically
@@ -5723,8 +5741,8 @@ except Exception:  # noqa: BLE001 — run-from-copied-file: no package __version
 def _running_pkg_version(pkg_name: str) -> str | None:
     """Version of the CODE THIS PROCESS IS RUNNING — the honest heartbeat source.
 
-    Snapshotted from ``abstract_hugpy_dev.__version__`` at import (above), NOT
-    read live from dist metadata, so a self-update that pip-installed new files
+    Snapshotted from ``hugpy_fleet.__version__`` at import (above), NOT re-read
+    live from dist metadata, so a self-update that pip-installed new files
     on disk but has not yet re-exec'd keeps reporting the OLD version — the truth
     — rather than the disk's new version. Falls back to disk metadata ONLY when
     there is no package ``__version__`` to trust (a standalone copied agent.py),
@@ -11258,7 +11276,160 @@ def _save_update_state(args, state: dict) -> None:
         pass
 
 
-def _self_update_if_needed(required: str | None, args, state=None) -> None:
+# ── Lockstep convergence: the pip command both converge paths run ───────────
+# Central's constraints file lives under its ``/api`` mount, same prefix rule
+# as every other worker endpoint (see ``CentralClient``).
+_CONSTRAINTS_PATH = "/api/llm/workers/constraints.txt"
+_CONSTRAINTS_FETCH_TIMEOUT_S = 20.0
+
+
+def _constraints_url(args, hint: str | None = None) -> str | None:
+    """Where to fetch the lockstep pins: the reply's ``constraints_url`` when
+    central sent one, else derived from this worker's central base URL."""
+    hint = str(hint or "").strip()
+    if hint:
+        return hint
+    central = str(getattr(args, "central", None) or "").strip()
+    if not central:
+        return None
+    return central.rstrip("/") + _CONSTRAINTS_PATH
+
+
+def _fetch_constraints(url: str, timeout: float = _CONSTRAINTS_FETCH_TIMEOUT_S) -> list[str]:
+    """GET the constraints file; the non-blank, non-comment lines.
+
+    A 204 (central pins no version) or an empty body yields ``[]`` — the caller
+    treats that exactly like a failed fetch. Network/HTTP errors propagate."""
+    req = urllib.request.Request(url, headers={"Accept": "text/plain"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if getattr(resp, "status", 200) == 204:
+            return []
+        body = resp.read().decode("utf-8", "replace")
+    lines = []
+    for raw in body.splitlines():
+        ln = raw.strip()
+        if ln and not ln.startswith("#"):
+            lines.append(ln)
+    return lines
+
+
+def _normalize_dist(name: str) -> str:
+    """PEP 503 normalized distribution name."""
+    import re as _re
+    return _re.sub(r"[-_.]+", "-", str(name or "")).lower()
+
+
+def _installed_lockstep_siblings(constraint_lines: list[str], pkg_name: str) -> list[str]:
+    """Names from the constraints that are INSTALLED here, other than ``pkg_name``.
+
+    A constraints file only pins what pip already resolves — it never causes an
+    install. To converge the WHOLE lockstep set we name every installed sibling
+    explicitly (``hugpy-media==X``), so a distribution outside the tracked
+    package's dependency closure (e.g. a media/video extra) moves too. Absent
+    distributions are left absent: the install profile is the operator's."""
+    from importlib import metadata
+    want = _normalize_dist(pkg_name)
+    out: list[str] = []
+    for ln in constraint_lines:
+        name = ln.split("==", 1)[0].strip()
+        if not name or "==" not in ln or _normalize_dist(name) == want:
+            continue
+        try:
+            metadata.version(name)
+        except metadata.PackageNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001 — unreadable dist-info: don't pin it
+            continue
+        out.append(name)
+    return out
+
+
+def _pip_converge_command(args, target: str, constraints_path: str | None,
+                          extra_specs: "list[str] | tuple[str, ...]" = ()) -> list[str]:
+    """The pip command line that converges this worker to ``target``.
+
+    Used by BOTH the heartbeat self-update and ``/ops/update`` so the two paths
+    can never drift apart.
+
+    ``constraints_path`` set → the constrained (lockstep) form::
+
+        pip install -U --upgrade-strategy only-if-needed -c <constraints>
+            [--index-url <pkg_index>] <pkg_name>==<target> [<sibling>==<target> ...]
+
+    Dependencies are resolved under the pins, so every workspace sibling in the
+    dependency closure moves to ``target`` with the tracked package; the
+    explicit ``extra_specs`` cover installed siblings OUTSIDE the closure.
+    ``only-if-needed`` keeps the non-hugpy env (torch, llama-cpp-python, the
+    media extras) where it is unless a pin genuinely requires otherwise.
+
+    ``constraints_path`` None → the pre-partition fallback::
+
+        pip install -U --no-deps [--index-url <pkg_index>] <pkg_name>==<target>
+
+    a code hot-swap of ONE distribution, siblings untouched (the fleet may be
+    skewed until the constraints can be fetched)."""
+    pkg_name = getattr(args, "pkg_name", None) or "hugpy-fleet"
+    cmd = [sys.executable, "-m", "pip", "install", "-U"]
+    if constraints_path:
+        cmd += ["--upgrade-strategy", "only-if-needed", "-c", str(constraints_path)]
+    else:
+        cmd += ["--no-deps"]
+    pkg_index = getattr(args, "pkg_index", None)
+    if pkg_index:
+        cmd += ["--index-url", pkg_index]
+    cmd.append(f"{pkg_name}=={target}")
+    if constraints_path:
+        cmd.extend(str(s) for s in (extra_specs or ()))
+    return cmd
+
+
+def _prepare_converge(args, target: str, constraints_url: str | None = None
+                      ) -> "tuple[list[str], str | None]":
+    """Fetch central's lockstep pins into a temp file and build the pip command.
+
+    Returns ``(cmd, constraints_path)``; ``constraints_path`` is None on the
+    fallback path (fetch failed / no lines / no central URL) and the command is
+    the single-package ``--no-deps`` form. The caller owns the temp file — see
+    ``_discard_constraints``."""
+    pkg_name = getattr(args, "pkg_name", None) or "hugpy-fleet"
+    url = _constraints_url(args, constraints_url)
+    lines: list[str] = []
+    if url:
+        try:
+            lines = _fetch_constraints(url)
+        except Exception as exc:  # noqa: BLE001 — degrade, never block the converge
+            logger.warning("self-update: constraints fetch from %s failed: %s: %s",
+                           url, type(exc).__name__, exc)
+    if not lines:
+        logger.warning(
+            "self-update: no lockstep constraints from central (%s) — falling back "
+            "to a single-package --no-deps install of %s==%s. Sibling distributions "
+            "(hugpy-platform/-control/-storage/-engine/...) are NOT converged: the "
+            "fleet may be SKEWED until central serves constraints.txt.",
+            url or "no central URL", pkg_name, target)
+        return _pip_converge_command(args, target, None), None
+    fd, path = tempfile.mkstemp(prefix="hugpy-constraints-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    siblings = _installed_lockstep_siblings(lines, pkg_name)
+    specs = [f"{name}=={target}" for name in siblings]
+    logger.info("self-update: lockstep constraints from %s (%d pins); converging %s "
+                "+ %d installed sibling(s) %s", url, len(lines), pkg_name,
+                len(siblings), siblings)
+    return _pip_converge_command(args, target, path, extra_specs=specs), path
+
+
+def _discard_constraints(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _self_update_if_needed(required: str | None, args, state=None,
+                           constraints_url: str | None = None) -> None:
     """Install central's required package version and re-exec, if we're behind.
 
     Source of the bytes: PyPI by default (where ``sync.trigger`` publishes), since
@@ -11267,9 +11438,13 @@ def _self_update_if_needed(required: str | None, args, state=None) -> None:
     ``WORKER_PKG_INDEX`` overrides to central's own simple index — for a WG-only
     worker with no general egress, or to keep dev builds off public PyPI.
 
-    ``--no-deps``: this is a code hot-swap of an already-provisioned env, so we
-    pull ONLY the package and skip dependency resolution. A dev build that adds a
-    brand-new dependency needs a one-off full reinstall.
+    The install is the lockstep converge built by ``_prepare_converge`` /
+    ``_pip_converge_command``: central's constraints.txt pins every workspace
+    distribution to ``required`` so the siblings move with the tracked package.
+    Only when the pins cannot be fetched does it degrade to the pre-partition
+    ``--no-deps`` hot-swap of ONE distribution (loudly: the fleet may be skewed).
+    ``constraints_url`` is the reply's hint; absent, it is derived from
+    ``args.central``.
     """
     if not required:
         return  # central isn't managing versions -> never touch the install
@@ -11277,27 +11452,29 @@ def _self_update_if_needed(required: str | None, args, state=None) -> None:
     if required == installed:
         return
 
-    state = _load_update_state(args)
-    if state.get("target") == required and (time.time() - state.get("at", 0)) < _UPDATE_RETRY_BACKOFF:
+    # NB: a distinct name — ``state`` is the WorkerState the restart needs.
+    upd = _load_update_state(args)
+    if upd.get("target") == required and (time.time() - upd.get("at", 0)) < _UPDATE_RETRY_BACKOFF:
         return  # already tried this exact target recently; back off
 
     source = args.pkg_index or "PyPI"
     logger.info("self-update: %s %s -> %s (from %s)",
                 args.pkg_name, installed or "(none)", required, source)
-    cmd = [sys.executable, "-m", "pip", "install", "-U", "--no-deps"]
-    if args.pkg_index:
-        cmd += ["--index-url", args.pkg_index]
-    cmd.append(f"{args.pkg_name}=={required}")
+    cmd, constraints_path = _prepare_converge(args, required, constraints_url)
     try:
         rc = subprocess.call(cmd)
     except Exception as exc:  # noqa: BLE001
         logger.warning("self-update pip invocation failed: %s", exc)
         rc = 1
-    _save_update_state(args, {"target": required, "at": time.time(), "rc": rc})
+    finally:
+        _discard_constraints(constraints_path)
+    _save_update_state(args, {"target": required, "at": time.time(), "rc": rc,
+                              "constrained": constraints_path is not None})
 
     if rc == 0:
-        logger.info("self-update installed %s==%s; restarting agent",
-                    args.pkg_name, required)
+        logger.info("self-update installed %s==%s (%s); restarting agent",
+                    args.pkg_name, required,
+                    "lockstep-constrained" if constraints_path else "single-package fallback")
         # Restart onto the new code. Under systemd this EXITS (Restart= respawns
         # a fresh, properly-tracked process — never the os.execv orphan that
         # squatted :9100). kill_slots=True: an orphaned slot child would keep
@@ -11903,7 +12080,8 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             # facts only central holds; the pull path reads them off state.
             _adopt_storage_inputs(state, worker)
             # Converge to central's required package version (restarts on update).
-            _self_update_if_needed((worker or {}).get("required_pkg_version"), args, state)
+            _self_update_if_needed((worker or {}).get("required_pkg_version"), args, state,
+                                   constraints_url=(worker or {}).get("constraints_url"))
         except WorkerRejected as exc:
             _terminal_exit(exc)   # does not return
         except urllib.error.HTTPError as exc:
@@ -11967,7 +12145,8 @@ def _register(client: CentralClient, state: WorkerState, args) -> None:
     _adopt_boot_prewarm(state, worker)
     logger.info("registered as worker id=%s serving models=%s", state.worker_id, worker.get("models"))
     # Converge to central's required package version before serving (restarts).
-    _self_update_if_needed(worker.get("required_pkg_version"), args, state)
+    _self_update_if_needed(worker.get("required_pkg_version"), args, state,
+                           constraints_url=worker.get("constraints_url"))
 
 
 def _build_parser() -> argparse.ArgumentParser:

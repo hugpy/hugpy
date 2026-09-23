@@ -269,6 +269,74 @@ def pkg_index_dir() -> str:
         os.path.join(settings.state_dir, "pip_index")
 
 
+# The in-tree workspace distributions, all versioned in LOCKSTEP (one
+# git-derived version via setuptools-scm — the 0.2 partition). The canonical
+# list is ``hugpy_platform.buildinfo.WORKSPACE_DISTRIBUTIONS``; this constant is
+# the fallback for a central whose installed hugpy-platform predates it.
+WORKSPACE_DISTRIBUTIONS_FALLBACK = (
+    "hugpy-platform",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+    "hugpy-media",
+    "hugpy-video",
+    "hugpy-oracle",
+    "hugpy-fleet",
+    "hugpy-curation",
+    "hugpy-ops",
+    "hugpy-discord",
+    "hugpy-server",
+    "hugpy",
+)
+
+# Path (under central's ``/api`` mount) of the lockstep constraints file. A
+# worker derives the absolute URL from its central base URL when a reply omits
+# ``constraints_url``.
+CONSTRAINTS_PATH = "/api/llm/workers/constraints.txt"
+
+
+def workspace_distributions() -> tuple:
+    """Every distribution the lockstep version applies to.
+
+    Imported lazily from ``hugpy_platform.buildinfo`` so a central running an
+    older hugpy-platform still answers (from the fallback constant) instead of
+    failing at import time.
+    """
+    try:
+        from hugpy_platform.buildinfo import WORKSPACE_DISTRIBUTIONS
+        names = tuple(str(n).strip() for n in WORKSPACE_DISTRIBUTIONS
+                      if str(n).strip())
+        if names:
+            return names
+    except Exception:  # noqa: BLE001 — older platform: no buildinfo yet
+        pass
+    return WORKSPACE_DISTRIBUTIONS_FALLBACK
+
+
+def lockstep_constraints(required: Optional[str] = None) -> List[str]:
+    """``name==<required>`` for every workspace distribution — the body of a
+    pip constraints file, one line each.
+
+    A worker runs hugpy-fleet PLUS its siblings (platform, control, storage,
+    engine, media, ...); upgrading the tracked distribution alone leaves the
+    rest behind — the silent skew the 2026-07-20 incident class is made of.
+    Central hands out this pin set so the worker's ``pip install -c`` converges
+    the WHOLE set to the one version central itself runs. Empty when central
+    pins no version (``required_pkg_version()`` is None): nothing to converge
+    to, and the route answers 204.
+    """
+    if required is None:
+        required = required_pkg_version()
+    if not required:
+        return []
+    return [f"{name}=={required}" for name in workspace_distributions()]
+
+
+def constraints_url(base_url: str) -> str:
+    """Absolute URL of the constraints file for the central at ``base_url``."""
+    return str(base_url or "").rstrip("/") + CONSTRAINTS_PATH
+
+
 def _now() -> float:
     return time.time()
 
