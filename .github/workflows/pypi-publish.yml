@@ -12,15 +12,22 @@ name: pypi-publish
 # ...) release from their own repositories and py/compat/abstract_hugpy_dev is
 # a dev-only alias shell that is NEVER published (ECOSYSTEM.md D.4).
 #
-# One-time PyPI setup (owner: putkoff), once per project name:
+# One-time PyPI setup (owner: putkoff), once per project name (DONE 2026-09-23):
 #   1. On pypi.org, for each of the 13 names (hugpy, hugpy-platform, hugpy-control,
 #      hugpy-storage, hugpy-engine, hugpy-media, hugpy-video, hugpy-oracle,
 #      hugpy-fleet, hugpy-curation, hugpy-ops, hugpy-discord, hugpy-server):
 #      Manage -> Publishing -> add a trusted publisher with
 #        owner: hugpy   repository: hugpy   workflow: pypi-publish.yml   environment: pypi
-#      Names that do not exist yet are registered as "pending publishers" from
-#      https://pypi.org/manage/account/publishing/ with the same four fields; the
-#      first successful upload creates the project.
+#      The same publisher config is allowed on any number of EXISTING projects.
+#      It is NOT allowed as a "pending publisher" for more than one not-yet-
+#      existing name: PyPI keys pending publishers on (owner, repo, workflow,
+#      environment) alone. A new name therefore has to exist before its
+#      publisher can be added: bootstrap it once with a local-only tag
+#      (`git tag v0.X.0a0`, `python -m build` the package, `twine upload` the
+#      a0 placeholder with an account-scoped token, `git tag -d v0.X.0a0`),
+#      then register the publisher on the project page. That upload is the
+#      one exception to "never twine upload by hand"; the a0 pre-release is
+#      ignored by pip and can be yanked.
 #   2. On GitHub, create the `pypi` environment (Settings -> Environments) and
 #      give it required reviewers; the publish job waits there for an explicit go.
 #   3. Note on the name `hugpy`: it already exists on PyPI at 0.1.181 as the

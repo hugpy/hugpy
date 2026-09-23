@@ -72,6 +72,16 @@ Nothing edits a version anywhere in that flow. The first partitioned release is
 `0.2.0`: PyPI `hugpy` already exists at 0.1.181 (the retired monolith) and
 0.2.0 sorts above it.
 
+A brand-new distribution name needs one bootstrap before its first tagged
+release: PyPI allows a given (owner, repository, workflow, environment)
+trusted publisher as a *pending* publisher for only one not-yet-existing
+project, so the name is created once by hand (local-only tag `vX.Y.Za0`,
+`python -m build`, `twine upload` of the a0 placeholder with an account-scoped
+token, tag deleted), after which the ordinary publisher is added on the project
+page and the tag flow above takes over. The 12 partitioned names were
+bootstrapped this way as 0.2.0a0 on 2026-09-23 (see the header of
+`.github/workflows/pypi-publish.yml`).
+
 ## How central adopts and workers converge
 
 ```bash
