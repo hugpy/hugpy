@@ -1,4 +1,31 @@
-# Handoff — Hugpy partition, updated 2026-09-22 (session 4, late)
+# Handoff — Hugpy partition, updated 2026-09-22 (session 5: consistency)
+
+## -1. Session 5: the consistency method (branch `consistency`, not yet on main)
+
+Read `CONSISTENCY.md` first. In one line: one git-derived lockstep version for the
+13 distributions (setuptools-scm; tag `vX.Y.Z` → `X.Y.Z`, else `devN+g<sha>`),
+`hugpy_platform.buildinfo` on `/api/health`, `/api/build` and the heartbeat
+(`environment_digest.build`), `hugpy-drift-check` (A checkout / B installed /
+C fleet / D pypi; nightly timer via `--install-timer --run-as <owner>`),
+`release.sh` + `pypi-publish.yml` on `v*` tags, and worker convergence under
+`/api/llm/workers/constraints.txt` so a self-update moves the whole set.
+
+State when this was written: all suites green (platform 68, fleet 1116, server
+1920, ops 216, meta 113); `validate_partition.py --versions` passes; the repo has
+**no tag yet**, so versions read `0.0.1.devN+unknown.g<sha>` (central advertises
+no pin until a tag is installed — intended). ae's central still ran the pre-branch
+tree from a git-less copy; the cutover script and the full state live on ae in
+`~solcatcher/HANDOFF-hugpy-consistency-20260922.md`. Workers aeb/computron are
+still on the 0.1.266 monolith → drift section C is red until §0's worker cutover.
+
+Next: push the branch (CI `lockstep` job), merge, one-time PyPI trusted-publisher
+setup, `./release.sh 0.2.0`, central adopts, workers converge. Known nits: dead
+second `/llm/workers/install.sh` route in worker_routes.py; `/build` not in the
+auth exempt list (drift uses `/health`); the op box repo has no remote and a
+different history from GitHub for the same tree.
+
+## (session 4 handoff follows)
+
 
 ## 0. Latest first: the ComfyUI resident ledger (commit `08a6ca9` + follow-up)
 
