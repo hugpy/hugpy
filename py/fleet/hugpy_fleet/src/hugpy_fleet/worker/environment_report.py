@@ -347,6 +347,20 @@ def os_report() -> "dict[str, object]":
     return info
 
 
+def build_info_here() -> "dict[str, object] | None":
+    """The build document (``hugpy_platform.buildinfo.build_info``): version,
+    sha/dirty, editable source, lockstep. Lazy + guarded like every other
+    intra-package reach here: the standalone seeding copy of this file runs on
+    a box whose hugpy_platform may predate the module, and None is the honest
+    answer there — never a fabricated identity."""
+    try:
+        from hugpy_platform.buildinfo import build_info
+        doc = build_info()
+        return doc if isinstance(doc, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def pkg_version() -> "str | None":
     """The worker package version, from THIS interpreter's metadata."""
     try:
@@ -377,13 +391,24 @@ def canonical_json(obj: object) -> str:
 #: box's environment change?" unanswerable, which is the one question the
 #: heartbeat rider exists to answer.
 DIGEST_FIELDS: "tuple[str, ...]" = ("schema", "venvs", "binaries", "nvidia",
-                                    "mounts", "os", "pkg_version")
+                                    "mounts", "os", "pkg_version", "build")
+
+#: Keys inside ``build`` that change on every computation and therefore must
+#: not move the digest (same reasoning as the top-level ``generated_at``).
+_BUILD_VOLATILE: "tuple[str, ...]" = ("generated_at",)
+
+
+def _digest_view(report: "dict[str, object]") -> "dict[str, object]":
+    view: "dict[str, object]" = {k: report.get(k) for k in DIGEST_FIELDS}
+    build = view.get("build")
+    if isinstance(build, dict):
+        view["build"] = {k: v for k, v in build.items() if k not in _BUILD_VOLATILE}
+    return view
 
 
 def report_digest(report: "dict[str, object]") -> str:
     return hashlib.sha256(
-        canonical_json({k: report.get(k) for k in DIGEST_FIELDS})
-        .encode("utf-8")).hexdigest()[:16]
+        canonical_json(_digest_view(report)).encode("utf-8")).hexdigest()[:16]
 
 
 def build_report(worker_name: "str | None" = None) -> "dict[str, object]":
@@ -396,6 +421,7 @@ def build_report(worker_name: "str | None" = None) -> "dict[str, object]":
         "python": platform.python_version(),
         "worker_root": worker_root(),
         "pkg_version": pkg_version(),
+        "build": build_info_here(),
         "venvs": venvs_report(),
         "binaries": binaries_report(),
         "nvidia": nvidia_report(),
@@ -438,11 +464,16 @@ def compact_digest(report: "dict[str, object] | None" = None) -> "dict[str, obje
     main = (venvs.get("main") or {}) if isinstance(venvs, dict) else {}
     packages = (main.get("packages") or {}) if isinstance(main, dict) else {}
     binaries = rep.get("binaries") or {}
+    # One computation: the identity is lifted from the report's ``build``
+    # document rather than recomputed (a repository probe per beat is waste).
+    build = rep.get("build")
+    identity = build.get("identity") if isinstance(build, dict) else None
     return {
         "digest": rep.get("report_digest") or "",
         "at": rep.get("generated_at"),
         "python": rep.get("python"),
         "pkg_version": rep.get("pkg_version"),
+        "build": identity if isinstance(identity, dict) else None,
         "profiles": sorted(k for k in venvs if k != "main") if isinstance(venvs, dict) else [],
         "package_count": len(packages) if isinstance(packages, dict) else 0,
         "binaries": {name: bool((binaries.get(name) or {}).get("present"))
