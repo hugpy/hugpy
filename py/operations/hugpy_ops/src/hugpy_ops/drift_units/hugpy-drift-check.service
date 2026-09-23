@@ -1,0 +1,26 @@
+# hugpy-drift-check.service — one drift-check pass: prove the checkout, the
+# installed packages, the fleet's workers and PyPI are on ONE build; exit
+# non-zero (and POST the JSON report to --notify-url, when given) otherwise.
+#
+# Written by `hugpy-drift-check --install-timer` from the template shipped in
+# the hugpy-ops distribution (hugpy_ops/drift_units/). Re-run the installer
+# rather than editing this copy: nothing the system runs may be hand-authored
+# somewhere that does not ship.
+
+[Unit]
+Description=hugpy drift check: checkout / installed / fleet / PyPI on one build
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+${working_directory}ExecStart=$exec_start
+# A pass is a handful of git calls and a few HTTP GETs; 10m is the backstop
+# for a slow PyPI or a stalled fetch.
+TimeoutStartSec=10m
+Nice=10
+Environment=PYTHONUNBUFFERED=1
+$environment
+
+[Install]
+WantedBy=$wanted_by

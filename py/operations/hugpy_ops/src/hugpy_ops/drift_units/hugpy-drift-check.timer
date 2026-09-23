@@ -1,0 +1,16 @@
+# hugpy-drift-check.timer — cadence for hugpy-drift-check.service.
+# Written by `hugpy-drift-check --install-timer [--on-calendar SPEC]`.
+#   systemctl list-timers hugpy-drift-check*     journalctl -u hugpy-drift-check
+
+[Unit]
+Description=hugpy drift check: periodic build-consistency gate
+
+[Timer]
+OnCalendar=$on_calendar
+# Jitter so several boxes do not all hit central and PyPI at the same second.
+RandomizedDelaySec=300
+Persistent=true
+Unit=hugpy-drift-check.service
+
+[Install]
+WantedBy=$wanted_by
