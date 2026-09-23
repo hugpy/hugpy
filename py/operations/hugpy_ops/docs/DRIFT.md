@@ -80,6 +80,9 @@ Proves: the code this interpreter imports is one build and it is the checkout.
 GETs `<central>/api/health` and `<central>/api/llm/workers`. Central defaults
 to `HUGPY_BASE_URL` (or its aliases `HUGPY_CENTRAL`, `HUGPY_URL`,
 `WORKER_CENTRAL_URL`), else `http://127.0.0.1:7002`; `--central` overrides.
+Central calls wait up to 60 s (`--timeout` / `HUGPY_DRIFT_TIMEOUT`): right
+after a restart `/api/llm/workers` can take a minute while workers re-register,
+and a short timeout would report a healthy fleet as `error` (exit 2).
 A bearer token comes from `--token`, else `HUGPY_TOKEN` / `HUGPY_API_KEY`
 (the two read surfaces are usually open).
 
@@ -171,7 +174,7 @@ daemon-reload` and `enable --now hugpy-drift-check.timer`.
 - `ExecStart` is the absolute `hugpy-drift-check` console script next to the
   interpreter that ran the installer (falling back to
   `<python> -m hugpy_ops.drift`), with `--quiet --fetch` and whichever of
-  `--central`, `--notify-url`, `--workspace`, `--allow-dirty`, `--no-pypi`,
+  `--central`, `--notify-url`, `--workspace`, `--allow-dirty`, `--no-pypi`, `--timeout`,
   `--sections` you passed.
 - `--env-file PATH` becomes `EnvironmentFile=-PATH` (put `HUGPY_BASE_URL=` and
   `HUGPY_TOKEN=` there rather than on the command line); `--token` becomes an

@@ -305,6 +305,32 @@ def test_central_unreachable_is_error_rows_not_a_crash(monkeypatch):
     assert report.exit_code == 2 and not report.ok
 
 
+def test_central_calls_use_the_central_timeout(monkeypatch):
+    seen = []
+
+    def fetch(url, token=None, timeout=None):
+        seen.append((url.rsplit("/api", 1)[1], timeout))
+        return {"ok": True} if url.endswith("/api/health") else []
+    monkeypatch.setattr(drift, "fetch_json", fetch)
+    drift.run("C", central=CENTRAL)
+    assert seen == [("/health", drift.CENTRAL_TIMEOUT), ("/llm/workers", drift.CENTRAL_TIMEOUT)]
+    seen.clear()
+    drift.run("C", central=CENTRAL, timeout=123.0)
+    assert [t for _, t in seen] == [123.0, 123.0]
+    assert drift.CENTRAL_TIMEOUT > drift.HTTP_TIMEOUT   # the fleet is slow right after a restart
+
+
+def test_timer_records_a_non_default_timeout(tmp_path, monkeypatch):
+    args = drift.build_parser().parse_args(["--install-timer", "--dry-run", "--timeout", "90",
+                                            "--central", CENTRAL])
+    monkeypatch.setattr(drift, "console_script_path", lambda: "/x/hugpy-drift-check")
+    import io, contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert drift.install_timer(args) == 0
+    assert "--timeout 90.0" in out.getvalue()
+
+
 def test_central_url_and_token_follow_env(monkeypatch):
     for name in drift.CENTRAL_ENV_VARS + drift.TOKEN_ENV_VARS:
         monkeypatch.delenv(name, raising=False)

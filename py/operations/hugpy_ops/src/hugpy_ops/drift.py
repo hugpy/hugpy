@@ -72,7 +72,11 @@ DEFAULT_CENTRAL = "http://127.0.0.1:7002"
 CENTRAL_ENV_VARS = ("HUGPY_BASE_URL", "HUGPY_CENTRAL", "HUGPY_URL", "WORKER_CENTRAL_URL")
 TOKEN_ENV_VARS = ("HUGPY_TOKEN", "HUGPY_API_KEY", "HUGPY_KEY")
 PYPI_JSON = "https://pypi.org/pypi/{name}/json"
-HTTP_TIMEOUT = 10.0
+HTTP_TIMEOUT = 10.0            # pypi.org and notifications
+# Central can take a minute to answer /api/llm/workers right after a restart
+# (worker re-registration + first build probe); a short timeout there reports
+# a healthy fleet as UNVERIFIED. Override with --timeout / HUGPY_DRIFT_TIMEOUT.
+CENTRAL_TIMEOUT = float(os.environ.get("HUGPY_DRIFT_TIMEOUT") or 60.0)
 
 # The retired monolith (abstract_hugpy_dev) published 0.1.<n> releases; a
 # worker still reporting one of those runs code that never carried a git
@@ -585,11 +589,12 @@ def _same_build(a: Optional[dict], b: Optional[dict]) -> bool:
 
 
 def check_fleet(central: str, token: Optional[str] = None,
-                local_build: Optional[dict] = None) -> list[Row]:
+                local_build: Optional[dict] = None,
+                timeout: float = CENTRAL_TIMEOUT) -> list[Row]:
     S = "C"
     rows: list[Row] = []
     try:
-        health = fetch_json(f"{central}/api/health", token)
+        health = fetch_json(f"{central}/api/health", token, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — unreachable is a finding, not a crash
         rows.append(Row(S, "central", ERROR, f"{central}/api/health unreachable: {_exc(exc)}"))
         return rows
@@ -614,7 +619,7 @@ def check_fleet(central: str, token: Optional[str] = None,
                         f"{_build_desc(central_build)} (no local buildinfo to compare against)"))
 
     try:
-        workers = fetch_json(f"{central}/api/llm/workers", token)
+        workers = fetch_json(f"{central}/api/llm/workers", token, timeout=timeout)
     except Exception as exc:  # noqa: BLE001
         rows.append(Row(S, "workers", ERROR, f"{central}/api/llm/workers unreachable: {_exc(exc)}"))
         return rows
@@ -745,7 +750,8 @@ def parse_sections(spec: Optional[str]) -> list[str]:
 
 def run(sections: Iterable[str] = "ABCD", *, workspace: Optional[str] = None,
         central: Optional[str] = None, token: Optional[str] = None,
-        allow_dirty: bool = False, fetch: bool = False, pypi: bool = True) -> Report:
+        allow_dirty: bool = False, fetch: bool = False, pypi: bool = True,
+        timeout: float = CENTRAL_TIMEOUT) -> Report:
     wanted = [s.upper() for s in sections]
     ws = locate_workspace(workspace)
     report = Report(central=central_url(central), workspace=ws, build=local_build_identity())
@@ -754,7 +760,8 @@ def run(sections: Iterable[str] = "ABCD", *, workspace: Optional[str] = None,
     if "B" in wanted:
         report.extend(check_installed(ws))
     if "C" in wanted:
-        report.extend(check_fleet(report.central, central_token(token), report.build))
+        report.extend(check_fleet(report.central, central_token(token), report.build,
+                                  timeout=timeout))
     if "D" in wanted:
         if pypi:
             report.extend(check_pypi(ws))
@@ -821,6 +828,8 @@ def install_timer(args: argparse.Namespace, runner: Callable = subprocess.run) -
         exec_start.append("--allow-dirty")
     if args.no_pypi:
         exec_start.append("--no-pypi")
+    if getattr(args, "timeout", CENTRAL_TIMEOUT) != CENTRAL_TIMEOUT:
+        exec_start += ["--timeout", str(args.timeout)]
     chosen = parse_sections(args.sections)
     if chosen != list(SECTIONS):
         exec_start += ["--sections", ",".join(chosen)]
@@ -884,6 +893,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the JSON report instead of the table")
     p.add_argument("--central", help=f"central base URL (default: HUGPY_BASE_URL or {DEFAULT_CENTRAL})")
     p.add_argument("--token", help="bearer token for central (default: HUGPY_TOKEN / HUGPY_API_KEY)")
+    p.add_argument("--timeout", type=float, default=CENTRAL_TIMEOUT, metavar="SECONDS",
+                   help="HTTP timeout for central (section C); default: HUGPY_DRIFT_TIMEOUT or 60")
     p.add_argument("--workspace", help="workspace checkout (default: the editable install's source, "
                                        "else the git root of the current directory)")
     p.add_argument("--allow-dirty", action="store_true", help="a dirty tree is info, not drift")
@@ -915,7 +926,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         report = run(sections, workspace=args.workspace, central=args.central, token=args.token,
-                     allow_dirty=args.allow_dirty, fetch=args.fetch, pypi=not args.no_pypi)
+                     allow_dirty=args.allow_dirty, fetch=args.fetch, pypi=not args.no_pypi,
+                     timeout=args.timeout)
     except KeyboardInterrupt:
         return 130
 
