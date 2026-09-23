@@ -62,6 +62,8 @@ from hugpy_engine.serve.slots import SlotPool, slots_enabled, slot_install_steps
 # this doesn't depend on the re-export chain picking up the new names.
 from hugpy_fleet.central.workers import (
     required_pkg_version,
+    lockstep_constraints,
+    constraints_url as _constraints_url_for,
     pkg_index_dir,
     set_worker_admission,
     set_worker_pool,
@@ -868,6 +870,34 @@ def workers_required_version():
     return jsonify({"required_pkg_version": required_pkg_version()})
 
 
+@worker_bp.route("/llm/workers/constraints.txt", methods=["GET"])
+def workers_constraints():
+    """Public: the LOCKSTEP pin set as a pip constraints file (text/plain).
+
+    One ``name==<required>`` line per in-tree workspace distribution
+    (hugpy-platform, hugpy-control, ..., hugpy) at the version central itself
+    runs. A worker's self-update and the bootstrap pass this to
+    ``pip install -c`` so the WHOLE package set converges together — upgrading
+    hugpy-fleet alone would leave its siblings behind (silent skew).
+
+    **204 No Content** when central pins no version (``required_pkg_version()``
+    is None — a local ``+build``): there is nothing to pin, and a worker treats
+    an empty body exactly like a failed fetch (falls back to the single-package
+    ``--no-deps`` install). Unauthenticated, same rationale as required-version:
+    it runs BEFORE a worker exists and leaks only what every heartbeat carries.
+    Static path, so it takes routing priority over ``/llm/workers/<worker_id>``.
+    """
+    lines = lockstep_constraints()
+    if not lines:
+        return Response(status=204)
+    return Response("\n".join(lines) + "\n", mimetype="text/plain")
+
+
+def _reply_constraints_url() -> str:
+    """The constraints URL for the central answering THIS request (proxy-aware)."""
+    return _constraints_url_for(_central_base_url())
+
+
 @worker_bp.route("/llm/calibration", methods=["GET"])
 def llm_calibration():
     """t28 load-and-learn: the per-model calibration table — for each model with
@@ -1053,8 +1083,10 @@ def workers_register():
     if worker.get("admission") == "blocked":
         # Operator evicted this worker; 403 tells the agent to stop, not respawn.
         abort(403, description="Worker is blocked by the operator.")
-    # Tell the agent which package version to converge to (self-update handshake).
+    # Tell the agent which package version to converge to (self-update handshake)
+    # and where the lockstep pin set lives (the agent derives it when absent).
     worker["required_pkg_version"] = required_pkg_version()
+    worker["constraints_url"] = _reply_constraints_url()
     # Per-worker KEEP-WARM STAR (operator RULINGS 2026-07-23): carry this
     # worker's star from FIRST contact so the agent can warm it immediately
     # (thereafter the heartbeat keeps it warm every beat). Additive/omit-when-
@@ -1514,8 +1546,10 @@ def workers_heartbeat(worker_id):
     except Exception:
         pass
     # Advertise the target version every beat, so a worker converges within one
-    # heartbeat of central's required version changing.
+    # heartbeat of central's required version changing — plus the lockstep
+    # constraints URL so the converge pins EVERY sibling distribution.
     worker["required_pkg_version"] = required_pkg_version()
+    worker["constraints_url"] = _reply_constraints_url()
     # t28 load-and-learn: persist any calibration observations the worker shipped
     # this beat, then publish the gate-passing per-model corrections back in the
     # reply (a plain dict the worker reads with .get() — additive, an older
