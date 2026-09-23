@@ -291,10 +291,20 @@ jobs:
 ```
 
 Publishing is a separate, tag-triggered workflow using PyPI trusted publishing
-(`pypa/gh-action-pypi-publish`) and `npm publish --provenance`; tags are
-`<dist>/v<version>` (for example `hugpy-engine/v0.2.0`).
+(`pypa/gh-action-pypi-publish`) and `npm publish --provenance`. Python tags are
+workspace tags `vX.Y.Z` (one for all 13, see C.5); npm tags stay per package
+(`npm-<pkg>-v<version>`).
 
 ### C.5 Release checklist (per package)
+
+**Superseded for the 13 in-tree distributions (2026-09-22).** They share one
+git-derived version (setuptools-scm, `dynamic = ["version"]`), so there is no
+version to bump and no per-package tag: `./release.sh X.Y.Z` tags the
+workspace `vX.Y.Z` after the gates pass, `.github/workflows/pypi-publish.yml`
+builds, verifies against the tag, publishes and creates the GitHub Release.
+The method, the drift check and how central and the fleet adopt a release are
+in [`CONSISTENCY.md`](CONSISTENCY.md). The checklist below still applies to the
+independently released packages (`hugpy-agent`, `abstract-identity`, ...).
 
 1. `python py/validate_partition.py --edges` is green.
 2. `CHANGELOG.md` entry; bump `version` in `pyproject.toml` / `package.json`.
