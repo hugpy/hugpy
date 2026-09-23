@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,8 @@ def test_import_without_discord_or_dotenv():
         "print(hugpy_discord.__version__, cfg.HUGPY_BASE_URL.startswith('http'))"
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
-    assert proc.stdout.split() == ["0.1.0", "True"]
+    # the version is git-derived (lockstep), never a literal — compare with installed metadata
+    assert proc.stdout.split() == [version("hugpy-discord"), "True"]
 
 
 def test_bot_names_are_lazy_and_need_the_extra():

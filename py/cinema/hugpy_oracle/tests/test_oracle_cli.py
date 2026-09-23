@@ -4,6 +4,7 @@ with no server and no fleet."""
 from __future__ import annotations
 
 import json
+from importlib.metadata import version
 
 import pytest
 
@@ -18,7 +19,8 @@ def test_help_and_version(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["--version"])
     assert exc.value.code == 0
-    assert "hugpy-oracle 0.1.0" in capsys.readouterr().out
+    # the version is git-derived (lockstep), never a literal — compare with installed metadata
+    assert f"hugpy-oracle {version('hugpy-oracle')}" in capsys.readouterr().out
 
 
 def test_steward_local_pass_reports_on_an_empty_ledger(tmp_path, capsys, monkeypatch):
