@@ -4312,7 +4312,7 @@ def pip_simple_project(project):
             if not (fn.endswith(".whl") or fn.endswith(".tar.gz")):
                 continue
             # Distribution name is the segment before the first '-' in the
-            # filename (e.g. abstract_hugpy_dev-0.1.401.dev1-...whl).
+            # filename (e.g. hugpy_fleet-0.2.0-py3-none-any.whl).
             dist = fn.split("-", 1)[0]
             if _normalize_project(dist) == norm:
                 links.append(fn)
@@ -5609,17 +5609,11 @@ def slots_install():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Central-driven worker install.
-#
-# An operator on a GPU box runs ONE command; everything else (where to find the
-# agent, which central to call back, the port) is supplied by central here, so
-# the worker doesn't need to be pre-configured:
-#
-#     curl -fsSL https://api.hugpy.ai/llm/workers/install.sh | bash
-#
-# The script makes sure abstract_hugpy is importable, then launches the agent
-# pointed at THIS central (derived from the request host). Override port/name
-# with env vars before the pipe, e.g.  WORKER_PORT=9101 WORKER_NAME=gpu2 bash.
+# Central-driven worker install: the externally-visible base URL a worker
+# should call back. The installer itself is the packaged hugpy_fleet
+# bootstrap.sh served by `workers_install_sh` above (GET /llm/workers/install.sh);
+# the inline abstract_hugpy_dev installer that used to sit at the end of this
+# file was shadowed by that route and is gone.
 # ──────────────────────────────────────────────────────────────────────────
 def _central_base_url() -> str:
     """The externally-visible base URL of this central node, from the request."""
@@ -5666,175 +5660,3 @@ def workers_central_address():
         host = f"{lan_ip}:{port}" if port else lan_ip
     return jsonify({"base_url": f"{proto}://{host}", "lan_ip": lan_ip,
                     "request_host_loopback": loopback})
-
-
-@worker_bp.route("/llm/workers/install.sh", methods=["GET"])
-def worker_install_script():
-    central = _central_base_url()
-    script = r"""#!/usr/bin/env bash
-# abstract_hugpy_dev GPU worker — one-line installer (served by central).
-set -euo pipefail
-
-CENTRAL="${WORKER_CENTRAL_URL:-__CENTRAL__}"
-PORT="${WORKER_PORT:-9100}"
-NAME="${WORKER_NAME:-$(hostname)}"
-# Enrollment token (issued by the console). Required once central has
-# HUGPY_WORKER_ENROLL_REQUIRED on; during gradual rollout it's optional but
-# recommended. Supplied via env, NOT baked into this script (it's served openly):
-#   WORKER_ENROLL_TOKEN=hpw_... curl -fsSL $CENTRAL/api/llm/workers/install.sh | bash
-TOKEN="${WORKER_ENROLL_TOKEN:-}"
-# WORKER_PYTHON forces a specific interpreter; otherwise we auto-detect one that
-# already has abstract_hugpy_dev installed.
-PY="${WORKER_PYTHON:-}"
-# SYSTEMD=1 installs+enables a user service (auto-start on boot); default just
-# runs in the foreground. SYSTEMD=0 to force foreground.
-SYSTEMD="${SYSTEMD:-ask}"
-# Where the worker stores models it pulls from central. A worker does NOT need
-# central's /mnt mount: it downloads each model once over HTTP (resumable) and
-# caches it locally, which is faster than serving weights live over sshfs/NFS.
-# Default to a local dir so a missing/broken /mnt never matters; override with
-# DEFAULT_ROOT.
-export DEFAULT_ROOT="${DEFAULT_ROOT:-$HOME/.abstract_hugpy/storage}"
-
-echo "abstract_hugpy_dev worker installer"
-echo "  central : $CENTRAL"
-echo "  name    : $NAME"
-echo "  port    : $PORT"
-echo "  storage : $DEFAULT_ROOT"
-[[ -n "$TOKEN" ]] && echo "  token   : (enrollment token supplied)" || echo "  token   : (none — relying on gradual enrollment)"
-
-has_hugpy() { "$1" -c "import abstract_hugpy_dev" >/dev/null 2>&1; }
-
-# 1. Find a python that can import abstract_hugpy_dev.
-if [[ -n "$PY" ]]; then
-  if ! has_hugpy "$PY"; then
-    echo "error: WORKER_PYTHON=$PY cannot import abstract_hugpy_dev. Details:" >&2
-    "$PY" -c "import abstract_hugpy_dev" || true
-    exit 1
-  fi
-else
-  echo "Searching for a python with abstract_hugpy_dev…"
-  CANDIDATES=()
-  # the currently-active env first (you ran this from inside it)
-  [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python3" ]] && CANDIDATES+=("$CONDA_PREFIX/bin/python3")
-  [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python3" ]] && CANDIDATES+=("$VIRTUAL_ENV/bin/python3")
-  # current PATH pythons
-  for c in python3 python; do command -v "$c" >/dev/null 2>&1 && CANDIDATES+=("$(command -v "$c")"); done
-  # conda envs
-  for base in "$HOME/miniconda3" "$HOME/miniforge3" "$HOME/anaconda3" \
-              /opt/*/miniconda3 /opt/*/miniforge3 /opt/conda; do
-    for p in "$base"/bin/python3 "$base"/envs/*/bin/python3; do
-      [[ -x "$p" ]] && CANDIDATES+=("$p")
-    done
-  done
-  # common venv locations
-  for p in /opt/*/venv/bin/python3 "$HOME"/.virtualenvs/*/bin/python3 \
-           /srv/*/venv/bin/python3; do
-    [[ -x "$p" ]] && CANDIDATES+=("$p")
-  done
-
-  # De-duplicate while preserving order.
-  declare -A SEEN=()
-  UNIQ=()
-  for c in "${CANDIDATES[@]}"; do
-    [[ -n "${SEEN[$c]:-}" ]] && continue
-    SEEN[$c]=1; UNIQ+=("$c")
-  done
-
-  FIRST_ERR=""
-  for cand in "${UNIQ[@]}"; do
-    if has_hugpy "$cand"; then PY="$cand"; break; fi
-    # Capture the first real import error so we can show WHY (not just "not found").
-    if [[ -z "$FIRST_ERR" ]]; then
-      FIRST_ERR="$("$cand" -c "import abstract_hugpy_dev" 2>&1 || true)"
-      [[ -n "$FIRST_ERR" ]] && FIRST_ERR="[$cand] $FIRST_ERR"
-    fi
-  done
-
-  if [[ -z "$PY" ]]; then
-    echo "error: no python could import abstract_hugpy_dev." >&2
-    echo "Checked: ${UNIQ[*]:-<none>}" >&2
-    if [[ -n "$FIRST_ERR" ]]; then
-      echo "First import error was:" >&2
-      echo "$FIRST_ERR" >&2
-    fi
-    echo "If the package is installed but import fails above, that error is the" >&2
-    echo "real problem (e.g. a missing dependency). Otherwise install it, or run:" >&2
-    echo "  WORKER_PYTHON=/path/to/python curl -fsSL $CENTRAL/api/llm/workers/install.sh | bash" >&2
-    exit 1
-  fi
-fi
-echo "  python  : $PY"
-
-RUN_CMD=("$PY" -m abstract_hugpy_dev.worker_agent --central "$CENTRAL" --name "$NAME" --port "$PORT")
-[[ -n "$TOKEN" ]] && RUN_CMD+=(--token "$TOKEN")
-
-# 2. Optionally install a systemd --user service so it auto-starts on boot.
-maybe_systemd() {
-  command -v systemctl >/dev/null 2>&1 || { echo "systemctl not found; running foreground."; return 1; }
-  if [[ "$SYSTEMD" == "ask" ]]; then
-    if [[ -t 0 ]]; then
-      read -r -p "Install a systemd --user service so it auto-starts on boot? [y/N] " ans
-      [[ "$ans" =~ ^[Yy] ]] || return 1
-    else
-      # piped (curl|bash) with no TTY: default to foreground unless SYSTEMD=1.
-      return 1
-    fi
-  elif [[ "$SYSTEMD" != "1" ]]; then
-    return 1
-  fi
-  return 0
-}
-
-if maybe_systemd; then
-  UDIR="$HOME/.config/systemd/user"
-  mkdir -p "$UDIR"
-  cat > "$UDIR/abstract-hugpy-worker.service" <<UNIT
-[Unit]
-Description=abstract_hugpy_dev GPU worker
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=WORKER_CENTRAL_URL=$CENTRAL
-Environment=WORKER_NAME=$NAME
-Environment=WORKER_PORT=$PORT
-Environment=DEFAULT_ROOT=$DEFAULT_ROOT
-${TOKEN:+Environment=WORKER_ENROLL_TOKEN=$TOKEN}
-ExecStart=$PY -m abstract_hugpy_dev.worker_agent --central $CENTRAL --name $NAME --port $PORT ${TOKEN:+--token $TOKEN}
-# on-failure (not always): a deliberate block/revoke makes the agent exit 0, so
-# systemd leaves it stopped; transient crashes exit non-zero and are restarted.
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-UNIT
-  systemctl --user daemon-reload
-  systemctl --user enable --now abstract-hugpy-worker.service
-  # Let the service keep running after logout.
-  command -v loginctl >/dev/null 2>&1 && loginctl enable-linger "$USER" 2>/dev/null || true
-  echo "✓ Installed user service. Logs: journalctl --user -u abstract-hugpy-worker -f"
-  exit 0
-fi
-
-# 3. Foreground run.
-# Termux/Android: hold a wakelock so Android Doze doesn't throttle the worker's
-# background network/CPU when the screen sleeps. Without it the periodic OUTBOUND
-# heartbeat to central stalls ("read operation timed out") and central marks the
-# worker offline — even though INBOUND /infer still works while it's being hit.
-# This is the same fix phone_brick/bootstrap.sh already applies for the vision pool.
-if [[ "${PREFIX:-}" == *com.termux* ]] || command -v termux-wake-lock >/dev/null 2>&1; then
-  termux-wake-lock 2>/dev/null || true
-  echo "  termux : wake-lock held (keeps heartbeats alive under Doze)"
-  trap 'termux-wake-unlock 2>/dev/null || true' EXIT
-  echo "Starting worker agent in the foreground (Ctrl-C to stop)…"
-  "${RUN_CMD[@]}"
-else
-  echo "Starting worker agent in the foreground (Ctrl-C to stop)…"
-  exec "${RUN_CMD[@]}"
-fi
-"""
-    script = script.replace("__CENTRAL__", central)
-    return Response(script, mimetype="text/x-shellscript")
