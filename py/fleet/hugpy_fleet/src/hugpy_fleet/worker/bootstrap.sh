@@ -131,6 +131,14 @@ PIP_EXTRA_INDEX=""
 if [ -n "$PKG_INDEX_URL" ]; then
   PIP_EXTRA_INDEX="--extra-index-url ${PKG_INDEX_URL}"
   say "central serves this version from its own pip index: ${PKG_INDEX_URL}"
+  # pip silently drops a plain-http index on a non-loopback host unless trusted
+  # (a LAN central over http is the normal case).
+  case "$PKG_INDEX_URL" in
+    http://127.0.0.1*|http://localhost*|https://*) ;;
+    http://*)
+      _host="${PKG_INDEX_URL#http://}"; _host="${_host%%/*}"
+      PIP_EXTRA_INDEX="${PIP_EXTRA_INDEX} --trusted-host ${_host}" ;;
+  esac
 fi
 
 # 3b. the lockstep constraints -----------------------------------------------

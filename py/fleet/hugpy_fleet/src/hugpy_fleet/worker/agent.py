@@ -11348,6 +11348,23 @@ def _installed_lockstep_siblings(constraint_lines: list[str], pkg_name: str) -> 
     return out
 
 
+def _insecure_index_host(url: str | None) -> str | None:
+    """``host[:port]`` of a plain-http index URL on a non-loopback host (what pip
+    needs as ``--trusted-host``), else None."""
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(url)
+    except Exception:  # noqa: BLE001
+        return None
+    if parts.scheme != "http" or not parts.hostname:
+        return None
+    if parts.hostname in ("127.0.0.1", "localhost", "::1"):
+        return None
+    return parts.netloc
+
+
 def _pip_converge_command(args, target: str, constraints_path: str | None,
                           extra_specs: "list[str] | tuple[str, ...]" = (),
                           extra_index: str | None = None) -> list[str]:
@@ -11392,6 +11409,15 @@ def _pip_converge_command(args, target: str, constraints_path: str | None,
         cmd += ["--index-url", pkg_index]
     if extra_index and extra_index.rstrip("/") != str(pkg_index or "").rstrip("/"):
         cmd += ["--extra-index-url", extra_index]
+    else:
+        extra_index = None
+    # pip silently DROPS a plain-http index on a non-loopback host unless the
+    # host is trusted (seen 2026-09-23: computron ignored http://192.168.1.100:7002
+    # and "resolved" from PyPI alone). A LAN central over http is the normal case.
+    for url in (pkg_index, extra_index):
+        host = _insecure_index_host(url)
+        if host and host not in cmd:
+            cmd += ["--trusted-host", host]
     cmd.append(f"{pkg_name}=={target}")
     if constraints_path:
         cmd.extend(str(s) for s in (extra_specs or ()))

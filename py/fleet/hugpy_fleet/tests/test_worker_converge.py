@@ -351,3 +351,17 @@ def test_pkg_index_has_requires_every_lockstep_wheel_at_that_version(monkeypatch
 def test_pkg_index_has_is_false_for_a_missing_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(W, "pkg_index_dir", lambda: str(tmp_path / "nope"))
     assert W.pkg_index_has("0.2.0") is False
+
+
+# ── plain-http LAN index needs --trusted-host (pip drops it silently otherwise) ─
+def test_plain_http_lan_index_gets_trusted_host_but_loopback_and_https_do_not():
+    lan = "http://192.168.1.100:7002/api/llm/pip/simple"
+    cmd = A._pip_converge_command(_Args(), "0.2.0", None, extra_index=lan)
+    assert cmd[cmd.index("--trusted-host") + 1] == "192.168.1.100:7002"
+    cmd = A._pip_converge_command(_Args(pkg_index=lan), "0.2.0", None)
+    assert cmd[cmd.index("--trusted-host") + 1] == "192.168.1.100:7002"
+    assert cmd.count("--trusted-host") == 1
+    for safe in ("http://127.0.0.1:7002/api/llm/pip/simple", "https://dev.hugpy.ai/api/llm/pip/simple"):
+        cmd = A._pip_converge_command(_Args(), "0.2.0", None, extra_index=safe)
+        assert "--trusted-host" not in cmd
+    assert A._insecure_index_host(None) is None and A._insecure_index_host("garbage") is None

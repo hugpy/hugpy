@@ -63,9 +63,14 @@ embed = ["sentence-transformers"]
 transformers = ["torch", "transformers", "accelerate", "sentencepiece", "timm"]
 vision = ["opencv-python-headless", "onnxruntime", "aiohttp"]
 extract = ["python-docx", "openpyxl", "brotli", "zstandard"]
+keywords = ["keybert"]
+# tts is opt-in ONLY: chatterbox-tts pins torch/numpy/transformers versions that
+# conflict with the rest of this set (numpy<2 / transformers==5.2 vs >=5.12), so
+# `hugpy[gpu-worker]` (-> hugpy-media[all]) was unresolvable while it was in
+# `all` (found at the 0.2.0 worker cutover, 2026-09-23).
 tts = ["chatterbox-tts"]
 comfy = ["aiohttp"]
-all = ["hugpy-media[keywords,audio,imagegen,embed,transformers,vision,extract,tts,comfy]"]
+all = ["hugpy-media[keywords,audio,imagegen,embed,transformers,vision,extract,comfy]"]
 
 [project.entry-points."hugpy_engine.tasks"]
 media = "hugpy_media.plugin:register"

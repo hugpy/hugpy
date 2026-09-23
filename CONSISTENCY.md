@@ -151,7 +151,7 @@ the fleet itself converges, with or without PyPI.
 |---|---|---|
 | A | the git checkout: clean tracked tree, no unpushed commits, HEAD level with the remote | dev box, before a release (`release.sh`) |
 | B | the installed distributions vs. the checkout: all 13 present, one identical version, editable paths resolve here | CI `lockstep` job, dev box |
-| C | the fleet vs. central: central's `/api/health` build identity, then every worker's heartbeat build (version + sha) against it; a worker still on the monolith, or without a build identity, is drift; `version_ok = null` (central pins nothing) is info | central |
+| C | the fleet vs. central: central's `/api/health` build identity, then every worker's heartbeat build (version + sha) against it; a worker still on the monolith, or without a build identity, is drift; an offline worker is info (not part of the running fleet); `version_ok = null` (central pins nothing) is info | central |
 | D | the newest git tag vs. PyPI: a tag newer than PyPI is an unpublished release unless central's index serves it, PyPI newer than the tag is a checkout behind a release, not on PyPI at all is info (ok when central's index serves the tag) | dev box, central |
 
 `release.sh` gates on `A,B`; CI runs `B` (green until `hugpy-ops` ships the

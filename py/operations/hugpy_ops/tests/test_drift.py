@@ -262,6 +262,27 @@ def test_worker_monolith_version_is_drift(monkeypatch):
     assert c["worker nobuild"].status == drift.DRIFT
 
 
+def test_offline_worker_is_info_not_drift(monkeypatch):
+    """A powered-off box (op, 2026-09-23) must not keep the verdict red: its
+    stale version is reported, not compared. Online monolith workers still drift."""
+    _fake_fleet(monkeypatch, {"ok": True, "build": CBUILD}, [
+        _worker("op", status="offline", pkg_version="0.1.266", version_ok=False,
+                required_pkg_version="1.0.1"),
+        _worker("aeb", pkg_version="0.1.266", version_ok=False, required_pkg_version="1.0.1"),
+    ])
+    report = drift.run("C", central=CENTRAL)
+    c = _rows(report, "C")
+    assert c["worker op"].status == drift.INFO and "offline" in c["worker op"].detail \
+        and "0.1.266" in c["worker op"].detail
+    assert c["worker aeb"].status == drift.DRIFT
+    # with only the offline box drifting, the fleet is in sync
+    _fake_fleet(monkeypatch, {"ok": True, "build": CBUILD}, [
+        _worker("op", status="offline", pkg_version="0.1.266"),
+        _worker("same", environment_digest={"build": {"version": CBUILD["version"], "sha": "aaaaaaa"}}),
+    ])
+    assert drift.run("C", central=CENTRAL).exit_code == 0
+
+
 def test_worker_sha_mismatch_is_drift_and_match_is_ok(monkeypatch):
     _fake_fleet(monkeypatch, {"ok": True, "build": CBUILD}, [
         _worker("same", environment_digest={"build": {"version": CBUILD["version"], "sha": "aaaaaaa"}}),

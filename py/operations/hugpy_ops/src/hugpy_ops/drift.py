@@ -24,7 +24,8 @@ Sections, each producing rows ``{section, subject, status, detail}`` with
   C  fleet      central's ``/api/health`` build vs each ``/api/llm/workers`` row:
                 ``environment_digest.build`` when the worker reports one, else
                 ``pkg_version`` vs ``required_pkg_version``; a monolith
-                ``0.1.x`` worker or one without a build identity is drift
+                ``0.1.x`` worker or one without a build identity is drift;
+                an OFFLINE worker is info (not part of the running fleet)
   D  pypi       the newest git tag vs PyPI's latest release for each workspace
                 distribution (tag ahead = unpublished release; PyPI ahead =
                 checkout behind release; absent from PyPI = info). A tag that
@@ -668,6 +669,14 @@ def _worker_row(w: dict, reference: Optional[dict], central_has_build: bool) -> 
         against = "central" if central_has_build else "this interpreter"
         return Row(S, name, DRIFT,
                    f"{_build_desc(build)} != {against} {_build_desc(reference)} {tag}")
+
+    # An OFFLINE worker is not part of the running fleet: its (stale) version is
+    # reported for the record but cannot fail the check — otherwise one box
+    # that is powered off keeps the verdict red forever (op, 2026-09-23).
+    if str(status).lower() in ("offline", "gone", "stale") and not w.get("unreachable"):
+        return Row(S, name, INFO,
+                   f"offline; last known pkg_version={pkg_version or 'none'}"
+                   f"{' build ' + _build_desc(build) if build else ''} {tag} — not compared")
 
     if not pkg_version or _MONOLITH_VERSION.match(str(pkg_version)):
         return Row(S, name, DRIFT,
