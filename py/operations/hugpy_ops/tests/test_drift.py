@@ -512,3 +512,12 @@ def test_help_mentions_sections():
     with pytest.raises(SystemExit) as info:
         drift.main(["--help"])
     assert info.value.code == 0
+
+
+def test_render_units_run_as_writes_user_for_system_units_only():
+    units = drift.render_units(exec_start="/x/hugpy-drift-check", run_as="hugpy")
+    assert "User=hugpy\n" in units["hugpy-drift-check.service"]
+    units = drift.render_units(exec_start="/x/hugpy-drift-check", run_as="hugpy", user_mode=True)
+    assert "User=" not in units["hugpy-drift-check.service"]
+    units = drift.render_units(exec_start="/x/hugpy-drift-check")
+    assert "User=" not in units["hugpy-drift-check.service"]

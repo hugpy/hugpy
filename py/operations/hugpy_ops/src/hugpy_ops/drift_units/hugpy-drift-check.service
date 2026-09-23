@@ -14,7 +14,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-${working_directory}ExecStart=$exec_start
+${run_as}${working_directory}ExecStart=$exec_start
 # A pass is a handful of git calls and a few HTTP GETs; 10m is the backstop
 # for a slow PyPI or a stalled fetch.
 TimeoutStartSec=10m

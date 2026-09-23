@@ -172,7 +172,10 @@ def test_install_deps_auto_profile_uses_platform_probe(monkeypatch, capsys):
 def test_version_lists_distributions(capsys):
     assert cli.main(["version"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("hugpy ")
+    lines = out.splitlines()
+    # the identity line (from hugpy_platform.buildinfo) leads when that module
+    # is installed; the "hugpy <version>" line is first otherwise
+    assert any(line.startswith("hugpy ") for line in lines[:2])
     assert "hugpy-platform" in out
 
 

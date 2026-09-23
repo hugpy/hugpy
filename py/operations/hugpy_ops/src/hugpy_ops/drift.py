@@ -784,8 +784,13 @@ def _read_unit_template(name: str) -> str:
 
 def render_units(*, exec_start: str, on_calendar: str = "daily",
                  environment: Iterable[str] = (), env_file: Optional[str] = None,
-                 user_mode: bool = False, working_directory: Optional[str] = None) -> dict[str, str]:
-    """``{unit filename: text}`` for the service and the timer."""
+                 user_mode: bool = False, working_directory: Optional[str] = None,
+                 run_as: Optional[str] = None) -> dict[str, str]:
+    """``{unit filename: text}`` for the service and the timer.
+
+    ``run_as`` writes ``User=`` into a SYSTEM unit so the check runs as the
+    account that owns the checkout (git refuses a root-run check on a tree
+    owned by someone else); ignored for user units."""
     env_lines = [f"Environment={line}" for line in environment]
     if env_file:
         env_lines.append(f"EnvironmentFile=-{os.path.abspath(env_file)}")
@@ -794,6 +799,7 @@ def render_units(*, exec_start: str, on_calendar: str = "daily",
         environment="\n".join(env_lines) if env_lines else "# (no Environment= lines given)",
         wanted_by="default.target" if user_mode else "multi-user.target",
         working_directory=f"WorkingDirectory={working_directory}\n" if working_directory else "",
+        run_as=f"User={run_as}\n" if (run_as and not user_mode) else "",
     )
     timer = string.Template(_read_unit_template("hugpy-drift-check.timer")).substitute(
         on_calendar=on_calendar,
@@ -822,7 +828,8 @@ def install_timer(args: argparse.Namespace, runner: Callable = subprocess.run) -
         environment.append(f"HUGPY_TOKEN={args.token}")
     units = render_units(exec_start=" ".join(exec_start), on_calendar=args.on_calendar or "daily",
                          environment=environment, env_file=args.env_file, user_mode=args.user,
-                         working_directory=os.path.abspath(args.workspace) if args.workspace else None)
+                         working_directory=os.path.abspath(args.workspace) if args.workspace else None,
+                         run_as=getattr(args, "run_as", None))
     if args.user:
         unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
         ctl = ["systemctl", "--user"]
@@ -890,6 +897,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--user", action="store_true", help="user units (~/.config/systemd/user) + systemctl --user")
     t.add_argument("--on-calendar", default="daily", help="systemd OnCalendar= (default: daily)")
     t.add_argument("--env-file", help="EnvironmentFile= for the service (central URL, token)")
+    t.add_argument("--run-as", metavar="USER",
+                   help="User= for a system unit: the account that owns the checkout (default: root)")
     t.add_argument("--dry-run", action="store_true", help="print the units, write nothing")
     return p
 
