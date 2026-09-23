@@ -37,7 +37,11 @@ from hugpy_storage.providers import (
     set_transfer_telemetry,
 )
 
-__version__ = "0.1.0"
+try:  # the installed distribution's version: the workspace tag/commit, never a literal
+    from importlib.metadata import version as _dist_version
+    __version__ = _dist_version("hugpy-storage")
+except Exception:  # noqa: BLE001 — source tree without metadata
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "__version__",

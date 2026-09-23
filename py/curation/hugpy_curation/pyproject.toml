@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugpy-curation"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Hugpy curation: discovery dossiers and the search, screen, download, smoke and judge review pipeline for candidate models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,3 +63,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 hugpy_curation = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]
+
+# ---------------------------------------------------------------------------
+# Lockstep workspace version (2026-09-22): every in-tree hugpy-* distribution
+# takes ONE version from the workspace git tag (vX.Y.Z at the repo root), so a
+# release is a tag and a build always carries the commit it came from
+# (X.Y.Z.devN+g<sha>[.dirty] between tags). A checkout without git metadata
+# builds as 0.0.0+unknown, which central refuses to advertise to workers.
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+unknown"

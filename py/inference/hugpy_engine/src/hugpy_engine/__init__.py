@@ -20,7 +20,7 @@ try:
 
     __version__ = _package_version("hugpy-engine")
 except Exception:
-    __version__ = "0.1.0"
+    __version__ = "0.0.0+unknown"  # source tree without metadata
 
 from .allocation import (
     allocation_spill,
