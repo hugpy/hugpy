@@ -42,7 +42,7 @@ def _slot_row(**over):
     row = {
         "slot_id": "1", "model_key": "coder", "healthy": True, "busy": False,
         "endpoint": "http://x:8101", "rss_bytes": 2 * GIB,
-        "n_gpu_layers": 17, "ctx": 16384, "child_pid": 4242,
+        "n_gpu_layers": 17, "ctx": 16384, "child_pid": 90004242,
         "last_used": 0.0,
     }
     row.update(over)
@@ -130,7 +130,7 @@ def test_measured_device_wins_and_is_labeled(monkeypatch):
     """nvidia-smi joined on child_pid = ground truth: device + real bytes,
     stamped 'measured'."""
     out = _alloc(monkeypatch, _slot_row(),
-                 gpu_procs={4242: {"name": "llama-server", "mib": 3000}})
+                 gpu_procs={90004242: {"name": "llama-server", "mib": 3000}})
     a = out[0]
     assert a["device"] == "cuda"
     assert a["vram_bytes"] == 3000 * MIB
@@ -229,7 +229,7 @@ def test_existing_field_meanings_unchanged(monkeypatch):
     """`device` must keep meaning 'the device the weights live on' and rss_bytes
     stays VmRSS verbatim — the fallback only fills a hole, never re-defines."""
     out = _alloc(monkeypatch, _slot_row(),
-                 gpu_procs={4242: {"name": "llama-server", "mib": 3000}})
+                 gpu_procs={90004242: {"name": "llama-server", "mib": 3000}})
     a = out[0]
     assert a["device"] in ("cuda", "cpu")
     assert a["rss_bytes"] == 2 * GIB

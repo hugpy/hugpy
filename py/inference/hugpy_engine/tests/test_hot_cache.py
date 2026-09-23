@@ -149,7 +149,9 @@ def test_hot_cache():
     with open(victim, "wb") as fh:
         fh.write(b"x" * 5)
     check("partial: size-mismatched hot copy reads incomplete", hc.is_complete(d) is False)
-    check("partial: incomplete hot copy falls back to shared", hc.use(d) == d)
+    # promote=False: the default would kick the async promoter at the incomplete
+    # copy, racing the delete + is_complete read below (flaked on CI).
+    check("partial: incomplete hot copy falls back to shared", hc.use(d, promote=False) == d)
     # a wholly-missing file also reads incomplete
     os.remove(victim)
     check("partial: missing hot file reads incomplete", hc.is_complete(d) is False)

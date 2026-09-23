@@ -91,9 +91,9 @@ def _h(out, pid):
 
 # ── the squatter: non-serving own-venv holder past min-age ──────────────────
 def test_idle_own_venv_holder_is_the_squatter(rig):
-    rig.add(4242, mib=8000)                 # the leaked 8GB studio fork
+    rig.add(90004242, mib=8000)                 # the leaked 8GB studio fork
     out = rig.holders()
-    row = _h(out, 4242)
+    row = _h(out, 90004242)
     assert row["kind"] == "own-orphan"
     assert row["reapable"] is True
     assert row["squatter"] is True
@@ -101,7 +101,7 @@ def test_idle_own_venv_holder_is_the_squatter(rig):
     assert row["vram_bytes"] == 8000 * MIB
     assert "not auto-reaped" in row["reason"].lower()
     # It rides the top-level squatters list — the EXPLICIT surfacing.
-    assert [s["pid"] for s in out["squatters"]] == [4242]
+    assert [s["pid"] for s in out["squatters"]] == [90004242]
 
 
 # ── a serving slot is doing work: never a squatter ──────────────────────────
@@ -163,9 +163,9 @@ def test_agent_own_pid_is_infra(rig):
 
 # ── gate 4: a YOUNG own-venv holder is protected (mid-spawn race) ────────────
 def test_young_own_venv_holder_not_yet_squatter(rig):
-    rig.add(4243, age=YOUNG)
+    rig.add(90004243, age=YOUNG)
     out = rig.holders()
-    row = _h(out, 4243)
+    row = _h(out, 90004243)
     assert row["kind"] == "own-orphan"
     assert row["reapable"] is False        # inside the grace window
     assert row["squatter"] is False
@@ -174,9 +174,9 @@ def test_young_own_venv_holder_not_yet_squatter(rig):
 
 # ── gate 4 fail-closed: unmeasurable age is NOT reapable ─────────────────────
 def test_unmeasurable_age_fails_closed(rig):
-    rig.add(4244, age=None)
+    rig.add(90004244, age=None)
     out = rig.holders()
-    row = _h(out, 4244)
+    row = _h(out, 90004244)
     assert row["kind"] == "own-orphan"
     assert row["reapable"] is False
     assert "unmeasurable" in row["reason"]
@@ -185,9 +185,9 @@ def test_unmeasurable_age_fails_closed(rig):
 # ── gate 1 fail-closed: no venv marker -> own-venv can't be proven -> foreign ─
 def test_no_venv_marker_reads_as_foreign(rig, monkeypatch):
     monkeypatch.setattr(A, "_self_venv_marker", lambda: None)
-    rig.add(4245)
+    rig.add(90004245)
     out = rig.holders()
-    row = _h(out, 4245)
+    row = _h(out, 90004245)
     assert row["kind"] == "foreign"        # ownership unprovable -> not ours
     assert row["reapable"] is False
     assert row["squatter"] is False
@@ -196,7 +196,7 @@ def test_no_venv_marker_reads_as_foreign(rig, monkeypatch):
 # ── the per-card meter + coarse work signal ─────────────────────────────────
 def test_card_totals_and_coarse_util(rig):
     rig.cards[0]["util_pct"] = 0           # 0% — card doing NO work
-    rig.add(4242)
+    rig.add(90004242)
     out = rig.holders()
     assert out["vram_total_bytes"] == 24000 * MIB
     assert out["vram_used_bytes"] == 20000 * MIB
@@ -236,7 +236,7 @@ def test_beat_wrapper_swallows_errors(monkeypatch):
 
 # ── the route contract: GET /ops/vram-holders, read-only ────────────────────
 def test_route_returns_meter(rig, monkeypatch):
-    rig.add(4242)
+    rig.add(90004242)
     state = A.WorkerState(name="t", url=None, worker_id="w-vram")
     c = A.build_app(state).test_client()
     r = c.get("/ops/vram-holders")

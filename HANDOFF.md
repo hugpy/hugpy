@@ -1,4 +1,51 @@
-# Handoff — Hugpy partition, updated 2026-09-22 (session 4)
+# Handoff — Hugpy partition, updated 2026-09-22 (session 4, late)
+
+## 0. Latest first: the ComfyUI resident ledger (commit `08a6ca9` + follow-up)
+
+The user's long-standing complaint ("evict-to-fit never could account for
+comfy models") is addressed in `hugpy_fleet`; read
+`py/fleet/hugpy_fleet/docs/COMFY-LEDGER.md` before touching the worker's VRAM
+paths. In one line: `worker/comfy_ledger.py` records every checkpoint hugpy
+dispatches to comfy with its file size, so Fix B clears *that checkpoint's*
+need (not a 7 GiB constant), comfy's residents are named in `_vram_residents`
+and are LRU candidates when the watchdog predicate says idle (protected with
+`why="comfy busy: …"` otherwise), and the heartbeat's `comfy.resident` lists
+them. Knobs: `HUGPY_COMFY_GEN_CUSHION_GIB` (2.0), `COMFY_CHECKPOINT_DIRS`
+(set to the roots comfy's `extra_model_paths.yaml` scans — on ae:
+`/mnt/16T_toshiba/llm_storage/checkpoints:/mnt/nvmes/2T_samsung_990/hot990/hugpy/comfyui/models/checkpoints`).
+
+**Not live yet.** This code runs on the GPU worker, and `aeb`'s worker
+(`/home/aeb/hugpy-worker/venv`, :9200, plus its slot agents) still runs the
+monolith **0.1.266 wheel** — verified equivalent to the partitioned tree
+(every Sep-10 marker present in both). The worker cutover to `hugpy-worker`
+from the packages is what switches the ledger on; it is the next step and is
+bigger than central's was (worker venv, slot agents, the worker's
+`slot.env`, the two ComfyUI instances' env).
+
+The same shape of fix is still owed for in-process "system" models (vision /
+embed share the worker's CUDA context and show as an anonymous
+`cuda_context` lump).
+
+CI lesson from this commit's first run (35805340263, then green on rerun):
+tests that fake pids must use values **above Linux `pid_max` (4194304)** —
+the runner's `bash`/`pytest` sat at 4242/4243 and two fleet tests read them
+as live processes; and `hot_cache.use()` defaults to `promote=True`, which
+races a test that corrupts the hot copy. All three tests are fixed.
+
+Host cleanup found the same day (commands given to the user, not run by the
+assistant): 132 GB of duplicate GGUFs in the retired `hugpyw` worker's private
+store on the root disk; 38 GB `.trash-keeper-20260722` inside the 16T
+`checkpoints/` root that ComfyUI was offering as loadable checkpoints
+(including an 8 GB Qwen3-4B `qwen_3_4b.safetensors`); the seeded
+`comfy-dreamshaper-8` row's `DreamShaper_8_pruned.safetensors` was a dangling
+symlink into an empty `/mnt/llm_storage`. The `hugpy-downloader` unit and
+`7002_hugpy_api` got a `wait-for-storage.conf` drop-in (the 16T is a USB
+G-DRIVE that can enumerate minutes after boot; `RequiresMountsFor` made that a
+final dependency failure).
+
+---
+
+# Session 4 (earlier) — partition cleanup and host cutover
 
 Start here. Companion documents: `PARTITION.md` (architecture, rev 2),
 `py/partition.toml` (ownership manifest), `py/EXTRACTION_GUIDE.md`,
