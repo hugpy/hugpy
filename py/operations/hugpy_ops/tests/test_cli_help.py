@@ -14,6 +14,7 @@ ENTRY_POINTS = {
     "hugpy-keeper": "hugpy_ops.keeper",
     "hugpy-todo-keeper": "hugpy_ops.todo_keeper_daemon",
     "hugpy-provisioner": "hugpy_ops.provisioner",
+    "hugpy-drift-check": "hugpy_ops.drift",
 }
 
 
@@ -68,7 +69,14 @@ def test_import_hugpy_ops_is_light():
     )
     proc = _run(code)
     assert proc.returncode == 0, proc.stderr[-2000:]
-    assert proc.stdout.strip() == "0.1.0"
+    # The version is the installed distribution's (git-derived, lockstep),
+    # never a literal; the source-tree fallback is 0.0.0+unknown.
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        expected = version("hugpy-ops")
+    except PackageNotFoundError:
+        expected = "0.0.0+unknown"
+    assert proc.stdout.strip() == expected
 
 
 def test_lazy_submodule_access_and_versions_helper():

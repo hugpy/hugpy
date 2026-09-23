@@ -5,8 +5,8 @@
     hugpy bot        [--central http://127.0.0.1:7002] [--env PATH] [--guild ID]
     hugpy download   MODEL_KEY [MODEL_KEY ...]
     hugpy chat       "prompt"            (stdlib HTTP client of a central)
-    hugpy keeper / sentinel / chaos / provision / oracle / curation / video / storage
-    hugpy install-engine | install-deps | reclassify-images | version
+    hugpy keeper / sentinel / chaos / provision / drift / oracle / curation / video / storage
+    hugpy install-engine | install-deps | reclassify-images | version | build
 
 Every feature lives in the package that owns it; this module only maps a
 subcommand to that package's entry point and imports it on demand. A bare
@@ -78,6 +78,7 @@ DISPATCH: dict[str, Target] = {
     "sentinel": Target("hugpy_ops.sentinel.__main__", ("main",), "ops"),
     "chaos": Target("hugpy_ops.chaos.runner", ("main",), "ops"),
     "provision": Target("hugpy_ops.provisioner", ("main",), "ops"),
+    "drift": Target("hugpy_ops.drift", ("main",), "ops", "hugpy-drift-check"),
     "oracle": Target("hugpy_oracle.cli", ("main",), "oracle", "hugpy-oracle"),
     "curation": Target("hugpy_curation.cli", ("main",), "curation", "hugpy-curation"),
     "video": Target("hugpy_video.cli", ("main",), "video", "hugpy-video"),
@@ -92,6 +93,7 @@ PASSTHROUGH: dict[str, str] = {
     "sentinel": "sentinel: bound-exceeded detection -> case -> diagnosis agent",
     "chaos": "chaos runner: adversarial allocation/eviction sweeps against a central",
     "provision": "provisioner: fetch declared-but-missing weights across registries",
+    "drift": "drift check: prove checkout, installed packages, fleet and PyPI are one build",
     "oracle": "oracle: steward self-check, hook installation",
     "curation": "curation: discovery dossiers and the review pipeline",
     "video": "video intelligence: media job bus, self tests, state roots",
@@ -491,12 +493,45 @@ ECOSYSTEM_DISTRIBUTIONS = (
 )
 
 
+def _buildinfo():
+    """``hugpy_platform.buildinfo`` when the installed platform ships it, else
+    None. Lazy: a thin ``pip install hugpy`` may carry an older platform."""
+    try:
+        return importlib.import_module("hugpy_platform.buildinfo")
+    except Exception:  # noqa: BLE001 — absent or broken: callers degrade
+        return None
+
+
+def _build(args: argparse.Namespace) -> int:
+    """Print this interpreter's build identity (which commit is running)."""
+    import json as _json
+
+    bi = _buildinfo()
+    if bi is None:
+        print("hugpy build: hugpy_platform.buildinfo is not available in this install "
+              "(hugpy-platform predates build identity; upgrade hugpy-platform)",
+              file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(bi.build_info(), indent=2, sort_keys=True))
+    else:
+        print(bi.identity_line())
+    return 0
+
+
 def _version(_args: argparse.Namespace) -> int:
-    """Print the installed hugpy distributions (a thin install lists few)."""
+    """Print the installed hugpy distributions (a thin install lists few),
+    headed by the build identity line when the platform can produce one."""
     from importlib.metadata import PackageNotFoundError, version
 
     from hugpy import __version__
 
+    bi = _buildinfo()
+    if bi is not None:
+        try:
+            print(bi.identity_line())
+        except Exception:  # noqa: BLE001 — identity is a courtesy, never a failure
+            pass
     print(f"hugpy {__version__}")
     for dist in ECOSYSTEM_DISTRIBUTIONS:
         try:
@@ -576,6 +611,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write the corrected tasks (default: dry run)")
 
     sub.add_parser("version", help="show installed hugpy distributions")
+
+    bld = sub.add_parser("build", help="show which build (version + commit) this "
+                                       "interpreter runs")
+    bld.add_argument("--json", action="store_true",
+                     help="the full build document (all distributions, lockstep, workspace)")
     return parser
 
 
@@ -603,6 +643,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _reclassify_images(args)
         if args.cmd == "version":
             return _version(args)
+        if args.cmd == "build":
+            return _build(args)
     except DispatchError as exc:
         print(str(exc), file=sys.stderr)
         return 1

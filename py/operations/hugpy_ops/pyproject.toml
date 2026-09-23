@@ -60,12 +60,14 @@ hugpy-chaos = "hugpy_ops.chaos.runner:main"
 hugpy-keeper = "hugpy_ops.keeper:main"
 hugpy-todo-keeper = "hugpy_ops.todo_keeper_daemon:main"
 hugpy-provisioner = "hugpy_ops.provisioner:main"
+hugpy-drift-check = "hugpy_ops.drift:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-hugpy_ops = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]
+hugpy_ops = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt",
+             "drift_units/*.service", "drift_units/*.timer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
