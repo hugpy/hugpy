@@ -73,3 +73,52 @@ def test_register_reply_carries_constraints_url(client, monkeypatch):
     worker = resp.get_json()
     assert worker["required_pkg_version"] == "0.2.0"
     assert worker["constraints_url"] == "https://central.test/api/llm/workers/constraints.txt"
+
+
+# ── central's own pip index (pkg_index_url) ──────────────────────────────────
+def test_required_version_names_central_index_only_when_it_holds_the_release(client, monkeypatch):
+    monkeypatch.setattr(W, "required_pkg_version", lambda: "0.2.0")
+    monkeypatch.setattr(wr, "required_pkg_version", lambda: "0.2.0")
+    monkeypatch.setattr(wr, "pkg_index_has", lambda required: False)
+    body = client.get("/api/llm/workers/required-version", base_url="https://central.test").get_json()
+    assert body["required_pkg_version"] == "0.2.0" and "pkg_index_url" not in body
+    monkeypatch.setattr(wr, "pkg_index_has", lambda required: required == "0.2.0")
+    body = client.get("/api/llm/workers/required-version", base_url="https://central.test").get_json()
+    assert body["pkg_index_url"] == "https://central.test/api/llm/pip/simple"
+
+
+def test_register_reply_carries_pkg_index_url_when_published_on_central(client, monkeypatch):
+    monkeypatch.setattr(wr, "required_pkg_version", lambda: "0.2.0")
+    monkeypatch.setattr(wr, "_enrollment_ok", lambda: True)
+    monkeypatch.setattr(wr, "pkg_index_has", lambda required: True)
+    resp = client.post("/api/llm/workers/register",
+                       json={"name": "wp5-index-box", "url": "http://10.0.0.10:9100"},
+                       base_url="https://central.test")
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    worker = resp.get_json()
+    assert worker["pkg_index_url"] == "https://central.test/api/llm/pip/simple"
+    assert worker["constraints_url"] == "https://central.test/api/llm/workers/constraints.txt"
+
+
+def test_register_reply_omits_pkg_index_url_when_index_lacks_the_release(client, monkeypatch):
+    monkeypatch.setattr(wr, "required_pkg_version", lambda: "0.2.0")
+    monkeypatch.setattr(wr, "_enrollment_ok", lambda: True)
+    monkeypatch.setattr(wr, "pkg_index_has", lambda required: False)
+    resp = client.post("/api/llm/workers/register",
+                       json={"name": "wp5-noindex-box", "url": "http://10.0.0.11:9100"},
+                       base_url="https://central.test")
+    assert resp.status_code == 200
+    assert "pkg_index_url" not in resp.get_json()
+
+
+def test_index_probe_failure_never_fails_the_reply(client, monkeypatch):
+    monkeypatch.setattr(wr, "required_pkg_version", lambda: "0.2.0")
+    monkeypatch.setattr(wr, "_enrollment_ok", lambda: True)
+
+    def boom(required):
+        raise OSError("index dir exploded")
+    monkeypatch.setattr(wr, "pkg_index_has", boom)
+    resp = client.post("/api/llm/workers/register",
+                       json={"name": "wp5-boom-box", "url": "http://10.0.0.12:9100"},
+                       base_url="https://central.test")
+    assert resp.status_code == 200 and "pkg_index_url" not in resp.get_json()

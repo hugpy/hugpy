@@ -96,14 +96,51 @@ version**, read fresh from `importlib.metadata` on every heartbeat reply
 env var and no cache: the instant central runs X.Y.Z it advertises X.Y.Z. Each
 worker compares that to its own version on its next heartbeat, installs the
 advertised version from central's PEP 503 index
-(`<central>/api/llm/pip/simple`, populated from PyPI or the local wheel dir)
-and re-execs.
+(`<central>/api/llm/pip/simple`, populated by `py/build_wheels.py --publish`,
+added as an extra index alongside PyPI when it holds the release) and re-execs.
 
 Only a clean tagged version is ever advertised: a version containing `+`
 (`0.2.1.dev7+g1a2b3c4`, `0.0.0+unknown`) makes `required_pkg_version` return
 `None`, which means "not managing versions". An editable dev central therefore
 never pushes a dev build to the fleet, and a broken checkout never pushes
 `0.0.0+unknown`.
+
+## Releasing through central (no PyPI in the loop)
+
+Central already hands workers their model files; it hands them their wheels
+the same way. The wheel directory `hugpy_fleet.central.workers.pkg_index_dir()`
+(`$HUGPY_PKG_INDEX_DIR`, default `<state dir>/pip_index`) is served as a PEP 503
+index at `<central>/api/llm/pip/simple/<name>/`. Publishing a release there
+is one command on the central box, from a checkout of the tag:
+
+```bash
+git fetch --tags && git checkout vX.Y.Z
+python py/build_wheels.py --expect-tag vX.Y.Z --publish "$HUGPY_PKG_INDEX_DIR"
+```
+
+`py/build_wheels.py` is the same builder CI's `pypi-publish.yml` runs: every
+`[[package]]` in cut order, versions read back from the artifacts, all
+identical and equal to the tag, or nothing is published. Artifacts are
+immutable on the index (a differing file with the same name is refused).
+
+From then on:
+
+* `required-version`, register and heartbeat replies carry `pkg_index_url`
+  whenever the index holds **every** lockstep wheel of the required version
+  (`pkg_index_has`); a half-published index is never advertised, so workers
+  fall back to PyPI rather than strand on a missing sibling.
+* the worker's converge adds it as `pip --extra-index-url`: the pinned
+  `hugpy-*` wheels resolve from central, third-party dependencies still come
+  from PyPI, and an explicit `--pkg-index` (a WireGuard-only box with no egress)
+  keeps its `--index-url` meaning.
+* `bootstrap.sh` (`<central>/api/llm/workers/install.sh`) reads the same key
+  from `required-version`, so a bare box enrolls from central's wheels too.
+* drift section D counts a tag that central's index serves as published, and
+  reports PyPI's version alongside for reference.
+
+PyPI remains the public surface (`pip install hugpy` on a box that knows no
+central) and the tag flow above still publishes there; central's index is how
+the fleet itself converges, with or without PyPI.
 
 ## The drift check
 
@@ -115,7 +152,7 @@ never pushes a dev build to the fleet, and a broken checkout never pushes
 | A | the git checkout: clean tracked tree, no unpushed commits, HEAD level with the remote | dev box, before a release (`release.sh`) |
 | B | the installed distributions vs. the checkout: all 13 present, one identical version, editable paths resolve here | CI `lockstep` job, dev box |
 | C | the fleet vs. central: central's `/api/health` build identity, then every worker's heartbeat build (version + sha) against it; a worker still on the monolith, or without a build identity, is drift; `version_ok = null` (central pins nothing) is info | central |
-| D | the newest git tag vs. PyPI: a tag newer than PyPI is an unpublished release, PyPI newer than the tag is a checkout behind a release, not on PyPI at all is info | dev box, central |
+| D | the newest git tag vs. PyPI: a tag newer than PyPI is an unpublished release unless central's index serves it, PyPI newer than the tag is a checkout behind a release, not on PyPI at all is info (ok when central's index serves the tag) | dev box, central |
 
 `release.sh` gates on `A,B`; CI runs `B` (green until `hugpy-ops` ships the
 command, enforcing from then on); the nightly timer shipped with `hugpy-ops`

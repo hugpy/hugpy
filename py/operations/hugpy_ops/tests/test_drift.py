@@ -357,6 +357,21 @@ def _fake_pypi(monkeypatch, latest: dict):
         return {"info": {"version": latest[name]}}
     monkeypatch.setattr(drift, "fetch_json", fetch)
     monkeypatch.setattr(drift, "workspace_distributions", lambda: ("hugpy-ops", "hugpy", "hugpy-new"))
+    _fake_central_index(monkeypatch, {})
+
+
+def _fake_central_index(monkeypatch, served: dict):
+    """Central's ``/api/llm/pip/simple/<name>/`` pages: ``served`` maps a
+    distribution name to the versions its wheels are listed at; a name absent
+    from it 404s (the route lists nothing) and an empty dict means no central
+    (connection refused)."""
+    def fetch_text(url, token=None, timeout=None):
+        if not served:
+            raise urllib.error.URLError("connection refused")
+        name = url.rstrip("/").rsplit("/", 1)[1]
+        stem = name.replace("-", "_")
+        return "".join(f'<a href="{stem}-{v}-py3-none-any.whl">x</a>' for v in served.get(name, ()))
+    monkeypatch.setattr(drift, "fetch_text", fetch_text)
 
 
 def test_unpublished_tag_is_drift(repos, monkeypatch):
@@ -367,6 +382,46 @@ def test_unpublished_tag_is_drift(repos, monkeypatch):
     assert d["hugpy-ops"].status == drift.DRIFT and "unpublished release" in d["hugpy-ops"].detail
     assert d["hugpy"].status == drift.OK
     assert d["hugpy-new"].status == drift.INFO and "not on PyPI" in d["hugpy-new"].detail
+
+
+def test_tag_served_by_central_index_is_published(repos, monkeypatch):
+    """A release published on central's own index (py/build_wheels.py --publish)
+    is not 'unpublished' just because PyPI lacks it — the fleet converges from
+    central. PyPI's version is still reported alongside."""
+    _, work = repos
+    _fake_pypi(monkeypatch, {"hugpy-ops": "0.9.0", "hugpy": "1.0.0"})
+    _fake_central_index(monkeypatch, {"hugpy-ops": ["1.0.0"], "hugpy-new": ["1.0.0"],
+                                      "hugpy": ["0.9.0"]})
+    d = _rows(drift.run("D", workspace=str(work), central="http://c:1"), "D")
+    assert d["hugpy-ops"].status == drift.OK and "central's index" in d["hugpy-ops"].detail \
+        and "PyPI 0.9.0" in d["hugpy-ops"].detail
+    assert d["hugpy-new"].status == drift.OK and "not on PyPI" in d["hugpy-new"].detail
+    assert d["hugpy"].status == drift.OK and "= PyPI" in d["hugpy"].detail
+
+
+def test_central_index_probe_stops_after_first_unreachable(repos, monkeypatch):
+    _, work = repos
+    _fake_pypi(monkeypatch, {"hugpy-ops": "0.9.0"})
+    calls = []
+
+    def fetch_text(url, token=None, timeout=None):
+        calls.append(url)
+        raise urllib.error.URLError("timed out")
+    monkeypatch.setattr(drift, "fetch_text", fetch_text)
+    monkeypatch.setattr(drift, "workspace_distributions", lambda: ("hugpy-ops", "hugpy-new", "hugpy"))
+    d = _rows(drift.run("D", workspace=str(work), central="http://c:1"), "D")
+    assert d["hugpy-ops"].status == drift.DRIFT and "unpublished release" in d["hugpy-ops"].detail
+    assert d["hugpy-new"].status == drift.INFO
+    assert len(calls) == 1   # one timeout, not one per distribution
+
+
+def test_central_index_has_parses_the_simple_page(monkeypatch):
+    monkeypatch.setattr(drift, "fetch_text", lambda url, token=None, timeout=None:
+                        '<a href="hugpy_fleet-0.2.0-py3-none-any.whl#sha256=x">a</a>'
+                        '<a href="hugpy_fleet-0.2.0.tar.gz">b</a>')
+    assert drift.central_index_has("http://c:1/", "hugpy-fleet", "0.2.0") is True
+    assert drift.central_index_has("http://c:1/", "hugpy-fleet", "0.2.0a0") is False
+    assert drift.central_index_has(None, "hugpy-fleet", "0.2.0") is None
 
 
 def test_checkout_behind_release_is_drift(repos, monkeypatch):

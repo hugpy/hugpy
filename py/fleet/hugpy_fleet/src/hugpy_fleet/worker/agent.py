@@ -4035,7 +4035,11 @@ def build_app(state: "WorkerState") -> Flask:
         # from central, siblings pinned; --no-deps fallback when unreachable).
         # Central may name its constraints URL; otherwise derived from --central.
         constraints_hint = str(body.get("constraints_url") or "").strip() or None
-        cmd, constraints_path = _prepare_converge(args, target, constraints_hint)
+        # Central's own index as an EXTRA source (heartbeat's pkg_index_url);
+        # unlike ``pkg_index`` above it does not replace PyPI.
+        index_hint = str(body.get("pkg_index_url") or "").strip() or None
+        cmd, constraints_path = _prepare_converge(args, target, constraints_hint,
+                                                  pkg_index_url=index_hint)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=560)
@@ -11345,7 +11349,8 @@ def _installed_lockstep_siblings(constraint_lines: list[str], pkg_name: str) -> 
 
 
 def _pip_converge_command(args, target: str, constraints_path: str | None,
-                          extra_specs: "list[str] | tuple[str, ...]" = ()) -> list[str]:
+                          extra_specs: "list[str] | tuple[str, ...]" = (),
+                          extra_index: str | None = None) -> list[str]:
     """The pip command line that converges this worker to ``target``.
 
     Used by BOTH the heartbeat self-update and ``/ops/update`` so the two paths
@@ -11354,7 +11359,15 @@ def _pip_converge_command(args, target: str, constraints_path: str | None,
     ``constraints_path`` set → the constrained (lockstep) form::
 
         pip install -U --upgrade-strategy only-if-needed -c <constraints>
-            [--index-url <pkg_index>] <pkg_name>==<target> [<sibling>==<target> ...]
+            [--index-url <pkg_index>] [--extra-index-url <extra_index>]
+            <pkg_name>==<target> [<sibling>==<target> ...]
+
+    ``extra_index`` is central's own index as advertised in the reply
+    (``pkg_index_url``): it joins PyPI as a SECOND source rather than replacing
+    it, so the pinned hugpy-* wheels resolve from central when they are only
+    published there while third-party dependencies still come from PyPI. An
+    explicit ``--pkg-index`` (the WG-only worker with no egress) keeps its
+    ``--index-url`` semantics and ignores a hint equal to it.
 
     Dependencies are resolved under the pins, so every workspace sibling in the
     dependency closure moves to ``target`` with the tracked package; the
@@ -11377,15 +11390,21 @@ def _pip_converge_command(args, target: str, constraints_path: str | None,
     pkg_index = getattr(args, "pkg_index", None)
     if pkg_index:
         cmd += ["--index-url", pkg_index]
+    if extra_index and extra_index.rstrip("/") != str(pkg_index or "").rstrip("/"):
+        cmd += ["--extra-index-url", extra_index]
     cmd.append(f"{pkg_name}=={target}")
     if constraints_path:
         cmd.extend(str(s) for s in (extra_specs or ()))
     return cmd
 
 
-def _prepare_converge(args, target: str, constraints_url: str | None = None
+def _prepare_converge(args, target: str, constraints_url: str | None = None,
+                      pkg_index_url: str | None = None
                       ) -> "tuple[list[str], str | None]":
     """Fetch central's lockstep pins into a temp file and build the pip command.
+
+    ``pkg_index_url`` is the reply's hint for central's own index (added as
+    ``--extra-index-url`` on both the constrained and the fallback command).
 
     Returns ``(cmd, constraints_path)``; ``constraints_path`` is None on the
     fallback path (fetch failed / no lines / no central URL) and the command is
@@ -11407,7 +11426,7 @@ def _prepare_converge(args, target: str, constraints_url: str | None = None
             "(hugpy-platform/-control/-storage/-engine/...) are NOT converged: the "
             "fleet may be SKEWED until central serves constraints.txt.",
             url or "no central URL", pkg_name, target)
-        return _pip_converge_command(args, target, None), None
+        return _pip_converge_command(args, target, None, extra_index=pkg_index_url), None
     fd, path = tempfile.mkstemp(prefix="hugpy-constraints-", suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -11416,7 +11435,8 @@ def _prepare_converge(args, target: str, constraints_url: str | None = None
     logger.info("self-update: lockstep constraints from %s (%d pins); converging %s "
                 "+ %d installed sibling(s) %s", url, len(lines), pkg_name,
                 len(siblings), siblings)
-    return _pip_converge_command(args, target, path, extra_specs=specs), path
+    return _pip_converge_command(args, target, path, extra_specs=specs,
+                                 extra_index=pkg_index_url), path
 
 
 def _discard_constraints(path: str | None) -> None:
@@ -11429,7 +11449,8 @@ def _discard_constraints(path: str | None) -> None:
 
 
 def _self_update_if_needed(required: str | None, args, state=None,
-                           constraints_url: str | None = None) -> None:
+                           constraints_url: str | None = None,
+                           pkg_index_url: str | None = None) -> None:
     """Install central's required package version and re-exec, if we're behind.
 
     Source of the bytes: PyPI by default (where ``sync.trigger`` publishes), since
@@ -11444,7 +11465,10 @@ def _self_update_if_needed(required: str | None, args, state=None,
     Only when the pins cannot be fetched does it degrade to the pre-partition
     ``--no-deps`` hot-swap of ONE distribution (loudly: the fleet may be skewed).
     ``constraints_url`` is the reply's hint; absent, it is derived from
-    ``args.central``.
+    ``args.central``. ``pkg_index_url`` is the reply's hint for central's own
+    index (present only when central holds every wheel of ``required``); it
+    joins PyPI as an extra index so a release published only on central still
+    converges the fleet.
     """
     if not required:
         return  # central isn't managing versions -> never touch the install
@@ -11457,10 +11481,11 @@ def _self_update_if_needed(required: str | None, args, state=None,
     if upd.get("target") == required and (time.time() - upd.get("at", 0)) < _UPDATE_RETRY_BACKOFF:
         return  # already tried this exact target recently; back off
 
-    source = args.pkg_index or "PyPI"
+    source = args.pkg_index or ("PyPI + " + pkg_index_url if pkg_index_url else "PyPI")
     logger.info("self-update: %s %s -> %s (from %s)",
                 args.pkg_name, installed or "(none)", required, source)
-    cmd, constraints_path = _prepare_converge(args, required, constraints_url)
+    cmd, constraints_path = _prepare_converge(args, required, constraints_url,
+                                              pkg_index_url=pkg_index_url)
     try:
         rc = subprocess.call(cmd)
     except Exception as exc:  # noqa: BLE001
@@ -12081,7 +12106,8 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             _adopt_storage_inputs(state, worker)
             # Converge to central's required package version (restarts on update).
             _self_update_if_needed((worker or {}).get("required_pkg_version"), args, state,
-                                   constraints_url=(worker or {}).get("constraints_url"))
+                                   constraints_url=(worker or {}).get("constraints_url"),
+                                   pkg_index_url=(worker or {}).get("pkg_index_url"))
         except WorkerRejected as exc:
             _terminal_exit(exc)   # does not return
         except urllib.error.HTTPError as exc:
@@ -12146,7 +12172,8 @@ def _register(client: CentralClient, state: WorkerState, args) -> None:
     logger.info("registered as worker id=%s serving models=%s", state.worker_id, worker.get("models"))
     # Converge to central's required package version before serving (restarts).
     _self_update_if_needed(worker.get("required_pkg_version"), args, state,
-                           constraints_url=worker.get("constraints_url"))
+                           constraints_url=worker.get("constraints_url"),
+                           pkg_index_url=worker.get("pkg_index_url"))
 
 
 def _build_parser() -> argparse.ArgumentParser:

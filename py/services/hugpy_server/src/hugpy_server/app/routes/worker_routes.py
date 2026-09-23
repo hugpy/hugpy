@@ -65,6 +65,8 @@ from hugpy_fleet.central.workers import (
     lockstep_constraints,
     constraints_url as _constraints_url_for,
     pkg_index_dir,
+    pkg_index_has,
+    pkg_index_url as _pkg_index_url_for,
     set_worker_admission,
     set_worker_pool,
     set_worker_limits,
@@ -867,7 +869,12 @@ def workers_required_version():
     pins no version (workers then track latest). Static path, so it takes routing
     priority over ``/llm/workers/<worker_id>``.
     """
-    return jsonify({"required_pkg_version": required_pkg_version()})
+    required = required_pkg_version()
+    out = {"required_pkg_version": required}
+    idx = _reply_pkg_index_url(required)
+    if idx:
+        out["pkg_index_url"] = idx   # bootstrap.sh adds it as pip --extra-index-url
+    return jsonify(out)
 
 
 @worker_bp.route("/llm/workers/constraints.txt", methods=["GET"])
@@ -896,6 +903,20 @@ def workers_constraints():
 def _reply_constraints_url() -> str:
     """The constraints URL for the central answering THIS request (proxy-aware)."""
     return _constraints_url_for(_central_base_url())
+
+
+def _reply_pkg_index_url(required: "str | None") -> "str | None":
+    """Central's own pip index URL when its wheel dir can serve ``required`` for
+    the WHOLE lockstep set, else None (the key is then omitted and the worker
+    converges from PyPI as before). Same channel the worker pulls model files
+    from — a release published with ``py/build_wheels.py --publish`` reaches the
+    fleet with no PyPI in the loop."""
+    try:
+        if required and pkg_index_has(required):
+            return _pkg_index_url_for(_central_base_url())
+    except Exception:  # noqa: BLE001 — an index hiccup must never fail a heartbeat
+        logger.debug("pkg index probe failed", exc_info=True)
+    return None
 
 
 @worker_bp.route("/llm/calibration", methods=["GET"])
@@ -1087,6 +1108,9 @@ def workers_register():
     # and where the lockstep pin set lives (the agent derives it when absent).
     worker["required_pkg_version"] = required_pkg_version()
     worker["constraints_url"] = _reply_constraints_url()
+    _idx = _reply_pkg_index_url(worker["required_pkg_version"])
+    if _idx:
+        worker["pkg_index_url"] = _idx
     # Per-worker KEEP-WARM STAR (operator RULINGS 2026-07-23): carry this
     # worker's star from FIRST contact so the agent can warm it immediately
     # (thereafter the heartbeat keeps it warm every beat). Additive/omit-when-
@@ -1550,6 +1574,9 @@ def workers_heartbeat(worker_id):
     # constraints URL so the converge pins EVERY sibling distribution.
     worker["required_pkg_version"] = required_pkg_version()
     worker["constraints_url"] = _reply_constraints_url()
+    _idx = _reply_pkg_index_url(worker["required_pkg_version"])
+    if _idx:
+        worker["pkg_index_url"] = _idx
     # t28 load-and-learn: persist any calibration observations the worker shipped
     # this beat, then publish the gate-passing per-model corrections back in the
     # reply (a plain dict the worker reads with .get() — additive, an older
@@ -3663,6 +3690,12 @@ def workers_update(worker_id):
                         "version": body["version"],
                         "message": "worker already runs this version — "
                                    "no update, no restart"})
+    # Same index hint the heartbeat carries, so an on-demand update pulls the
+    # target from central's own index when it is published there.
+    if not str(body.get("pkg_index_url") or "").strip():
+        idx = _reply_pkg_index_url(body["version"])
+        if idx:
+            body = {**body, "pkg_index_url": idx}
     # Long relay timeout on purpose: the worker's pip step alone is allowed
     # 560s — a 30s relay turned every real update into a spurious console
     # "Update failed" while the install kept going.

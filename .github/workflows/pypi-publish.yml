@@ -54,55 +54,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python -m pip install -U pip build twine
-      - name: Build sdist + wheel for every [[package]] in py/partition.toml
-        run: |
-          set -euo pipefail
-          rm -rf dist && mkdir dist
-          python - <<'EOF' > /tmp/package-dirs
-          import tomllib
-          from pathlib import Path
-          for p in tomllib.loads(Path("py/partition.toml").read_text())["package"]:
-              print(f"py/{p['destination']}")
-          EOF
-          echo "building $(wc -l < /tmp/package-dirs) distributions:"; cat /tmp/package-dirs
-          while IFS= read -r dir; do
-            python -m build --sdist --wheel --outdir dist/ "$dir"
-          done < /tmp/package-dirs
-          ls -1 dist/
-      - name: Every built version equals the tag (without the leading v)
-        run: |
-          python - "$GITHUB_REF_NAME" <<'EOF'
-          import re, sys, tomllib
-          from pathlib import Path
-          from packaging.version import Version  # ships with build/twine
-          tag = sys.argv[1]
-          m = re.fullmatch(r"v(\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?)", tag)
-          if not m:
-              sys.exit(f"tag {tag!r} is not vX.Y.Z (optional aN/bN/rcN/.postN)")
-          want = Version(m.group(1))
-          packages = tomllib.loads(Path("py/partition.toml").read_text())["package"]
-          files = sorted(Path("dist").iterdir())
-          bad = []
-          for p in packages:
-              stem = re.sub(r"[-_.]+", "_", p["distribution"]).lower() + "-"  # PEP 427/625 file stem
-              wheels = [f for f in files if f.name.startswith(stem) and f.suffix == ".whl"]
-              sdists = [f for f in files if f.name.startswith(stem) and f.name.endswith(".tar.gz")]
-              if len(wheels) != 1 or len(sdists) != 1:
-                  bad.append(f"{p['distribution']}: expected one wheel and one sdist, found {wheels + sdists}")
-                  continue
-              built = {
-                  wheels[0].name: wheels[0].name[len(stem):].split("-")[0],
-                  sdists[0].name: sdists[0].name[len(stem):-len(".tar.gz")],
-              }
-              for fname, v in built.items():
-                  if Version(v) != want:
-                      bad.append(f"{fname}: version {v} != tag {want}")
-                  else:
-                      print(f"  ok {fname}")
-          if bad:
-              sys.exit("built artifacts disagree with the tag:\n  " + "\n  ".join(bad))
-          print(f"{len(packages)} distributions at {want}, matching {tag}")
-          EOF
+      - name: Build sdist + wheel for every [[package]] in py/partition.toml, verified against the tag
+        # The same script a central box runs to publish a release on its own
+        # index (py/build_wheels.py --publish); CI only adds PyPI at the end.
+        run: python py/build_wheels.py --out dist --expect-tag "$GITHUB_REF_NAME"
       - run: python -m twine check dist/*
       - uses: actions/upload-artifact@v4
         with:

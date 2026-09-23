@@ -27,7 +27,10 @@ Sections, each producing rows ``{section, subject, status, detail}`` with
                 ``0.1.x`` worker or one without a build identity is drift
   D  pypi       the newest git tag vs PyPI's latest release for each workspace
                 distribution (tag ahead = unpublished release; PyPI ahead =
-                checkout behind release; absent from PyPI = info)
+                checkout behind release; absent from PyPI = info). A tag that
+                PyPI lacks but central's own index serves (``/api/llm/pip/
+                simple/<name>/``, published with ``py/build_wheels.py
+                --publish``) is ok: the fleet converges from central
 
 Exit codes: 0 everything ok (info rows allowed), 1 drift, 2 only errors (the
 check could not verify — central unreachable, git missing, PyPI down).
@@ -359,6 +362,14 @@ def fetch_json(url: str, token: Optional[str] = None, timeout: float = HTTP_TIME
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_text(url: str, token: Optional[str] = None, timeout: float = HTTP_TIMEOUT) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "hugpy-drift-check"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
 
 
 def post_json(url: str, payload: dict, timeout: float = HTTP_TIMEOUT) -> int:
@@ -693,10 +704,39 @@ def pypi_latest(name: str) -> Optional[str]:
     return (data.get("info") or {}).get("version")
 
 
-def check_pypi(workspace: Optional[str]) -> list[Row]:
+def central_index_has(central: Optional[str], name: str, version: str,
+                      timeout: float = HTTP_TIMEOUT) -> Optional[bool]:
+    """True/False whether central's own pip index lists a wheel of ``name`` at
+    ``version``; None when there is no central to ask or the query fails."""
+    if not central:
+        return None
+    url = f"{central.rstrip('/')}/api/llm/pip/simple/{name}/"
+    try:
+        body = fetch_text(url, None, timeout)
+    except Exception:  # noqa: BLE001 — absent route / offline central: unknown
+        return None
+    stem = re.sub(r"[-_.]+", "_", name).lower() + "-" + re.escape(version) + "-"
+    return re.search(r'href="' + stem, body) is not None
+
+
+def check_pypi(workspace: Optional[str], central: Optional[str] = None,
+               timeout: float = HTTP_TIMEOUT) -> list[Row]:
     S = "D"
     rows: list[Row] = []
     tag = strip_v(git_latest_tag(workspace)) if workspace else None
+
+    # One probe of central's index per name, and none at all once central has
+    # proven unreachable: an offline central must not cost a timeout per name.
+    unreachable = [False]
+
+    def on_central_index(name: str, version: str) -> bool:
+        if unreachable[0]:
+            return False
+        got = central_index_has(central, name, version, timeout)
+        if got is None:
+            unreachable[0] = True
+            return False
+        return got
     if not tag:
         rows.append(Row(S, "tag", INFO,
                         "no release tag in the checkout (git describe --tags); "
@@ -712,7 +752,10 @@ def check_pypi(workspace: Optional[str]) -> list[Row]:
             rows.append(Row(S, name, ERROR, f"pypi lookup failed: {_exc(exc)}"))
             continue
         if latest is None:
-            rows.append(Row(S, name, INFO, "not on PyPI"))
+            if tag and on_central_index(name, tag):
+                rows.append(Row(S, name, OK, f"tag {tag} on central's index (not on PyPI)"))
+            else:
+                rows.append(Row(S, name, INFO, "not on PyPI"))
             continue
         if not tag:
             rows.append(Row(S, name, INFO, f"PyPI {latest} (no local tag to compare)"))
@@ -723,7 +766,10 @@ def check_pypi(workspace: Optional[str]) -> list[Row]:
         elif cmp == 0:
             rows.append(Row(S, name, OK, f"tag {tag} = PyPI {latest}"))
         elif cmp > 0:
-            rows.append(Row(S, name, DRIFT, f"unpublished release: tag {tag} > PyPI {latest}"))
+            if on_central_index(name, tag):
+                rows.append(Row(S, name, OK, f"tag {tag} on central's index (PyPI {latest})"))
+            else:
+                rows.append(Row(S, name, DRIFT, f"unpublished release: tag {tag} > PyPI {latest}"))
         else:
             rows.append(Row(S, name, DRIFT, f"checkout behind release: PyPI {latest} > tag {tag}"))
     return rows
@@ -764,7 +810,7 @@ def run(sections: Iterable[str] = "ABCD", *, workspace: Optional[str] = None,
                                   timeout=timeout))
     if "D" in wanted:
         if pypi:
-            report.extend(check_pypi(ws))
+            report.extend(check_pypi(ws, report.central, timeout=timeout))
         else:
             report.add("D", "pypi", INFO, "skipped (--no-pypi)")
     return report

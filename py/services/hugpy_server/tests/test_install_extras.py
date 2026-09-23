@@ -76,8 +76,21 @@ def test_bootstrap_installs_profile_under_lockstep_constraints():
     assert "/llm/workers/constraints.txt" in raw
     assert 'PIP_CONSTRAINT="-c ${CONSTRAINTS_FILE}"' in raw
     assert 'SPEC="hugpy[${PROFILE}]==${VERSION}"' in raw
-    assert 'install --upgrade $PIP_CONSTRAINT "$SPEC"' in raw
+    assert 'install --upgrade $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"' in raw
     assert "abstract_hugpy_dev" not in raw
+
+
+def test_bootstrap_adds_central_index_as_an_extra_index_when_advertised():
+    """A release published on central's own index (py/build_wheels.py
+    --publish) reaches a bare box too: required-version names ``pkg_index_url``
+    and the bootstrap passes it as ``--extra-index-url`` — PyPI stays for the
+    third-party deps, and an operator can pre-set WORKER_PKG_INDEX_URL."""
+    raw = (resources.files("hugpy_fleet.worker")
+           .joinpath("bootstrap.sh").read_text(encoding="utf-8"))
+    assert '"pkg_index_url"' in raw
+    assert 'PIP_EXTRA_INDEX="--extra-index-url ${PKG_INDEX_URL}"' in raw
+    assert 'PKG_INDEX_URL="${WORKER_PKG_INDEX_URL:-}"' in raw
+    assert "--index-url" not in raw.replace("--extra-index-url", "")   # never replaces PyPI
 
 
 def test_agent_self_update_converges_under_constraints_with_no_deps_fallback():

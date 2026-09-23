@@ -10,9 +10,12 @@
 #   1. checks python3 >= 3.10 with the venv module
 #   2. creates ~/hugpy-worker/venv if missing
 #   3. pip install --upgrade -c <central>/llm/workers/constraints.txt
-#        'hugpy[<profile>]==<version>'
+#        [--extra-index-url <central>/llm/pip/simple] 'hugpy[<profile>]==<version>'
 #      (when --version is omitted it asks <central>/llm/workers/required-version;
-#       falls back to latest if central pins no version). The constraints file
+#       falls back to latest if central pins no version; when that reply names
+#       central's own pip index — the release is published there — it is added
+#       as an extra index so the hugpy-* wheels come from central, like model
+#       files do, while third-party deps still come from PyPI). The constraints file
 #       pins EVERY hugpy-* workspace distribution to that one lockstep version,
 #       so the whole set lands together — never hugpy-fleet at one version and
 #       hugpy-platform/-engine/-media at another (the silent-skew incident class).
@@ -105,16 +108,29 @@ fetch_central() {
 }
 
 # 3. resolve the package version -------------------------------------------
-if [ -z "$VERSION" ]; then
+PKG_INDEX_URL="${WORKER_PKG_INDEX_URL:-}"
+if [ -z "$VERSION" ] || [ -z "$PKG_INDEX_URL" ]; then
   say "querying ${CENTRAL} for the required package version"
   RESP="$(fetch_central /llm/workers/required-version)"
-  # Pull the string value out of {"required_pkg_version": "0.1.x"}; null -> empty.
-  VERSION="$(printf '%s' "$RESP" \
-    | sed -n 's/.*"required_pkg_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   if [ -z "$VERSION" ]; then
-    say "WARNING: could not resolve required version from central (query failed or"
-    say "         central pins none) — falling back to the LATEST release."
+    # Pull the string value out of {"required_pkg_version": "0.1.x"}; null -> empty.
+    VERSION="$(printf '%s' "$RESP" \
+      | sed -n 's/.*"required_pkg_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [ -z "$VERSION" ]; then
+      say "WARNING: could not resolve required version from central (query failed or"
+      say "         central pins none) — falling back to the LATEST release."
+    fi
   fi
+  if [ -z "$PKG_INDEX_URL" ]; then
+    # Central names its own index only when it holds every wheel of that version.
+    PKG_INDEX_URL="$(printf '%s' "$RESP" \
+      | sed -n 's/.*"pkg_index_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  fi
+fi
+PIP_EXTRA_INDEX=""
+if [ -n "$PKG_INDEX_URL" ]; then
+  PIP_EXTRA_INDEX="--extra-index-url ${PKG_INDEX_URL}"
+  say "central serves this version from its own pip index: ${PKG_INDEX_URL}"
 fi
 
 # 3b. the lockstep constraints -----------------------------------------------
@@ -146,9 +162,9 @@ else
   say "no version resolved from central — installing latest [${PROFILE}]"
   SPEC="hugpy[${PROFILE}]"
 fi
-say "pip install --upgrade ${PIP_CONSTRAINT} '${SPEC}'"
-# shellcheck disable=SC2086  # PIP_CONSTRAINT is intentionally two words or empty
-"$PIP_BIN" install --upgrade $PIP_CONSTRAINT "$SPEC"
+say "pip install --upgrade ${PIP_CONSTRAINT} ${PIP_EXTRA_INDEX} '${SPEC}'"
+# shellcheck disable=SC2086  # PIP_CONSTRAINT / PIP_EXTRA_INDEX are intentionally two words or empty
+"$PIP_BIN" install --upgrade $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"
 if [ -n "$CONSTRAINTS_FILE" ]; then rm -f "$CONSTRAINTS_FILE"; fi
 
 # 4b. optional media-intelligence deps the canonical [engine] venv omits -----

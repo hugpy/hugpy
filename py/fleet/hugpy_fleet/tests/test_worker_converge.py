@@ -279,3 +279,75 @@ def test_lockstep_constraints_reads_required_and_is_empty_when_unpinned(monkeypa
 def test_constraints_url_helper():
     assert W.constraints_url("https://c.example/") == \
         "https://c.example/api/llm/workers/constraints.txt"
+
+
+# ── central's own index as an EXTRA source (pkg_index_url hint) ──────────────
+def test_extra_index_joins_pypi_on_constrained_and_fallback_commands():
+    hint = "https://central.example/api/llm/pip/simple"
+    cmd = A._pip_converge_command(_Args(), "0.2.0", "/tmp/c.txt", extra_index=hint)
+    assert "--index-url" not in cmd                      # PyPI stays primary
+    assert cmd[cmd.index("--extra-index-url") + 1] == hint
+    assert cmd[-1] == "hugpy-fleet==0.2.0"
+    cmd = A._pip_converge_command(_Args(), "0.2.0", None, extra_index=hint)
+    assert cmd == [sys.executable, "-m", "pip", "install", "-U", "--no-deps",
+                   "--extra-index-url", hint, "hugpy-fleet==0.2.0"]
+
+
+def test_extra_index_is_dropped_when_it_equals_the_explicit_pkg_index():
+    idx = "https://central.example/api/llm/pip/simple"
+    cmd = A._pip_converge_command(_Args(pkg_index=idx), "0.2.0", None, extra_index=idx + "/")
+    assert cmd.count(idx) == 1 and "--extra-index-url" not in cmd
+    assert cmd[cmd.index("--index-url") + 1] == idx
+
+
+def test_prepare_converge_threads_the_index_hint(monkeypatch):
+    monkeypatch.setattr(A, "_fetch_constraints",
+                        lambda url, timeout=None: ["hugpy-platform==0.2.0", "hugpy-fleet==0.2.0"])
+    monkeypatch.setattr(A, "_installed_lockstep_siblings", lambda lines, pkg: ["hugpy-platform"])
+    cmd, path = A._prepare_converge(_Args(), "0.2.0",
+                                    pkg_index_url="https://c/api/llm/pip/simple")
+    try:
+        assert cmd[cmd.index("--extra-index-url") + 1] == "https://c/api/llm/pip/simple"
+        assert "-c" in cmd and cmd[-2:] == ["hugpy-fleet==0.2.0", "hugpy-platform==0.2.0"]
+    finally:
+        A._discard_constraints(path)
+
+
+def test_self_update_passes_the_reply_hint_to_pip(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(A, "_installed_pkg_version", lambda pkg: "0.1.9")
+    monkeypatch.setattr(A, "_load_update_state", lambda args: {})
+    monkeypatch.setattr(A, "_save_update_state", lambda args, st: seen.setdefault("state", st))
+    monkeypatch.setattr(A, "_fetch_constraints", lambda url, timeout=None: [])
+    monkeypatch.setattr(A.subprocess, "call", lambda cmd: seen.setdefault("cmd", cmd) and 1)
+    A._self_update_if_needed("0.2.0", _Args(id_file=str(tmp_path / "id")), state=None,
+                             constraints_url=None,
+                             pkg_index_url="https://c/api/llm/pip/simple")
+    assert seen["cmd"][-3:] == ["--extra-index-url", "https://c/api/llm/pip/simple",
+                                "hugpy-fleet==0.2.0"]
+
+
+# ── central side: pkg_index_has / pkg_index_url ─────────────────────────────
+def test_pkg_index_url_is_under_the_api_mount():
+    assert W.pkg_index_url("https://central.example/") == \
+        "https://central.example/api/llm/pip/simple"
+
+
+def test_pkg_index_has_requires_every_lockstep_wheel_at_that_version(monkeypatch, tmp_path):
+    monkeypatch.setattr(W, "pkg_index_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(W, "workspace_distributions", lambda: ("hugpy-platform", "hugpy-fleet"))
+    assert W.pkg_index_has("0.2.0") is False                      # empty dir
+    (tmp_path / "hugpy_platform-0.2.0-py3-none-any.whl").write_bytes(b"")
+    (tmp_path / "hugpy_fleet-0.2.0.tar.gz").write_bytes(b"")     # sdist alone does not count
+    assert W.pkg_index_has("0.2.0") is False
+    (tmp_path / "hugpy_fleet-0.2.0-py3-none-any.whl").write_bytes(b"")
+    assert W.pkg_index_has("0.2.0") is True
+    assert W.pkg_index_has("0.2.1") is False
+    assert W.pkg_index_has(None) is False
+    # a subset is enough when the caller names it
+    assert W.pkg_index_has("0.2.0", names=["hugpy-fleet"]) is True
+
+
+def test_pkg_index_has_is_false_for_a_missing_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(W, "pkg_index_dir", lambda: str(tmp_path / "nope"))
+    assert W.pkg_index_has("0.2.0") is False

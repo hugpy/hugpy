@@ -20,12 +20,13 @@ the functions exported here.
 from __future__ import annotations
 
 import os
+import re
 import json
 import time
 import uuid
 import threading
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 try:
     import fcntl  # POSIX advisory file locks — cross-process coordination.
@@ -261,12 +262,63 @@ def required_pkg_version() -> Optional[str]:
 def pkg_index_dir() -> str:
     """Directory of built wheels that central serves as a PEP-503 simple index.
 
-    The ``sync.trigger`` build drops the freshly-built dev wheel here. Override
-    with ``HUGPY_PKG_INDEX_DIR``; defaults to a ``pip_index`` dir beside the
-    model manifest.
+    ``python py/build_wheels.py --publish <this dir>`` from a checkout of the
+    release tag drops every workspace distribution here (CONSISTENCY.md,
+    "Releasing through central"). Override with ``HUGPY_PKG_INDEX_DIR``;
+    defaults to a ``pip_index`` dir beside the model manifest.
     """
     return os.environ.get("HUGPY_PKG_INDEX_DIR") or \
         os.path.join(settings.state_dir, "pip_index")
+
+
+# Path (under central's ``/api`` mount) of the PEP-503 index the wheel dir is
+# served as. Workers get the absolute URL in every reply that carries
+# ``required_pkg_version`` when the dir can actually satisfy that version.
+PKG_INDEX_PATH = "/api/llm/pip/simple"
+
+
+def pkg_index_url(base_url: str) -> str:
+    """Absolute URL of central's pip index for the central at ``base_url``."""
+    return str(base_url or "").rstrip("/") + PKG_INDEX_PATH
+
+
+def _index_wheel_version(filename: str) -> Optional[tuple]:
+    """``(normalized distribution, version)`` from a wheel/sdist filename."""
+    if filename.endswith(".whl"):
+        parts = filename[:-4].split("-")
+        if len(parts) < 2:
+            return None
+        return (re.sub(r"[-_.]+", "-", parts[0]).lower(), parts[1])
+    if filename.endswith(".tar.gz"):
+        stem = filename[:-len(".tar.gz")]
+        name, sep, version = stem.rpartition("-")
+        if not sep:
+            return None
+        return (re.sub(r"[-_.]+", "-", name).lower(), version)
+    return None
+
+
+def pkg_index_has(version: Optional[str], names: Optional[Iterable[str]] = None) -> bool:
+    """True when the wheel dir holds ``version`` of every distribution in
+    ``names`` (default: the whole lockstep set), i.e. a worker converging to
+    ``version`` can be served entirely from this central.
+
+    False for an unpinned central (None), an absent dir, or any missing name:
+    the reply then omits ``pkg_index_url`` and workers fall back to PyPI, so a
+    half-published index never strands a converge."""
+    if not version:
+        return False
+    wanted = {re.sub(r"[-_.]+", "-", n).lower() for n in (names or workspace_distributions())}
+    try:
+        entries = os.listdir(pkg_index_dir())
+    except OSError:
+        return False
+    found = set()
+    for fn in entries:
+        parsed = _index_wheel_version(fn)
+        if parsed and parsed[1] == version and parsed[0] in wanted and fn.endswith(".whl"):
+            found.add(parsed[0])
+    return wanted <= found
 
 
 # The in-tree workspace distributions, all versioned in LOCKSTEP (one
