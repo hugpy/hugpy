@@ -17,9 +17,13 @@ What lives here (and nothing above it — no engine, storage, fleet or server):
     compat_pydantic  pure-Python pydantic stand-in for platforms without pydantic_core
     except_utils     ``caught`` / ``attempt`` / ``catching`` logging helpers
     trust            Hugging Face publisher trust tiers
+    buildinfo        which build is this process: workspace version, sha/dirty,
+                     editable source, lockstep check (``/health``, ``/build``, heartbeat)
 
 This ``__init__`` re-exports only the light, side-effect-free names below; the
-heavier modules are imported by dotted path.
+heavier modules are imported by dotted path. ``buildinfo`` is exported lazily
+(``hugpy_platform.buildinfo`` resolves on first attribute access, PEP 562) so
+importing the package never pays for it.
 """
 from __future__ import annotations
 
@@ -42,7 +46,24 @@ from hugpy_platform.except_utils import FAILED, attempt, catching, caught, caugh
 from hugpy_platform.platform_facade import EXE_SUFFIX, IS_LINUX, IS_MACOS, IS_WINDOWS, env_value
 from hugpy_platform.trust import trust_label, trust_tier
 
-__version__ = "0.1.0"
+try:  # the installed distribution's version: the workspace tag/commit, never a literal
+    from importlib.metadata import version as _dist_version
+    __version__ = _dist_version("hugpy-platform")
+except Exception:  # noqa: BLE001 — source tree without metadata
+    __version__ = "0.0.0+unknown"
+
+_LAZY_SUBMODULES = ("buildinfo",)
+
+
+def __getattr__(name: str):
+    """Lazy submodule export: ``hugpy_platform.buildinfo`` without an import-time cost."""
+    if name in _LAZY_SUBMODULES:
+        import importlib
+        module = importlib.import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "__version__",
@@ -79,4 +100,6 @@ __all__ = [
     # trust tiers
     "trust_label",
     "trust_tier",
+    # build identity (lazy submodule)
+    "buildinfo",
 ]

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugpy-ops"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Hugpy operations: sentinel, chaos runner, keeper REPL, todo keeper and provisioner for declared-but-missing model weights"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -60,12 +60,24 @@ hugpy-chaos = "hugpy_ops.chaos.runner:main"
 hugpy-keeper = "hugpy_ops.keeper:main"
 hugpy-todo-keeper = "hugpy_ops.todo_keeper_daemon:main"
 hugpy-provisioner = "hugpy_ops.provisioner:main"
+hugpy-drift-check = "hugpy_ops.drift:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-hugpy_ops = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt"]
+hugpy_ops = ["py.typed", "**/*.json", "**/*.sh", "**/*.md", "**/*.txt",
+             "drift_units/*.service", "drift_units/*.timer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# Lockstep workspace version (2026-09-22): every in-tree hugpy-* distribution
+# takes ONE version from the workspace git tag (vX.Y.Z at the repo root), so a
+# release is a tag and a build always carries the commit it came from
+# (X.Y.Z.devN+g<sha>[.dirty] between tags). A checkout without git metadata
+# builds as 0.0.0+unknown, which central refuses to advertise to workers.
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+unknown"

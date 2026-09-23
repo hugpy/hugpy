@@ -39,7 +39,7 @@ def test_top_level_help_exits_zero():
         assert name in proc.stdout, f"{name} missing from top-level help"
 
 
-@pytest.mark.parametrize("command", sorted(set(cli.DISPATCH) | {"chat", "install-deps", "version"}))
+@pytest.mark.parametrize("command", sorted(set(cli.DISPATCH) | {"chat", "install-deps", "version", "build"}))
 def test_every_subcommand_help_exits_zero(command):
     proc = _run(command, "--help")
     assert proc.returncode == 0, f"{command} --help:\n{proc.stderr[-3000:]}"
@@ -62,7 +62,7 @@ def test_dispatch_table_covers_the_documented_surface():
     expected = {
         "serve", "worker", "gguf-worker", "phone-brick", "bot", "download",
         "storage", "install-engine", "reclassify-images", "keeper", "sentinel",
-        "chaos", "provision", "oracle", "curation", "video",
+        "chaos", "provision", "drift", "oracle", "curation", "video",
     }
     assert expected == set(cli.DISPATCH)
     for name in cli.PASSTHROUGH:
@@ -172,8 +172,83 @@ def test_install_deps_auto_profile_uses_platform_probe(monkeypatch, capsys):
 def test_version_lists_distributions(capsys):
     assert cli.main(["version"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("hugpy ")
+    lines = out.splitlines()
+    # the identity line (from hugpy_platform.buildinfo) leads when that module
+    # is installed; the "hugpy <version>" line is first otherwise
+    assert any(line.startswith("hugpy ") for line in lines[:2])
     assert "hugpy-platform" in out
+
+
+def test_version_prints_identity_line_first_when_buildinfo_present(monkeypatch, capsys):
+    import types
+
+    fake = types.ModuleType("hugpy_platform.buildinfo")
+    fake.identity_line = lambda: "hugpy-fleet 1.2.3.dev4+gabc1234 (editable /ws)"
+    monkeypatch.setattr(cli, "_buildinfo", lambda: fake)
+    assert cli.main(["version"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "hugpy-fleet 1.2.3.dev4+gabc1234 (editable /ws)"
+    assert lines[1].startswith("hugpy ")
+
+
+# --------------------------------------------------------------------------- #
+# drift / build
+# --------------------------------------------------------------------------- #
+def test_drift_is_a_passthrough_to_hugpy_ops(monkeypatch):
+    """``hugpy drift ...`` hands every argument to hugpy_ops.drift:main."""
+    import types
+
+    target = cli.DISPATCH["drift"]
+    assert target.module == "hugpy_ops.drift" and target.extra == "ops"
+    assert target.script == "hugpy-drift-check"
+    assert "drift" in cli.PASSTHROUGH
+    seen: list[list[str]] = []
+    fake = types.ModuleType(target.module)
+    fake.main = lambda argv=None: seen.append(list(argv or [])) or 3
+    monkeypatch.setitem(sys.modules, target.module, fake)
+    rc = cli.main(["drift", "--sections", "A,B", "--allow-dirty", "--json"])
+    assert rc == 3
+    assert seen == [["--sections", "A,B", "--allow-dirty", "--json"]]
+
+
+def test_drift_without_ops_gives_install_hint(monkeypatch, capsys):
+    target = cli.DISPATCH["drift"]
+    monkeypatch.setitem(sys.modules, target.module, None)
+    monkeypatch.setitem(sys.modules, target.package, None)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert cli.main(["drift", "--sections", "A"]) == 1
+    err = capsys.readouterr().err
+    assert 'pip install "hugpy[ops]"' in err and "Traceback" not in err
+
+
+def test_build_prints_identity_line_and_json(monkeypatch, capsys):
+    import json
+    import types
+
+    fake = types.ModuleType("hugpy_platform.buildinfo")
+    fake.identity_line = lambda: "hugpy-server 2.0.0 (g0123abc)"
+    fake.build_info = lambda: {"identity": {"version": "2.0.0", "sha": "0123abc"},
+                               "lockstep": {"ok": True, "versions": {}}}
+    monkeypatch.setattr(cli, "_buildinfo", lambda: fake)
+    assert cli.main(["build"]) == 0
+    assert capsys.readouterr().out.strip() == "hugpy-server 2.0.0 (g0123abc)"
+    assert cli.main(["build", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["identity"]["sha"] == "0123abc" and doc["lockstep"]["ok"] is True
+
+
+def test_build_without_buildinfo_exits_one(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_buildinfo", lambda: None)
+    assert cli.main(["build"]) == 1
+    err = capsys.readouterr().err
+    assert "buildinfo" in err and "Traceback" not in err
+
+
+def test_build_lazy_import_is_blocked_cleanly(monkeypatch, capsys):
+    """The real lazy import path: a blocked module resolves to None, exit 1."""
+    monkeypatch.setitem(sys.modules, "hugpy_platform.buildinfo", None)
+    assert cli.main(["build"]) == 1
+    assert "buildinfo" in capsys.readouterr().err
 
 
 def test_chat_unreachable_central_is_a_clean_failure(capsys):

@@ -48,6 +48,7 @@ Related repositories: [hugpy-agent](https://github.com/hugpy/hugpy-agent)
 - [`py/WIRING.md`](py/WIRING.md): what the composition roots install at startup.
 - [`py/EXTRACTION_GUIDE.md`](py/EXTRACTION_GUIDE.md): the working rules every package follows.
 - [`ECOSYSTEM.md`](ECOSYSTEM.md): registries, naming, versioning and release plan.
+- [`CONSISTENCY.md`](CONSISTENCY.md): a release is a git tag; how the one version reaches PyPI, checkouts and the fleet, and the drift check that proves it.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md).
 
 Each package builds and tests on its own:

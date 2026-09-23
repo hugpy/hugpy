@@ -9,24 +9,30 @@
 # What it does (idempotent — safe to re-run to upgrade):
 #   1. checks python3 >= 3.10 with the venv module
 #   2. creates ~/hugpy-worker/venv if missing
-#   3. pip install --upgrade 'abstract_hugpy_dev[engine]==<version>'
+#   3. pip install --upgrade -c <central>/llm/workers/constraints.txt
+#        'hugpy[<profile>]==<version>'
 #      (when --version is omitted it asks <central>/llm/workers/required-version;
-#       falls back to latest if central pins no version)
+#       falls back to latest if central pins no version). The constraints file
+#       pins EVERY hugpy-* workspace distribution to that one lockstep version,
+#       so the whole set lands together — never hugpy-fleet at one version and
+#       hugpy-platform/-engine/-media at another (the silent-skew incident class).
 #   4. runs the canonical installer, which FIRST runs the k118 environment
 #      preflight (this box's self-report diffed against the fleet doctrine) and
 #      refuses to register a worker with doctrine BLOCKERS unless --force, then
 #      writes + enables the hugpy-worker.service systemd user unit
-#      (see worker_agent/install.py)
+#      (see hugpy_fleet/worker/install.py)
 #
 # Why the preflight is here and not "later": a-brain had no ffmpeg, computron
 # had no bitsandbytes, and both boxes registered, advertised the task, and only
 # found out when a real job died on them. The check costs a few seconds at the
 # one moment an operator is already watching the terminal.
 #
-# The [engine] extra matters: base abstract_hugpy_dev deliberately omits
-# llama-cpp-python, so a worker without it registers fine but serves NO GGUFs.
-# CUDA / source llama-cpp-python and the native llama-server are box errands
-# (they need CMAKE_ARGS / nvcc) — see WORKER-SETUP.md §2/§3.
+# The profile matters: bare `hugpy` is only the CLI. `gpu-worker` (default) is
+# the fleet agent + GGUF engine + model store + the media/video stacks;
+# `cpu-worker` drops the GPU-only pieces; `worker` is the minimal agent+engine.
+# Pick with --profile / WORKER_PROFILE. CUDA / source llama-cpp-python and the
+# native llama-server are box errands (they need CMAKE_ARGS / nvcc) — see
+# WORKER-SETUP.md §2/§3.
 set -eu
 
 CENTRAL=""
@@ -37,6 +43,7 @@ VERSION=""
 STORAGE_ROOT=""
 VENV="${HOME}/hugpy-worker/venv"
 FORCE=""
+PROFILE="${WORKER_PROFILE:-gpu-worker}"
 
 die() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }
 say() { printf 'bootstrap: %s\n' "$*"; }
@@ -50,6 +57,7 @@ while [ $# -gt 0 ]; do
     --version)      VERSION="${2:-}"; shift 2 ;;
     --storage-root) STORAGE_ROOT="${2:-}"; shift 2 ;;
     --venv)         VENV="${2:-}"; shift 2 ;;
+    --profile)      PROFILE="${2:-}"; shift 2 ;;
     --force)        FORCE="1"; shift 1 ;;
     -h|--help)      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              die "unknown argument: $1" ;;
@@ -74,43 +82,74 @@ fi
 PY_BIN="${VENV}/bin/python"
 PIP_BIN="${VENV}/bin/pip"
 
+# fetch_central <path>: GET ${CENTRAL}<path> to stdout; empty on failure.
+# LAN centrals often front a cert the box doesn't trust; these values only
+# pick which version pip pulls FROM THE INDEX, so an insecure retry is a
+# version-pin risk, not a code-injection one. Warn either way.
+fetch_central() {
+  _out=""
+  if command -v curl >/dev/null 2>&1; then
+    _out="$(curl -fsSL "${CENTRAL}$1" 2>/dev/null || true)"
+    if [ -z "$_out" ]; then
+      say "WARNING: strict query of $1 failed; retrying with certificate checks off"
+      _out="$(curl -fskL "${CENTRAL}$1" 2>/dev/null || true)"
+    fi
+  else
+    _out="$(wget -qO- "${CENTRAL}$1" 2>/dev/null || true)"
+    if [ -z "$_out" ]; then
+      say "WARNING: strict query of $1 failed; retrying with certificate checks off"
+      _out="$(wget -qO- --no-check-certificate "${CENTRAL}$1" 2>/dev/null || true)"
+    fi
+  fi
+  printf '%s' "$_out"
+}
+
 # 3. resolve the package version -------------------------------------------
 if [ -z "$VERSION" ]; then
   say "querying ${CENTRAL} for the required package version"
-  if command -v curl >/dev/null 2>&1; then
-    RESP="$(curl -fsSL "${CENTRAL}/llm/workers/required-version" 2>/dev/null || true)"
-    # LAN centrals often front a cert the box doesn't trust; the value only
-    # picks which version pip pulls FROM PYPI, so an insecure retry is a
-    # version-pin risk, not a code-injection one. Warn either way.
-    if [ -z "$RESP" ]; then
-      say "WARNING: strict query failed; retrying with certificate checks off"
-      RESP="$(curl -fskL "${CENTRAL}/llm/workers/required-version" 2>/dev/null || true)"
-    fi
-  else
-    RESP="$(wget -qO- "${CENTRAL}/llm/workers/required-version" 2>/dev/null || true)"
-    if [ -z "$RESP" ]; then
-      say "WARNING: strict query failed; retrying with certificate checks off"
-      RESP="$(wget -qO- --no-check-certificate "${CENTRAL}/llm/workers/required-version" 2>/dev/null || true)"
-    fi
-  fi
+  RESP="$(fetch_central /llm/workers/required-version)"
   # Pull the string value out of {"required_pkg_version": "0.1.x"}; null -> empty.
   VERSION="$(printf '%s' "$RESP" \
     | sed -n 's/.*"required_pkg_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   if [ -z "$VERSION" ]; then
     say "WARNING: could not resolve required version from central (query failed or"
-    say "         central pins none) — falling back to the LATEST PyPI release."
+    say "         central pins none) — falling back to the LATEST release."
+  fi
+fi
+
+# 3b. the lockstep constraints -----------------------------------------------
+# Central serves `name==<required>` for EVERY hugpy-* workspace distribution
+# (204/empty when it pins none). Passed to pip as -c so the profile install
+# resolves all of them to the one version central runs — the same file the
+# agent's self-update converges under afterwards. Missing/empty → unconstrained
+# (pip's own resolution), which can leave siblings at another version: warn.
+CONSTRAINTS_FILE=""
+PIP_CONSTRAINT=""
+if [ -n "$VERSION" ]; then
+  CONSTRAINTS_BODY="$(fetch_central /llm/workers/constraints.txt)"
+  if printf '%s' "$CONSTRAINTS_BODY" | grep -q '=='; then
+    CONSTRAINTS_FILE="$(mktemp "${TMPDIR:-/tmp}/hugpy-constraints.XXXXXX")"
+    printf '%s\n' "$CONSTRAINTS_BODY" > "$CONSTRAINTS_FILE"
+    PIP_CONSTRAINT="-c ${CONSTRAINTS_FILE}"
+    say "lockstep constraints from central: $(grep -c '==' "$CONSTRAINTS_FILE") pins -> ${CONSTRAINTS_FILE}"
+  else
+    say "WARNING: no lockstep constraints from ${CENTRAL}/llm/workers/constraints.txt —"
+    say "         installing unconstrained; sibling hugpy-* distributions may end up"
+    say "         at another version than ${VERSION} (fleet skew) until the agent converges."
   fi
 fi
 
 # 4. install / upgrade the package -----------------------------------------
 if [ -n "$VERSION" ]; then
-  SPEC="abstract_hugpy_dev[engine]==${VERSION}"
+  SPEC="hugpy[${PROFILE}]==${VERSION}"
 else
-  say "no version resolved from central — installing latest [engine]"
-  SPEC="abstract_hugpy_dev[engine]"
+  say "no version resolved from central — installing latest [${PROFILE}]"
+  SPEC="hugpy[${PROFILE}]"
 fi
-say "pip install --upgrade '${SPEC}'"
-"$PIP_BIN" install --upgrade "$SPEC"
+say "pip install --upgrade ${PIP_CONSTRAINT} '${SPEC}'"
+# shellcheck disable=SC2086  # PIP_CONSTRAINT is intentionally two words or empty
+"$PIP_BIN" install --upgrade $PIP_CONSTRAINT "$SPEC"
+if [ -n "$CONSTRAINTS_FILE" ]; then rm -f "$CONSTRAINTS_FILE"; fi
 
 # 4b. optional media-intelligence deps the canonical [engine] venv omits -----
 # On 2026-07-11 three /ml requests reached workers whose venv lacked these and
@@ -120,8 +159,10 @@ say "pip install --upgrade '${SPEC}'"
 # dies — hence the pin. Install them here so an enrolled worker can actually run
 # ASR / embeddings / keyword-extraction; central now also SKIPS a worker that
 # still can't (task_capabilities gate), but shipping the deps is the real fix.
-# NB: the agent's self-update uses `pip install -U --no-deps`, so it never
-# touches these — they persist across every version converge.
+# NB: the agent's self-update converges under central's constraints with
+# `--upgrade-strategy only-if-needed` (hugpy-* pins only), so it never touches
+# these — they persist across every version converge. (Its no-constraints
+# fallback is `pip install -U --no-deps`, which touches even less.)
 say "installing media-intelligence deps (sentence-transformers, openai-whisper, keybert; numpy<2.5 for numba)"
 "$PIP_BIN" install --upgrade sentence-transformers openai-whisper keybert "numpy<2.5"
 
@@ -132,7 +173,7 @@ say "installing media-intelligence deps (sentence-transformers, openai-whisper, 
 # defaults already read (DEFAULT_ROOT / WORKER_ENROLL_TOKEN), so probe --help
 # for the new flags and use the env route when they're absent.
 set -- --central "$CENTRAL" --name "$NAME" --port "$PORT"
-HELP="$("$PY_BIN" -m abstract_hugpy_dev.worker_agent.install --help 2>&1 || true)"
+HELP="$("$PY_BIN" -m hugpy_fleet.worker.install --help 2>&1 || true)"
 if [ -n "$FORCE" ]; then
   case "$HELP" in *--force*) set -- "$@" --force;;
                   *) say "NOTE: this installer predates --force; ignoring";; esac
@@ -146,4 +187,4 @@ if [ -n "$STORAGE_ROOT" ]; then
                   *) set -- "$@" --storage "$STORAGE_ROOT";; esac
 fi
 say "registering worker service (hugpy-worker.service)"
-exec "$PY_BIN" -m abstract_hugpy_dev.worker_agent.install "$@"
+exec "$PY_BIN" -m hugpy_fleet.worker.install "$@"

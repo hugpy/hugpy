@@ -27,9 +27,13 @@ from __future__ import annotations
 
 import importlib
 
-__version__ = "0.1.0"
+try:  # the installed distribution's version: the workspace tag/commit, never a literal
+    from importlib.metadata import version as _dist_version
+    __version__ = _dist_version("hugpy-ops")
+except Exception:  # noqa: BLE001 — source tree without metadata
+    __version__ = "0.0.0+unknown"
 
-_SUBMODULES = ("chaos", "keeper", "provisioner", "sentinel", "todo_keeper",
+_SUBMODULES = ("chaos", "drift", "keeper", "provisioner", "sentinel", "todo_keeper",
                "todo_keeper_daemon", "versions")
 
 __all__ = ["__version__", *_SUBMODULES]

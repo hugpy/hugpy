@@ -63,12 +63,29 @@ def test_packaged_bootstrap_carries_extras_block():
     raw = (resources.files("hugpy_fleet.worker")
            .joinpath("bootstrap.sh").read_text(encoding="utf-8"))
     assert all(p in raw for p in EXTRAS) and "numpy<2.5" in raw
-    # Self-update persistence: the block sits AFTER the main [engine] install and the
-    # agent's converge uses --no-deps, so the extras survive every version bump.
-    assert "--no-deps" in raw
+    # Self-update persistence: the block sits AFTER the main profile install and
+    # the agent's converge only pins hugpy-* (constraints + only-if-needed; the
+    # no-constraints fallback is --no-deps), so the extras survive every bump.
+    assert "only-if-needed" in raw and "--no-deps" in raw
 
 
-def test_agent_self_update_uses_no_deps():
+def test_bootstrap_installs_profile_under_lockstep_constraints():
+    """WP5: the pinned install passes central's constraints.txt as -c."""
+    raw = (resources.files("hugpy_fleet.worker")
+           .joinpath("bootstrap.sh").read_text(encoding="utf-8"))
+    assert "/llm/workers/constraints.txt" in raw
+    assert 'PIP_CONSTRAINT="-c ${CONSTRAINTS_FILE}"' in raw
+    assert 'SPEC="hugpy[${PROFILE}]==${VERSION}"' in raw
+    assert 'install --upgrade $PIP_CONSTRAINT "$SPEC"' in raw
+    assert "abstract_hugpy_dev" not in raw
+
+
+def test_agent_self_update_converges_under_constraints_with_no_deps_fallback():
     agent_src = (resources.files("hugpy_fleet.worker")
                  .joinpath("agent.py").read_text(encoding="utf-8"))
-    assert '"install", "-U", "--no-deps"' in agent_src
+    # ONE helper builds the pip line for both the heartbeat and /ops/update.
+    assert agent_src.count("def _pip_converge_command(") == 1
+    # the two call sites (heartbeat self-update, /ops/update), not the def
+    assert agent_src.count("= _prepare_converge(args, ") == 2
+    assert '"--upgrade-strategy", "only-if-needed", "-c"' in agent_src
+    assert '"--no-deps"' in agent_src   # the fetch-failed fallback survives

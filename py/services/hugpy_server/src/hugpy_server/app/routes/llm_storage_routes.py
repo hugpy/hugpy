@@ -40,6 +40,9 @@ from hugpy_engine.config.models.models_config import (
 # functions/__init__ can never silently drop the honesty back out of the reply.
 from hugpy_storage.downloader.queue import queue_depth, queue_healthy
 from hugpy_storage.downloader.presence import downloader_alive
+# Build identity (WP2): which build is central running. Module import, so a
+# test can monkeypatch ``_buildinfo.build_identity`` and see the route follow.
+from hugpy_platform import buildinfo as _buildinfo
 
 llm_bp, logger = get_bp("llm_bp", __name__)
 
@@ -49,13 +52,33 @@ for name in ("httpx", "httpcore", "huggingface_hub", "filelock", "urllib3"):
 # ──────────────────────────────────────────────────────────────────────────
 # Routes
 # ──────────────────────────────────────────────────────────────────────────
+def _guarded_build(fn):
+    """``fn()`` or ``{"error": ...}`` — the health and build routes must never
+    5xx because a metadata read or a repository probe went wrong."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 @llm_bp.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "ok": True,
         "storage_root": str(settings.storage_root),
         "manifest_path": str(settings.manifest_path),
+        "build": _guarded_build(_buildinfo.build_identity),
     })
+
+
+@llm_bp.route("/build", methods=["GET"])
+def build():
+    """The full build document: identity, every workspace/external
+    distribution, the lockstep check, the editable checkout's state."""
+    doc = _guarded_build(_buildinfo.build_info)
+    if "identity" not in doc:
+        doc = {"identity": None, "build": doc, "error": doc.get("error")}
+    return jsonify(doc)
 
 
 @llm_bp.route("/llm/peers", methods=["GET"])

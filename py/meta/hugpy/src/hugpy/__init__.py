@@ -18,7 +18,7 @@ from importlib.metadata import PackageNotFoundError, version as _dist_version
 try:
     __version__ = _dist_version("hugpy")
 except PackageNotFoundError:  # running from a source tree without metadata
-    __version__ = "0.1.0"
+    __version__ = "0.0.0+unknown"  # source tree without metadata
 
 __all__ = ["__version__", "cli", "hpy"]
 
