@@ -5,9 +5,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # setuptools-scm derives every version from the workspace tags
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      # manifest, forbidden import edges, then the lockstep versioning contract (CONSISTENCY.md)
       - run: python py/validate_partition.py && python py/validate_partition.py --edges
+      - run: python py/validate_partition.py --versions && python py/validate_partition.py --self-test
   python:
     needs: partition
     runs-on: ubuntu-latest
@@ -31,6 +34,7 @@ jobs:
           - py/compat/abstract_hugpy_dev
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # setuptools-scm derives every version from the workspace tags
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       # the video, server and media suites render tiny real clips
@@ -56,10 +60,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # setuptools-scm derives every version from the workspace tags
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       # the documented checkout install: one editable pip run for all 13 + compat, then the alias check
       - run: ./local_install.sh --venv /tmp/hugpy-local-venv --check
+  # The versioning contract as installed: every in-tree distribution reports ONE
+  # git-derived version (CONSISTENCY.md). Same editable install as `python`.
+  lockstep:
+    needs: partition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # setuptools-scm derives every version from the workspace tags
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install -U pip
+      - run: |
+          specs=()
+          for d in py/foundation/* py/storage/* py/inference/hugpy_engine py/inference/hugpy_media \
+                   py/cinema/hugpy_video py/cinema/hugpy_oracle py/fleet/* py/curation/* \
+                   py/operations/* py/integrations/* py/services/* py/meta/* py/compat/*; do
+            specs+=(-e "$d")
+          done
+          pip install "${specs[@]}"
+      - name: All workspace distributions report one identical git-derived version
+        run: |
+          python - <<'EOF'
+          import importlib.metadata as md, sys, tomllib
+          from pathlib import Path
+          dists = [p["distribution"] for p in tomllib.loads(Path("py/partition.toml").read_text())["package"]]
+          versions = {d: md.version(d) for d in dists}
+          for d, v in versions.items():
+              print(f"  {d:16s} {v}")
+          distinct = sorted(set(versions.values()))
+          if len(distinct) != 1:
+              sys.exit(f"lockstep broken: {len(dists)} distributions report {distinct}")
+          if distinct[0] == "0.0.0+unknown":
+              sys.exit("every distribution built as the setuptools-scm fallback: git metadata missing (fetch-depth: 0?)")
+          print(f"lockstep ok: {len(dists)} distributions at {distinct[0]}")
+          EOF
+      # Section B of the drift check (installed distributions vs. this checkout).
+      # Green until hugpy-ops ships `hugpy-drift-check`, enforcing from then on.
+      - name: hugpy-drift-check --sections B
+        run: |
+          if command -v hugpy-drift-check >/dev/null 2>&1; then
+            hugpy-drift-check --sections B
+          else
+            echo "drift-check not installed in this checkout"
+          fi
   react:
     runs-on: ubuntu-latest
     strategy:
@@ -67,6 +116,7 @@ jobs:
       matrix: { pkg: [react/ui, react/agents_ui, react/media_intelligence_ui, react/video_intelligence_ui] }
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # setuptools-scm derives every version from the workspace tags
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       # react/package.json is a workspace root with no root lockfile; each package

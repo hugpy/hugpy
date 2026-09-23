@@ -1,0 +1,136 @@
+name: pypi-publish
+# The ONLY way a hugpy-* distribution reaches PyPI (never `twine upload` by hand).
+#
+# A release is a workspace tag:  ./release.sh X.Y.Z  (see CONSISTENCY.md). The
+# tag vX.Y.Z is the single source of the version: setuptools-scm turns it into
+# X.Y.Z in every in-tree pyproject at build time, so this workflow never edits a
+# version and refuses to publish if any built artifact disagrees with the tag.
+#
+# Which distributions: every [[package]] in py/partition.toml, in cut order,
+# derived at run time. Adding a package to the manifest is enough; this file
+# needs no edit. [[external_package]] entries (hugpy-agent, abstract-identity,
+# ...) release from their own repositories and py/compat/abstract_hugpy_dev is
+# a dev-only alias shell that is NEVER published (ECOSYSTEM.md D.4).
+#
+# One-time PyPI setup (owner: putkoff), once per project name:
+#   1. On pypi.org, for each of the 13 names (hugpy, hugpy-platform, hugpy-control,
+#      hugpy-storage, hugpy-engine, hugpy-media, hugpy-video, hugpy-oracle,
+#      hugpy-fleet, hugpy-curation, hugpy-ops, hugpy-discord, hugpy-server):
+#      Manage -> Publishing -> add a trusted publisher with
+#        owner: hugpy   repository: hugpy   workflow: pypi-publish.yml   environment: pypi
+#      Names that do not exist yet are registered as "pending publishers" from
+#      https://pypi.org/manage/account/publishing/ with the same four fields; the
+#      first successful upload creates the project.
+#   2. On GitHub, create the `pypi` environment (Settings -> Environments) and
+#      give it required reviewers; the publish job waits there for an explicit go.
+#   3. Note on the name `hugpy`: it already exists on PyPI at 0.1.181 as the
+#      retired monolith (same owner). The first partitioned release is 0.2.0,
+#      which sorts above it and supersedes it; earlier releases are yanked per
+#      ECOSYSTEM.md D.4 after the bridge period, never deleted.
+#   No API tokens are stored anywhere: trusted publishing mints a short-lived
+#   OIDC token per run (permissions: id-token: write below).
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: read
+concurrency:
+  group: pypi-publish-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # setuptools-scm derives every version from the workspace tags
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install -U pip build twine
+      - name: Build sdist + wheel for every [[package]] in py/partition.toml
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir dist
+          python - <<'EOF' > /tmp/package-dirs
+          import tomllib
+          from pathlib import Path
+          for p in tomllib.loads(Path("py/partition.toml").read_text())["package"]:
+              print(f"py/{p['destination']}")
+          EOF
+          echo "building $(wc -l < /tmp/package-dirs) distributions:"; cat /tmp/package-dirs
+          while IFS= read -r dir; do
+            python -m build --sdist --wheel --outdir dist/ "$dir"
+          done < /tmp/package-dirs
+          ls -1 dist/
+      - name: Every built version equals the tag (without the leading v)
+        run: |
+          python - "$GITHUB_REF_NAME" <<'EOF'
+          import re, sys, tomllib
+          from pathlib import Path
+          from packaging.version import Version  # ships with build/twine
+          tag = sys.argv[1]
+          m = re.fullmatch(r"v(\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?)", tag)
+          if not m:
+              sys.exit(f"tag {tag!r} is not vX.Y.Z (optional aN/bN/rcN/.postN)")
+          want = Version(m.group(1))
+          packages = tomllib.loads(Path("py/partition.toml").read_text())["package"]
+          files = sorted(Path("dist").iterdir())
+          bad = []
+          for p in packages:
+              stem = re.sub(r"[-_.]+", "_", p["distribution"]).lower() + "-"  # PEP 427/625 file stem
+              wheels = [f for f in files if f.name.startswith(stem) and f.suffix == ".whl"]
+              sdists = [f for f in files if f.name.startswith(stem) and f.name.endswith(".tar.gz")]
+              if len(wheels) != 1 or len(sdists) != 1:
+                  bad.append(f"{p['distribution']}: expected one wheel and one sdist, found {wheels + sdists}")
+                  continue
+              built = {
+                  wheels[0].name: wheels[0].name[len(stem):].split("-")[0],
+                  sdists[0].name: sdists[0].name[len(stem):-len(".tar.gz")],
+              }
+              for fname, v in built.items():
+                  if Version(v) != want:
+                      bad.append(f"{fname}: version {v} != tag {want}")
+                  else:
+                      print(f"  ok {fname}")
+          if bad:
+              sys.exit("built artifacts disagree with the tag:\n  " + "\n  ".join(bad))
+          print(f"{len(packages)} distributions at {want}, matching {tag}")
+          EOF
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi # required reviewers live here; trusted publisher is bound to this name
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC), no stored token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          print-hash: true
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release for the tag
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: hugpy ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz

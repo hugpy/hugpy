@@ -16,6 +16,9 @@ anything. Everything is installed **editable** (`pip install -e`) so edits in
 `PYTHON=/path/to/python`) and runs `py/local_install.py`, which is stdlib-only
 and works on Python 3.10+.
 
+Every installed distribution reports the git-derived workspace version
+(`X.Y.Z` at a tag, `X.Y.Z.devN+gSHA` between tags); see [`CONSISTENCY.md`](CONSISTENCY.md).
+
 ## What it does
 
 1. Creates the virtualenv if it does not exist (`python -m venv --upgrade-deps`).
