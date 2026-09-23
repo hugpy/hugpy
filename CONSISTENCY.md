@@ -104,13 +104,13 @@ never pushes a dev build to the fleet, and a broken checkout never pushes
 |---|---|---|
 | A | the git checkout: clean tracked tree, no unpushed commits, HEAD level with the remote | dev box, before a release (`release.sh`) |
 | B | the installed distributions vs. the checkout: all 13 present, one identical version, editable paths resolve here | CI `lockstep` job, dev box |
-| C | the running central service vs. what is installed: the process serves the installed version (no restart pending) | central |
-| D | the fleet vs. central: every worker's `pkg_version` equals central's `required_pkg_version` | central |
+| C | the fleet vs. central: central's `/api/health` build identity, then every worker's heartbeat build (version + sha) against it; a worker still on the monolith, or without a build identity, is drift; `version_ok = null` (central pins nothing) is info | central |
+| D | the newest git tag vs. PyPI: a tag newer than PyPI is an unpublished release, PyPI newer than the tag is a checkout behind a release, not on PyPI at all is info | dev box, central |
 
 `release.sh` gates on `A,B`; CI runs `B` (green until `hugpy-ops` ships the
 command, enforcing from then on); the nightly timer shipped with `hugpy-ops`
-(`hugpy_ops/drift_units/`, enabled on central with `systemctl enable --now`)
-runs `A,B,C,D`. Runtime state (registries, caches, logs, model files) is never
+(`hugpy-drift-check --install-timer [--user] [--central URL] [--notify-url URL]`
+writes and enables `hugpy-drift-check.timer`) runs `A,B,C,D` with `--quiet --fetch`. Runtime state (registries, caches, logs, model files) is never
 compared: only authored and derived artifacts are drift.
 
 ## A fresh box from PyPI
@@ -121,7 +121,8 @@ compared: only authored and derived artifacts are drift.
 | `pip install "hugpy[server]"` | central: `hugpy-server`, `hugpy-fleet`, `hugpy-engine[gguf]`, media, video, oracle, curation, storage, control, discord bot, gunicorn |
 | `hugpy install-deps` | a worker box's pip extras: `hugpy[gpu-worker]` by default, `--cpu` for `hugpy[cpu-worker]`, `--profile auto` to detect; `--version X.Y.Z` pins |
 | `hugpy install-engine [--cuda]` | the native llama.cpp `llama-server`/`rpc-server` binaries |
-| `hugpy install` | the meta CLI's one-shot fresh-box path over the two above (see `hugpy --help`) |
+| `hugpy build` / `hugpy version` | the build identity of this install (version, sha, dirty, editable) and every distribution's version |
+| `hugpy drift --install-timer` | the nightly drift check as a systemd timer (`--user` for a user unit; `--dry-run` prints the units) |
 
 All of it resolves from PyPI at one version; `pip install "hugpy[worker]==X.Y.Z"`
 pins a box to a release and central's heartbeat keeps it there afterwards.

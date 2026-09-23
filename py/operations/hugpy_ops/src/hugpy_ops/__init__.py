@@ -33,7 +33,7 @@ try:  # the installed distribution's version: the workspace tag/commit, never a 
 except Exception:  # noqa: BLE001 — source tree without metadata
     __version__ = "0.0.0+unknown"
 
-_SUBMODULES = ("chaos", "keeper", "provisioner", "sentinel", "todo_keeper",
+_SUBMODULES = ("chaos", "drift", "keeper", "provisioner", "sentinel", "todo_keeper",
                "todo_keeper_daemon", "versions")
 
 __all__ = ["__version__", *_SUBMODULES]
