@@ -84,6 +84,10 @@ def rig(monkeypatch):
     monkeypatch.setattr(A, "_residency",
                         lambda mk: "static" if mk in static else "on-demand")
     monkeypatch.setattr(A, "_busy_slot_models", lambda: set(busy_slots))
+    # comfy (2026-09-22): idle by default (a candidate); a test that wants the
+    # rendering-comfy protection sets a reason.
+    comfy_busy = {"v": None}
+    monkeypatch.setattr(A, "_comfy_busy_reason", lambda s: comfy_busy["v"])
     monkeypatch.setattr(gen_gate, "in_flight",
                         lambda mk: 1 if mk in replying else 0)
     monkeypatch.setattr(A, "_trim_host_ram", lambda: None)
@@ -106,7 +110,7 @@ def rig(monkeypatch):
     return type("Rig", (), {
         "card": card, "residents": residents, "lru": lru, "static": static,
         "replying": replying, "busy_slots": busy_slots,
-        "evicted": evicted_calls})()
+        "comfy_busy": comfy_busy, "evicted": evicted_calls})()
 
 
 # ── THE ae SHAPE: idle 21.3G slot child evicted for a small transformers load ──
@@ -183,15 +187,30 @@ def test_queued_ahead_resident_is_protected(rig, monkeypatch):
     assert any("queued ahead" in p["why"] for p in plan["reason"]["protected"])
 
 
-# ── comfy is never evicted here (0.1.137 exclusion; its own headroom path) ──
-def test_comfy_resident_is_never_evicted(rig):
+# ── comfy (2026-09-22): a RENDERING comfy is protected; an IDLE one yields ──
+def test_busy_comfy_resident_is_protected(rig):
+    rig.card["free"] = 1 * GIB
+    rig.card["need"] = 10 * GIB
+    rig.residents["comfy-sdxl"] = {"vram_bytes": 20 * GIB, "host_mode": "comfy"}
+    rig.comfy_busy["v"] = "a comfy call is in flight (comfy-sdxl)"
+    plan = A._vram_evict_to_fit(_State(), "subject")
+    assert plan["action"] == "refuse"
+    assert "comfy-sdxl" not in rig.evicted
+    prot = [p for p in plan["reason"]["protected"] if p["host_mode"] == "comfy"]
+    assert prot and prot[0]["why"].startswith("comfy busy:")
+
+
+def test_idle_comfy_resident_is_evicted_for_a_load(rig):
+    """The whole point of the ledger: a checkpoint nothing is using loses to a
+    load that needs the room, through the SAME planner as every other resident
+    (not a side watchdog)."""
     rig.card["free"] = 1 * GIB
     rig.card["need"] = 10 * GIB
     rig.residents["comfy-sdxl"] = {"vram_bytes": 20 * GIB, "host_mode": "comfy"}
     plan = A._vram_evict_to_fit(_State(), "subject")
-    assert plan["action"] == "refuse"
-    assert "comfy-sdxl" not in rig.evicted
-    assert any(p["host_mode"] == "comfy" for p in plan["reason"]["protected"])
+    assert plan["action"] == "evicted"
+    assert rig.evicted == ["comfy-sdxl"]
+    assert rig.card["free"] == 21 * GIB
 
 
 # ── minimum LRU set: coldest first, stop as soon as it fits ────────────────
@@ -928,6 +947,8 @@ def test_every_protection_class_still_holds_with_a_credited_subject(
         rig.busy_slots.add("neighbour")
     elif klass == "queued_ahead":
         monkeypatch.setattr(A, "_queued_ahead_of", lambda subj: {"neighbour"})
+    elif klass == "comfy":
+        rig.comfy_busy["v"] = "a comfy call is in flight (neighbour)"
     monkeypatch.setattr(A, "_served_gguf_geometry", lambda mk: (None, None))
     plan = A._vram_evict_to_fit(_State(), "subj")
     assert plan["action"] == "refuse"

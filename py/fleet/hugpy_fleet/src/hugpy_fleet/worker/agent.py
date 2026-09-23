@@ -7619,6 +7619,10 @@ def _comfy_free_models(state: "WorkerState") -> "tuple[bool, str]":
                        json={"unload_models": True, "free_memory": True},
                        timeout=30.0)
         if r.status_code == 200:
+            # comfy holds nothing now: the ledger's resident set is empty until
+            # the next dispatch (every /free goes through here — the watchdog,
+            # the evict verb and the planner all bind this one function).
+            _comfy_ledger().note_freed()
             return True, "comfy /free accepted (unload_models + free_memory)"
         return False, f"comfy /free returned HTTP {r.status_code}"
     except Exception as exc:  # noqa: BLE001 — comfy down / no /free: degrade, never 500
@@ -7682,6 +7686,101 @@ def _comfy_reclaim_idle_vram(state: "WorkerState", incoming_model: "str | None",
     except Exception as exc:  # noqa: BLE001 — a reclaim attempt never breaks admission
         logger.warning("comfy idle reclaim failed: %s", exc)
         return 0
+
+
+# ── comfy resident ledger (2026-09-22) ──────────────────────────────────────
+# ComfyUI is one nvidia-smi lump; hugpy dispatched every checkpoint inside it.
+# The ledger (worker.comfy_ledger) records those dispatches and their file
+# sizes, which is what lets (a) the headroom path clear room for THIS
+# checkpoint instead of one constant for every gen and (b) the eviction planner
+# rank comfy's residents by name and LRU like every other occupant.
+_COMFY_LEDGER = None
+
+
+def _comfy_ledger():
+    global _COMFY_LEDGER
+    if _COMFY_LEDGER is None:
+        from hugpy_fleet.worker.comfy_ledger import ComfyLedger
+        _COMFY_LEDGER = ComfyLedger()
+    return _COMFY_LEDGER
+
+
+def _comfy_busy_reason(state: "WorkerState") -> "str | None":
+    """Why comfy must NOT be freed right now, or ``None`` when it is provably
+    idle. The watchdog's clauses 1-3 (a registered comfy call, a non-empty
+    comfy queue, an unreadable queue/call table) are the doctrine — an in-flight
+    render is never killed for an LLM load — so the planner asks the SAME
+    predicate rather than a cheaper one that could disagree with it. Anything
+    that cannot be proved idle reads as busy (conservative direction)."""
+    try:
+        obs = _comfy_watchdog(state).observe()
+    except Exception as exc:  # noqa: BLE001 — cannot prove idle -> busy
+        return f"comfy idle state unreadable: {type(exc).__name__}"
+    if obs.get("idle"):
+        return None
+    return str(obs.get("why") or "comfy not provably idle")
+
+
+def _comfy_checkpoint_filename(model_key: str) -> "str | None":
+    """The checkpoint file the graph will name for ``model_key`` (the registry
+    row's ``filename``), or None for a row that has none."""
+    try:
+        from hugpy_fleet.worker.imports import get_model_config
+        fn = getattr(get_model_config(model_key), "filename", None)
+        return str(fn) if fn else None
+    except Exception:  # noqa: BLE001 — unknown row: unknown file
+        return None
+
+
+def _comfy_need_detail(state: "WorkerState", model_key: str) -> dict:
+    """What a comfy gen of ``model_key`` needs free BEFORE it starts, priced from
+    the checkpoint FILE (fp16 weights on disk ≈ weights in VRAM) plus the gen
+    cushion — or ``need: None`` when the file cannot be found, so the caller
+    falls back honestly instead of inventing a figure.
+
+    ``held``: the ledger says comfy already holds this checkpoint AND comfy's
+    measured process VRAM covers its weights — then only the cushion is needed.
+    A ledger claim comfy's VRAM does not back (comfy restarted, freed behind our
+    back) is not trusted: the row is dropped and the full need applies."""
+    from hugpy_fleet.worker import comfy_ledger as _cl
+    ledger = _comfy_ledger()
+    filename = _comfy_checkpoint_filename(model_key)
+    extra = []
+    try:
+        from hugpy_storage.provision import _comfy_checkpoints_dir
+        extra.append(_comfy_checkpoints_dir())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        extra.append(os.path.join(_models_store_root() or "", "checkpoints"))
+    except Exception:  # noqa: BLE001
+        pass
+    size = _cl.checkpoint_size_bytes(filename, extra)
+    held = False
+    if ledger.holds(model_key):
+        pv = _comfy_process_vram()
+        if size is not None and pv is not None and pv >= size:
+            held = True
+        elif size is None and pv:
+            held = True                 # resident by the ledger, size unknown
+        else:
+            ledger.forget(model_key)    # comfy no longer backs the claim
+    need = _cl.predicted_need_bytes(size, held)
+    return {"checkpoint": filename, "checkpoint_bytes": size, "held": held,
+            "cushion": _cl.gen_cushion_bytes(), "need": need}
+
+
+def _comfy_headroom_target(detail: dict) -> int:
+    """Free VRAM to clear before the gen: the checkpoint's own need when it is
+    known, else the legacy constant (HUGPY_COMFY_TARGET_FREE_GIB, 7 GiB) — and
+    an EXPLICIT operator constant is a floor the need never undercuts."""
+    need = detail.get("need")
+    if need is None:
+        return _comfy_target_free_bytes()
+    floor = 0
+    if str(os.environ.get("HUGPY_COMFY_TARGET_FREE_GIB") or "").strip():
+        floor = _comfy_target_free_bytes()
+    return max(int(need), floor)
 
 
 def _model_footprint_before_evict(model_key: str, host_mode: str,
@@ -7849,6 +7948,13 @@ def _evict_model(state: "WorkerState", model_key: str,
     #    forced), but comfy's /free is coarse (releases comfy's resident set).
     if _model_framework(model_key) == "comfy":
         allowed, why = (True, "") if force else _evict_gate(model_key)
+        if allowed and not force:
+            # The watchdog's doctrine, not just this key's gate: comfy /free
+            # drops EVERY checkpoint it holds, so any render in flight against
+            # comfy (ours or not) vetoes it, and unprovable idleness is busy.
+            busy = _comfy_busy_reason(state)
+            if busy:
+                allowed, why = False, busy
         if not allowed:
             return _result("comfy", False, f"eviction gated: {why}")
         footprint = _model_footprint_before_evict(model_key, "comfy")
@@ -8638,8 +8744,11 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
     TRUTH the eviction planner ranks — it includes the slot child ('max GPU'
     alloc and all: alloc is a sizing preference, not a residency shield) that
     the in-process contention path was blind to. Comfy rows are surfaced but
-    EXCLUDED from eviction here (0.1.137: comfy is out of allocations; it has
-    its own Fix B headroom path).
+    named from the comfy LEDGER (2026-09-22): comfy is one nvidia-smi lump, but
+    hugpy dispatched every checkpoint inside it, so each one is a row here with
+    its file size (capped at the measured process VRAM) and host_mode "comfy".
+    Whether a comfy row may be evicted is _partition_residents' call (idle
+    comfy yields under contention; a rendering comfy never does).
 
     THE k30 INVISIBILITY FIX (2026-07-23): the pid registry is per-process,
     in-memory state repopulated by the heartbeat loop. A slot occupant can be
@@ -8674,6 +8783,26 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             })
     except Exception:  # noqa: BLE001 — no registry -> nothing to plan against
         pass
+    # Union in comfy's residents by name (the ledger). The registry attributes
+    # comfy's PID to at most the ACTIVE call's model; everything else comfy
+    # still caches is invisible to it. Ledger rows only when comfy really holds
+    # VRAM — a ledger with no process behind it (comfy restarted) names nothing.
+    try:
+        pv = _comfy_process_vram()
+        if pv:
+            for row in _comfy_ledger().residents(process_vram_bytes=pv):
+                mk = row.get("model_key")
+                if not mk or mk in seen:
+                    continue
+                seen.add(mk)
+                out.append({
+                    "model_key": mk,
+                    "vram_bytes": int(row.get("bytes") or 0),
+                    "host_mode": "comfy",
+                    "alive": True,
+                })
+    except Exception:  # noqa: BLE001 — no ledger / no smi -> registry rows stand
+        pass
     # Union in LIVE slot occupants the registry doesn't know (k30). A slot with
     # a model_key claim is a resource allocation whether or not the registry has
     # caught up; its child holds the VRAM. Join nvidia-smi on child_pid for the
@@ -8707,9 +8836,15 @@ def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, l
     admission of ``model_key``. THE single definition of "what may be evicted".
 
     Protection (operator ruling, INVIOLABLE): never a 🔒static resident, never one
-    ACTIVELY REPLYING, never one with work QUEUED AHEAD of the subject, never
-    comfy (its own headroom path), never the subject itself. Each protected row
-    carries a ``why`` for the honest refusal.
+    ACTIVELY REPLYING, never one with work QUEUED AHEAD of the subject, never a
+    comfy that is RENDERING (or cannot be proved idle), never the subject
+    itself. Each protected row carries a ``why`` for the honest refusal.
+
+    comfy (2026-09-22, superseding the 0.1.137 blanket exclusion): an IDLE
+    comfy's residents are candidates like any on-demand model — a checkpoint
+    nothing is using loses to a load that needs the room. Busy is the watchdog's
+    predicate (_comfy_busy_reason), asked once per partition; all comfy rows
+    share the verdict because comfy /free is all-or-nothing.
 
     Extracted so the eviction-aware autofit's RECLAIMABLE estimate is computed
     from exactly the rows this admission would really be willing to evict — a
@@ -8719,13 +8854,18 @@ def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, l
     queued_ahead = _queued_ahead_of(model_key)
     candidates: list[dict] = []
     protected: list[dict] = []
+    comfy_busy: "str | None | bool" = False        # False = not asked yet
     for r in _vram_residents(state):
         mk = r["model_key"]
         if mk == model_key:
             continue
         if str(r.get("host_mode")) == "comfy":
-            protected.append({**r, "why": "comfy (own headroom path; excluded "
-                                          "from allocations — 0.1.137)"})
+            if comfy_busy is False:
+                comfy_busy = _comfy_busy_reason(state)
+            if comfy_busy:
+                protected.append({**r, "why": f"comfy busy: {comfy_busy}"})
+            else:
+                candidates.append(r)
             continue
         if _residency(mk) == "static":
             protected.append({**r, "why": "static (locked residency)"})
@@ -10107,8 +10247,11 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
 
 # ── Fix B: ensure comfy headroom (evict-to-target-free-VRAM, operator: "always") ─
 def _comfy_target_free_bytes() -> int:
-    """Target free VRAM to clear before a ComfyUI gen
-    (HUGPY_COMFY_TARGET_FREE_GIB, default 7.0 GiB).
+    """The LEGACY constant target free VRAM before a ComfyUI gen
+    (HUGPY_COMFY_TARGET_FREE_GIB, default 7.0 GiB). Since 2026-09-22 the gen is
+    priced per checkpoint (_comfy_need_detail); this constant is the fallback
+    when the checkpoint file cannot be sized, and — when the operator set the
+    env explicitly — a floor the per-checkpoint need never undercuts.
 
     Reasoning for the 7.0 default: recon on ae observed ComfyUI's process VRAM
     growing to ~6.5 GiB (5.5 -> 6.5 G) when it drove a gen — that footprint is
@@ -10184,13 +10327,27 @@ def _worker_ensure_comfy_headroom(state: "WorkerState", model_key: str,
     early, never block); nothing left to evict but still short -> proceed anyway
     with a logged warning (the comfy gen is NEVER blocked/hung). Returns a small
     telemetry dict (used by the routine's own logging + tests). Best-effort — the
-    caller (comfy_runner) swallows any exception, but this stays defensive too."""
-    target = _comfy_target_free_bytes()
+    caller (comfy_runner) swallows any exception, but this stays defensive too.
+
+    THE TARGET IS THE CHECKPOINT'S OWN NEED (2026-09-22): weights on disk + the
+    gen cushion, or the cushion alone when comfy already holds this checkpoint
+    (_comfy_need_detail). A 2 GiB SD1.5 no longer evicts neighbours for 7 GiB
+    it will never use, and a 12 GiB checkpoint no longer starts a gen with 7.
+    Unknown file -> the legacy constant, byte-identical to before. The dispatch
+    is then recorded in the ledger so the planner can see it by name."""
+    try:
+        detail = _comfy_need_detail(state, model_key)
+    except Exception as exc:  # noqa: BLE001 — sizing never blocks the gen
+        logger.warning("comfy need for %s unpriced (%s) — legacy target", model_key, exc)
+        detail = {"checkpoint": None, "checkpoint_bytes": None, "held": False,
+                  "need": None}
+    target = _comfy_headroom_target(detail)
     fv = _free_vram_bytes()
     if fv is None:
         # No GPU / can't measure: byte-identical to today — do nothing.
         return {"target": target, "free_before": None, "free_after": None,
-                "evicted": [], "reached": None, "note": "no GPU / unmeasurable"}
+                "evicted": [], "reached": None, "note": "no GPU / unmeasurable",
+                **_comfy_need_report(detail)}
     evicted: list[str] = []
     tried: set[str] = set()
     while fv < target:
@@ -10221,8 +10378,24 @@ def _worker_ensure_comfy_headroom(state: "WorkerState", model_key: str,
         if fv is None:
             break
     reached = (fv is not None and fv >= target)
+    # The gen commits next (the caller POSTs the graph): comfy holds this
+    # checkpoint from here, whatever the headroom outcome was.
+    try:
+        _comfy_ledger().note_dispatch(model_key, detail.get("checkpoint"),
+                                      detail.get("checkpoint_bytes"))
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks the gen
+        pass
     return {"target": target, "free_after": fv, "evicted": evicted,
-            "reached": reached}
+            "reached": reached, **_comfy_need_report(detail)}
+
+
+def _comfy_need_report(detail: dict) -> dict:
+    """The need detail as telemetry keys (omit-when-unknown for the file)."""
+    out = {"need": detail.get("need"), "held": bool(detail.get("held"))}
+    if detail.get("checkpoint"):
+        out["checkpoint"] = detail["checkpoint"]
+        out["checkpoint_bytes"] = detail.get("checkpoint_bytes")
+    return out
 
 
 def _prune_stale_residency(state: "WorkerState") -> None:
@@ -10592,6 +10765,13 @@ def _comfy_status() -> dict:
     # snapshot), so it isn't frozen for the 60s presence-cache window. Only when
     # ComfyUI is actually up; null otherwise.
     out["vram_bytes"] = _comfy_process_vram() if out.get("available") else None
+    # What comfy holds BY NAME (the ledger): the console's comfy card shows the
+    # checkpoints, not just one lump. Only when comfy really holds VRAM.
+    try:
+        out["resident"] = (_comfy_ledger().residents(process_vram_bytes=out["vram_bytes"])
+                           if out["vram_bytes"] else [])
+    except Exception:  # noqa: BLE001 — telemetry only
+        out["resident"] = []
     return out
 
 

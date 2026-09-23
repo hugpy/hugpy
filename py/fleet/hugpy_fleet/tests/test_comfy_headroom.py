@@ -108,13 +108,24 @@ class Fleet:
 
 def install_fleet(fleet):
     saved = (agent._comfy_headroom_candidates, agent._evict_model,
-             agent._free_vram_bytes)
+             agent._free_vram_bytes, agent._comfy_need_detail,
+             agent._COMFY_LEDGER)
     agent._comfy_headroom_candidates = fleet.candidates
     agent._evict_model = fleet.evict
     agent._free_vram_bytes = lambda: fleet.free
+    # The per-checkpoint sizing (2026-09-22) is covered in test_comfy_ledger.py;
+    # this file exercises the LEGACY constant-target path, which is what an
+    # unsized checkpoint still gets. Pin that and a fresh ledger PER CASE (this
+    # module runs at import, so a module-level patch would leak into every
+    # suite collected after it) so nothing here touches the catalog or nvidia-smi.
+    from hugpy_fleet.worker.comfy_ledger import ComfyLedger
+    agent._COMFY_LEDGER = ComfyLedger()
+    agent._comfy_need_detail = lambda state, mk: {
+        "checkpoint": None, "checkpoint_bytes": None, "held": False, "need": None}
     def restore():
         (agent._comfy_headroom_candidates, agent._evict_model,
-         agent._free_vram_bytes) = saved
+         agent._free_vram_bytes, agent._comfy_need_detail,
+         agent._COMFY_LEDGER) = saved
     return restore
 
 

@@ -83,6 +83,9 @@ def seams(monkeypatch):
     saved_settings = dict(agent._RUNTIME_SETTINGS)
     agent._RUNTIME_SETTINGS.clear()
     monkeypatch.setattr(agent.gen_gate, "in_flight", lambda mk: 0)
+    # comfy provably idle unless a test says otherwise (the comfy branch asks
+    # the watchdog's predicate before /free — 2026-09-22 ledger change).
+    monkeypatch.setattr(agent, "_comfy_busy_reason", lambda state: None)
     monkeypatch.setattr(agent, "_model_framework", lambda mk: None)
     monkeypatch.setattr(agent, "_resolve_slot_handle", lambda mk: None)
     monkeypatch.setattr(agent, "_is_inprocess_resident", lambda mk: False)
@@ -126,6 +129,25 @@ def test_1a_comfy_model_goes_through_comfy_free(seams, fixed_mem):
     assert comfy_called == [True]
     # vram_freed reported from before/after delta
     assert b["vram_freed"] == 4000 and b["ram_freed"] == 7000
+
+
+# --- (1a2) a RENDERING comfy is gated; force overrides ------------------------
+
+def test_1a2_busy_comfy_is_gated_unless_forced(seams, fixed_mem):
+    """comfy /free drops every checkpoint at once, so a render in flight against
+    comfy (ours or not) vetoes the verb the same way it vetoes the watchdog."""
+    seams.setattr(agent, "_model_framework", lambda mk: "comfy" if mk == "cmfy" else None)
+    seams.setattr(agent, "_comfy_busy_reason", lambda state: "comfy /queue has work")
+    comfy_called = []
+    seams.setattr(agent, "_comfy_free_models",
+                  lambda state: comfy_called.append(True) or (True, "freed"))
+
+    b = _new_client().post("/ops/evict", json={"model_key": "cmfy"}).get_json()
+    assert b["host_mode"] == "comfy" and b["evicted"] is False
+    assert "comfy /queue has work" in b["reason"] and comfy_called == []
+
+    b = _new_client().post("/ops/evict", json={"model_key": "cmfy", "force": True}).get_json()
+    assert b["evicted"] is True and comfy_called == [True]
 
 
 # --- (1b) slot host-mode: live slot serves it -> slot /unload ----------------
