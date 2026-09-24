@@ -198,15 +198,7 @@ def _hot_last_used(hot_dir: str) -> float:
             return 0.0
 
 
-def _dir_bytes(path: str) -> int:
-    total = 0
-    for dirpath, _dirs, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(dirpath, f))
-            except OSError:
-                pass
-    return total
+from hugpy_platform.filesystem import directory_bytes as _dir_bytes
 
 
 def _hot_copy_candidates(hot_root: str, keep_dir: str) -> list[str]:
@@ -1815,15 +1807,8 @@ def run_wan_i2v(
     # boundary. We ALSO re-check should_cancel() around the call so a cancel is
     # still honored if a box's diffusers lacks the callback param. This whole path
     # is BOX-ONLY (preflight short-circuits the GPU-less VM above).
-    def _cancel_step_cb(pipe_ref, step_index, timestep, cb_kwargs):
-        if should_cancel is not None and should_cancel():
-            pipe_ref._interrupt = True   # diffusers checks self.interrupt each step
-        if on_step is not None:
-            try:
-                on_step(int(step_index) + 1, int(steps))
-            except Exception:  # noqa: BLE001 — telemetry never breaks a render
-                pass
-        return cb_kwargs
+    from hugpy_video.intel.studio.runners.cancel import cancel_step_callback
+    _cancel_step_cb = cancel_step_callback(should_cancel, on_step, steps)
 
     call_extra: dict = {}
     if should_cancel is not None or on_step is not None:

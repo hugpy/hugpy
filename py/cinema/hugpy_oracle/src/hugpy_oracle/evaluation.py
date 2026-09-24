@@ -5,9 +5,8 @@ Generalizes the movie keyframe judge (``video_intel/runners/movie.py``:
 ``VERDICT=YES|NO; SCORE=0-100; WHY=<one sentence>`` discipline, the SAME
 tolerant parse, and the SAME degradation — a judge that raises, times out or
 returns garbage yields an UNSCORED/UNAVAILABLE ``JudgeResult`` and NEVER flips
-``hard_pass`` (movie: "unscored, keep"). The parser is a lift, not an import:
-oracle must not grow a video_intel runtime dependency, so movie.py keeps its
-own copy untouched (a later task may re-point it here).
+``hard_pass`` (movie: "unscored, keep"). Both callers import the same pure
+parser from ``hugpy_platform.verdict``, so oracle has no video runtime import.
 
 Rubrics are per-capability defaults (``RUBRICS``):
 
@@ -118,34 +117,7 @@ _ERROR_TAIL = 300
 # ---------------------------------------------------------------------------
 
 
-def parse_judge_verdict(text: str) -> dict:
-    """Parse a judge reply into ``{"verdict","score","why"}``. Tolerant of
-    model drift exactly like the movie parser: field forms win, a bare YES/NO
-    word is the fallback, garbage yields verdict=None/score=None (which the
-    evaluator treats as "unscored, keep"). Returns DATA only — never raises."""
-    t = text or ""
-    verdict = None
-    m = re.search(r"VERDICT\s*[=:]\s*(YES|NO)", t, re.I)
-    if m:
-        verdict = m.group(1).upper()
-
-    score = None
-    m = re.search(r"SCORE\s*[=:]\s*(\d{1,3})", t, re.I)
-    if m:
-        score = max(0, min(100, int(m.group(1))))
-
-    why = ""
-    m = re.search(r"WHY\s*[=:]\s*(.+)", t, re.I | re.S)
-    if m:
-        why = m.group(1).strip().splitlines()[0].strip().rstrip(".").strip()
-
-    if verdict is None:
-        if re.search(r"\bYES\b", t, re.I):
-            verdict = "YES"
-        elif re.search(r"\bNO\b", t, re.I):
-            verdict = "NO"
-
-    return {"verdict": verdict, "score": score, "why": why}
+from hugpy_platform.verdict import parse_verdict as parse_judge_verdict
 
 
 def _reply_text(res: Any) -> str:

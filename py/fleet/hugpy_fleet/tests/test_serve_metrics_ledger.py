@@ -50,7 +50,15 @@ LIVE_TIMINGS = {
     "predicted_ms": 147.499,
     "predicted_per_second": 115.25501867809274,
 }
-LIVE_TOK_S = 115.25501867809274
+# The engine's REPORTED predicted_per_second. It is inflated by n/(n-1):
+# llama-server starts the generation clock only after the first token, so
+# predicted_ms times predicted_n - 1 decode steps (the 2277/4952 tok/s bug,
+# fixed 2026-09-23 in eviction.tok_s_from_timings). Kept only for the wire
+# tests below, which carry the raw block unmodified.
+LIVE_ENGINE_RATE = 115.25501867809274
+# THE CORRECTED decode rate we now extract from LIVE_TIMINGS:
+# (predicted_n - 1) * 1000 / predicted_ms = 16000 / 147.499.
+LIVE_TOK_S = (17 - 1) * 1000.0 / 147.499
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +447,9 @@ class TestWireContract:
         assert d.timings is None                      # every old call site works
         d2 = DoneEvent(request_id="r", input_tokens=0, output_chunks=1,
                        finish_reason="stop", timings=LIVE_TIMINGS)
-        assert d2.timings["predicted_per_second"] == LIVE_TOK_S
+        # The wire carries the engine's RAW timings block unmodified; the
+        # (n-1) decode-rate correction happens at extraction, not on the wire.
+        assert d2.timings["predicted_per_second"] == LIVE_ENGINE_RATE
 
     def test_task_result_allows_extra_so_timings_needs_no_bump(self):
         """The central->worker REQUEST is extra=forbid (the landmine). The
@@ -448,7 +458,7 @@ class TestWireContract:
         from hugpy_engine.schemas.chat_schemas import ChatResult
         r = ChatResult(request_id="r", model_key="m", text="hi",
                        finish_reason="stop", timings=LIVE_TIMINGS)
-        assert r.model_dump()["timings"]["predicted_per_second"] == LIVE_TOK_S
+        assert r.model_dump()["timings"]["predicted_per_second"] == LIVE_ENGINE_RATE
 
     def test_chat_request_still_forbids_extra(self):
         """Pin the landmine itself: nothing here loosened the frozen request."""
@@ -470,7 +480,7 @@ class TestWireContract:
                 "some_future_field_from_a_newer_worker": {"x": 1}}
         ev = remote._event_from_worker_line(line, "req-1")
         assert ev.type == "done", "terminal done was lost to an unknown key"
-        assert ev.timings["predicted_per_second"] == LIVE_TOK_S
+        assert ev.timings["predicted_per_second"] == LIVE_ENGINE_RATE
 
     def test_relay_done_without_timings_is_unchanged(self):
         remote = importlib.import_module(

@@ -21,8 +21,10 @@ from hugpy_server.app.routes.eviction_routes import eviction_bp
 from hugpy_server.app.routes.group_routes import group_bp
 from hugpy_server.app.routes.model_group_routes import model_group_bp
 from hugpy_server.app.routes.metrics_routes import metrics_bp
+from hugpy_server.app.routes.model_status_routes import model_status_bp
 from hugpy_server.app.routes.oracle_routes import oracle_bp
 from hugpy_server.app.routes.keeper_help_routes import keeper_help_bp
+from hugpy_server.app.routes.help_routes import help_bp
 from hugpy_server.app.routes.script_first_routes import script_first_bp
 from hugpy_server.app.routes.fleet_doctrine_routes import fleet_doctrine_bp
 from hugpy_server.app.routes.interim_routes import interim_bp

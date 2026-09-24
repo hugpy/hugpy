@@ -14,9 +14,16 @@ Once the model is known, its files are fetched in this order:
        /api/llm/models/<key>/manifest and /api/llm/models/<key>/file. This needs
        no Hugging Face token on the worker and reuses whatever central already
        downloaded.
-    2. If central doesn't have it (409) or is unreachable, fall back to the
-       normal Hugging Face download via ``hugpy_storage.download_models.ensure_model``
-       — which the inference path would call anyway.
+    2. Nothing else. A worker NEVER downloads from Hugging Face (operator
+       ruling 2026-09-23, computron 134 GB incident: "if central is unreachable
+       then what is computron acting on? ... if its not an action from central,
+       then its not an action from hugpy"). Central's own downloader daemon is
+       the ONLY Hugging Face path in the fleet; if central does not hold the
+       weights (or cannot be reached) provisioning FAILS with the reason.
+
+"Present" always means WEIGHTS are present: a directory holding only a vision
+projector (mmproj / ``general.architecture == clip``) is NOT a model, whether it
+is on the worker's disk or in central's transfer manifest.
 
 Files are placed under the worker's OWN storage root using the same
 route_destination() layout central uses, so the existing loader/`ensure_model`
@@ -148,10 +155,10 @@ def _resolve_budget_state(state):
 # door and pull weights central just declined to serve (that is how a refusal
 # turned into a silent 55GB/700GB HF pull).
 #
-# HF fallback is a SURVIVAL path, permitted ONLY when central gave NO verdict at
-# all: the box can't reach central (connection refused / timeout / DNS) or no
-# central URL is configured. We distinguish the two by EXCEPTION TYPE at the
-# transfer call sites, never by string-matching a reason (urllib's taxonomy):
+# There is NO Hugging Face fallback on a worker (ruling 2026-09-23). The
+# exception taxonomy below is kept because the chat/console still needs to say
+# WHICH way central failed — "unreachable" vs "refused" — but both now end in a
+# refusal, never a download:
 #
 #   * urllib.error.HTTPError  -> central RESPONDED with a status. A VERDICT.
 #                                (HTTPError is a subclass of URLError, so it is
@@ -159,20 +166,14 @@ def _resolve_budget_state(state):
 #   * urllib.error.URLError (non-HTTPError), socket.timeout, TimeoutError,
 #     ConnectionError, OSError -> no HTTP response reached us. UNREACHABLE.
 #
-# The fetchers RAISE CentralUnreachable for the unreachable class (instead of
-# the old swallow-to-False, which made "central refused" and "central down"
-# indistinguishable at _provision_now). A verdict-shaped failure returns False /
-# raises a non-CentralUnreachable error; _provision_now then refuses HF.
-#
-# Escape hatch: env HUGPY_HF_FALLBACK=always restores the pre-ruling behavior
-# (any central failure falls through to HF) for emergencies.
+# The old HUGPY_HF_FALLBACK=always escape hatch is gone with the fallback.
 import socket as _socket
 
 
 class CentralUnreachable(Exception):
     """Central gave NO HTTP response — connection refused, timeout, or DNS
-    failure. The ONLY condition (besides no central URL) under which the HF
-    survival fallback is permitted. Carries the originating exception."""
+    failure. Reported as such; it no longer opens any other source. Carries the
+    originating exception."""
 
     def __init__(self, cause: BaseException):
         self.cause = cause
@@ -192,10 +193,142 @@ def _is_unreachable(exc: BaseException) -> bool:
                             TimeoutError, ConnectionError, OSError))
 
 
-def _hf_fallback_always() -> bool:
-    """Emergency escape hatch: HUGPY_HF_FALLBACK=always restores the pre-2026-07-17
-    behavior (ANY central failure — verdict or not — falls through to HF)."""
-    return (os.environ.get("HUGPY_HF_FALLBACK", "").strip().lower() == "always")
+class CentralHoldsNoWeights(RuntimeError):
+    """Central's copy of a model carries no WEIGHTS (e.g. only its vision
+    projector), or the worker's copy is projector-only after a transfer. A
+    VERDICT, not a transient: re-pulling the same manifest cannot fix it."""
+
+
+class CentralCopyBroken(RuntimeError):
+    """A weight file central served disagrees with the model's INSTALL
+    MANIFEST (hugpy.json ``manifest``, captured once when central downloaded
+    it): central's own copy is short/long. A VERDICT — re-pulling the same
+    bytes (per-file or archive) reproduces it; central must re-provision."""
+
+
+def _install_manifest_of(dest: str) -> dict | None:
+    """The install manifest from the model's hugpy.json on this box, or None
+    (a pre-manifest model — judged by transfer sizes alone, as before)."""
+    try:
+        from hugpy_storage.hugpy_marker import MANIFEST_KEY, read_hugpy_marker
+        m = (read_hugpy_marker(dest) or {}).get(MANIFEST_KEY)
+    except Exception:  # noqa: BLE001
+        return None
+    return m if isinstance(m, dict) and m.get("files") else None
+
+
+def _check_install_manifest(model_key: str, dest: str, files: list[dict]) -> None:
+    """After a transfer: every WEIGHT file of the transfer set that the
+    install manifest lists must be on disk at the manifest's byte count. The
+    manifest travels with the model (central serves hugpy.json in the transfer
+    set), so this needs no Hub call and no extra request. Non-weight files are
+    not judged — hugpy edits small config files after install."""
+    manifest = _install_manifest_of(dest)
+    if manifest is None:
+        return
+    from hugpy_storage.hugpy_marker import manifest_file_status
+    scope = [e.get("path") for e in files or [] if e.get("path")]
+    st = manifest_file_status(dest, manifest, paths=scope, weights_only=True)
+    if st["mismatch"] or st["missing"]:
+        rel, have, want = (st["mismatch"] or [(st["missing"][0], 0, None)])[0]
+        raise CentralCopyBroken(
+            f"central's copy of {model_key} disagrees with its install manifest: "
+            f"{rel} is {have} bytes, manifest says {want} "
+            f"({len(st['mismatch'])} mismatched, {len(st['missing'])} missing of "
+            f"{st['checked']} checked) — central must re-provision it")
+
+
+def local_copy_matches_manifest(path: str) -> bool:
+    """Worker-side presence refinement: every weight file the install manifest
+    lists that IS on this box has the manifest's byte count. (A worker holds a
+    SUBSET of central's files — one quant, one weight format — so absence of
+    other manifest files is expected; completeness of the transfer set was
+    judged at pull time by _check_install_manifest.) True when there is no
+    manifest."""
+    manifest = _install_manifest_of(path)
+    if manifest is None:
+        return True
+    from hugpy_storage.hugpy_marker import manifest_file_status
+    present = [e.get("path") for e in manifest.get("files") or []
+               if e.get("path") and os.path.exists(os.path.join(path, e["path"]))]
+    st = manifest_file_status(path, manifest, paths=present, weights_only=True)
+    if st["mismatch"]:
+        logger.warning("%s: local weight file(s) disagree with the install "
+                       "manifest: %s", path, st["mismatch"][:3])
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Worker identity + the serve-path weights resolver (2026-09-23).
+# ---------------------------------------------------------------------------
+# A process is a WORKER when WORKER_CENTRAL_URL is set: the installer writes it
+# into every worker unit (hugpy_fleet.worker.install._env_for), the agent sets
+# it at boot when started with only --central, and the slot children inherit it
+# (hugpy_engine.serve.slot_agent._central_url reads the same variable). Central's
+# own services never set it. No new flag: this is the marker the fleet already
+# uses to tell a worker's slot where central is.
+WORKER_CENTRAL_ENV = "WORKER_CENTRAL_URL"
+
+
+def worker_central_url() -> str | None:
+    """Central's URL when THIS process is a worker, else None (central itself,
+    or a standalone box)."""
+    v = (os.environ.get(WORKER_CENTRAL_ENV) or "").strip()
+    return v.rstrip("/") or None
+
+
+def is_worker_process() -> bool:
+    return worker_central_url() is not None
+
+
+def _designated_quant(cfg) -> str:
+    """The quant a load would ask for, for error messages only."""
+    pin = (os.environ.get("HUGPY_GGUF_FILE") or "").strip()
+    if pin:
+        return pin
+    fn = getattr(cfg, "filename", None) if cfg is not None and not isinstance(cfg, dict) \
+        else (cfg or {}).get("filename")
+    return str(fn) if fn else "no quant designated"
+
+
+def ensure_serving_weights(model_key: str, central_url: str | None = None) -> str:
+    """The model dir a RUNNER loads from — the serve-path replacement for a
+    direct ``download_models.ensure_model``.
+
+    * On a WORKER: local-or-central ONLY. Already present (weights, not just a
+      projector) -> its dir. Otherwise pull from central through the normal
+      provisioning chain (budget gate, single-flight, verified transfer). If
+      central holds no weights / refuses / is unreachable this RAISES
+      :class:`CentralHoldsNoWeights` naming the reason. It never touches
+      Hugging Face (computron 2026-09-23: a projector-only dir sent the runner
+      to snapshot_download a 134 GB repo).
+    * Anywhere else (central, a standalone box): unchanged —
+      ``download_models.ensure_model``.
+    """
+    central = (central_url or "").strip().rstrip("/") or worker_central_url()
+    if not central:
+        from hugpy_storage.download_models import ensure_model
+        return ensure_model(model_key)
+    return _worker_weights_dir(model_key, central)
+
+
+def _worker_weights_dir(model_key: str, central: str) -> str:
+    """Worker half of :func:`ensure_serving_weights`: local-or-central, or raise."""
+    ok = ensure_model_present(model_key, central, purpose="demand")
+    canonical = _assure_local_key(model_key) or model_key
+    cfg = catalog_get(canonical)
+    if ok and model_is_local(canonical):
+        d = _model_dir(canonical, cfg)
+        if d:
+            return _providers.serve_path(d)
+    fail = last_failure(canonical) or last_failure(model_key) or {}
+    why = fail.get("human") or fail.get("reason") or "central did not provide them"
+    raise CentralHoldsNoWeights(
+        f"central holds no weights for {model_key} ({_designated_quant(cfg)}): "
+        f"{why}. Workers only take weights from central; add the model's "
+        f"weights on central (its downloader) — this worker will not fetch "
+        f"them from Hugging Face.")
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +695,7 @@ def model_is_local(model_key: str) -> bool:
         path = _model_dir(model_key, cfg)
         if not path:
             return False
-        return bool(model_looks_downloaded(path, cfg))
+        return bool(model_looks_downloaded(path, cfg)) and local_copy_matches_manifest(path)
     except Exception:
         return False
 
@@ -950,6 +1083,104 @@ def _missing_or_short(dest: str, files: list[dict]) -> list[tuple]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# "Present" means WEIGHTS (2026-09-23). Central's manifest for
+# zerodigest/Qwen3.8-27B-Uncensored-YMQ-MTP-GGUF listed only its two
+# mmproj/*.gguf projector files; the worker saw both on disk and logged
+# "already complete on disk (2 files)" / "provisioned from CENTRAL", and the
+# runner then went looking for the model elsewhere. A file set is a model only
+# when it carries a weight file that is not a projector.
+# ---------------------------------------------------------------------------
+_WEIGHT_EXTS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx", ".h5",
+                ".msgpack", ".npz", ".pkl", ".joblib", ".tflite", ".nemo")
+_WEIGHT_FLOOR = 1024 * 1024            # below this a weight file is a pointer stub
+_LARGE_FILE = 64 * 1024 * 1024         # any file this big is weights of SOME format
+
+
+def _is_projector(path: str) -> bool:
+    """A vision projector gguf (header ``general.architecture == clip`` when
+    the file is readable; the name / ``mmproj/`` parent dir otherwise)."""
+    try:
+        from hugpy_platform.utils import is_mmproj_file
+        return bool(is_mmproj_file(path))
+    except Exception:  # noqa: BLE001
+        low = str(path or "").lower()
+        return any(h in low for h in ("mmproj", "mm-proj", "mm_proj", "projector"))
+
+
+def _weight_files(files: list[dict], dest: str | None = None) -> list[str]:
+    """The entries of ``files`` that are model WEIGHTS.
+
+    ``dest=None`` judges central's manifest (names + advertised sizes); with a
+    ``dest`` the files are judged ON DISK (real size, GGUF header), so a
+    projector cannot pass as a model by its name."""
+    out = []
+    for entry in files or []:
+        rel = entry.get("path")
+        if not rel:
+            continue
+        low = str(rel).lower()
+        full = os.path.join(dest, rel) if dest else str(rel)
+        if dest:
+            if not os.path.isfile(full):
+                continue
+            size = os.path.getsize(full)
+        else:
+            size = entry.get("size")
+        if low.endswith(".gguf"):
+            if _is_projector(full):
+                continue
+            if size is not None and size <= _WEIGHT_FLOOR:
+                continue
+            if dest and not _gguf_header_ok(full):
+                continue
+            out.append(rel)
+        elif low.endswith(_WEIGHT_EXTS):
+            if size is None or size > _WEIGHT_FLOOR:
+                out.append(rel)
+        elif size is not None and size >= _LARGE_FILE:
+            out.append(rel)
+    return out
+
+
+def _raise_if_no_weights(exc: "urllib.error.HTTPError") -> None:
+    """Central's /manifest answers 409 ``{"state": "no_weights", "reason": …}``
+    when its copy is projector/sidecar-only. Surface that exact reason as a
+    :class:`CentralHoldsNoWeights` verdict instead of a generic "no copy"."""
+    try:
+        body = json.loads((exc.read() or b"{}").decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — an unreadable body is just a 409
+        return
+    if isinstance(body, dict) and body.get("state") == "no_weights":
+        raise CentralHoldsNoWeights(str(body.get("reason") or body.get("error")
+                                        or "central holds no weights")) from exc
+
+
+def _require_manifest_weights(model_key: str, manifest: dict, files: list[dict]) -> None:
+    """Refuse a transfer whose file set carries no weights — before a byte moves."""
+    if _weight_files(files):
+        return
+    names = ", ".join(sorted(str(e.get("path")) for e in files if e.get("path"))[:6]) or "none"
+    quant = manifest.get("filename") or "no quant designated"
+    raise CentralHoldsNoWeights(
+        f"central holds no weights for {model_key} ({quant}): its transfer set "
+        f"is {len(files)} file(s) [{names}], none of them model weights "
+        f"(vision projector / sidecars only)")
+
+
+def _require_disk_weights(model_key: str, manifest: dict, dest: str,
+                          files: list[dict]) -> None:
+    """After a transfer (or a 'nothing pending' no-op): the landed files must
+    include weights, judged by their real headers."""
+    if _weight_files(files, dest):
+        return
+    quant = manifest.get("filename") or "no quant designated"
+    raise CentralHoldsNoWeights(
+        f"central holds no weights for {model_key} ({quant}): the {len(files)} "
+        f"file(s) under {dest} are vision projector / sidecars only — "
+        f"not a model")
+
+
 def _pull_concurrency() -> int:
     """Max simultaneous connections for a transfer (env HUGPY_PULL_CONCURRENCY)."""
     try:
@@ -1137,6 +1368,7 @@ def fetch_from_central(central_url: str, model_key: str, progress=None) -> bool:
         manifest = _get_json(base + "/manifest")
     except urllib.error.HTTPError as exc:
         if exc.code in (404, 409):
+            _raise_if_no_weights(exc)
             logger.info("central has no copy of %s (HTTP %s)", model_key, exc.code)
             return False
         raise                       # other HTTP status = a VERDICT — propagate it
@@ -1151,11 +1383,16 @@ def fetch_from_central(central_url: str, model_key: str, progress=None) -> bool:
     files = manifest.get("files") or []
     total = manifest.get("total_bytes") or sum((e.get("size") or 0) for e in files)
     concurrency = _pull_concurrency()
+    # A projector-only (or empty) transfer set is not a model: refuse before
+    # moving a byte instead of "provisioning" a dir no runner can load.
+    _require_manifest_weights(model_key, manifest, files)
 
     # File-level resume: only fetch what isn't already complete. If nothing is
     # pending, this is a pure no-op (not even a Range probe).
     pending = [{"path": r, "size": s} for r, s, _w in _missing_or_short(dest, files)]
     if not pending:
+        _require_disk_weights(model_key, manifest, dest, files)
+        _check_install_manifest(model_key, dest, files)
         logger.info("%s already complete on disk (%d files)", model_key, len(files))
         return True
 
@@ -1314,6 +1551,8 @@ def fetch_from_central(central_url: str, model_key: str, progress=None) -> bool:
             f"{len(missing)}/{len(files)} files still missing/short "
             f"(e.g. {missing[0][0]} [{missing[0][2]}]) under {dest}")
 
+    _require_disk_weights(model_key, manifest, dest, files)
+    _check_install_manifest(model_key, dest, files)
     logger.info("provisioned %s from central in full (%d files, %s)",
                 model_key, len(files), _human(total))
     return True
@@ -1382,6 +1621,7 @@ def fetch_archive_from_central(central_url: str, model_key: str, progress=None) 
         manifest = _get_json(base + "/manifest")
     except urllib.error.HTTPError as exc:
         if exc.code in (404, 409):
+            _raise_if_no_weights(exc)
             logger.info("central has no copy of %s (HTTP %s)", model_key, exc.code)
             return False
         raise                       # other HTTP status = a VERDICT — propagate it
@@ -1392,6 +1632,7 @@ def fetch_archive_from_central(central_url: str, model_key: str, progress=None) 
     dest = _local_destination(manifest)
     files = manifest.get("files") or []
     total = manifest.get("total_bytes") or sum((e.get("size") or 0) for e in files)
+    _require_manifest_weights(model_key, manifest, files)
     dest_real = os.path.realpath(dest)
     os.makedirs(dest, exist_ok=True)
 
@@ -1454,29 +1695,17 @@ def fetch_archive_from_central(central_url: str, model_key: str, progress=None) 
             f"{len(missing)}/{len(files)} files missing/short "
             f"(e.g. {missing[0][0]} [{missing[0][2]}]) under {dest}")
 
+    _require_disk_weights(model_key, manifest, dest, files)
+    _check_install_manifest(model_key, dest, files)
     logger.info("provisioned %s from central archive in full (%d files, %s)",
                 model_key, len(files), _human(total))
     return True
 
 
+from hugpy_platform.formatting import human_bytes
+
 def _human(n) -> str:
-    if not n:
-        return "?"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    v = float(n)
-    i = 0
-    while v >= 1024 and i < len(units) - 1:
-        v /= 1024
-        i += 1
-    return f"{v:.1f} {units[i]}"
-
-
-def fetch_from_hf(model_key: str) -> str:
-    """Last-resort: pull from Hugging Face via the normal code path."""
-    from hugpy_storage.download_models import ensure_model
-
-    logger.info("provisioning %s from Hugging Face", model_key)
-    return ensure_model(model_key)
+    return human_bytes(n, empty="?")
 
 
 def central_total_bytes(central_url: str | None, model_key: str) -> int | None:
@@ -1510,7 +1739,7 @@ def central_total_bytes(central_url: str | None, model_key: str) -> int | None:
 
 def ensure_model_present(model_key: str, central_url: str | None, progress=None,
                          state=None, purpose: str | None = None) -> bool:
-    """Make sure model_key is on local disk. Central-first, then HF fallback.
+    """Make sure model_key is on local disk — from CENTRAL only (never HF).
 
     ``progress(done_bytes, total_bytes, filename)`` is forwarded to the central
     download so callers can stream provisioning status. Returns True if the
@@ -1714,24 +1943,19 @@ def clear_failure(model_key: str) -> None:
 
 
 def _provision_now(canonical: str, central_url: str | None, progress=None) -> bool:
-    """Do the actual fetch (central archive -> per-file -> HF). Caller holds the
-    per-model provisioning lock.
+    """Do the actual fetch (central per-file -> central archive). Caller holds
+    the per-model provisioning lock.
 
-    CHAIN OF COMMAND (operator ruling, ae 1.2TB incident 2026-07-17): central's
-    verdict is AUTHORITATIVE. If central answered at all — a refusal (404/409/
-    archive-refused) OR any other HTTP status — it is ALIVE and its "no" STANDS:
-    this returns False WITHOUT trying HF. HF is a SURVIVAL fallback, reached ONLY
-    when central was UNREACHABLE (no HTTP response: CentralUnreachable) or no
-    central URL is configured. The distinction is by EXCEPTION TYPE, never by
-    string-matching the reason. Escape hatch: HUGPY_HF_FALLBACK=always restores
-    the old any-failure-falls-through behavior for emergencies.
+    CHAIN OF COMMAND (operator rulings 2026-07-17 and 2026-09-23): central is
+    the ONLY source a worker takes weights from. Central refused, holds no
+    weights, is unreachable, or no central URL is configured -> this returns
+    False with the recorded reason. There is no Hugging Face fallback and no
+    escape hatch: "if its not an action from central, then its not an action
+    from hugpy".
     """
     # Daylight item 4: the chosen SOURCE must be loud — logged AND streamed
     # through the progress callback (a "source=…" marker the agent stores on
-    # provision_progress), so a silent 55GB HF pull while central held the
-    # files can never happen unnoticed again.
-    hf_ok = _hf_fallback_always()            # escape hatch pre-decides HF
-    central_reason = "no central URL configured"
+    # provision_progress).
     # Telemetry (observation only — every call below is total; see comms/
     # evictions.py). The run scope JOINS whatever pass is already open so the
     # provisioning rows land in the SAME console card as the eviction rows that
@@ -1753,29 +1977,84 @@ def _provision_now(canonical: str, central_url: str | None, progress=None) -> bo
                 pass
 
 
+# ── measured central->worker transfer rate (heartbeat ``load_bytes_per_s``) ──
+# EMA over COMPLETED provisions (bytes actually moved / wall time), so the
+# benchmark's cold-load budget (fleet_grading._cold_budget: 2 x bytes / rate +
+# 30 s) is derived from this box's real link instead of the fixed cap. A
+# provision that moved almost nothing (files already on disk) says nothing
+# about the link and is not recorded.
+_RATE_LOCK = threading.Lock()
+_RATE: dict = {"bps": None, "samples": 0, "last_bps": None, "last_at": None}
+RATE_EMA_ALPHA = 0.3
+RATE_MIN_BYTES = 64 << 20
+RATE_MIN_SECONDS = 1.0
+
+
+def record_transfer(bytes_moved, seconds) -> float | None:
+    """Fold one completed provision into the EMA; returns the new rate (B/s),
+    or None when the sample is too small to mean anything."""
+    try:
+        b, s = float(bytes_moved or 0), float(seconds or 0)
+    except (TypeError, ValueError):
+        return None
+    if b < RATE_MIN_BYTES or s < RATE_MIN_SECONDS:
+        return None
+    bps = b / s
+    with _RATE_LOCK:
+        prev = _RATE["bps"]
+        _RATE["bps"] = bps if prev is None else (RATE_EMA_ALPHA * bps + (1 - RATE_EMA_ALPHA) * prev)
+        _RATE["samples"] += 1
+        _RATE["last_bps"], _RATE["last_at"] = bps, time.time()
+        return _RATE["bps"]
+
+
+def transfer_rate() -> float | None:
+    """The EMA central->worker transfer rate in bytes/s, or None (no sample)."""
+    with _RATE_LOCK:
+        return round(_RATE["bps"], 1) if _RATE["bps"] else None
+
+
+def transfer_rate_stats() -> dict:
+    with _RATE_LOCK:
+        return dict(_RATE)
+
+
 def _provision_sources(canonical: str, central_url: str | None, progress,
                        ev, dest: str | None) -> bool:
     """The source chain itself. Split out of ``_provision_now`` only so the
     telemetry run-scope wraps it without indenting the whole decision body."""
-    hf_ok = _hf_fallback_always()            # escape hatch pre-decides HF
     central_reason = "no central URL configured"
 
+    # Bytes moved by the CURRENT attempt, for the transfer-rate EMA: the
+    # caller's progress callback is wrapped (and forwarded verbatim).
+    moved = {"bytes": 0}
+    _user_progress = progress
+
+    def progress(done, total, name=None):  # noqa: F811 — deliberate wrap
+        if isinstance(done, (int, float)) and not (isinstance(name, str) and name.startswith("source=")):
+            moved["bytes"] = max(moved["bytes"], done)
+        if _user_progress:
+            _user_progress(done, total, name)
+
     def _t_start(source: str):
+        moved["bytes"] = 0
         if ev is not None:
             ev.emit_provision_start(canonical, source, dest_path=dest)
 
     def _t_done(source: str, t0: float):
+        dt = time.time() - t0
+        record_transfer(moved["bytes"], dt)
         if ev is not None:
-            ev.emit_provision_done(canonical, source,
-                                   duration_ms=int((time.time() - t0) * 1000))
+            ev.emit_provision_done(canonical, source, bytes_=moved["bytes"] or None,
+                                   duration_ms=int(dt * 1000))
         clear_failure(canonical)
         # Weights landed: the catalog must re-read this row.
         publish_catalog_changed(f"provisioned from {source}", model_key=canonical,
                                 destination=dest, change="download", source=source)
 
     # Has THIS attempt already captured an errno-bearing (i.e. OS-level) cause?
-    # A full disk fails identically from every source, so the first source to
-    # hit ENOSPC has already diagnosed the box; a later "HF returned 404" is a
+    # A full disk fails identically from every transport, so the first one to
+    # hit ENOSPC has already diagnosed the box; a later prose reason is a
     # symptom, not the cause, and must not overwrite it.
     sharp = {"seen": False}
 
@@ -1794,103 +2073,71 @@ def _provision_sources(canonical: str, central_url: str | None, progress,
         if has_errno:
             sharp["seen"] = True
 
-    if central_url is None:
-        # No central configured at all: HF is the only source (a worker cut off
-        # from the fleet). This is the survival path, not a side door.
-        hf_ok = True
-    else:
-        central_alive = False                # did central give us an HTTP verdict?
-        # 1) parallel + segmented per-file transfer — fastest (saturates the
-        #    link; a big weights file is split across many connections).
+    def _refuse(reason: str) -> bool:
+        logger.error("PROVENANCE: %s NOT provisioned — %s. Workers take weights "
+                     "from central only (no Hugging Face fallback).",
+                     canonical, reason)
         if progress:
-            progress(0, 0, "source=central")
-        _t0 = time.time()
-        _t_start("central-transfer")
-        try:
-            if fetch_from_central(central_url, canonical, progress=progress):
-                logger.info("PROVENANCE: %s provisioned from CENTRAL (parallel)",
-                            canonical)
-                _t_done("central-transfer", _t0)
-                return True
-            central_alive = True             # returned False = a 409/empty VERDICT
-            central_reason = "central does not have the files (per-file 409/empty)"
-            _t_fail("central-transfer", central_reason)
-        except CentralUnreachable as exc:
-            central_reason = f"central unreachable (parallel): {exc}"
-            _t_fail("central-transfer", central_reason, exc)
-            logger.warning("central parallel transfer of %s: central UNREACHABLE "
-                           "(%s); trying archive", canonical, exc)
-        except Exception as exc:
-            central_alive = True             # any other error = central RESPONDED
-            central_reason = f"parallel transfer failed: {type(exc).__name__}: {exc}"
-            _t_fail("central-transfer", central_reason, exc)
-            logger.warning("central parallel transfer of %s failed: %s; "
-                           "trying archive", canonical, exc)
-        # 2) whole-directory tar stream — single-connection fallback.
-        _t0 = time.time()
-        _t_start("archive")
-        try:
-            if fetch_archive_from_central(central_url, canonical, progress=progress):
-                logger.info("PROVENANCE: %s provisioned from CENTRAL (archive)",
-                            canonical)
-                _t_done("archive", _t0)
-                return True
-            central_alive = True
-            central_reason = "central cannot provide the files (archive refused)"
-            _t_fail("archive", central_reason)
-        except CentralUnreachable as exc:
-            central_reason = f"central unreachable (archive): {exc}"
-            _t_fail("archive", central_reason, exc)
-            logger.warning("central archive of %s: central UNREACHABLE (%s)",
-                           canonical, exc)
-        except Exception as exc:
-            central_alive = True
-            central_reason = f"archive transfer failed: {type(exc).__name__}: {exc}"
-            _t_fail("archive", central_reason, exc)
-
-        # THE GATE. Central ALIVE (any verdict) => its "no" is authoritative;
-        # NO HF, unless the emergency escape hatch is set. Central UNREACHABLE
-        # on BOTH transports (central_alive stayed False) => HF survival path ok.
-        if not central_alive:
-            hf_ok = True
-        if central_alive and not hf_ok:
-            logger.error("PROVENANCE: %s NOT provisioned — central gave a verdict "
-                         "and HF is forbidden by chain of command (2026-07-17): "
-                         "%s. Set HUGPY_HF_FALLBACK=always to override.",
-                         canonical, central_reason)
-            if progress:
-                progress(0, 0, f"source=refused ({central_reason[:120]})")
-            # KEEP the sharper cause already recorded by the parallel/archive
-            # attempt. Those recorded an exception and therefore an errno; this
-            # gate has only a prose reason, and overwriting an "ENOSPC / disk
-            # full" record with "central gave a verdict" would re-flatten the
-            # exact diagnosis this whole change exists to preserve. Only record
-            # here when nothing sharper was captured.
-            if not (last_failure(canonical) or {}).get("errno_name"):
-                _record_failure(canonical, "central-transfer",
-                                f"{central_reason} (HF fallback forbidden by "
-                                f"chain of command)", dest_path=dest)
-            return False
-
-    logger.warning("PROVENANCE: %s falling back to HUGGING FACE — %s",
-                   canonical, central_reason)
-    _t0 = time.time()
-    _t_start("hf")
-    try:
-        if progress:
-            progress(0, 0, f"source=hf ({central_reason[:120]})")
-        fetch_from_hf(canonical)
-        logger.warning("PROVENANCE: %s provisioned from HUGGING FACE (%s)",
-                       canonical, central_reason)
-        _t_done("hf", _t0)
-        return True
-    except Exception as exc:
-        # LAST source exhausted. This failure — not the central one that
-        # preceded it — is the one the operator's chat should name, unless HF
-        # merely repeated a local problem (a full disk fails identically from
-        # every source, and "disk full" beats "HF said 404" every time).
-        _t_fail("hf", f"HF fetch failed: {type(exc).__name__}: {exc}", exc)
-        logger.error("could not provision %s from central or HF: %s "
-                     "(central: %s)", canonical, exc, central_reason)
+            progress(0, 0, f"source=refused ({reason[:120]})")
+        # KEEP a sharper errno-bearing cause already recorded by a transport.
+        if not (last_failure(canonical) or {}).get("errno_name"):
+            _record_failure(canonical, "central-transfer", reason, dest_path=dest)
         return False
 
+    if not central_url:
+        return _refuse("no central URL configured, and a worker has no other "
+                       "source for weights")
+
+    # 1) parallel + segmented per-file transfer — fastest (saturates the
+    #    link; a big weights file is split across many connections).
+    if progress:
+        progress(0, 0, "source=central")
+    _t0 = time.time()
+    _t_start("central-transfer")
+    try:
+        if fetch_from_central(central_url, canonical, progress=progress):
+            logger.info("PROVENANCE: %s provisioned from CENTRAL (parallel)",
+                        canonical)
+            _t_done("central-transfer", _t0)
+            return True
+        central_reason = "central does not have the files (per-file 404/409)"
+        _t_fail("central-transfer", central_reason)
+    except (CentralHoldsNoWeights, CentralCopyBroken) as exc:
+        # A verdict about central's COPY — the archive would carry the same
+        # projector-only set, so don't try it.
+        _t_fail("central-transfer", str(exc), exc)
+        return _refuse(str(exc))
+    except CentralUnreachable as exc:
+        central_reason = f"central unreachable (parallel): {exc}"
+        _t_fail("central-transfer", central_reason, exc)
+        logger.warning("central parallel transfer of %s: central UNREACHABLE "
+                       "(%s); trying archive", canonical, exc)
+    except Exception as exc:
+        central_reason = f"parallel transfer failed: {type(exc).__name__}: {exc}"
+        _t_fail("central-transfer", central_reason, exc)
+        logger.warning("central parallel transfer of %s failed: %s; "
+                       "trying archive", canonical, exc)
+    # 2) whole-directory tar stream — single-connection fallback (still central).
+    _t0 = time.time()
+    _t_start("archive")
+    try:
+        if fetch_archive_from_central(central_url, canonical, progress=progress):
+            logger.info("PROVENANCE: %s provisioned from CENTRAL (archive)",
+                        canonical)
+            _t_done("archive", _t0)
+            return True
+        central_reason = "central cannot provide the files (archive refused)"
+        _t_fail("archive", central_reason)
+    except (CentralHoldsNoWeights, CentralCopyBroken) as exc:
+        _t_fail("archive", str(exc), exc)
+        return _refuse(str(exc))
+    except CentralUnreachable as exc:
+        central_reason = f"central unreachable (archive): {exc}"
+        _t_fail("archive", central_reason, exc)
+        logger.warning("central archive of %s: central UNREACHABLE (%s)",
+                       canonical, exc)
+    except Exception as exc:
+        central_reason = f"archive transfer failed: {type(exc).__name__}: {exc}"
+        _t_fail("archive", central_reason, exc)
+
+    return _refuse(central_reason)

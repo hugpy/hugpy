@@ -149,6 +149,9 @@ ASPECT_SIZE = "size"
 SIZE_FIELDS: Tuple[str, ...] = (
     "dir_bytes", "size_bytes", "effective_bytes", "effective_gguf",
     "gguf_variants", "mmproj_bytes", "moe",
+    # 2026-09-23: where size_bytes came from (marker/manifest/dir_walk/
+    # gguf_effective), a qualifier, and — when it is None — WHY.
+    "size_source", "size_note", "size_reason",
 )
 # MARKER: the model's ``hugpy.json`` declared-identity blob, read off disk. Its
 # capability bools (moe_capable, bnb_capable) are what the WORKERS view asks per
@@ -171,15 +174,10 @@ _DEFAULT_MAX_AGE_S = 6 * 3600.0   # bounded staleness for changes nobody told us
 _DEFAULT_POLL_S = 1.0             # min gap between (mtime,size) revalidations
 
 
+from hugpy_storage.env import env_float
+
 def _env_float(name: str, default: float) -> float:
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.debug("ignoring non-numeric %s=%r", name, raw)
-        return default
+    return env_float(name, default, logger=logger)
 
 
 def max_age_seconds() -> float:

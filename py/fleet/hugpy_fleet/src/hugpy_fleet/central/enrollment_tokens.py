@@ -65,12 +65,8 @@ class EnrollmentTokenStore:
         self._ensure_parent()
 
     def _ensure_parent(self) -> None:
-        parent = os.path.dirname(self._path)
-        if parent:
-            try:
-                os.makedirs(parent, exist_ok=True)
-            except OSError:
-                pass
+        from hugpy_platform.filesystem import ensure_parent_best_effort
+        ensure_parent_best_effort(self._path)
 
     def _read_unlocked(self, fh=None) -> Dict[str, Dict[str, Any]]:
         """Parse the tokens map. A non-empty but unparseable file is CORRUPTION:

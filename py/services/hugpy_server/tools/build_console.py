@@ -19,8 +19,10 @@ copies into ui/dist/ are not copied over them.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,6 +38,77 @@ REQUIRED_KEYS = ("package_dir", "npm", "version", "target")
 
 class BuildError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------- freshness
+#
+# The pipeline never runs npm: the TRACKED console_dist/ is what ships. So a
+# React edit that nobody rebuilt would silently miss every promotion. A root
+# build from source writes SOURCE_STAMP (the content hash of react/ui/src) into
+# console_dist/; py/build_wheels.py and pkg_promote.build_members refuse to
+# build a wheel while react/ui/src hashes differently (falling back to "any src
+# file newer than console_dist/index.html" when no stamp exists yet).
+SOURCE_STAMP = "SOURCE_HASH.json"
+ROOT_SOURCE = Path("ui") / "src"
+REBUILD_HINT = "python py/services/hugpy_server/tools/build_console.py --from-source --only /"
+# Files that never reach the bundle (node --test suites) do not make it stale.
+_NOT_BUNDLED = re.compile(r"(\.test\.(m?js|jsx?|tsx?)$)|(^|/)__tests__/|(^|/)\.")
+
+
+def _bundled_files(src: Path) -> list[Path]:
+    out = []
+    for p in sorted(src.rglob("*")):
+        rel = p.relative_to(src).as_posix()
+        if p.is_file() and not _NOT_BUNDLED.search(rel):
+            out.append(p)
+    return out
+
+
+def source_hash(src: Path) -> str:
+    """sha256 over (relative path, bytes) of every bundled file under ``src``."""
+    h = hashlib.sha256()
+    for p in _bundled_files(src):
+        h.update(p.relative_to(src).as_posix().encode() + b"\0")
+        h.update(hashlib.sha256(p.read_bytes()).digest())
+    return h.hexdigest()
+
+
+def write_source_stamp(console_dist: Path, src: Path) -> Path:
+    stamp = console_dist / SOURCE_STAMP
+    stamp.write_text(json.dumps({"source": ROOT_SOURCE.as_posix(), "sha256": source_hash(src),
+                                 "files": len(_bundled_files(src))}, indent=1) + "\n", encoding="utf-8")
+    return stamp
+
+
+def console_staleness(src: Path, console_dist: Path, *, mtime_fallback: bool = True) -> str | None:
+    """None when console_dist was built from ``src`` as it is now; else why not
+    (always naming the rebuild command). No ``src`` (a wheel/sdist without the
+    React tree) -> None: there is nothing to be stale against."""
+    src, console_dist = Path(src), Path(console_dist)
+    if not src.is_dir():
+        return None
+    index = console_dist / "index.html"
+    if not index.is_file():
+        return f"console_dist has no index.html ({console_dist}); run: {REBUILD_HINT}"
+    stamp = console_dist / SOURCE_STAMP
+    if stamp.is_file():
+        try:
+            recorded = json.loads(stamp.read_text(encoding="utf-8")).get("sha256")
+        except (OSError, ValueError):
+            recorded = None
+        now = source_hash(src)
+        if recorded == now:
+            return None
+        return (f"console_dist is STALE: {src} (sha256 {now[:12]}) differs from the source the bundle "
+                f"was built from ({str(recorded)[:12]}); run: {REBUILD_HINT}")
+    if not mtime_fallback:
+        return f"console_dist carries no {SOURCE_STAMP} (built before stamping); run: {REBUILD_HINT}"
+    built = index.stat().st_mtime
+    newer = [p for p in _bundled_files(src) if p.stat().st_mtime > built]
+    if newer:
+        return (f"console_dist is STALE: {len(newer)} file(s) under {src} are newer than "
+                f"{index} (e.g. {newer[0].relative_to(src)}); run: {REBUILD_HINT}")
+    return None
 
 
 def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict:
@@ -263,6 +336,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.from_source:
                 dest = build_from_source(manifest, mount, react_root, console_dist,
                                          skip_install=args.skip_install)
+                if mount == "/":
+                    stamp = write_source_stamp(console_dist, react_root / ROOT_SOURCE)
+                    print(f"[build_console] stamped {stamp}", flush=True)
             else:
                 dest = build_from_npm(manifest, mount, console_dist)
             print(f"[build_console] {mount} -> {dest}", flush=True)

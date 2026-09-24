@@ -116,18 +116,7 @@ class BudgetRefusal(Exception):
         super().__init__(reason.get("reason") or "won't fit")
 
 
-def _human(n) -> str:
-    """Bytes -> a short human string. Mirrors provision._human's units so the
-    refusal reason reads the same as the transfer logs."""
-    if not n:
-        return "0 B"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    v = float(n)
-    i = 0
-    while v >= 1024 and i < len(units) - 1:
-        v /= 1024
-        i += 1
-    return f"{v:.1f} {units[i]}"
+from hugpy_platform.formatting import human_bytes as _human
 
 
 def cap_bytes(limits: dict | None) -> int | None:
@@ -298,9 +287,9 @@ def disk_reserve_bytes(limits: dict | None = None) -> int:
     50. The reserve is carved OUT of the disk_cache_gib allocation (see
     resolve_effective_cap), so it is also the inference headroom.
 
-    Mirrors the CENTRAL-side ``_disk_reserve_bytes`` (utils/workers.py) exactly —
-    same env var, same default — so the worker's own disk-free floor reads the
-    same number central's display budget uses. Sized to comfortably exceed the
+    Central imports this function as ``_disk_reserve_bytes`` — the same env var
+    and default give the worker's disk-free floor the same value as central's
+    display budget. Sized to comfortably exceed the
     largest single pull (~45 GiB) so provisioning never drives a volume to
     [Errno 28]. Override with ``HUGPY_WORKER_DISK_RESERVE_GIB`` (default 50).
 

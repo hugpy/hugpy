@@ -2,7 +2,6 @@
 
 import json
 import os
-import shutil
 
 from abstract_flask import get_bp
 from flask import abort, jsonify, request
@@ -35,12 +34,8 @@ api = HfApi(token=get_hf_token() or False)
 
 # ── helpers ───────────────────────────────────────────────────────────────
 def _free_bytes() -> int | None:
-    """Headroom on the filesystem where downloads actually land (MODELS_DIR)."""
-    try:
-        probe = MODELS_DIR if os.path.exists(MODELS_DIR) else "/"
-        return shutil.disk_usage(probe).free
-    except OSError:
-        return None
+    from hugpy_platform.filesystem import free_bytes as shared_free_bytes
+    return shared_free_bytes(MODELS_DIR)
 
 
 def _context_length(hub_id: str, files) -> int | None:
@@ -227,7 +222,7 @@ def hf_spec():
 
     try:
         payload = fetch_repo_info(hub_id, files_metadata=True,
-                                  force=refresh, api=api)
+                                  force=refresh, api=api, purpose="discovery")
     except Exception as exc:
         abort(502, description=f"Hugging Face request failed: {exc}")
     if payload is None:
@@ -332,6 +327,32 @@ def _stamp_civitai_provenance(dest: str, url: str, filename: str,
     except Exception as exc:  # noqa: BLE001
         logger.warning("civitai: central provenance row for %s failed: %s",
                        filename, exc)
+
+
+def _admit_checkpoint(filename: str) -> None:
+    """POST-DOWNLOAD ADMISSION for a Civitai checkpoint (2026-09-23): the same
+    install hook every HF download path calls. The catalog key is the comfy
+    row that claims this file (a curated staple), else the ``comfy-<stem>``
+    row the sweep synthesizes; the job finds the directory by that key once
+    the sweep has linked it. Never raises."""
+    import time as _time
+    try:
+        from hugpy_storage.admission import on_install_complete
+        from hugpy_storage.model_metadata import checkpoint_stem
+        key = f"comfy-{checkpoint_stem(filename)}"
+        try:
+            from hugpy_engine.config.models.models_config import get_models_dict
+            for k, row in (get_models_dict(dict_return=True) or {}).items():
+                if isinstance(row, dict) and row.get("framework") == "comfy" \
+                        and row.get("filename") == filename:
+                    key = row.get("model_key") or k
+                    break
+        except Exception:  # noqa: BLE001 — fall back to the synthesized key
+            pass
+        on_install_complete(None, key, source="civitai",
+                            captured_at=f"civitai:{filename}:{_time.time():.0f}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("civitai: admission enqueue for %s failed: %s", filename, exc)
 
 
 @search_bp.route("/civitai/search", methods=["GET"])
@@ -445,6 +466,7 @@ def civitai_download():
             os.replace(tmp, dest)
             st["status"] = "done"
             _stamp_civitai_provenance(dest, url, filename, provenance)
+            _admit_checkpoint(filename)
             logger.info("civitai: %s landed in /checkpoints — the sweep "
                         "registers it on the next registry read", filename)
         except Exception as exc:  # noqa: BLE001

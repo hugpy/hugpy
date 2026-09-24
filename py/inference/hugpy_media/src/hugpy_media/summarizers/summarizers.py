@@ -488,12 +488,7 @@ def summarize(
 
     p = get_preset(preset) if preset else SummaryPreset()
 
-    def _resolve(explicit, from_preset, schema_default):
-        if explicit is not None:
-            return explicit
-        if from_preset is not None:
-            return from_preset
-        return schema_default
+    from hugpy_platform.choices import first_not_none as _resolve
 
     _d = {f.name: f.default for f in SummaryRequest.__dataclass_fields__.values()}
 

@@ -9,11 +9,7 @@ from hugpy_platform.constants import (
     EXCLUDE_DIR_PREFIXES,
     HUGPY_MARKER,
 )
-def safe_path_part(value: str) -> str:
-    value = value.strip().replace("\\", "/")
-    value = re.sub(r"[^A-Za-z0-9._/\-]+", "_", value)
-    value = re.sub(r"/+", "/", value)
-    return value.strip("/")
+from hugpy_platform.paths import safe_path_part
 def safe_name(value: str) -> str:
     value = value.strip()
     value = value.replace("\\", "/")
@@ -300,19 +296,7 @@ def flat_destination(model: dict, root: str = DEFAULT_ROOT) -> str:
     return os.path.join(root, "models", runtime, hub_path)
 
 
-def _routing_as_cfg(model: dict):
-    """A minimal cfg shim for model_looks_downloaded from a bare routing dict
-    (which carries no ModelConfig). Only the fields the completeness gate reads
-    matter: framework (the gguf branch), filename/include (pin + vision), and
-    primary_task/tasks (the vision-needs-mmproj gate)."""
-    from types import SimpleNamespace
-    return SimpleNamespace(
-        framework=model.get("framework"),
-        filename=model.get("filename"),
-        include=model.get("include"),
-        primary_task=model.get("primary_task") or model.get("task"),
-        tasks=model.get("tasks"),
-    )
+from hugpy_storage.model_config_shim import model_config_shim as _routing_as_cfg
 
 
 def legacy_task_dirs(hub_path: str, runtime: str, root: str = DEFAULT_ROOT) -> list:

@@ -128,7 +128,7 @@ def _gguf_basenames(model_dir: str) -> list:
     out = []
     try:
         for fn in os.listdir(model_dir):
-            if fn.lower().endswith(".gguf") and not is_mmproj_file(fn):
+            if fn.lower().endswith(".gguf") and not is_mmproj_file(os.path.join(model_dir, fn)):
                 out.append(fn)
     except OSError:
         return []
@@ -264,7 +264,7 @@ def _mmproj_bytes(model_dir: str) -> int:
     try:
         for root, _dirs, files in os.walk(model_dir):
             for fn in files:
-                if fn.lower().endswith(".gguf") and is_mmproj_file(fn):
+                if fn.lower().endswith(".gguf") and is_mmproj_file(os.path.join(root, fn)):
                     try:
                         largest = max(largest,
                                       int(os.path.getsize(os.path.join(root, fn))))
@@ -302,7 +302,7 @@ def _servable_gguf_files(model_dir: str) -> list:
     try:
         for root, _dirs, files in os.walk(model_dir):
             for fn in files:
-                if not fn.lower().endswith(".gguf") or is_mmproj_file(fn):
+                if not fn.lower().endswith(".gguf") or is_mmproj_file(os.path.join(root, fn)):
                     continue
                 full = os.path.join(root, fn)
                 rel = os.path.relpath(full, model_dir)

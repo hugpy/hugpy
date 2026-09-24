@@ -1,7 +1,6 @@
 """Console-side presence helpers — the live ``model_status`` read and the
 install-marker writer. Flask-free: these are storage facts the HTTP layer
 merely shapes into responses."""
-import json
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -72,17 +71,7 @@ def model_status(model: dict) -> dict:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _status_cfg(model: dict):
-    """A minimal cfg shim for model_looks_downloaded from a registry/manifest
-    dict — only framework/filename/include/primary_task/tasks are read."""
-    from types import SimpleNamespace
-    return SimpleNamespace(
-        framework=model.get("framework"),
-        filename=model.get("filename"),
-        include=model.get("include"),
-        primary_task=model.get("primary_task") or model.get("task"),
-        tasks=model.get("tasks"),
-    )
+from hugpy_storage.model_config_shim import model_config_shim as _status_cfg
 
 def write_install_marker(destination: str, model_key: str, model: dict[str, Any]) -> None:
     # The marker IS the authoritative hugpy.json declared-identity read back by
@@ -94,7 +83,6 @@ def write_install_marker(destination: str, model_key: str, model: dict[str, Any]
     tasks = model.get("tasks") or ([primary] if primary else None)
     if tasks is not None and not isinstance(tasks, list):
         tasks = [tasks]
-    marker = os.path.join(destination, HUGPY_MARKER)
     payload = {
         "model_key": model_key,
         "hub_id": model.get("hub_id"),
@@ -106,10 +94,20 @@ def write_install_marker(destination: str, model_key: str, model: dict[str, Any]
         "include": model.get("include"),
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
+    # INSTALL MANIFEST (2026-09-23): an install record already captured is
+    # kept; otherwise capture it now from the files on disk (HF download
+    # metadata supplies sha256/revision when present — no Hub call).
+    from hugpy_storage.hugpy_marker import (MANIFEST_KEY, _save_marker,
+                                            build_install_manifest, read_hugpy_marker)
+    prior = (read_hugpy_marker(destination) or {}).get(MANIFEST_KEY)
+    try:
+        payload[MANIFEST_KEY] = (prior if isinstance(prior, dict)
+                                 else build_install_manifest(destination, source="huggingface"))
+    except Exception:  # noqa: BLE001 — the marker still lands without it
+        pass
 
     os.makedirs(destination, exist_ok=True)
-    with open(marker, "w", encoding="utf-8") as f:
-        f.write(json.dumps(payload, indent=2))
+    _save_marker(destination, payload)          # atomic (temp + os.replace)
 
 
 

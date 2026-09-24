@@ -428,8 +428,13 @@ def test_slot_threads_the_size_up_layer_count_into_the_load(monkeypatch):
 
 
 def test_slot_leaves_the_load_untouched_without_a_size_up(monkeypatch):
-    """A plain 'proceed' verdict (nothing to size up) must leave the /load body
-    byte-identical to today — no n_gpu_layers injected."""
+    """A plain 'proceed' verdict (nothing to size up) must not inject any size-up
+    n_gpu_layers into the /load body. The alloc-mismatch-provenance round
+    (2026-09-23) makes every /load body additionally carry alloc_requested /
+    alloc_source so a seat records what it was loaded FOR — with nothing
+    requested those are the 'default' provenance stamp, and no reload_reason
+    is present. The load-bearing invariant here is unchanged: NO size-up
+    n_gpu_layers is injected."""
     from hugpy_engine.serve import slots as S
 
     posted = {}
@@ -444,7 +449,15 @@ def test_slot_leaves_the_load_untouched_without_a_size_up(monkeypatch):
                         lambda url, body, timeout: (posted.update(body),
                                                     {"endpoint": "e"})[1])
     pool.endpoint_for("m")
-    assert posted == {"model_key": "m"}
+    # the seat request itself: model_key only, NO size-up n_gpu_layers injected
+    assert posted["model_key"] == "m"
+    assert "n_gpu_layers" not in posted, "no size-up injected on a plain proceed"
+    # provenance stamp: nothing was requested -> 'default' source, empty request
+    assert posted["alloc_requested"] == {"alloc_mode": None, "n_gpu_layers": None}
+    assert posted["alloc_source"] == {"kind": "default"}
+    assert "reload_reason" not in posted, "no reload on a first seat"
+    # exactly those keys — the body carries no other stowaways
+    assert set(posted) == {"model_key", "alloc_requested", "alloc_source"}
 
 
 def test_slot_explicit_ngl_in_opts_skips_the_size_up(monkeypatch):

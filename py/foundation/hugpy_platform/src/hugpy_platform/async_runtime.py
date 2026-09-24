@@ -31,6 +31,7 @@ the behaviour is byte-identical to before.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import logging
 import concurrent.futures as _cf
@@ -126,6 +127,13 @@ def run(coro, *, alive=None):
             raise client_liveness.ClientGone(
                 "the client disconnected before the reply was ready; the "
                 "in-flight work was cancelled and its slot released")
+
+
+def await_sync(value):
+    """Resolve an awaitable on the process loop or return a plain value."""
+    if not inspect.isawaitable(value):
+        return value
+    return run(value)
 
 
 def call_soon_threadsafe(callback, *args) -> None:

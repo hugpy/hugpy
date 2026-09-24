@@ -68,11 +68,7 @@ logger = logging.getLogger(__name__)
 _MEMBER_SURFACE = re.compile(r"^/(media|ml|uploads|session|chat|prompt)(/|$)")
 
 
-def _normalized_path() -> str:
-    path = request.path or "/"
-    if path == "/api" or path.startswith("/api/"):
-        path = path[len("/api"):] or "/"
-    return path
+from hugpy_server.app.auth_common import normalized_path as _normalized_path
 
 
 def _is_member_surface() -> bool:
@@ -125,14 +121,7 @@ def _member_authorized() -> bool:
     return False
 
 
-def _is_shell_request() -> bool:
-    """True when the request is a browser navigation for an SPA shell (as opposed
-    to an XHR/fetch to a data route) — used only to choose the DENY SHAPE.
-    Identical rule to video_auth._is_shell_request (the shell catch-all's
-    endpoint, with a Sec-Fetch-Dest fallback); both branches are denials."""
-    if request.endpoint == "_hugpy_ui":
-        return True
-    return request.headers.get("Sec-Fetch-Dest") == "document"
+from hugpy_server.app.auth_common import is_shell_request as _is_shell_request
 
 
 def install_member_gate(app) -> None:

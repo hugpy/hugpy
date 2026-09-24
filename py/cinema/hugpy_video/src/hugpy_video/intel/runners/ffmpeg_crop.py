@@ -29,11 +29,7 @@ from hugpy_video.intel.result_schema import JobError, JobResult
 _CROPS_DIR = os.path.join(DEFAULT_ROOT, "video_intel", "crops")
 
 
-def _fmt_num(x) -> str:
-    """Compact numeric string for ffmpeg (avoid '1.5000000000001' noise)."""
-    if isinstance(x, float) and x.is_integer():
-        return str(int(x))
-    return repr(x) if isinstance(x, float) else str(x)
+from hugpy_platform.formatting import ffmpeg_num as _fmt_num
 
 
 def run_crop(spec: CropSpec, job_id: str) -> JobResult:

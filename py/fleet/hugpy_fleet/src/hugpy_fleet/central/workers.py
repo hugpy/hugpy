@@ -74,6 +74,11 @@ def _remember_assignments(worker: Dict[str, Any]) -> None:
             "name": worker.get("name"),
             "models": list(worker.get("models") or []),
             "spill_by_model": dict(worker.get("spill_by_model") or {}),
+            # PIN + DESIGNATION PROVENANCE (2026-09-23): {model_key: {source, at,
+            # pinned?, pinned_by?, pinned_at?}} rides the same sidecar so a row-
+            # loss restore knows which designations are operator intent (pinned
+            # / operator) and which were automation's transient ones.
+            "designation_meta": dict(worker.get("designation_meta") or {}),
             "remembered_at": _now(),
         }
         # Durable HARDWARE FACTS ride the same sidecar so they survive even a
@@ -391,6 +396,162 @@ def constraints_url(base_url: str) -> str:
 
 def _now() -> float:
     return time.time()
+
+
+# ── PIN vs DESIGNATION (operator, 2026-09-23) ───────────────────────────────
+# "the pin ... is meant to indicate what the user wants allocated to those
+# workers. meaning that it should allocate only those that are pinned if the
+# hugpy api restarts." Two concepts, both explicit, both recorded per (worker,
+# model) in ``worker["designation_meta"]`` beside ``worker["models"]`` (the
+# plain designation list stays exactly as it was, for every old reader):
+#
+#   * PIN — operator intent: "I want this resident on this worker". Only an
+#     operator action sets/clears it (POST /llm/workers/<id>/pin, pin-all,
+#     unpin-all). Pinned models are what central (re)loads onto the worker
+#     after a WORKER boot or a CENTRAL restart (worker_routes._pin_restore_warm),
+#     from the files already on that worker's disk. Pinning never evicts and
+#     never forces placement.
+#   * DESIGNATION SOURCE — who wrote the designation ("operator", or one of the
+#     automated sources below) and when. Automated designations are TRANSIENT:
+#     never restored on a row-loss re-register, never reloaded on restart, and
+#     pruned (prune_designations) once the model is not loaded and has not been
+#     called on that worker for N hours.
+#
+# A record's ``pinned`` key is TRI-STATE: absent = no central decision yet, so
+# the legacy agent-side 📌 (``config.pinned``, which rides every heartbeat)
+# still reads through; True/False = the operator's central decision, which wins.
+DESIGNATION_SOURCES = ("operator", "benchmark", "admission", "model_group",
+                       "autoplace")
+AUTOMATED_DESIGNATION_SOURCES = frozenset(
+    ("benchmark", "admission", "model_group", "autoplace"))
+UNRECORDED_SOURCE = "unrecorded"   # designations written before provenance existed
+
+
+def _norm_source(source: Optional[str]) -> Optional[str]:
+    s = str(source or "").strip().lower()
+    return s if s in DESIGNATION_SOURCES else None
+
+
+def effective_pin(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
+    """``{pinned, origin, by, at}`` for one (worker, model). ``origin`` is
+    "central" (the operator's recorded decision) or "agent" (a legacy 📌 in the
+    worker agent's own settings, read through only while central has no
+    decision); None when unpinned."""
+    meta = (worker.get("designation_meta") or {}).get(model_key) or {}
+    if "pinned" in meta:
+        on = bool(meta.get("pinned"))
+        return {"pinned": on, "origin": "central" if on else None,
+                "by": meta.get("pinned_by"), "at": meta.get("pinned_at")}
+    legacy = bool(((worker.get("config") or {}).get("pinned") or {}).get(model_key))
+    return {"pinned": legacy, "origin": "agent" if legacy else None,
+            "by": None, "at": None}
+
+
+def pinned_keys(worker: Dict[str, Any]) -> List[str]:
+    """Every model pinned to this worker (designated or not), pin time first."""
+    keys = set(worker.get("models") or []) | set(worker.get("designation_meta") or {})
+    keys |= set(((worker.get("config") or {}).get("pinned") or {}))
+    rows = [(effective_pin(worker, mk), mk) for mk in keys]
+    rows = [(p.get("at") or 0.0, mk) for p, mk in rows if p["pinned"]]
+    return [mk for _at, mk in sorted(rows)]
+
+
+def _last_call(worker: Dict[str, Any], model_key: str) -> Optional[float]:
+    """Newest recorded call of this model ON THIS worker (epoch) or None."""
+    stamps = [(worker.get("model_last_picked") or {}).get(model_key),
+              ((worker.get("model_call_stats") or {}).get(model_key) or {}).get("last_call")]
+    stamps = [float(s) for s in stamps if isinstance(s, (int, float)) and s]
+    return max(stamps) if stamps else None
+
+
+def _resident_keys(worker: Dict[str, Any]) -> set:
+    return (set(worker.get("loaded_models") or []) | set(worker.get("loading") or [])
+            | set(worker.get("provisioning") or []))
+
+
+def designation_rows(worker: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The ``designations`` rows of ``GET /llm/workers`` — one per designated
+    model: ``{model_key, pinned, pin_origin, pinned_by, pinned_at, source, at,
+    last_call, loaded}``, every value read off the record (never inferred)."""
+    meta_all = worker.get("designation_meta") or {}
+    resident = _resident_keys(worker)
+    out = []
+    for mk in (worker.get("models") or []):
+        meta = meta_all.get(mk) or {}
+        pin = effective_pin(worker, mk)
+        out.append({
+            "model_key": mk,
+            "pinned": pin["pinned"],
+            "pin_origin": pin["origin"],
+            "pinned_by": pin["by"],
+            "pinned_at": pin["at"],
+            "source": meta.get("source") or UNRECORDED_SOURCE,
+            "at": meta.get("at"),
+            "last_call": _last_call(worker, mk),
+            "loaded": mk in resident,
+        })
+    return out
+
+
+def designation_prune_hours() -> float:
+    """Idle bound for the automated-designation prune (env-tunable, default 24h,
+    clamped to 1h..30d so a typo can neither prune everything nor nothing)."""
+    try:
+        h = float(os.environ.get("HUGPY_DESIGNATION_PRUNE_HOURS", "24"))
+    except ValueError:
+        h = 24.0
+    return min(max(h, 1.0), 720.0)
+
+
+def designation_prune_plan(worker: Dict[str, Any], *, max_age_s: float,
+                           include_unrecorded: bool = False,
+                           now: Optional[float] = None) -> Dict[str, Any]:
+    """PURE: which designations the prune would remove, and why.
+
+    A designation is removed only when ALL hold: it is not pinned; its source
+    is automated (or ``unrecorded`` and the caller opted in); the model is not
+    loaded / loading / provisioning here and is not 🔒static here; it has not
+    been called on this worker within ``max_age_s``; and (when its designation
+    time is recorded) it was designated longer ago than ``max_age_s``.
+    Operator designations are never pruned."""
+    now = _now() if now is None else now
+    meta_all = worker.get("designation_meta") or {}
+    resident = _resident_keys(worker)
+    static = {k for k, v in (((worker.get("config") or {}).get("residency")) or {}).items()
+              if v == "static"}
+    hours = max_age_s / 3600.0
+    remove, kept = [], {}
+
+    def keep(why):
+        kept[why] = kept.get(why, 0) + 1
+
+    for mk in (worker.get("models") or []):
+        meta = meta_all.get(mk) or {}
+        source = meta.get("source") or UNRECORDED_SOURCE
+        at = meta.get("at")
+        last = _last_call(worker, mk)
+        if effective_pin(worker, mk)["pinned"]:
+            keep("pinned"); continue
+        if source == "operator":
+            keep("operator"); continue
+        if source == UNRECORDED_SOURCE and not include_unrecorded:
+            keep("unrecorded"); continue
+        if mk in resident:
+            keep("loaded"); continue
+        if mk in static:
+            keep("static"); continue
+        if last is not None and now - last < max_age_s:
+            keep("recent_call"); continue
+        if isinstance(at, (int, float)) and now - at < max_age_s:
+            keep("recent_designation"); continue
+        why = (f"{source} designation, not loaded, "
+               + (f"last called here {(now - last) / 3600.0:.1f}h ago"
+                  if last is not None else "never called on this worker")
+               + f" (bound {hours:g}h)")
+        remove.append({"model_key": mk, "source": source, "at": at,
+                       "last_call": last, "loaded": False, "reason": why})
+    return {"remove": remove, "kept": kept, "max_age_hours": hours,
+            "include_unrecorded": bool(include_unrecorded)}
 
 
 # ── operator model BLOCK (central serving-pool primitive) ────────────────────
@@ -938,6 +1099,11 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # wedged the card) can never happen again. Read-time and pure like every
         # other derivation here; never raises into a worker read.
         "vram_squatters": _vram_squatters(worker),
+        # PIN + DESIGNATION PROVENANCE (2026-09-23) — feature-additive: one row
+        # per designated model {model_key, pinned, pin_origin, pinned_by,
+        # pinned_at, source, at, last_call, loaded}. The plain ``models`` list
+        # above is unchanged for old clients.
+        "designations": designation_rows(worker),
     }
 
 
@@ -1142,6 +1308,16 @@ def _comfy_id_lock_capable(worker: Dict[str, Any]) -> bool:
     if not isinstance(comfy, dict) or not comfy.get("available"):
         return False
     return bool(comfy.get("id_lock"))
+
+
+def _comfy_available(worker: Dict[str, Any]) -> bool:
+    """Whether ``worker``'s adopted ComfyUI backend is answering — the heartbeat
+    ``comfy.available`` flag (its own /system_stats probe). A comfy-framework
+    model is served by that EXTERNAL backend, so a box whose comfy is not
+    answering can only produce a connection-refused at request time and must
+    never be a candidate for it."""
+    comfy = worker.get("comfy")
+    return isinstance(comfy, dict) and bool(comfy.get("available"))
 
 
 def _has_usable_gpu(worker: Dict[str, Any]) -> bool:
@@ -1441,36 +1617,7 @@ def _bar_public_fields(bar: Optional[Dict[str, Any]],
     })
 
 
-def _disk_reserve_bytes(limits: Optional[Dict[str, Any]] = None) -> int:
-    """Free-space reserve (bytes) kept on a worker's MODEL-ROOT volume.
-
-    Resolution: per-worker ``limits.disk_reserve_gib`` -> env
-    ``HUGPY_WORKER_DISK_RESERVE_GIB`` -> 50. Mirrors worker_agent/budget.py
-    ``disk_reserve_bytes`` exactly (Parity). Carved OUT of disk_cache_gib.
-
-    Below this reserve a worker is "over budget" and its COLD local models become
-    eviction candidates. Sized to comfortably exceed the largest single model
-    pull (~45 GiB per the model_cache header note) so a provision can always land
-    after one eviction. Override with ``HUGPY_WORKER_DISK_RESERVE_GIB`` (default
-    50). This is DISTINCT from ``HUGPY_MODEL_CACHE_MAX_GIB`` (=450, the separate
-    SSD hot-cache bound in managers/serve/model_cache.py) — do not conflate: this
-    reserve is on the model-root disk, not the SSD cache.
-    """
-    gib = None
-    v = (limits or {}).get("disk_reserve_gib") if isinstance(limits, dict) else None
-    if v not in (None, ""):
-        try:
-            gib = float(v)
-        except (TypeError, ValueError):
-            gib = None
-    if gib is None:
-        try:
-            gib = float(os.environ.get("HUGPY_WORKER_DISK_RESERVE_GIB", "50"))
-        except (TypeError, ValueError):
-            gib = 50.0
-    if gib < 0:
-        gib = 0.0
-    return int(gib * (1 << 30))
+from hugpy_fleet.worker.budget import disk_reserve_bytes as _disk_reserve_bytes
 
 
 def _registry_row(model_key: str) -> Optional[Dict[str, Any]]:
@@ -2800,43 +2947,7 @@ def storage_proposal(worker: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _match_keys(model_key: str) -> set:
-    """Normalized aliases a model might be named by, for tolerant matching.
-
-    A model can be referenced as its registry key, its hub_id (owner/name), or
-    just the trailing name — and with different case. We compare on the set of
-    these forms so an assignment made via one spelling still routes a chat that
-    uses another. Example: "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
-    "Qwen2.5-Coder-3B-Instruct-GGUF" and the lowercased variants all match.
-
-    "~"-TAIL UNIFICATION (key-match unification, operator doctrine 2026-07-23).
-    Registry keys qualify a base name with its owner via "~" ("Qwen~X",
-    "unsloth~X") while workers routinely serve/report the BARE base name ("X").
-    Before this, the two spellings never intersected — the k30 class of
-    invisible mismatches: a designation carries the ~-qualified key, the
-    worker's loaded/models list carries the bare one, and routing looked at a
-    box actually holding the model and said "not serveable here". Operator
-    doctrine: a specific call may try any same-base sibling — so the "~"-tail
-    is an alias exactly like the "/"-tail. "Qwen~X" -> {"Qwen~X", "qwen~x",
-    "X", "x"}; bare "X" -> {"X", "x"}; qualified and bare now intersect in BOTH
-    directions. (Two different owners of the SAME base intersect too — the
-    blocked-sibling guard in _serveable_match is what keeps that from serving a
-    BLOCKED sibling under an unblocked name.) Raw forms stay first-class; the
-    tails are additions, never replacements.
-    """
-    if not model_key:
-        return set()
-    raw = str(model_key).strip()
-    forms = {raw, raw.lower()}
-    tail = raw.split("/")[-1]
-    forms.add(tail)
-    forms.add(tail.lower())
-    if "~" in raw:
-        base = raw.split("~", 1)[1]
-        if base:
-            forms.add(base)
-            forms.add(base.lower())
-    return forms
+from hugpy_platform.model_keys import model_key_forms as _match_keys
 
 
 def _serveable_match(model_key: str, wanted: set, serveable) -> bool:
@@ -3265,12 +3376,8 @@ class WorkerStore:
 
     # -- persistence (disk-authoritative) ----------------------------------
     def _ensure_parent(self) -> None:
-        parent = os.path.dirname(self._path)
-        if parent:
-            try:
-                os.makedirs(parent, exist_ok=True)
-            except OSError:
-                pass
+        from hugpy_platform.filesystem import ensure_parent_best_effort
+        ensure_parent_best_effort(self._path)
 
     def _read_unlocked(self, fh=None) -> Dict[str, Dict[str, Any]]:
         """Parse the workers map from an open fh, or from disk if none given.
@@ -3426,6 +3533,10 @@ class WorkerStore:
                     role=role or existing.get("role", "worker"),
                     last_seen=_now(),
                 )
+                # A register IS an agent (re)boot: stamp it so central's pin-
+                # restore (worker_routes._pin_restore_warm) reloads this worker's
+                # PINNED models once for the new agent process.
+                existing["agent_boot_at"] = _now()
                 if models is not None:
                     existing["models"] = sorted(set(models))
                 if pkg_version is not None:
@@ -3480,11 +3591,32 @@ class WorkerStore:
             remembered = _load_assign_memory().get(wid) if worker_id else None
             restored_models: List[str] = []
             restored_spill: Dict[str, Any] = {}
+            restored_meta: Dict[str, Any] = {}
             restored_gpu_known = None
             restored_ram_known = None
             if remembered:
                 restored_models = list(remembered.get("models") or [])
                 restored_spill = dict(remembered.get("spill_by_model") or {})
+                # PIN vs DESIGNATION (2026-09-23): automation's designations are
+                # TRANSIENT — a row-loss restore brings back only operator
+                # intent (pinned, operator-authored, or pre-provenance
+                # "unrecorded"), never a benchmark/admission/model-group/
+                # autoplace designation that nobody pinned.
+                restored_meta = dict(remembered.get("designation_meta") or {})
+                _transient = {
+                    mk for mk, m in restored_meta.items()
+                    if isinstance(m, dict)
+                    and m.get("source") in AUTOMATED_DESIGNATION_SOURCES
+                    and not m.get("pinned")}
+                if _transient:
+                    logger.info("register: NOT restoring %d automated "
+                                "designation(s) for %s: %s", len(_transient),
+                                name or wid, sorted(_transient))
+                    restored_models = [mk for mk in restored_models
+                                       if mk not in _transient]
+                    for _mk in _transient:
+                        restored_spill.pop(_mk, None)
+                        restored_meta.pop(_mk, None)
                 # k67 item G — a BLOCKED model has no live placement contract, so
                 # its remembered spill row is INERT. Resurrecting it on a registry
                 # loss just regrows the exact stale bare rows the operator hand-
@@ -3517,6 +3649,7 @@ class WorkerStore:
                 "gpus": gpus or [],
                 "models": sorted(set(models or []) | set(restored_models)),
                 "spill_by_model": restored_spill,
+                "designation_meta": restored_meta,
                 "pkg_version": pkg_version,
                 "engine_build": engine_build,   # item L (k65) — native engine commit
                 "rpc_endpoint": rpc_endpoint,
@@ -3548,6 +3681,7 @@ class WorkerStore:
                 "admission": "pending",
                 "created_at": _now(),
                 "last_seen": _now(),
+                "agent_boot_at": _now(),   # pin-restore epoch (see above)
             }
             # Inherit durable hardware facts remembered for this id (a returning
             # worker whose live row was lost keeps its totals immediately), then
@@ -3605,6 +3739,7 @@ class WorkerStore:
         aggregate: Optional[Dict[str, Any]] = None,
         environment_digest: Optional[Dict[str, Any]] = None,
         doctrine_status: Optional[Dict[str, Any]] = None,
+        load_bytes_per_s: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Mark a worker alive and refresh its live GPU / loaded-model stats."""
         with self._transaction() as workers:
@@ -3743,6 +3878,11 @@ class WorkerStore:
                 worker["environment_digest"] = environment_digest
             if doctrine_status is not None:
                 worker["doctrine_status"] = doctrine_status
+            if isinstance(load_bytes_per_s, (int, float)) and load_bytes_per_s > 0:
+                # Measured central->worker rate; read by the benchmark's
+                # cold-load budget (fleet_grading._cold_budget). A None beat
+                # (no provision since restart) keeps the last known rate.
+                worker["load_bytes_per_s"] = float(load_bytes_per_s)
             if vram_evictions is not None:
                 # VRAM eviction churn (slice 10): stored verbatim so the console
                 # can surface GPU evict-to-fit churn beside the disk reaps.
@@ -3905,8 +4045,20 @@ class WorkerStore:
         worker_id: str,
         model_key: str,
         spill: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
+        retag: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Assign a model to a worker, with optional per-assignment spill config.
+
+        ``source`` records WHO designated it ("operator" | "benchmark" |
+        "admission" | "model_group" | "autoplace"; None/unknown → "unrecorded")
+        and ``at`` when, in ``designation_meta``. A NEW designation always takes
+        the caller's source. On an EXISTING one: an automated source never
+        overwrites an operator designation (it only refreshes ``at`` of another
+        automated one); an operator source with ``retag=True`` (an explicit
+        operator assign) adopts it as operator-owned; ``retag=False`` (a spill-
+        only edit such as alloc-all) leaves provenance untouched. The pin is
+        never touched here — only set_pin changes it.
 
         ``spill`` is an opaque dict of GPU/CPU knobs (e.g. n_gpu_layers,
         gpu_mem_gib, cpu_mem_gib) the worker applies when it loads the model.
@@ -3931,6 +4083,7 @@ class WorkerStore:
             if worker is None:
                 return None
             models = set(worker.get("models", []))
+            is_new = model_key not in models
             models.add(model_key)
             worker["models"] = sorted(models)
             if spill is not None:
@@ -3940,6 +4093,19 @@ class WorkerStore:
                     by_model[model_key] = spill
                 else:
                     by_model.pop(model_key, None)
+            src = _norm_source(source)
+            meta_all = worker.setdefault("designation_meta", {})
+            meta = dict(meta_all.get(model_key) or {})
+            prior = meta.get("source")
+            if is_new or not prior:
+                meta["source"] = src or UNRECORDED_SOURCE
+                meta["at"] = _now()
+            elif src == "operator" and retag and prior != "operator":
+                meta["source"], meta["at"] = "operator", _now()
+            elif (src in AUTOMATED_DESIGNATION_SOURCES
+                  and prior in AUTOMATED_DESIGNATION_SOURCES):
+                meta["source"], meta["at"] = src, _now()
+            meta_all[model_key] = meta
             _remember_assignments(worker)   # 4b: designations survive row loss
             return _public_view(worker)
 
@@ -4009,8 +4175,63 @@ class WorkerStore:
             # honestly what an unassigned-then-reassigned model has.
             worker.get("model_call_stats", {}).pop(model_key, None)
             worker.get("model_tok_stats", {}).pop(model_key, None)
+            worker.get("designation_meta", {}).pop(model_key, None)
             _remember_assignments(worker)   # 4b: an explicit unassign IS forgotten
             return _public_view(worker)
+
+    # -- PIN (operator intent) + automated-designation prune (2026-09-23) -----
+    def set_pin(self, worker_id: str, model_key: str, pinned: bool,
+                by: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Record the operator's pin decision for (worker, model). Pinning an
+        undesignated model designates it (source "operator") — a pin IS operator
+        intent to have it here. Unpinning keeps the designation (use unassign to
+        drop it) and records an explicit False, which also overrides a legacy
+        agent-side 📌. Nothing is loaded or evicted here."""
+        with self._transaction() as workers:
+            worker = workers.get(worker_id)
+            if worker is None:
+                return None
+            meta_all = worker.setdefault("designation_meta", {})
+            meta = dict(meta_all.get(model_key) or {})
+            if pinned and model_key not in (worker.get("models") or []):
+                worker["models"] = sorted(set(worker.get("models") or []) | {model_key})
+                meta["source"], meta["at"] = "operator", _now()
+            meta.setdefault("source", UNRECORDED_SOURCE)
+            meta["pinned"] = bool(pinned)
+            meta["pinned_by"] = by or "operator"
+            meta["pinned_at"] = _now()
+            meta_all[model_key] = meta
+            _remember_assignments(worker)
+            return _public_view(worker)
+
+    def prune_designations(self, worker_id: str, *, max_age_s: float,
+                           include_unrecorded: bool = False,
+                           apply: bool = False) -> Optional[Dict[str, Any]]:
+        """Plan (and, with ``apply``, execute) the automated-designation prune
+        for one worker — see designation_prune_plan for the rule. Removal is the
+        same registry drop as unassign (designation, spill row, LRU stamp, call
+        stats, provenance); nothing on the worker is unloaded or deleted."""
+        with self._transaction() as workers:
+            worker = workers.get(worker_id)
+            if worker is None:
+                return None
+            plan = designation_prune_plan(worker, max_age_s=max_age_s,
+                                          include_unrecorded=include_unrecorded)
+            plan["applied"] = bool(apply)
+            if apply and plan["remove"]:
+                drop = {r["model_key"] for r in plan["remove"]}
+                worker["models"] = sorted(set(worker.get("models") or []) - drop)
+                for mk in drop:
+                    for field in ("spill_by_model", "model_last_picked",
+                                  "model_call_stats", "model_tok_stats",
+                                  "designation_meta"):
+                        (worker.get(field) or {}).pop(mk, None)
+                _remember_assignments(worker)
+                logger.info("designation prune on %s: removed %d: %s",
+                            worker.get("name") or worker_id, len(drop), sorted(drop))
+            plan["worker_id"] = worker_id
+            plan["worker"] = worker.get("name") or worker_id
+            return plan
 
     # -- placement grants (Phase 1 item 2) -----------------------------------
     # A GRANT is a SYSTEM-authored designation — born from a future
@@ -4233,7 +4454,18 @@ class WorkerStore:
                 reports.pop(model_key, None)
             else:
                 reports[model_key] = report
-            return _public_view(worker)
+            out = _public_view(worker)
+            who = {"id": worker_id, "name": worker.get("name")}
+        # A FAILED report is also one load/fail row in the metrics store
+        # (2026-09-23), deduped by the report's ts — outside the transaction,
+        # fail-open (metrics never break the registry write).
+        if report is not None and report.get("ok") is False:
+            try:
+                from hugpy_fleet.central.model_metrics import record_load_report_failure
+                record_load_report_failure(who, model_key, report)
+            except Exception:  # noqa: BLE001
+                logger.debug("load-fail metrics skipped for %s", model_key, exc_info=True)
+        return out
 
     # -- queries ------------------------------------------------------------
     def get(self, worker_id: str) -> Optional[Dict[str, Any]]:
@@ -4278,9 +4510,17 @@ class WorkerStore:
         # the per-worker lookup below is then a dict hit. Guarded inside
         # _wildcard_map: a store miss degrades to "nobody is a wildcard".
         wildcards = _wildcard_map()
+        # COMFY-FRAMEWORK models are served by the worker's EXTERNAL ComfyUI, not
+        # its in-process engine — resolved ONCE per call (not per worker). A comfy
+        # model routed to a box whose comfy backend isn't answering can only yield
+        # a connection-refused at request time (comfy-dreamshaper-8 × computron,
+        # 2026-09-23), so such a box is gated out below on the affirmative
+        # comfy.available signal — never the legacy-permissive task default.
+        _comfy_model = (_model_engine(model_key) == "comfy")
         tier_skipped = 0
         task_skipped = 0
         id_lock_skipped = 0
+        comfy_down_skipped = 0
         infeasible_skipped = 0
         engine_skipped = 0
         wildcard_engine_skipped = 0
@@ -4404,6 +4644,16 @@ class WorkerStore:
             if not _task_capable(w, task):
                 task_skipped += 1
                 continue
+            # COMFY-BACKEND liveness gate (2026-09-23): a comfy-framework model
+            # only serves through the box's adopted ComfyUI. Require the
+            # affirmative comfy.available signal — the legacy-permissive
+            # _task_capable default would otherwise offer a box whose comfy is
+            # dead/absent, and every dispatch there returns connection-refused.
+            # Affirmative-only, like the id_lock gate; a HOME assignment does not
+            # exempt it (an assigned box with no live comfy cannot serve).
+            if _comfy_model and not _comfy_available(w):
+                comfy_down_skipped += 1
+                continue
             # ID-LOCK routing gate (identity-locked STILLs): an id_lock image
             # request must land on a box whose ComfyUI PROVABLY has the IPAdapter
             # nodes (comfy.id_lock). Affirmative-only — never route id_lock to a
@@ -4526,6 +4776,17 @@ class WorkerStore:
                 "model %s id_lock: %d otherwise-eligible worker(s) skipped — no "
                 "box advertises comfy.id_lock (install ComfyUI_IPAdapter_plus + "
                 "weights per WORKER-SETUP §5b)", model_key, id_lock_skipped)
+        if not out and comfy_down_skipped:
+            # The comfy model HAS servers — every one was excluded because its
+            # ComfyUI backend is not answering (heartbeat comfy.available
+            # false/absent). Name it so the operator restarts ComfyUI on those
+            # boxes instead of seeing only the downstream no-worker error.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "model %s: %d otherwise-eligible worker(s) skipped — their ComfyUI "
+                "backend is not answering (comfy.available false/absent); start "
+                "ComfyUI on those boxes or assign one whose comfy is live",
+                model_key, comfy_down_skipped)
         if not out and infeasible_skipped:
             # The model HAS servers — every one was excluded because the model
             # does not fit that box's GPU+RAM combined (statically infeasible).
@@ -4792,39 +5053,45 @@ class WorkerStore:
         store — all return False and record nothing. Never raises.
 
         Returns True iff a sample was actually recorded.
+
+        ``tok_s`` None (2026-09-23): the call completed but the engine gave no
+        decode rate (a 1-token reply, an image call, an old worker). The rate
+        EMAs are skipped; the call-ledger row (model_calls) is still appended —
+        every completed call is recorded, a missing rate is recorded as absent.
         """
-        if tok_s is None:
-            return False
-        try:
-            v = float(tok_s)
-        except (TypeError, ValueError):
-            return False
-        if not (v > 0.0) or v != v or v in (float("inf"), float("-inf")):
-            return False
+        v: Optional[float] = None
+        if tok_s is not None:
+            try:
+                v = float(tok_s)
+            except (TypeError, ValueError):
+                v = None
+            if v is not None and (not (v > 0.0) or v != v
+                                  or v in (float("inf"), float("-inf"))):
+                v = None
         now = _now()
         state: Dict[str, Any] = {}
+        mrow: Dict[str, Any] = {}
         try:
             with self._transaction() as workers:
                 stored = workers.get(worker_id)
                 if stored is None:
                     return False
-                row = stored.setdefault("model_call_stats", {}).setdefault(
-                    model_key, {"calls": 0})
-                if not isinstance(row, dict):
-                    return False
-                ok = _record_tok_s(row, v)
-                if not ok:
-                    return False
-                # (b) per-(worker,model) rollup + (c) per-worker rollup
-                mts = stored.setdefault("model_tok_stats", {})
-                mrow = mts.get(model_key)
-                if not isinstance(mrow, dict):
-                    mrow = mts[model_key] = {}
-                _rollup_tok_stats(mrow, v, now)
-                ts = stored.get("tok_stats")
-                if not isinstance(ts, dict):
-                    ts = stored["tok_stats"] = {}
-                _rollup_tok_stats(ts, v, now, model_key=model_key)
+                if v is not None:
+                    row = stored.setdefault("model_call_stats", {}).setdefault(
+                        model_key, {"calls": 0})
+                    if not isinstance(row, dict) or not _record_tok_s(row, v):
+                        v = None
+                if v is not None:
+                    # (b) per-(worker,model) rollup + (c) per-worker rollup
+                    mts = stored.setdefault("model_tok_stats", {})
+                    mrow = mts.get(model_key)
+                    if not isinstance(mrow, dict):
+                        mrow = mts[model_key] = {}
+                    _rollup_tok_stats(mrow, v, now)
+                    ts = stored.get("tok_stats")
+                    if not isinstance(ts, dict):
+                        ts = stored["tok_stats"] = {}
+                    _rollup_tok_stats(ts, v, now, model_key=model_key)
                 # STATE SNAPSHOT — captured INSIDE the transaction, off the
                 # authoritative stored record central holds (vram/alloc/
                 # co-residents live on the heartbeat, not the relay). Assembled
@@ -4847,7 +5114,7 @@ class WorkerStore:
         # (a) every query logged — outside the store lock, append-only.
         entry: Dict[str, Any] = {
             "ts": round(now, 3), "worker_id": worker_id, "model_key": model_key,
-            "tok_s": round(v, 3),
+            "tok_s": round(v, 3) if v is not None else None,
         }
         for k in ("request_id", "prompt_tokens", "completion_tokens",
                   "elapsed_s", "source", "estimated", "task"):
@@ -4855,40 +5122,72 @@ class WorkerStore:
                 entry[k] = meta[k]
         if state:
             entry["state"] = state
-        _append_toks_log(entry)
+        if v is not None:      # the toks log is the RATE log; no rate, no line
+            _append_toks_log(entry)
         # Registry-DB metrics card (2026-09-10, modeled on the operator's
         # llm_storage/assets/metrics.xlsx_0.ods): the SAME sample lands in the
         # per-(model x quant x alloc x worker) table. Outside the store lock,
         # fail-open, inert unless HUGPY_REGISTRY_DB=pg.
-        try:
-            from hugpy_engine.model_index import record_metric
-            _base = {"gpu-only": "gpu", "ram-only": "ram"}.get(_mx_am, _mx_am)
+        # THE CALL STAMP (2026-09-23): worker / quant / alloc_mode are what the
+        # serving path resolved for THIS call (resolvers.remote.call_stamp:
+        # the seat's own served report, else this worker's heartbeat slot, else
+        # the placement decision) — never the request. Before this, quant was
+        # read from state.model.dtype (never populated) and alloc from the
+        # placement map under the exact key only, so every relay row landed
+        # unstamped (quant '' / alloc '').
+        stamp = meta.get("stamp") if isinstance(meta.get("stamp"), dict) else {}
+        _quant = str(stamp.get("quant") or "")
+        if stamp.get("alloc_mode"):
+            _mode = str(stamp["alloc_mode"])
+        else:
+            _base = {"gpu-only": "gpu_only", "ram-only": "ram_only"}.get(_mx_am, _mx_am.replace("-", "_"))
             if _mx_moe:
-                _mode = "moe"
+                _mode = "explicit"
             elif _mx_bnb:
-                _mode = f"4bit:{_base}" if _base else "4bit"
+                _mode = f"4-bit:{_base}" if _base else ""
             else:
                 _mode = _base or ""
-            _quant = str(((state.get("model") or {}).get("dtype")) or "")
-            record_metric(model_key, str(_mx_worker), quant=_quant,
-                          alloc_mode=_mode, tok_per_s=v,
-                          task=meta.get("task"))
+        try:
+            from hugpy_engine.model_index import record_metric
+            if v is not None:
+                record_metric(model_key, str(_mx_worker), quant=_quant,
+                              alloc_mode=_mode, tok_per_s=v,
+                              task=meta.get("task"))
             # EVERY call, appended (operator: "maintains its record of every
             # call and its metrics") — the card above is this stream's rollup.
             from hugpy_engine.model_index import record_call
+            # tok_per_s = gen_tokens / generation_s of THIS call (the engine's
+            # predicted_ms window holds predicted_n - 1 tokens; see
+            # resolvers.remote.generation_split); None when the call had no
+            # generation window. Never the engine's predicted_per_second (which
+            # divides n tokens by an (n-1)-token window: 1 token / 0.2 ms read
+            # as 4952 tok/s) and never a fallback to another number.
+            _cstate = dict(state) if isinstance(state, dict) else {}
+            _cstate.update({k: meta[k] for k in ("engine_gen_s", "gen_s", "ttft_s", "gen_basis",
+                                                  "source", "streaming", "caller", "served")
+                            if meta.get(k) is not None})
+            if v is not None:
+                _cstate["engine_tok_s"] = round(v, 3)
+            for k in ("stamp_source", "stamp_missing"):
+                if stamp.get(k):
+                    _cstate[k] = stamp[k]
+            _cstate.setdefault("caller", "relay")
             record_call(model_key, str(_mx_worker), quant=_quant,
-                        alloc_mode=_mode, tok_per_s=v,
+                        alloc_mode=_mode, tok_per_s=meta.get("call_tok_s"),
                         prompt_tokens=meta.get("prompt_tokens"),
                         completion_tokens=meta.get("completion_tokens"),
                         elapsed_s=meta.get("elapsed_s"),
                         task=meta.get("task"),
-                        request_id=meta.get("request_id"), state=state)
+                        request_id=meta.get("request_id"), state=_cstate,
+                        prompt_s=meta.get("prompt_s"),
+                        generation_s=meta.get("generation_s"),
+                        gen_tokens=meta.get("gen_tokens"))
         except Exception:  # noqa: BLE001 — metrics must never fail a serve
             pass
-        logger.info("toks: %s/%s %.1f tok/s (%s, n=%s) rid=%s",
-                    worker_id, model_key, v, entry.get("source", "?"),
-                    mrow.get("n"), entry.get("request_id"))
-        return True
+        logger.info("toks: %s/%s %s tok/s (%s, n=%s) rid=%s",
+                    worker_id, model_key, f"{v:.1f}" if v is not None else "no-rate",
+                    entry.get("source", "?"), mrow.get("n"), entry.get("request_id"))
+        return v is not None
 
     def candidates_for_model(self, model_key: str,
                              pool: Optional[str] = None,
@@ -5003,8 +5302,33 @@ def enroll_required() -> bool:
 
 
 def assign_model(worker_id: str, model_key: str,
-                 spill: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    return worker_store.assign_model(worker_id, model_key, spill=spill)
+                 spill: Optional[Dict[str, Any]] = None,
+                 source: Optional[str] = None,
+                 retag: bool = True) -> Optional[Dict[str, Any]]:
+    """Designate ``model_key`` to the worker. ``source`` names the writer
+    ("operator" | "benchmark" | "admission" | "model_group" | "autoplace") —
+    see WorkerStore.assign_model for the provenance rules."""
+    return worker_store.assign_model(worker_id, model_key, spill=spill,
+                                     source=source, retag=retag)
+
+
+def set_pin(worker_id: str, model_key: str, pinned: bool,
+            by: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Operator PIN decision for (worker, model) — WorkerStore.set_pin."""
+    return worker_store.set_pin(worker_id, model_key, pinned, by=by)
+
+
+def prune_designations(worker_id: str, *, max_age_s: Optional[float] = None,
+                       include_unrecorded: bool = False,
+                       apply: bool = False) -> Optional[Dict[str, Any]]:
+    """Automated-designation prune (dry-run unless ``apply``) —
+    WorkerStore.prune_designations. ``max_age_s`` defaults to
+    HUGPY_DESIGNATION_PRUNE_HOURS (24h)."""
+    if max_age_s is None:
+        max_age_s = designation_prune_hours() * 3600.0
+    return worker_store.prune_designations(
+        worker_id, max_age_s=float(max_age_s),
+        include_unrecorded=include_unrecorded, apply=apply)
 
 
 def set_moe(worker_id: str, model_key: str, value) -> Optional[Dict[str, Any]]:
@@ -5660,7 +5984,7 @@ def explain_no_worker(model_key: str, pool: Optional[str] = None,
                     why = f"llama-cpp not loadable: {err}"
                 else:
                     why = "inference engine reports installed=False"
-                reasons.append(f"{name}: engine unusable ({why[:400]})")
+                reasons.append(f"{name}: engine unusable ({why})")
                 continue
             if (w.get("pool") or "").strip() != want_pool:
                 reasons.append(f"{name}: reserved for pool {w.get('pool')!r} "

@@ -51,7 +51,6 @@ THE FOURTH ROW is a different shape entirely and deliberately not handled here:
 """
 from __future__ import annotations
 
-import json
 import os
 from typing import Optional, Tuple
 
@@ -93,13 +92,7 @@ class AdapterBaseUnavailable(RuntimeError):
 # ---------------------------------------------------------------------------
 # Reading the two config shapes
 # ---------------------------------------------------------------------------
-def _read_json(path: str) -> Optional[dict]:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:  # noqa: BLE001 — absent/unreadable/malformed are all "no"
-        return None
-    return data if isinstance(data, dict) else None
+from hugpy_platform.atomic_json import read_json_dict as _read_json
 
 
 def read_adapter_config(model_dir: Optional[str]) -> Optional[dict]:

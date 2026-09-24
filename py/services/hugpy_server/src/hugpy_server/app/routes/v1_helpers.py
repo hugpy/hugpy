@@ -69,6 +69,12 @@ def _completion_kwargs(payload: dict) -> dict:
     model = payload.get("model")
     if isinstance(model, str) and model.strip().lower() in ("", "default"):
         model = None
+    # OpenAI multimodal content (2026-09-23): ``image_url`` parts ride to the
+    # model as ChatRequest.images (the engine's single image path — the GGUF
+    # runner folds them back into the latest user turn as image_url parts for
+    # the native llama-server --mmproj). They used to be str()-flattened into
+    # the prompt text and never reached the model.
+    images = _collect_images(messages)
     kwargs = {
         # Fold the OpenAI tool-calling shapes (assistant `tool_calls`
         # echo-backs, `{"role":"tool"}` results) down into the plain
@@ -79,6 +85,8 @@ def _completion_kwargs(payload: dict) -> dict:
         "model_key": model,
         "request_id": f"v1-{uuid.uuid4().hex}",
     }
+    if images:
+        kwargs["images"] = images
     max_tokens = payload.get("max_tokens") or payload.get("max_completion_tokens")
     if max_tokens:
         # Explicit client cap → bounded; omitted → engine runs unbounded with
@@ -183,6 +191,58 @@ def _render_assistant_tool_calls(tool_calls) -> str:
     return "\n".join(blocks)
 
 
+_IMAGE_PART_TYPES = ("image_url", "input_image", "image")
+
+
+def _image_part_url(part) -> "str | None":
+    """The data:/http(s)/base64 string of one OpenAI image content part."""
+    val = part.get("image_url", part.get("url", part.get("image")))
+    if isinstance(val, dict):
+        val = val.get("url")
+    return val if isinstance(val, str) and val.strip() else None
+
+
+def _content_text(content) -> str:
+    """Message content as text: a string as-is; a content-part list as its
+    text parts joined (image parts are carried separately, see
+    _collect_images) — never the Python repr of the list."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") in _IMAGE_PART_TYPES:
+                    continue
+                if isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+        return "\n".join(t for t in texts if t)
+    return str(content)
+
+
+def _collect_images(messages) -> list:
+    """Every image part's url across ``messages``, in order. A part without a
+    usable url is a malformed request, not something to drop silently."""
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict) or not isinstance(m.get("content"), list):
+            continue
+        for part in m["content"]:
+            if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES:
+                url = _image_part_url(part)
+                if not url:
+                    raise ValueError(
+                        f"image content part without a url: {sorted(part)!r} — "
+                        "send {\"type\":\"image_url\",\"image_url\":{\"url\":"
+                        "\"data:image/png;base64,...\"}}")
+                out.append(url)
+    return out
+
+
 def _render_tool_messages(messages):
     """Downcast OpenAI messages to the role+content wire, rendering tool turns.
 
@@ -199,8 +259,7 @@ def _render_tool_messages(messages):
             out.append({"role": "user", "content": str(m)})
             continue
         role = m.get("role", "user")
-        content = m.get("content")
-        content = content if isinstance(content, str) else ("" if content is None else str(content))
+        content = _content_text(m.get("content"))
 
         if role == "tool":
             # A tool result the model reads as <tool_response>…</tool_response>

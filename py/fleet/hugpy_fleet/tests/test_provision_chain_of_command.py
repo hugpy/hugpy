@@ -7,12 +7,10 @@ Two operator rulings, exercised without touching the network or the model store:
      probes as before (ensure_model_present may be called — files already there —
      and the runner path runs).
 
-  B) Central's verdict is AUTHORITATIVE. In _provision_now:
-       * central gave an HTTP VERDICT (4xx refusal, or any non-unreachable
-         failure) -> NO HF fallback; returns False with the central reason.
-       * central was NETWORK-UNREACHABLE (CentralUnreachable) on both transports,
-         or no central URL -> HF fallback attempted.
-       * HUGPY_HF_FALLBACK=always -> old behavior (any failure falls to HF).
+  B) Central is the ONLY source (rulings 2026-07-17 + 2026-09-23). In
+     _provision_now every failure — an HTTP verdict, central UNREACHABLE on both
+     transports, or no central URL at all — returns False with the reason and
+     NEVER reaches Hugging Face. There is no HUGPY_HF_FALLBACK escape hatch.
 
 Runs like the other tests here:
     venv/bin/python tests/test_provision_chain_of_command.py
@@ -68,26 +66,29 @@ def _run_provision(*, central_url, parallel, archive, hf, hf_always=False):
             raise archive
         return archive
 
-    def _fake_hf(canonical):
+    # Any reach for Hugging Face is recorded: download_models' transport seam
+    # (the only HF entry) and its ensure_model.
+    dm = importlib.import_module("hugpy_storage.download_models")
+
+    def _fake_hf(*a, **k):
         calls.add("hf")
-        if isinstance(hf, BaseException):
-            raise hf
-        return "hf-path"
+        raise AssertionError("Hugging Face reached from worker provisioning")
 
     orig = (provision.fetch_from_central, provision.fetch_archive_from_central,
-            provision.fetch_from_hf)
+            dm._hf, dm.ensure_model)
     if hf_always:
         os.environ["HUGPY_HF_FALLBACK"] = "always"
     else:
         os.environ.pop("HUGPY_HF_FALLBACK", None)
     provision.fetch_from_central = _fake_parallel
     provision.fetch_archive_from_central = _fake_archive
-    provision.fetch_from_hf = _fake_hf
+    dm._hf = _fake_hf
+    dm.ensure_model = _fake_hf
     try:
         result = provision._provision_now(CANON, central_url)
     finally:
         (provision.fetch_from_central, provision.fetch_archive_from_central,
-         provision.fetch_from_hf) = orig
+         dm._hf, dm.ensure_model) = orig
         os.environ.pop("HUGPY_HF_FALLBACK", None)
     return result, calls
 
@@ -116,36 +117,50 @@ check("central 5xx (HTTPError) is a VERDICT -> provision False", res is False)
 check("central 5xx -> HF NOT attempted", "hf" not in calls)
 
 
-# --- central UNREACHABLE on both transports -> HF permitted -----------------
+# --- central UNREACHABLE on both transports -> refused, NO HF ----------------
 res, calls = _run_provision(central_url="http://c", parallel=_unreachable(),
                             archive=_unreachable(), hf=lambda: None)
-check("central unreachable on both -> HF attempted (survival path)",
-      "hf" in calls)
-check("central unreachable -> provision succeeds via HF", res is True)
+check("central unreachable on both -> HF NOT attempted (no survival path)",
+      "hf" not in calls)
+check("central unreachable -> provision returns False", res is False)
+check("central unreachable -> the recorded reason says so",
+      "unreachable" in (provision.last_failure(CANON) or {}).get("reason", ""))
 
 
-# --- parallel unreachable, archive gives a VERDICT -> central alive, NO HF --
-# Mixed: the parallel transport couldn't connect, but the archive transport DID
-# get an HTTP answer (a refusal). Central is alive => no HF.
+# --- parallel unreachable, archive gives a VERDICT -> NO HF ------------------
 res, calls = _run_provision(central_url="http://c", parallel=_unreachable(),
                             archive=False, hf=lambda: None)
-check("one transport unreachable but the other got a verdict -> central ALIVE",
+check("one transport unreachable, the other a verdict -> refused, no HF",
       "hf" not in calls and res is False)
 
 
-# --- no central URL -> HF is the only source --------------------------------
+# --- no central URL -> refused, NO HF ----------------------------------------
 res, calls = _run_provision(central_url=None, parallel=False, archive=False,
                             hf=lambda: None)
-check("no central URL -> HF attempted directly", "hf" in calls and res is True)
+check("no central URL -> refused (no HF)", "hf" not in calls and res is False)
 check("no central URL -> central transports NOT called",
       "parallel" not in calls and "archive" not in calls)
 
 
-# --- escape hatch: HUGPY_HF_FALLBACK=always restores old behavior ------------
+# --- the retired escape hatch no longer opens HF ------------------------------
 res, calls = _run_provision(central_url="http://c", parallel=False,
                             archive=False, hf=lambda: None, hf_always=True)
-check("HUGPY_HF_FALLBACK=always -> central verdict still falls through to HF",
-      "hf" in calls and res is True)
+check("HUGPY_HF_FALLBACK=always is ignored -> still refused, no HF",
+      "hf" not in calls and res is False)
+check("escape-hatch helpers are gone from provision",
+      not hasattr(provision, "_hf_fallback_always")
+      and not hasattr(provision, "fetch_from_hf"))
+
+
+# --- central holds no weights (projector-only) -> refused, archive skipped ---
+res, calls = _run_provision(
+    central_url="http://c",
+    parallel=provision.CentralHoldsNoWeights("central holds no weights for x (q)"),
+    archive=True, hf=lambda: None)
+check("projector-only central copy -> refused without trying the archive",
+      res is False and calls == {"parallel"})
+check("projector-only -> recorded reason names 'central holds no weights'",
+      "central holds no weights" in (provision.last_failure(CANON) or {}).get("reason", ""))
 
 
 # --- central succeeds on first transport -> no archive, no HF ---------------

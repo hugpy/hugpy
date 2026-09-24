@@ -752,6 +752,7 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
     # main-catalog mechanism; the legacy model_cache (HUGPY_MODEL_CACHE) is kept
     # as a fallback so a box still on the old env is not regressed. Neither env
     # set -> path is returned unchanged (byte-identical behaviour).
+    _shared_path = path            # pre-hot-cache path (projector fallback below)
     try:
         from hugpy_engine.serve import hot_cache
         if hot_cache.enabled():
@@ -777,6 +778,8 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
     # child then OOMs when the ~1.3 GB projector lands on top. 0 for text models
     # (byte-identical to before).
     _mmproj_reserve = vision_projector_bytes(path)
+    if not _mmproj_reserve and _shared_path != path:
+        _mmproj_reserve = vision_projector_bytes(_shared_path)
     # Resolve the SERVED ctx BEFORE fitting layers. The VRAM a llama_context
     # costs is linear in n_ctx (the KV cache), so autofit must price the context
     # THIS CHILD will actually run with rather than a flat constant — see
@@ -1188,7 +1191,12 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
         # Vision GGUF: load the multimodal projector so /v1/chat/completions accepts
         # image_url content. No-op for text models (no projector beside the model).
         from hugpy_platform.utils import find_mmproj
-        mmproj = find_mmproj(path)
+        # The hot-cache copy carries only *mmproj*-named sidecars; a projector
+        # identified by its GGUF header (arch 'clip') under another name stays
+        # in the shared dir — fall back to it so the child never launches a
+        # vision model without its projector.
+        mmproj = find_mmproj(path) or (
+            find_mmproj(_shared_path) if _shared_path != path else None)
         if mmproj:
             argv += ["--mmproj", mmproj]
             logger.info("slot %s: vision model — loading projector %s", SLOT_ID, mmproj)
@@ -1208,7 +1216,7 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
         from hugpy_platform.utils import find_mmproj
         if find_mmproj(path):
             raise RuntimeError(
-                f"{model_key}: vision model (mmproj sidecar present) but this "
+                f"{model_key}: vision_needs_slot — vision model (mmproj sidecar present) but this "
                 "box has no native llama-server (LLAMA_SERVER_BIN) — the "
                 "llama_cpp.server fallback cannot load the projector, images "
                 "would be silently ignored. Install/point to a llama-server "
@@ -1298,13 +1306,57 @@ _STDERR_ERR_HINTS = ("error", "fail", "invalid", "unable", "cannot", "corrupt",
                      "abort", "out of memory", "not within", "bounds")
 
 
-def _start_stderr_tail(proc, sink: "collections.deque") -> "threading.Thread | None":
-    """Tee ``proc.stderr`` into ``sink`` (ring) + our own stderr (journal)."""
+def _load_log_path(model_key: str) -> "str | None":
+    """Per-load log file for the child's FULL stderr stream (2026-09-23):
+    ``PROJECTS_HOME/logs/<worker>/<model>/<ts>-slot<id>.log``. The in-memory
+    ring only feeds the short excerpt; this file is the whole log, and its
+    path travels as ``log_ref`` beside the full text. None when unwritable."""
+    try:
+        try:
+            from hugpy_platform.constants import PROJECTS_HOME as _ph
+        except Exception:  # noqa: BLE001 — layout fallback, as serve/overrides.py
+            _ph = os.environ.get("PROJECTS_HOME")
+        if not _ph:
+            return None
+        import socket as _socket
+        worker = (os.environ.get("WORKER_NAME") or _socket.gethostname() or "worker")
+        safe = lambda v: "".join(c if (c.isalnum() or c in "._-") else "_"
+                                 for c in str(v)) or "_"
+        d = os.path.join(str(_ph), "logs", safe(worker), safe(model_key))
+        os.makedirs(d, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        return os.path.join(d, f"{ts}-slot{safe(SLOT_ID)}.log")
+    except Exception:  # noqa: BLE001 — a log path never blocks a load
+        return None
+
+
+def _read_log_file(path) -> "str | None":
+    """The whole per-load log, verbatim. None when absent/unreadable/empty."""
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except Exception:  # noqa: BLE001
+        return None
+    return text if text.strip() else None
+
+
+def _start_stderr_tail(proc, sink: "collections.deque",
+                       log_path: "str | None" = None) -> "threading.Thread | None":
+    """Tee ``proc.stderr`` into ``sink`` (ring), our own stderr (journal) and,
+    when given, ``log_path`` (the FULL stream, every byte, persisted)."""
     pipe = getattr(proc, "stderr", None)
     if pipe is None:
         return None
 
     def _pump():
+        fh = None
+        if log_path:
+            try:
+                fh = open(log_path, "ab")
+            except Exception:  # noqa: BLE001 — the ring + journal still work
+                fh = None
         try:
             for raw in iter(pipe.readline, b""):
                 try:
@@ -1312,6 +1364,12 @@ def _start_stderr_tail(proc, sink: "collections.deque") -> "threading.Thread | N
                     sys.stderr.buffer.flush()
                 except Exception:  # noqa: BLE001 — journal echo is best-effort
                     pass
+                if fh is not None:
+                    try:
+                        fh.write(raw)
+                        fh.flush()
+                    except Exception:  # noqa: BLE001
+                        pass
                 line = raw.decode("utf-8", "replace").rstrip()
                 if line:
                     sink.append(line)
@@ -1322,6 +1380,11 @@ def _start_stderr_tail(proc, sink: "collections.deque") -> "threading.Thread | N
                 pipe.close()
             except Exception:  # noqa: BLE001
                 pass
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     t = threading.Thread(target=_pump, name="slot-stderr-tail", daemon=True)
     t.start()
@@ -1342,6 +1405,17 @@ def _stderr_excerpt(sink, max_lines: int = _STDERR_EXCERPT_LINES,
         l = " ".join(l.split())
         out.append(l if len(l) <= max_chars else l[:max_chars - 1] + "…")
     return " | ".join(out)
+
+
+def _stderr_verbatim(sink, log_path: "str | None" = None) -> "str | None":
+    """The loader's WHOLE stderr, verbatim (2026-09-23: no filter, no cap).
+    Read from the per-load log file when one was written; else every line the
+    in-memory ring still holds. None when empty."""
+    full = _read_log_file(log_path)
+    if full is not None:
+        return full
+    lines = [l for l in (sink or ()) if l and l.strip()]
+    return "\n".join(lines) if lines else None
 
 
 class Slot:
@@ -1374,6 +1448,14 @@ class Slot:
         self.n_cpu_moe = None
         self.loaded_at = 0.0
         self.last_used = 0.0
+        # ALLOCATION PROVENANCE (2026-09-23): what the current seat was loaded
+        # FOR (the caller's ask, before any autofit/make-room plan), who asked
+        # (designation / per-request <rid> / operator), and — when this load
+        # replaced a resident of the same model — why. SlotPool.endpoint_for
+        # compares a request's ask against alloc_requested before reusing.
+        self.alloc_requested = None
+        self.alloc_source = None
+        self.reload_reason = None
         # Free VRAM sampled at the start of the CURRENT load (slice 12): the
         # baseline the stall-detector measures VRAM-consumed against.
         self._load_free_vram_at_start = None
@@ -1385,8 +1467,14 @@ class Slot:
         self.last_load_error: "str | None" = None
         # t140: the loader's last stderr excerpt behind last_load_error
         self.last_load_stderr: "str | None" = None
+        self.last_load_stderr_raw: "str | None" = None
+        self.last_load_class: "str | None" = None
         self._stderr_tail = None
         self._stderr_thread = None
+        # 2026-09-23: the per-load log file (full stderr) + the one behind
+        # the last failure, so the reply/status carry it as log_ref.
+        self._load_log_path: "str | None" = None
+        self.last_load_log_ref: "str | None" = None
         self.lock = threading.Lock()
         # llama_cpp.server (python child) cannot take CONCURRENT streaming
         # requests — overlapping streams kill BOTH with an incomplete chunked
@@ -1511,6 +1599,7 @@ class Slot:
         self.n_cpu_moe = None
         self.profile_bin = None
         self.model_path = None
+        self.alloc_requested = self.alloc_source = self.reload_reason = None
         self._identity = {"pid": None, "ok": True, "note": None, "at": 0.0}
 
     def _self_heal(self):
@@ -1560,6 +1649,17 @@ class Slot:
             # None = no split. getattr for the same pre-field-instance reason.
             "n_cpu_moe": getattr(self, "n_cpu_moe", None),
             "ctx": self.ctx,
+            # Allocation provenance (additive; see __init__). alloc_effective is
+            # what the child actually launched with.
+            "alloc_requested": getattr(self, "alloc_requested", None),
+            "alloc_source": getattr(self, "alloc_source", None),
+            "alloc_effective": ({
+                "n_gpu_layers": self.ngl,
+                "total_layers": getattr(self, "total_layers", None),
+                "n_cpu_moe": getattr(self, "n_cpu_moe", None),
+                "device": ("cpu" if self.ngl == 0 else "cuda") if isinstance(self.ngl, int) else None,
+            } if self.model_key else None),
+            "reload_reason": getattr(self, "reload_reason", None),
             "threads": self.threads,
             "cpus": self.cpus,
             "gpu": self.gpu,
@@ -1589,6 +1689,10 @@ class Slot:
             # t140: the loader's own last words behind that error (None when
             # the child never wrote any, or once a load succeeds).
             "last_load_stderr": getattr(self, "last_load_stderr", None),
+            # 2026-09-23: the WHOLE loader stderr + the per-load log file
+            # holding it (the excerpt above is a heading, not the log).
+            "last_load_stderr_full": getattr(self, "last_load_stderr_raw", None),
+            "last_load_log_ref": getattr(self, "last_load_log_ref", None),
         }
         # Honest RSS split (omit-when-unset): rss_bytes stays VmRSS verbatim for
         # wire back-compat, while rss_anon_bytes is the truly-pinned RAM and
@@ -1602,7 +1706,8 @@ class Slot:
     def load(self, model_key, n_gpu_layers=None, ctx=None, threads=None,
              cpus=None, gpu=None, path=None, gpu_mem_gib=None,
              cpu_mem_gib=None, profile_bin=None, force=False,
-             n_cpu_moe=None, alloc_mode=None) -> dict:
+             n_cpu_moe=None, alloc_mode=None, alloc_requested=None,
+             alloc_source=None, reload_reason=None) -> dict:
         with self.lock:
             # k64: the ACTIVE allocation mode, as a per-load opt. The slot is a
             # separate process spawned at boot, so the agent's per-request
@@ -1623,19 +1728,34 @@ class Slot:
             # otherwise a same-model relaunch is a silent no-op and the sweep can
             # never change the offload depth.
             if not force and self.model_key == model_key and self.healthy():
-                self.last_used = time.time()
-                return self.status()
+                # Same model is not the same seat: a caller that states what it
+                # asked for must get a seat loaded for THAT ask (the pool
+                # normally unloads first; this guards a direct /load).
+                why = None
+                if isinstance(alloc_requested, dict):
+                    from hugpy_engine.serve.slots import alloc_mismatch, alloc_signature
+                    why = alloc_mismatch({"alloc_requested": self.alloc_requested,
+                                          "alloc_source": self.alloc_source,
+                                          "n_gpu_layers": self.ngl,
+                                          "total_layers": self.total_layers},
+                                         alloc_signature(alloc_requested), alloc_source)
+                if why is None:
+                    self.last_used = time.time()
+                    return self.status()
+                reload_reason = reload_reason or why
+                logger.info("slot %s: %s", SLOT_ID, why)
 
             # BACKOFF (slice 12): after repeated GENUINE load failures for this
             # model, refuse a re-attempt for a growing window instead of hammering
             # a doomed 46G re-page on every incoming request. Cleared on success.
             until = self._load_backoff_until.get(model_key, 0.0)
             if time.time() < until:
-                raise RuntimeError(
+                raise self._load_failure_exc(
                     f"slot {SLOT_ID}: {model_key} in load-backoff for "
                     f"{until - time.time():.0f}s after "
                     f"{self._load_failures.get(model_key, 0)} failed attempt(s)"
-                    + (f" — {self.last_load_error}" if self.last_load_error else ""))
+                    + (f" — {self.last_load_error}" if self.last_load_error else ""),
+                    model_key)
 
             self._kill()
             self.profile_bin = profile_bin or None
@@ -1681,7 +1801,9 @@ class Slot:
                 pass
             self.proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE)
             self._stderr_tail = collections.deque(maxlen=_STDERR_TAIL_LINES)
-            self._stderr_thread = _start_stderr_tail(self.proc, self._stderr_tail)
+            self._load_log_path = _load_log_path(model_key)
+            self._stderr_thread = _start_stderr_tail(self.proc, self._stderr_tail,
+                                                     self._load_log_path)
             self.model_key = model_key
             # The file this child was launched with — argv's -m/--model — kept
             # so the identity check has something to verify /props against.
@@ -1714,9 +1836,18 @@ class Slot:
                         pass
                 self.last_load_stderr = _stderr_excerpt(
                     getattr(self, "_stderr_tail", None)) or None
+                # 2026-09-23: the loader's WHOLE stderr verbatim (from the
+                # per-load log file), for the structured load_failure the
+                # /load reply carries, plus that file's path as log_ref.
+                self.last_load_log_ref = getattr(self, "_load_log_path", None)
+                self.last_load_stderr_raw = _stderr_verbatim(
+                    getattr(self, "_stderr_tail", None), self.last_load_log_ref)
                 _why = (f"Loader stderr: {self.last_load_stderr}"
                         if self.last_load_stderr else
-                        "See the worker journal for the loader's own error.")
+                        f"loader stderr was empty (read ring + log file "
+                        f"{self.last_load_log_ref or '<none written>'}, bytes=0; fail kind={kind}, "
+                        f"exit_code={exit_code}, attempt {n}, backoff {backoff:.0f}s)")
+                self.last_load_class = "other"
                 if kind == "exit" and isinstance(exit_code, int) and exit_code < 0:
                     # The child was killed by a SIGNAL (Popen returncode -N):
                     # -11 SIGSEGV / -9 oom-kill / -6 abort. That is a CRASH —
@@ -1746,6 +1877,7 @@ class Slot:
                     # carries "hard load failure", which central's
                     # _PERMANENT_LOAD_MARKERS matches to fail the call fast (and
                     # cache) instead of holding and re-requesting it.
+                    self.last_load_class = "hard_load_failure"
                     self.last_load_error = (
                         f"hard load failure: the llama-server child exited "
                         f"(code {exit_code}) after "
@@ -1758,15 +1890,44 @@ class Slot:
                         f"did not become healthy ({kind or 'stall/hard-cap'}); "
                         + (f"{_why} " if self.last_load_stderr else "")
                         + f"attempt {n}, backing off {backoff:.0f}s")
-                raise RuntimeError(
-                    f"slot {SLOT_ID}: {model_key} {self.last_load_error}")
+                raise self._load_failure_exc(
+                    f"slot {SLOT_ID}: {model_key} {self.last_load_error}",
+                    model_key)
+            # SUCCESS — record the allocation provenance of this seat.
+            self.alloc_requested = (dict(alloc_requested) if isinstance(alloc_requested, dict)
+                                    else {"n_gpu_layers": None if _ngl_is_unset(n_gpu_layers)
+                                          else n_gpu_layers,
+                                          "alloc_mode": alloc_mode or None})
+            self.alloc_source = (dict(alloc_source) if isinstance(alloc_source, dict)
+                                 and alloc_source else {"kind": "unknown"})
+            self.reload_reason = reload_reason or None
+            if self.reload_reason:
+                logger.info("slot %s: %s", SLOT_ID, self.reload_reason)
             # SUCCESS — clear the failure counters + backoff for this model.
             self._load_failures.pop(model_key, None)
             self._load_backoff_until.pop(model_key, None)
             self.last_load_error = None
             self.last_load_stderr = None
+            self.last_load_stderr_raw = None
+            self.last_load_log_ref = None
+            self.last_load_class = None
             logger.info("slot %s ready: %s on %s", SLOT_ID, model_key, self.child_base)
             return self.status()
+
+    def _load_failure_exc(self, message: str, model_key: str):
+        """The structured failure for a load that never served (2026-09-23):
+        ``ModelLoadFailure`` carrying the class the verdict above recorded
+        (``hard_load_failure`` for a loader rejection), the loader's stderr
+        verbatim (bounded) and the file the child opened — the /load route
+        ships it as ``load_failure`` so the caller need not parse wording."""
+        from hugpy_engine.serve.load_failure import ModelLoadFailure, HardLoadFailure
+        cls = getattr(self, "last_load_class", None) or "other"
+        kind = HardLoadFailure if cls == "hard_load_failure" else ModelLoadFailure
+        return kind(message, load_class=cls,
+                    loader_stderr=(getattr(self, "last_load_stderr_raw", None)
+                                   or self.last_load_stderr),
+                    path=getattr(self, "model_path", None), model_key=model_key,
+                    log_ref=getattr(self, "last_load_log_ref", None))
 
     def _hard_cap_s(self) -> float:
         """Size-scaled generous-but-bounded hard cap. base (HEALTH_TIMEOUT) +
@@ -1902,7 +2063,9 @@ class Slot:
             threads=self.threads, cpus=self.cpus, gpu=self.gpu,
             gpu_mem_gib=None, cpu_mem_gib=None,
             profile_bin=self.profile_bin, force=True,
-            n_cpu_moe=n_cpu_moe)
+            n_cpu_moe=n_cpu_moe,
+            alloc_requested={"n_gpu_layers": requested_ngl, "alloc_mode": None},
+            alloc_source={"kind": "operator", "via": "relaunch", "at": time.time()})
         # Surface the request alongside the honest launched value so the caller
         # can see requested-vs-effective at a glance (self.ngl / status carries
         # the measured launch value).
@@ -1987,9 +2150,18 @@ def build_app():
                                      cpu_mem_gib=body.get("cpu_mem_gib"),
                                      profile_bin=body.get("profile_bin"),
                                      n_cpu_moe=body.get("n_cpu_moe"),
-                                     alloc_mode=body.get("alloc_mode")))
+                                     alloc_mode=body.get("alloc_mode"),
+                                     alloc_requested=body.get("alloc_requested"),
+                                     alloc_source=body.get("alloc_source"),
+                                     reload_reason=body.get("reload_reason")))
         except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+            out = {"error": f"{type(exc).__name__}: {exc}"}
+            # Additive (2026-09-23): the structured verdict, so the pool client
+            # re-raises a typed hard failure instead of a string to parse.
+            _lf = getattr(exc, "load_failure", None)
+            if isinstance(_lf, dict):
+                out["load_failure"] = _lf
+            return jsonify(out), 500
 
     @app.route("/unload", methods=["POST"])
     def unload():

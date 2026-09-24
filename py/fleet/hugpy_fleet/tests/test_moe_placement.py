@@ -1954,7 +1954,7 @@ def test_moe_refuses_the_in_process_fallback_instead_of_loading_whole(monkeypatc
     # Measured MoE, priced like coder-next.
     monkeypatch.setattr(getmod, "get_model_config", lambda k: object(),
                         raising=False)
-    monkeypatch.setattr(getmod, "ensure_model", lambda k: "/models/cn",
+    monkeypatch.setattr(getmod, "ensure_serving_weights", lambda k: "/models/cn",
                         raising=False)
     monkeypatch.setattr(getmod, "get_gguf_file",
                         lambda d, c: "/models/cn/coder-next.gguf", raising=False)
@@ -1988,7 +1988,7 @@ def test_dense_models_still_take_the_in_process_fallback(monkeypatch):
     monkeypatch.setattr(_slots, "slots_enabled", lambda: False)
     monkeypatch.setattr(getmod, "get_model_config", lambda k: object(),
                         raising=False)
-    monkeypatch.setattr(getmod, "ensure_model", lambda k: "/models/d",
+    monkeypatch.setattr(getmod, "ensure_serving_weights", lambda k: "/models/d",
                         raising=False)
     monkeypatch.setattr(getmod, "get_gguf_file",
                         lambda d, c: "/models/d/dense.gguf", raising=False)

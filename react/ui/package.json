@@ -62,7 +62,8 @@
     "build:lib": "vite build --config vite.lib.config.js",
     "prepublishOnly": "npm run build:lib",
     "preview": "npx serve dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/components/ModelTable/modelStatus.test.mjs src/components/MetricsPanel/suites.test.mjs src/components/MetricsPanel/modelFilters.test.mjs src/components/ModelLogs/failures.test.mjs src/components/HelpPanel/helpModel.test.mjs"
   },
   "peerDependencies": {
     "@mui/material": "^9.0.0",

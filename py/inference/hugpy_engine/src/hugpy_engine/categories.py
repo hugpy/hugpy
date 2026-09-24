@@ -38,12 +38,17 @@ HF_TASK_TO_TASKS = {
     "feature-extraction": ["feature-extraction", "sentence-similarity", "keyword-extraction"],
     "sentence-similarity": ["feature-extraction", "sentence-similarity", "keyword-extraction"],
     "text-to-image": ["text-to-image"],
-    # VIDEO (2026-07-27). Advertised truthfully, NOT servable by the LLM plane:
-    # there is no ("transformers","text-to-video") RUNNER_PAIR, so these rows are
-    # visible in the catalogue and excluded from chat routing — the studio arm
-    # (video_intel/studio) serves them through its own registry. Before this, a
-    # Wan T2V model fell through _base_tasks' "conservative floor" and advertised
-    # ["text-generation"]: a video diffusion model offering itself as a chat model.
+    # VIDEO. A full video pipeline (Wan/LTX/Cog/Hunyuan/Mochi/…) is SERVEABLE:
+    # the runners live in hugpy_video's studio registry, and the
+    # ("transformers","text-to-video")/("transformers","image-to-video")
+    # RUNNER_PAIRS below make derive_model_config_row flag it serveable so it is
+    # graded like any other model (no-grader until a video suite exists) instead
+    # of the blanket "unservable/pipeline component" it read as before
+    # (2026-09-24). Before 2026-07-27 a Wan T2V model fell through _base_tasks'
+    # "conservative floor" and advertised ["text-generation"]: a video diffusion
+    # model offering itself as a chat model. A single-file GGUF video transformer
+    # is NOT a full pipeline — it stays a pipeline-component
+    # (models_config._correct_pipeline_component).
     "text-to-video": ["text-to-video"],
     "image-to-video": ["image-to-video"],
     # NOTE: "image-to-image" is intentionally NOT a DISCOVERY pipeline_tag key.
@@ -73,6 +78,16 @@ RUNNER_PAIRS = {
     ("transformers", "text-summarization"), ("transformers", "text2text-generation"),
     ("transformers", "feature-extraction"), ("transformers", "sentence-similarity"),
     ("transformers", "text-to-image"), ("transformers", "image-to-image"),
+    # VIDEO (2026-09-24). Full diffusers video pipelines served by hugpy_video's
+    # studio runner registry (RunnerSpec for WAN/LTX/Hunyuan/Cog/Mochi/OpenSora/
+    # SkyReels, T2V + I2V + VACE). Declaring the pairs here is what flips a full
+    # video pipeline from serveable=False ("adapter / pipeline component") to a
+    # normal graded row. Where hugpy-video is not wired on a box,
+    # model_resolver._plugin_missing reports it as an uninstalled runner plugin
+    # and resolve() refuses at the point of use — it never fails import, and
+    # neither task is in TASK_DEFAULTS so no chat/media route can pick a video
+    # model.
+    ("transformers", "text-to-video"), ("transformers", "image-to-video"),
     # ComfyUI engine rows (slice B) — the checkpoint lives in the WORKER's own
     # ComfyUI install; hugpy holds no files for these.
     ("comfy", "text-to-image"), ("comfy", "image-to-image"),

@@ -50,6 +50,14 @@ const CTX_ERR_MAX = 4;
 // no globals, still dependency-free. Set on mount, cleared on unmount.
 let activeWidget = null;
 
+// Optional host override for the FAB click (2026-09-23): the console routes its
+// Help to the operator's hugpy help agent panel instead of this Keeper widget.
+// A function that returns false falls through to the widget's own panel.
+let fabOverride = null;
+export function setHelpWidgetOverride(fn) {
+  fabOverride = typeof fn === "function" ? fn : null;
+}
+
 // THE DIRECT LINE (2026-08-20): Ask goes to POST /keeper/help/ask — the hugpy
 // VM's keeper seat (the same B the station console talks to), grounded
 // server-side in live fleet state. No client-side preamble, no substitute
@@ -177,7 +185,10 @@ export function mountHelpWidget(opts = {}) {
     return el("button", {
       class: "hgh-fab", type: "button",
       "aria-label": "Open help",
-      onclick: () => { open = true; render(); },
+      onclick: () => {
+        if (fabOverride && fabOverride() !== false) return;
+        open = true; render();
+      },
     }, [el("span", { class: "hgh-fab-dot" }), el("span", { text: "Help" })]);
   }
 

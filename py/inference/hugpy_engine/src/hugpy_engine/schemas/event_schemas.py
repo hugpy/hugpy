@@ -33,6 +33,11 @@ class DoneEvent(BaseModel):
     #
     # ⚠ RECORDING ONLY — nothing ranks on this; eviction.sort_key is untouched.
     timings: Optional[dict] = None
+    # CENTRAL-SIDE annotations for the client (additive, None by default),
+    # e.g. {"output_repair": {"applied": True, "kind": ..., "removed": n}} set
+    # by hugpy_engine.output_repair. The relay reconstructs DoneEvent
+    # field-explicitly, so a worker never needs to know this field.
+    hugpy: Optional[dict] = None
 
 class ErrorEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")

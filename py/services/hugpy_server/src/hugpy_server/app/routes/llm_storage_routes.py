@@ -132,6 +132,11 @@ def list_models():
             # blocked read must be cleared on unblock — the `blocked` bool alone
             # is not enough.
             model.pop("block", None)
+        # ARCHIVE MARK (2026-09-23): the operator's recorded intent to archive
+        # this model ({marked, at, by, reason}), off the persisted marker aspect
+        # like admission. On EVERY row (not only verbose): it disables the
+        # model for placement, so every picker needs it.
+        model["archived"] = _archived_of(model, mk)
         # Whether this model is offered in the media-intelligence chat dropdown.
         model["media"] = _media[mk]
         # Whether this model is THE preselected default for the media chat.
@@ -186,6 +191,11 @@ def list_models():
                 m["workers"] = _joins.get(m.get("model_key"), [])
         except Exception:  # noqa: BLE001 — the join must never 500 the listing
             logger.exception("verbose worker join failed")
+        # ADMISSION (2026-09-23): the post-download gate's verdict, off the
+        # PERSISTED marker aspect (hugpy.json read once at the events that
+        # change it) — never a per-row file read.
+        for m in output:
+            m["admission"] = _admission_of(m)
 
     return jsonify(output)
 
@@ -403,7 +413,7 @@ def get_model(model_key):
     manifest = get_models_dict(dict_return=True)
     logger.info(manifest)
     if model_key not in manifest:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} is not in the model catalog ({len(manifest)} entries)")
     model = manifest[model_key]
     # The single-model detail read is the EXPLICIT refresh path: it always
     # derives LIVE (one model is ~10^2 filesystem calls, not ~10^4) and REWRITES
@@ -419,7 +429,232 @@ def get_model(model_key):
         detail["workers"] = _verbose_worker_join({mk}).get(mk, [])
     except Exception:  # noqa: BLE001 — the join must never 500 the detail read
         logger.exception("verbose worker join failed for %s", model_key)
+    # The detail read is LIVE (the explicit refresh path): admission straight
+    # off the model's hugpy.json.
+    try:
+        from hugpy_storage.admission import read_admission
+        detail["admission"] = read_admission(detail.get("destination"))
+    except Exception:  # noqa: BLE001
+        detail["admission"] = None
+    try:
+        from hugpy_storage.archive_mark import archive_view, read_archive_mark
+        detail["archived"] = archive_view(read_archive_mark(detail.get("destination")))
+    except Exception:  # noqa: BLE001
+        detail["archived"] = None
     return jsonify(detail)
+
+
+# ── ADMISSION (post-download gate, 2026-09-23) ────────────────────────────
+# The verdict lives on each model's hugpy.json ("admission"); the jobs live on
+# the persistent queue (hugpy_storage.admission). These routes read both and
+# let the operator re-run one model's admission.
+def _admission_of(model: dict):
+    """A model's admission block off the persisted marker aspect, or None."""
+    try:
+        from hugpy_storage.console.model_physical import marker_fields
+        mk = model.get("model_key") or ""
+        marker = (marker_fields(model, mk) or {}).get("hugpy_marker") or {}
+        block = marker.get("admission") if isinstance(marker, dict) else None
+        return block if isinstance(block, dict) else None
+    except Exception:  # noqa: BLE001 — a listing must never 500 over a marker
+        return None
+
+
+def _archived_of(model: dict, mk=None):
+    """A model's archive mark as ``{marked, at, by, reason}`` off the persisted
+    marker aspect (``marked: false`` when unmarked), or None when the marker
+    could not be read (unknown — never a fake "not marked")."""
+    try:
+        from hugpy_storage.archive_mark import ARCHIVE_KEY, archive_view
+        from hugpy_storage.console.model_physical import marker_fields
+        mk = mk or model.get("model_key") or ""
+        fields = marker_fields(model, mk) or {}
+        if "hugpy_marker" not in fields:
+            return None
+        marker = fields.get("hugpy_marker") or {}
+        return archive_view(marker.get(ARCHIVE_KEY) if isinstance(marker, dict) else None)
+    except Exception:  # noqa: BLE001 — a listing must never 500 over a marker
+        return None
+
+
+# ── ARCHIVE MARK (2026-09-23) ─────────────────────────────────────────────
+# Two states only: LIVE or ARCHIVE. The console marks (POST) / unmarks
+# (DELETE); the mark lives on the model's hugpy.json (hugpy_storage.archive_mark)
+# and central's archive gate refuses every placement/routing choice that would
+# land on a marked model. Marking moves, evicts and deletes NOTHING — the
+# operator's `hugpy-model-archive --apply` sweep turns marks into the archive
+# state. Operator-gated in operator_auth._SENSITIVE (same tier as block).
+# NOTE: GET /llm/models/<key>/archive (worker_routes) is the unrelated
+# whole-dir tar stream the provisioner pulls; werkzeug matches by method.
+def _marked_by() -> str:
+    """Who is marking: the session's username, else the API key's name, else
+    'operator-token' for the configured operator token, else 'console'."""
+    try:
+        from hugpy_server.app.operator_auth import (_operator_token, _provided_token,
+                                                    principal_username)
+        user = principal_username()
+        if user:
+            return str(user)
+        tok = _provided_token()
+        if tok and tok == _operator_token():
+            return "operator-token"
+        if tok and tok.startswith("hp_"):
+            from hugpy_server.app.functions.imports.utils.api_keys import key_name_for_token
+            name = key_name_for_token(tok)
+            if name:
+                return f"key:{name}"
+    except Exception:  # noqa: BLE001 — authorship is best-effort, never fatal
+        logger.debug("archive mark: authorship lookup failed", exc_info=True)
+    return "console"
+
+
+def _archive_target(model_key: str):
+    """(canonical key, destination) or a (response, status) refusal."""
+    manifest = get_models_dict(dict_return=True)
+    model = manifest.get(model_key)
+    if model is None:
+        return None, (jsonify({"error": f"model key {model_key!r} is not in the model "
+                               f"catalog ({len(manifest)} entries)"}), 404)
+    destination = route_destination(model)
+    if not destination or not os.path.isdir(destination):
+        return None, (jsonify({"error": f"{model_key} has no install directory at "
+                               f"{destination} — there is no hugpy.json to carry the mark",
+                               "destination": destination}), 409)
+    return (model.get("model_key") or model_key, destination), None
+
+
+def _archive_changed(model_key: str, action: str, detail: dict) -> None:
+    try:
+        from hugpy_fleet.central import archive_gate
+        archive_gate.invalidate()
+    except Exception:  # noqa: BLE001
+        pass
+    invalidate_model_status_cache(f"archive {action}: {model_key}", model_key=model_key)
+    try:
+        from hugpy_server.app.routes.comms_routes import audit
+        audit(f"model.archive_{action}", {"model_key": model_key, **detail})
+    except Exception:  # noqa: BLE001 — audit is best-effort, never fatal
+        pass
+
+
+@llm_bp.route("/llm/models/<path:model_key>/archive", methods=["POST"])
+def archive_mark_route(model_key):
+    """Mark a model for archive. Body (optional): ``{"reason": str}``.
+    Writes ``hugpy.json["archive"] = {marked, at, by, reason}``; nothing else."""
+    from hugpy_storage.archive_mark import archive_record, archive_view, write_archive_mark
+    target, refused = _archive_target(model_key)
+    if refused:
+        return refused
+    mk, destination = target
+    body = request.get_json(silent=True) or {}
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return jsonify({"error": f"'reason' must be a string or null, got {type(reason).__name__}"}), 400
+    rec = archive_record(by=_marked_by(), reason=reason)
+    path = write_archive_mark(destination, rec, model_key=mk)
+    if path is None:
+        return jsonify({"error": f"{mk}: no hugpy.json marker in {destination} to carry "
+                        "the mark (an unstamped dir is not an installed model)",
+                        "destination": destination}), 409
+    _archive_changed(mk, "mark", {"by": rec["by"], "reason": rec["reason"]})
+    return jsonify({"ok": True, "model_key": mk, "archived": archive_view(rec),
+                    "marker": path})
+
+
+@llm_bp.route("/llm/models/<path:model_key>/archive", methods=["DELETE"])
+def archive_unmark_route(model_key):
+    """Clear a model's archive mark. Reports the mark that was removed."""
+    from hugpy_storage.archive_mark import archive_view, clear_archive_mark
+    target, refused = _archive_target(model_key)
+    if refused:
+        return refused
+    mk, destination = target
+    was = clear_archive_mark(destination, model_key=mk)
+    if was is not None:
+        _archive_changed(mk, "unmark", {"by": _marked_by(), "was": was})
+    return jsonify({"ok": True, "model_key": mk, "archived": archive_view(None),
+                    "was": archive_view(was) if was else None,
+                    "was_marked": was is not None})
+
+
+def _runner_state() -> dict:
+    """Who runs admission jobs: the elected runner's host/pid/since off the
+    election lock (``hugpy_ops.admission.runner_state``) — not whether THIS
+    gunicorn worker happens to host the thread."""
+    try:
+        from hugpy_ops.admission import runner_state
+    except ImportError:
+        return {"installed": False, "elected": False, "owner": None,
+                "note": "hugpy-ops is not installed on central: jobs stay queued"}
+    try:
+        return {"installed": True, **runner_state()}
+    except Exception as exc:  # noqa: BLE001 — a listing must never 500 over the lock
+        return {"installed": True, "elected": None, "owner": None,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+@llm_bp.route("/llm/admission", methods=["GET"])
+def admission_list():
+    """Every catalog model's admission (``?status=pending|admitted|held|none``)
+    with its latest admission job, plus the queue's live jobs."""
+    from hugpy_storage.admission import admission_queue
+    want = (request.args.get("status") or "").strip().lower() or None
+    manifest = get_models_dict(dict_return=True)
+    rows = []
+    for key, model in manifest.items():
+        mk = model.get("model_key") or key
+        block = _admission_of({**model, "model_key": mk})
+        status = (block or {}).get("status") or "none"
+        if want and status != want:
+            continue
+        rows.append({"model_key": mk, "status": status, "admission": block})
+    try:
+        jobs = admission_queue.list(limit=200)
+    except Exception as exc:  # noqa: BLE001
+        jobs, rows_err = [], str(exc)
+    else:
+        rows_err = None
+    latest = {}
+    for j in jobs:
+        latest.setdefault(j.get("model_key"), j)
+    for r in rows:
+        j = latest.get(r["model_key"])
+        r["job"] = ({k: j.get(k) for k in ("id", "status", "source", "created_at",
+                                           "started_at", "finished_at")} if j else None)
+    counts = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return jsonify({"models": rows, "counts": counts,
+                    "queue": [j for j in jobs if j.get("status") in ("queued", "running")],
+                    "runner": _runner_state(), "queue_error": rows_err})
+
+
+@llm_bp.route("/llm/admission/<path:model_key>", methods=["GET"])
+def admission_one(model_key):
+    """One model's admission block + its admission jobs (with logs)."""
+    from hugpy_storage.admission import admission_queue, read_admission
+    manifest = get_models_dict(dict_return=True)
+    model = manifest.get(model_key)
+    destination = route_destination(model) if model else None
+    jobs = [j for j in admission_queue.list(limit=1_000_000) if j.get("model_key") == model_key]
+    return jsonify({"model_key": model_key, "known": model is not None,
+                    "destination": destination,
+                    "admission": read_admission(destination) if destination else None,
+                    "jobs": jobs, "runner": _runner_state()})
+
+
+@llm_bp.route("/llm/admission/<path:model_key>/rerun", methods=["POST"])
+def admission_rerun(model_key):
+    """Operator-only: queue a fresh admission job (marks the model pending)."""
+    from hugpy_storage.admission import request_admission
+    manifest = get_models_dict(dict_return=True)
+    model = manifest.get(model_key)
+    if model is None:
+        abort(404, description=f"model key {model_key!r} is not in the model catalog ({len(manifest)} entries)")
+    destination = route_destination(model)
+    job = request_admission(model_key, destination, source="rerun")
+    return jsonify({"queued": True, "job": job, "destination": destination,
+                    "runner": _runner_state()}), 202
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -468,7 +703,7 @@ def _enqueued_response(job, **extra):
 def start_download(model_key):
     model = get_model_config(model_key,dict_return=True)
     if not model:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} has no model config in the catalog")
     logger.info(model)
     body = request.get_json(silent=True) or {}
     job = enqueue_download(model_key, model,
@@ -508,7 +743,7 @@ def list_jobs():
 def get_job(job_id):
     d = get_download(job_id)
     if d is None:
-        abort(404, description="Unknown job ID.")
+        abort(404, description=f"no download job {job_id!r} in the download queue")
     return jsonify(d)
 
 
@@ -519,7 +754,7 @@ def cancel_job(job_id):
     so a cancel can never answer true while nothing changes."""
     res = cancel_download(job_id)
     if res.get("reason") == "unknown job":
-        abort(404, description="Unknown job ID.")
+        abort(404, description=f"no download job {job_id!r} in the download queue")
     return jsonify(res)
 
 
@@ -529,7 +764,7 @@ def retry_job(job_id):
     resumes from the partial files on disk (same job id, same payload)."""
     res = retry_download(job_id)
     if res.get("reason") == "unknown job":
-        abort(404, description="Unknown job ID.")
+        abort(404, description=f"no download job {job_id!r} in the download queue")
     return jsonify(res)
 
 
@@ -541,7 +776,7 @@ def discard_job(job_id):
     from hugpy_storage.downloader.queue import discard_download
     res = discard_download(job_id)
     if res.get("reason") == "unknown job":
-        abort(404, description="Unknown job ID.")
+        abort(404, description=f"no download job {job_id!r} in the download queue")
     return jsonify(res)
 
 
@@ -556,12 +791,12 @@ def diagnose_job(job_id):
     from hugpy_server.app.keeper_line import fleet_grounding, keeper_ask
     d = get_download(job_id)
     if d is None:
-        abort(404, description="Unknown job ID.")
+        abort(404, description=f"no download job {job_id!r} in the download queue")
     prompt = (
         "You are the hugpy fleet keeper. Diagnose this model-download problem "
         "for the operator: name the root cause and the ONE concrete action "
         "that fixes it. Be specific and short (a few sentences).\n\n"
-        f"JOB RECORD:\n{json.dumps(d, default=str)[:4000]}\n\n"
+        f"JOB RECORD:\n{json.dumps(d, default=str)}\n\n"
         f"FLEET FACTS:\n{fleet_grounding(include_queue=False)}")
     res = keeper_ask(prompt)
     reply = res.get("reply") or ""
@@ -603,13 +838,13 @@ def download_repo():
 def delete_model(model_key):
     manifest = get_models_dict(dict_return=True)
     if model_key not in manifest:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} is not in the model catalog ({len(manifest)} entries)")
 
     destination = route_destination(manifest.get(model_key))
     if not os.path.exists(destination):
         return jsonify({
             "deleted": False,
-            "message": "Model is not installed.",
+            "message": f"nothing deleted: {model_key} has no install directory at {destination}",
             "destination": str(destination),
         })
 
@@ -632,13 +867,14 @@ def prune_model_route(model_key):
     those first, so prune never silently orphans real data."""
     manifest = get_models_dict(dict_return=True)
     if model_key not in manifest:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} is not in the model catalog ({len(manifest)} entries)")
 
     destination = route_destination(manifest.get(model_key))
     if destination and os.path.exists(destination):
         return jsonify({
             "pruned": False,
-            "message": "Model has files on disk — delete them before pruning.",
+            "message": f"not pruned: {model_key} still has files on disk at {destination} "
+                       "(prune only removes rows with no files)",
             "destination": str(destination),
         }), 409
 
@@ -660,7 +896,7 @@ def set_model_media_route(model_key):
     keeps deviations from that default (see set_model_media)."""
     manifest = get_models_dict(dict_return=True)
     if model_key not in manifest:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} is not in the model catalog ({len(manifest)} entries)")
     body = request.get_json(silent=True) or {}
     enabled = body.get("enabled", body.get("media", True))
     return jsonify(set_model_media(model_key, enabled))
@@ -679,7 +915,7 @@ def set_model_media_default_route(model_key):
     Setting a model as default does NOT require it to be media-enabled."""
     manifest = get_models_dict(dict_return=True)
     if model_key not in manifest:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} is not in the model catalog ({len(manifest)} entries)")
     body = request.get_json(silent=True) or {}
     is_default = body.get("default", body.get("enabled", True))
     return jsonify(set_media_default(model_key, is_default))

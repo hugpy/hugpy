@@ -16,8 +16,6 @@ Explicit values win; anything omitted falls to resolve()'s default chain
 """
 from __future__ import annotations
 
-import asyncio
-import inspect
 
 from abstract_flask import get_bp
 from flask import jsonify, request
@@ -25,16 +23,7 @@ from flask import jsonify, request
 prompt_bp, logger = get_bp("prompt_bp", __name__)
 
 
-def _await_sync(value):
-    """Drive execute_prompt's (possibly) awaitable result from WSGI.
-
-    Uses the process-wide async runtime (one long-lived loop) rather than a
-    fresh per-request loop — see _platform/async_runtime.
-    """
-    if not inspect.isawaitable(value):
-        return value
-    from hugpy_platform import async_runtime
-    return async_runtime.run(value)
+from hugpy_platform.async_runtime import await_sync as _await_sync
 
 
 def _capacity_refusal(exc):
@@ -64,15 +53,7 @@ def _client_gone(exc) -> bool:
     return isinstance(exc, ClientGone)
 
 
-def _result_payload(result) -> dict:
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(result, attr, None)
-        if callable(fn):
-            try:
-                return fn()
-            except TypeError:
-                continue
-    return {"text": str(result)}
+from hugpy_platform.results import result_payload as _result_payload
 
 
 @prompt_bp.route("/prompt", methods=["POST"])

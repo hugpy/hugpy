@@ -157,14 +157,10 @@ def _allow_synthetic() -> bool:
     return os.environ.get(_ALLOW_SYNTHETIC_ENV) == "1"
 
 
+from hugpy_platform.versioning import module_version
+
 def _pkg_version() -> str:
-    """This tree's package version — echoed to the worker so a version skew is
-    LOGGED (never fatal). Best-effort; 'unknown' if the import can't resolve."""
-    try:
-        from hugpy_video import __version__
-        return str(__version__)
-    except Exception:  # noqa: BLE001
-        return "unknown"
+    return module_version("hugpy_video")
 
 
 def _float_env(name: str, default: float) -> float:
@@ -428,19 +424,7 @@ def resolve_studio_worker(spec) -> str:
     return _studio_worker_base()
 
 
-def _url_host(url: str) -> str:
-    """Lowercased host of ``url`` (no port/scheme). The studio worker base
-    (``HUGPY_STUDIO_WORKER``, a studio-render URL) and a registry row's ``url`` (the
-    agent URL) share a HOST but may differ in port/scheme, so autofit maps the studio
-    worker to its registry row by host alone."""
-    from urllib.parse import urlparse
-    if not url:
-        return ""
-    u = url if "://" in url else "http://" + url
-    try:
-        return (urlparse(u).hostname or "").lower()
-    except Exception:  # noqa: BLE001
-        return ""
+from hugpy_video.intel.net import url_host as _url_host
 
 
 def _autofit_from_worker(base: str) -> "tuple[float, str] | None":

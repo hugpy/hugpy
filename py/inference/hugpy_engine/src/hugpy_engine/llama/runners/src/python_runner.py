@@ -7,7 +7,9 @@ from hugpy_engine.config.main import get_gguf_file, get_model_config
 from hugpy_engine.llama.runners.src.imports.constants import DEFAULT_N_CTX
 from hugpy_engine.llama.runners.src.imports.init_imports import logger
 from hugpy_engine.llama.runners.src.imports.utils import messages_to_prompt_from_dicts
-from hugpy_storage.download_models import ensure_model
+# Serve path: weights are local-or-central on a worker, never Hugging Face
+# (hugpy_storage.provision.ensure_serving_weights; computron 2026-09-23).
+from hugpy_storage.provision import ensure_serving_weights
 # ===========================================================================
 # In-process Python runner — loads a GGUF via llama_cpp directly
 # ===========================================================================
@@ -75,14 +77,19 @@ class LlamaCppPythonRunner(LlamaCppBaseRunner):
         n_ctx: int = DEFAULT_N_CTX,
         n_threads: Optional[int] = None,
         n_gpu_layers: Optional[int] = None,
+        slot_refusal=None,
     ):
+        # ``slot_refusal`` (2026-09-23): the slot pool's SOFT refusal that sent
+        # get_llama_runner down this fallback (an exception or its text). It
+        # rides into a failed in-process load's message + load_failure so the
+        # first, usually more specific, reason is never lost.
         from llama_cpp import Llama
         from hugpy_engine.spill import llama_kwargs
 
         self.model_key = model_key
         self.cfg = get_model_config(model_key)
 
-        model_dir = ensure_model(model_key)
+        model_dir = ensure_serving_weights(model_key)
         # Operator-selected .gguf variant (UI serving control) wins; else the
         # registry filename / first .gguf. No pathlib — get_gguf_file accepts
         # strings via os.fspath internally.
@@ -127,6 +134,25 @@ class LlamaCppPythonRunner(LlamaCppBaseRunner):
             raise FileNotFoundError(
                 f"{model_key}: GGUF missing or empty at {self.model_path!r} — "
                 "refusing to load (would SIGILL llama.cpp)")
+        # Vision GGUF gate (2026-09-23): a model shipping an mmproj projector
+        # must NOT be loaded here text-only — that answered every image turn
+        # blind with ok:true (aeb load_reports). Refuse with the typed
+        # vision_needs_slot failure BEFORE any weights load. The llama-cpp-python
+        # multimodal chat handler is an explicit opt-in only
+        # (HUGPY_INPROCESS_VISION=1), and even then a handler that cannot be
+        # built is a refusal, never a text-only load.
+        from hugpy_platform.utils import find_mmproj
+        self._mmproj = find_mmproj(self.model_path)
+        self._inprocess_vision_ok = bool(self._mmproj) and (
+            os.environ.get("HUGPY_INPROCESS_VISION", "").strip().lower()
+            in ("1", "true", "yes", "on"))
+        if self._mmproj and not self._inprocess_vision_ok:
+            from hugpy_engine.llama.runners.get import vision_needs_slot_failure
+            raise vision_needs_slot_failure(
+                model_key, self.model_path, self._mmproj,
+                slot_refusal if slot_refusal is not None else
+                "in-process loader reached directly (llama-cpp-python cannot load "
+                "the projector)")
         self.n_ctx = n_ctx
         # DEFAULT_LLAMA_THREADS caps generation threads box-wide (the slot
         # agent already honors it) — an operator core budget for hugpy.
@@ -165,9 +191,14 @@ class LlamaCppPythonRunner(LlamaCppBaseRunner):
         # Vision GGUF: load the multimodal projector beside the model via a chat
         # handler so create_chat_completion accepts image_url content. None for
         # text models (no projector) or if no handler matches → text-only.
-        from hugpy_platform.utils import find_mmproj
-        mmproj = find_mmproj(self.model_path)
+        mmproj = self._mmproj
         chat_handler = _build_vision_chat_handler(self.model_path, mmproj, self.cfg) if mmproj else None
+        if mmproj and chat_handler is None:
+            from hugpy_engine.llama.runners.get import vision_needs_slot_failure
+            raise vision_needs_slot_failure(
+                model_key, self.model_path, mmproj,
+                "HUGPY_INPROCESS_VISION is set but no llama-cpp-python multimodal "
+                "chat handler could load the projector")
         self.is_vision = chat_handler is not None
 
         try:
@@ -192,7 +223,20 @@ class LlamaCppPythonRunner(LlamaCppBaseRunner):
                     _torch.cuda.empty_cache()
             except Exception:  # noqa: BLE001
                 pass
-            raise RuntimeError(f"{model_key}: in-process load failed - {type(exc).__name__}: {exc}") from None
+            # Chained, never ``from None`` (2026-09-23): the cause IS the
+            # diagnosis. The traceback was dropped above (frees the half-built
+            # Llama's frames), so keeping the exception object pins no weights.
+            from hugpy_engine.serve.load_failure import ModelLoadFailure, load_failure_of
+            msg = f"{model_key}: in-process load failed - {type(exc).__name__}: {exc}"
+            lclass = "other"
+            if slot_refusal is not None:
+                reason = (f"{type(slot_refusal).__name__}: {slot_refusal}"
+                          if isinstance(slot_refusal, BaseException) else str(slot_refusal))
+                msg += f" | slot refusal: {reason}"
+                if isinstance(slot_refusal, BaseException):
+                    lclass = (load_failure_of(slot_refusal, classify=True) or {}).get("class") or "other"
+            raise ModelLoadFailure(msg, load_class=lclass, path=self.model_path,
+                                   model_key=model_key) from exc
 
         logger.info(
             "LlamaCppPythonRunner ready: model=%s n_ctx=%s n_threads=%s "

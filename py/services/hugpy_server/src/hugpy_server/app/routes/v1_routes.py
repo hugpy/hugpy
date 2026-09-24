@@ -62,12 +62,7 @@ v1_bp, logger = get_bp("v1_bp", __name__)
 # ──────────────────────────────────────────────────────────────────────────
 # auth
 # ──────────────────────────────────────────────────────────────────────────
-def _bearer_token() -> str | None:
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    # OpenAI SDKs send Bearer; allow ?api_key= for quick curl tests too.
-    return request.args.get("api_key")
+from hugpy_server.app.auth_common import bearer_token as _bearer_token
 
 
 def _openai_error(message: str, status: int, err_type: str = "invalid_request_error",
@@ -75,10 +70,29 @@ def _openai_error(message: str, status: int, err_type: str = "invalid_request_er
     """The OpenAI-shaped error body. ``retry_after`` adds the standard header so
     a 503 is an INSTRUCTION ("come back in N seconds") rather than a brush-off —
     every OpenAI SDK and every well-behaved batch client honours it."""
-    body = jsonify({"error": {"message": message, "type": err_type, "code": status}})
+    err = {"message": message, "type": err_type, "code": status}
+    diag = _request_diagnostics()
+    if diag is not None:
+        err["diagnostics"] = diag     # the structured record the message came from
+    body = jsonify({"error": err})
     if retry_after is None:
         return body, status
     return body, status, {"Retry-After": str(int(retry_after))}
+
+
+def _request_diagnostics(request_id: "str | None" = None):
+    """The stored routing-refusal record for this request (resolvers/remote
+    builds + stores it), or None. ``request_id`` defaults to the one the
+    completion handler stamped on ``g``."""
+    try:
+        from flask import g
+        rid = request_id or g.get("hugpy_request_id")
+        if not rid:
+            return None
+        from hugpy_engine.routing_diagnostics import lookup
+        return lookup(rid)
+    except Exception:   # noqa: BLE001 — an error body must never fail to render
+        return None
 
 
 # How long a capacity-refused caller is told to wait. Read from the ONE knob the
@@ -136,6 +150,11 @@ def v1_models():
         _blocked = blocked_keys()
     except Exception:  # noqa: BLE001
         _blocked = set()
+    try:
+        from hugpy_fleet.central.archive_gate import archived_keys
+        _archived = archived_keys()
+    except Exception:  # noqa: BLE001
+        _archived = frozenset()
     data = []
     for key, model in manifest.items():
         model = update_model_status(model)
@@ -169,6 +188,8 @@ def v1_models():
             # Additive: ⛔ blocked from the serving pool by the operator. A call
             # naming a blocked model fails fast with the distinct blocked reason.
             "blocked": (key in _blocked),
+            # Additive: the operator marked it for archive — calls refuse (409).
+            "archived": (key in _archived),
         })
     return jsonify({"object": "list", "data": data})
 
@@ -243,6 +264,11 @@ def v1_chat_completions():
         prompt_kwargs = _completion_kwargs(payload)
     except (ValueError, TypeError) as exc:
         return _openai_error(str(exc), 400)
+    try:
+        from flask import g
+        g.hugpy_request_id = prompt_kwargs.get("request_id")
+    except Exception:  # noqa: BLE001
+        pass
 
     # REJECT-AT-INTAKE (slice 9, defect 3): a request naming a model that resolves
     # to NOTHING (not in the registry/catalog, no worker designation) must be
@@ -274,6 +300,18 @@ def v1_chat_completions():
             _draft = None
         if _draft:
             return _openai_error(_draft, 400)
+        # ARCHIVE MARK (2026-09-23): the operator marked this model for archive
+        # — refuse at intake with the recorded mark (409), never queue it.
+        try:
+            from hugpy_fleet.central.archive_gate import refusal as _arch_refusal
+            _arch = _arch_refusal(_mk)
+        except Exception:  # noqa: BLE001 — the gate is fail-open
+            _arch = None
+        if _arch:
+            return jsonify({"error": {"message": _arch["error"],
+                                      "type": "invalid_request_error", "code": 409,
+                                      "archive": _arch["archive"]},
+                            "archive": _arch["archive"]}), 409
 
     # A tool call is one short, bounded turn — never auto-continue it. A
     # continuation pass is exactly what rambled the captured 2026-07-14
@@ -287,16 +325,18 @@ def v1_chat_completions():
     created = int(time.time())
 
     if payload.get("stream"):
-        def chunk(delta: dict, finish=None) -> bytes:
-            return (
-                "data: " + json.dumps({
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-                }, ensure_ascii=False) + "\n\n"
-            ).encode("utf-8")
+        def chunk(delta: dict, finish=None, hugpy=None) -> bytes:
+            body = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            if hugpy:
+                # central annotations (e.g. output_repair) ride the final chunk
+                body["hugpy"] = hugpy
+            return ("data: " + json.dumps(body, ensure_ascii=False) + "\n\n").encode("utf-8")
 
         # OpenAI semantics: usage rides in ONE extra final chunk (choices: []),
         # and only when the client opted in via stream_options.include_usage.
@@ -374,7 +414,7 @@ def v1_chat_completions():
                             elif clean_text:
                                 # No call — the buffered reply is plain content.
                                 yield chunk({"content": clean_text})
-                        yield chunk({}, finish=finish)
+                        yield chunk({}, finish=finish, hugpy=getattr(ev, "hugpy", None))
                     elif t == "status":
                         status = ev.model_dump()
                         # Structured field for Hugpy-aware clients plus the
@@ -387,7 +427,11 @@ def v1_chat_completions():
                         if buffered:
                             yield chunk({"content": "".join(buffered)})
                             buffered = []
-                        yield chunk({"content": f"\n[error: {ev.message}]"}, finish="stop")
+                        _err = {"content": f"\n[error: {ev.message}]"}
+                        _d = _request_diagnostics(prompt_kwargs.get("request_id"))
+                        if _d is not None:
+                            _err["hugpy_diagnostics"] = _d
+                        yield chunk(_err, finish="stop")
             except Exception as exc:
                 logger.exception("v1 stream failed")
                 if buffered:
@@ -415,6 +459,8 @@ def v1_chat_completions():
     error_message = None
     usage = None
     status_events = []
+    hugpy_meta = None
+    timings = None
     try:
         for ev in chat_iter_sync(_v1_events(prompt_kwargs)):
             t = getattr(ev, "type", None)
@@ -423,6 +469,8 @@ def v1_chat_completions():
             elif t == "done":
                 finish = _finish_reason(ev.finish_reason)
                 usage = getattr(ev, "usage", None)
+                hugpy_meta = getattr(ev, "hugpy", None)
+                timings = getattr(ev, "timings", None)
             elif t == "status":
                 status_events.append(ev.model_dump())
             elif t == "error":
@@ -511,6 +559,18 @@ def v1_chat_completions():
     }
     if status_events:
         result["hugpy_status"] = status_events
+    if hugpy_meta:
+        # central annotations, e.g. {"output_repair": {"applied": true, ...}}
+        # (hugpy_engine.output_repair) — absent for every unrepaired model.
+        result["hugpy"] = hugpy_meta
+    # llama-server's own `timings` block (prompt_ms / predicted_ms / ...), as a
+    # llama.cpp OpenAI-compatible reply carries it, plus `timings.call` — THIS
+    # call's call-ledger stamp and generation split (request_id, worker, quant,
+    # alloc_mode, prompt_s, generation_s, gen_tokens, gen_basis, tok_per_s) as
+    # the relay recorded them (resolvers.remote._stamp_done). Extra key;
+    # OpenAI clients ignore it.
+    if isinstance(timings, dict) and timings:
+        result["timings"] = timings
     return jsonify(result)
 
 
@@ -530,7 +590,8 @@ def fleet_runbook():
         from hugpy_fleet.doctrine.runbook import load_runbook
         return jsonify(load_runbook())
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": "runbook unavailable", "detail": str(exc)}), 404
+        return jsonify({"error": f"hugpy_fleet.doctrine.runbook.load_runbook failed: "
+                                 f"{type(exc).__name__}: {exc}", "detail": str(exc)}), 404
 
 
 @v1_bp.route("/auth/config", methods=["GET"])
@@ -589,7 +650,7 @@ def keys_create():
 @v1_bp.route("/keys/<key_id>", methods=["DELETE"])
 def keys_revoke(key_id):
     if not revoke_api_key(key_id):
-        return jsonify({"ok": False, "error": "unknown key id"}), 404
+        return jsonify({"ok": False, "error": f"no API key {key_id!r} to revoke (revoke_api_key returned False)"}), 404
     return jsonify({"ok": True})
 
 
@@ -662,5 +723,5 @@ def video_share_create():
 @v1_bp.route("/keys/video-share/<key_id>", methods=["DELETE"])
 def video_share_revoke(key_id):
     if not revoke_share_key(key_id):
-        return jsonify({"ok": False, "error": "unknown key id"}), 404
+        return jsonify({"ok": False, "error": f"no video share key {key_id!r} to revoke (revoke_share_key returned False)"}), 404
     return jsonify({"ok": True})

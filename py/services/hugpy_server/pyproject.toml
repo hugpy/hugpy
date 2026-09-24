@@ -75,6 +75,9 @@ where = ["src"]
 hugpy_server = [
     "py.typed",
     "**/*.json", "**/*.sh", "**/*.md", "**/*.txt",
+    # installer launcher icons served by agent_routes._serve_installer_icon
+    # (public GET /agent/install/icon.png|.ico) — binary assets, must ship.
+    "**/*.png", "**/*.ico",
     "console_dist/**/*",
 ]
 

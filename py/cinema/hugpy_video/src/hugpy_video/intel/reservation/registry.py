@@ -20,7 +20,6 @@ console only READS the listing (``GET /llm/reservations``).
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 import threading
 import time
@@ -75,31 +74,12 @@ class ReservationRegistry:
         # The reservation-registry init was one of the restart-burst EMFILE
         # casualties (2026-07-23). Retry the store-open (see
         # comms.shared.retry_on_emfile) before the handle-local PRAGMAs.
-        conn = retry_on_emfile(lambda: sqlite3.connect(self.path, timeout=2.0))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=2000")
-        return conn
+        from hugpy_control.shared import connect_wal
+        return connect_wal(self.path, retry=retry_on_emfile)
 
     def _ensure(self) -> bool:
-        if self._disabled:
-            return False
-        if self._initialized:
-            return True
-        with self._init_lock:
-            if self._initialized:
-                return True
-            try:
-                d = os.path.dirname(self.path)
-                if d:
-                    os.makedirs(d, exist_ok=True)
-                with self._connect() as conn:
-                    conn.executescript(_SCHEMA)
-                self._initialized = True
-                return True
-            except Exception as exc:  # noqa: BLE001
-                self._note_failure("init", exc)
-                return False
+        from hugpy_control.shared import ensure_store_schema
+        return ensure_store_schema(self, _SCHEMA, script=True)
 
     def _note_failure(self, op: str, exc: Exception) -> None:
         self._failures += 1

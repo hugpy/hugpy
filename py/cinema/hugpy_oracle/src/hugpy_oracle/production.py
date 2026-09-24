@@ -58,7 +58,6 @@ No pathlib anywhere. os.path only (not that this module touches the disk).
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -101,15 +100,7 @@ class LockRefused(ProductionError):
 # ---------------------------------------------------------------------------
 
 
-def canonical_json(payload: Any) -> bytes:
-    """Deterministic JSON bytes: sorted keys, no whitespace, ASCII-escaped.
-
-    Byte-identical to ``audio_master.canonical_json`` and to
-    ``mct.manifest._canonical_json``. One encoding across the tree is what lets
-    an ``AudioMaster`` digest computed in k102 be compared to the one a
-    ``ProductionLock`` recorded here without a conversion step."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=True).encode("utf-8")
+from hugpy_oracle.audio_master import canonical_json
 
 
 def digest_payload(payload: Any) -> str:
@@ -154,18 +145,10 @@ class ContentAddressed:
         return hashlib.sha256(self.canonical_bytes).hexdigest()
 
 
-def _require_text(value: Any, what: str) -> str:
-    text = str(value or "")
-    if not text.strip():
-        raise ValueError(f"{what} must be non-empty")
-    return text
+from hugpy_oracle.validation import require_text as _require_text
 
 
-def _require_non_negative(value: Any, what: str) -> float:
-    number = float(value)
-    if number < 0:
-        raise ValueError(f"{what} must be non-negative, got {number}")
-    return number
+from hugpy_oracle.validation import require_non_negative as _require_non_negative
 
 
 def _str_tuple(values: Any, what: str) -> tuple[str, ...]:

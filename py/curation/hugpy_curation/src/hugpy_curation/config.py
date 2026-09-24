@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +72,7 @@ CRITERIA_DIR_ENV = "REVIEW_CRITERIA_DIR"
 FETCH_CACHE_ENV = "DOSSIER_CACHE_DIR"
 
 
-def _env(name: str) -> Optional[str]:
-    value = os.environ.get(name)
-    value = value.strip() if value else ""
-    return value or None
+from hugpy_platform.env import env_value as _env
 
 
 def _home_fallback(*parts: str) -> str:

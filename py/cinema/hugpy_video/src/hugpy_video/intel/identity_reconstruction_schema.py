@@ -565,7 +565,3 @@ def identity_mesh_from_dict(d: dict) -> IdentityMeshSpec:
         cleanup_prompt=d.get("cleanup_prompt", ""),
         negative_prompt=d.get("negative_prompt", ""),
     )
-
-
-def make_identity_reconstruction(**kwargs) -> IdentityReconstructionSpec:
-    return IdentityReconstructionSpec(**kwargs)

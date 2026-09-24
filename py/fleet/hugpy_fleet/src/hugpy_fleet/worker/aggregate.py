@@ -58,7 +58,7 @@ MAX_MODELS = 64          # distinct model rows kept; LRU-by-last_touched evicted
 MAX_EVENTS = 20          # per-model recent serve/load ring
 MAX_LATENCY_SAMPLES = 128  # per-model reservoir p95 is computed from
 MAX_SELFTEST = 10        # per-model self-test scores kept
-MAX_ERROR_CHARS = 2000   # last_error is VERBATIM but bounded
+MAX_ERROR_CHARS = None   # last_error is VERBATIM and WHOLE (2026-09-23: no cap)
 
 _DEFAULT_FLUSH_S = 10.0
 
@@ -100,16 +100,12 @@ def _flush_interval_s() -> float:
 
 
 def _clip(text: Any) -> Optional[str]:
-    """Verbatim, but bounded. The operator's standing want is the REAL error
-    text (a summarized error has repeatedly cost a diagnosis), so we keep the
-    head and tail and mark the elision rather than paraphrasing anything."""
+    """Verbatim and WHOLE. The operator's standing want is the REAL error
+    text (a summarized error has repeatedly cost a diagnosis); 2026-09-23
+    the head/tail elision went too — every byte is kept."""
     if text is None:
         return None
-    s = str(text)
-    if len(s) <= MAX_ERROR_CHARS:
-        return s
-    keep = MAX_ERROR_CHARS // 2 - 20
-    return s[:keep] + "\n…[elided]…\n" + s[-keep:]
+    return str(text)
 
 
 def _p95(samples: list) -> Optional[float]:

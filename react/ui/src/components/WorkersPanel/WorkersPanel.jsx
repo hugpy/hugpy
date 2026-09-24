@@ -9,7 +9,8 @@ import { allocIsGgufOnly, allocModeLabel, spillLabel } from './allocation'
 import { fmtBytes } from './formatters'
 import { findCatalogRow } from './catalogRow'
 import { GroupAssignPanel } from './GroupAssignPanel'
-import { WorkerRow } from './WorkerRow'
+import { WorkerRow, effectivePin } from './WorkerRow'
+import { responseReason } from '../responseReason'
 import './WorkersPanel.css'
 
 export default function WorkersPanel({ models = [], embedded = false }) {
@@ -132,7 +133,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         // ones. Keep the last known roster and surface the problem instead;
         // stale-but-labelled beats empty-and-silent.
         if (Array.isArray(data)) { setWorkers(data); setError(null) }
-        else setError('worker list unavailable (kept the last known roster)')
+        else setError(`GET /api/llm/workers returned a non-list (kept the last known roster): ${responseReason(data)}`)
       })
       .catch(e => setError(e.message))
     // Central-as-worker: its compute (the local slot pool) renders as a
@@ -206,7 +207,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_key: modelKey }),
       })
-      if (r && r.loaded === false) alert(`Not loaded: ${r.reason || 'no free slot'}`)
+      if (r && r.loaded === false) alert(`${modelKey} not loaded on central: ${responseReason(r)}`)
       setShowCentralLoad(false); setCentralPick('')
       load()
     } catch (err) { alert(`Load failed: ${err.message}`) }
@@ -410,7 +411,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_key: modelKey }),
       })
-      if (r && r.ok === false) alert(`Free failed: ${r.error || 'unknown error'}`)
+      if (r && r.ok === false) alert(`Free ${modelKey} on ${worker.name} failed: ${responseReason(r)}`)
       load()
     } catch (err) { alert(`Free failed: ${err.message}`) }
   }, [load])
@@ -430,9 +431,9 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         body: JSON.stringify({ model_key: modelKey }),
       })
       if (r && r.ok === false) {
-        alert(`Evict failed: ${r.error || r.reason || 'unknown error'}`)
+        alert(`Evict ${modelKey} on ${worker.name} failed: ${responseReason(r)}`)
       } else if (r && r.evicted === false) {
-        alert(`Not evicted: ${r.reason || 'model is not resident on this worker'}`)
+        alert(`${modelKey} not evicted on ${worker.name}: ${responseReason(r)}`)
       }
       load()
       return r
@@ -447,7 +448,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ all: true }),
       })
-      if (r && r.ok === false) alert(`Free failed: ${r.error || 'unknown error'}`)
+      if (r && r.ok === false) alert(`Free all on ${worker.name} failed: ${responseReason(r)}`)
       load()
     } catch (err) { alert(`Free failed: ${err.message}`) }
   }, [load])
@@ -462,7 +463,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       })
-      if (r && r.ok === false) { alert(`Free RAM failed: ${r.error || 'unknown error'}`); return }
+      if (r && r.ok === false) { alert(`Free RAM on ${worker.name} failed: ${responseReason(r)}`); return }
       const freed = r && typeof r.ram_freed === 'number' ? r.ram_freed : null
       if (freed && freed > 0) {
         alert(`Freed ${(freed / 1073741824).toFixed(1)} GiB RAM on ${worker.name}`)
@@ -593,7 +594,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         // stale proposal could widen the delete. /reap-approve ships in 0.1.137;
         // if it isn't live, refuse rather than weaken the guarantee.
         if (/\b404\b|not found/i.test(err.message || '')) {
-          throw new Error('reap-approve is not available on this central/worker (needs 0.1.137+). Refusing to fall back to the un-guarded reaper.')
+          throw new Error(`POST ${url} answered: ${err.message} — refusing to fall back to the un-guarded /reap`)
         }
         throw err
       }
@@ -664,7 +665,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slot_count: n }),
       })
-      if (r && r.ok === false) alert(`Config failed: ${r.error?.message || 'unknown'}`)
+      if (r && r.ok === false) alert(`Config on ${worker.name} failed: ${responseReason(r)}`)
       else if (r && r.restarting) markApplying(worker.id, { kind: 'slot_count', value: n })
       load()
     } catch (err) {
@@ -683,7 +684,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ residency: { [modelKey]: mode === 'static' ? 'static' : null } }),
       })
-      if (r && r.ok === false) alert(`Residency failed: ${r.error?.message || 'unknown'}`)
+      if (r && r.ok === false) alert(`Residency on ${worker.name} failed: ${responseReason(r)}`)
       else if (r && r.restarting) markApplying(worker.id, { kind: 'residency', model: modelKey, value: mode })
       load()
     } catch (err) {
@@ -715,7 +716,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
       })
       if (r && r.ok === false && !r.results) {
         // A pre-relay reject (bad body/mode) — no per-model map to show.
-        alert(`Residency change failed: ${r.error?.message || 'unknown'}`)
+        alert(`Residency change on ${worker.name} failed: ${responseReason(r)}`)
         return
       }
       if (r && r.restarting) {
@@ -813,7 +814,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
         body: JSON.stringify(body),
       })
       if (r && r.ok === false && !r.results) {
-        alert(`Allocation change failed: ${r.error?.message || 'unknown'}`)
+        alert(`Allocation change on ${worker.name} failed: ${responseReason(r)}`)
         return
       }
       const okN = r?.counts?.ok ?? 0, errN = r?.counts?.error ?? 0, skN = r?.counts?.skipped ?? 0
@@ -830,21 +831,22 @@ export default function WorkersPanel({ models = [], embedded = false }) {
   }, [load, models])
 
   // Tiers v2 FILES axis: pin toggles ride the same settings channel.
+  // Per-model 📌: central's record now, via POST /llm/workers/<id>/pin
+  // {model_key, pinned:bool} — writes designation_meta (pinned/pinned_by/
+  // pinned_at); no agent restart, no load, no eviction. (Was the legacy
+  // /config {pinned:{...}} agent-settings write.)
   const togglePin = useCallback(async (worker, modelKey, pin) => {
     try {
-      const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/config`, {
+      const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/pin`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pinned: { [modelKey]: pin ? true : null } }),
+        body: JSON.stringify({ model_key: modelKey, pinned: !!pin }),
       })
-      if (r && r.ok === false) alert(`Pin failed: ${r.error?.message || 'unknown'}`)
-      else if (r && r.restarting) markApplying(worker.id, { kind: 'pinned', model: modelKey, value: pin })
+      if (r && r.ok === false) alert(`Pin on ${worker.name} failed: ${responseReason(r)}`)
       load()
     } catch (err) {
-      alert(applying[worker.id]
-        ? 'The agent is restarting to apply the previous change — retry in a few seconds.'
-        : `Pin failed: ${err.message}`)
+      alert(`Pin failed: ${err.message}`)
     }
-  }, [load, markApplying, applying])
+  }, [load])
 
   // Bulk pin: 📌 pin EVERY model designated to this worker in one settings-write
   // (central relays a single /ops/config with the full pinned map — same code
@@ -853,7 +855,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
   const pinAll = useCallback(async (worker) => {
     const keys = worker.models || []
     if (keys.length === 0) { alert(`${worker.name} has no assigned models to pin.`); return }
-    const unpinned = keys.filter(k => !worker.config?.pinned?.[k])
+    const unpinned = keys.filter(k => !effectivePin(worker, k))
     if (unpinned.length === 0) {
       alert(`All ${keys.length} model${keys.length === 1 ? '' : 's'} on ${worker.name} are already pinned.`)
       return
@@ -861,7 +863,8 @@ export default function WorkersPanel({ models = [], embedded = false }) {
     if (!confirm(
       `📌 Pin all ${keys.length} model${keys.length === 1 ? '' : 's'} on ${worker.name}?\n\n` +
       'Pinning is PERMANENT attribution: each pinned model then refuses unassign ' +
-      '("unpin first") until you Unpin all. The worker agent restarts (~5s) to apply.')) return
+      '("unpin first") until you Unpin all, and is reloaded after a worker boot ' +
+      'or a central restart. No agent restart, no load, no eviction.')) return
     try {
       const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/pin-all`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -882,15 +885,16 @@ export default function WorkersPanel({ models = [], embedded = false }) {
   }, [load, markApplying, applying])
 
   // Unpin all — the undo for Pin all. Unpins every model on the worker in one
-  // /ops/config write (same relay); afterward the models can be unassigned.
+  // call (central records pinned=false per model); afterward they can be
+  // unassigned. No agent restart.
   const unpinAll = useCallback(async (worker) => {
     const keys = worker.models || []
-    const pinnedKeys = keys.filter(k => worker.config?.pinned?.[k])
+    const pinnedKeys = keys.filter(k => effectivePin(worker, k))
     if (pinnedKeys.length === 0) { alert(`No pinned models on ${worker.name}.`); return }
     if (!confirm(
       `Unpin all ${pinnedKeys.length} pinned model${pinnedKeys.length === 1 ? '' : 's'} on ${worker.name}?\n\n` +
       'This is the undo for Pin all — the models can be unassigned again afterward. ' +
-      'The worker agent restarts (~5s) to apply.')) return
+      'No agent restart.')) return
     try {
       const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/unpin-all`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -910,6 +914,44 @@ export default function WorkersPanel({ models = [], embedded = false }) {
     }
   }, [load, markApplying, applying])
 
+  // Prune AUTOMATED (non-pinned) designations on ONE worker. Two calls: a
+  // DRY-RUN (POST .../designations/prune with no apply) whose plan we show
+  // verbatim — every row a recorded fact (source, reason) — then an apply only
+  // on confirm. Absences are explicit ("nothing to prune"). Never touches
+  // pinned/operator designations; never unloads anything on the worker.
+  const pruneDesignations = useCallback(async (worker) => {
+    let plan
+    try {
+      plan = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/designations/prune`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apply: false }),
+      })
+    } catch (err) { alert(`Prune (dry-run) failed on ${worker.name}: ${err.message}`); return }
+    const remove = (plan && plan.remove) || []
+    const boundH = plan && plan.max_age_hours
+    if (remove.length === 0) {
+      const keptN = Object.values((plan && plan.kept) || {}).reduce((a, b) => a + b, 0)
+      alert(`Nothing to prune on ${worker.name} (idle bound ${boundH}h). ` +
+            `${keptN} designation(s) kept.`)
+      return
+    }
+    const lines = remove.map(r => `  • ${r.model_key} — ${r.reason}`).join('\n')
+    if (!confirm(
+      `Prune ${remove.length} automated designation(s) on ${worker.name} ` +
+      `(idle bound ${boundH}h)?\n\n${lines}\n\n` +
+      'Pinned & operator designations are never touched; nothing on the worker ' +
+      'is unloaded — only the registry designations are dropped.')) return
+    try {
+      const done = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/designations/prune`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apply: true }),
+      })
+      const n = ((done && done.remove) || []).length
+      alert(`Pruned ${n} automated designation(s) on ${worker.name}.`)
+      load()
+    } catch (err) { alert(`Prune failed on ${worker.name}: ${err.message}`) }
+  }, [load])
+
   const setLimits = useCallback(async (worker, limits) => {
     try {
       await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/limits`, {
@@ -925,9 +967,12 @@ export default function WorkersPanel({ models = [], embedded = false }) {
     const stale = workers.filter(w => w.status !== 'online')
     if (!stale.length) return
     if (!confirm(`Remove ${stale.length} offline worker(s) from the pool?`)) return
+    const failed = []
     await Promise.all(stale.map(w =>
-      fetchJson(`/api/llm/workers/${encodeURIComponent(w.id)}`, { method: 'DELETE' }).catch(() => {})
+      fetchJson(`/api/llm/workers/${encodeURIComponent(w.id)}`, { method: 'DELETE' })
+        .catch(e => failed.push(`${w.name || w.id}: ${e.message}`))
     ))
+    if (failed.length) alert(`Removed ${stale.length - failed.length}/${stale.length} offline worker(s); failed:\n${failed.join('\n')}`)
     load()
   }, [workers, load])
 
@@ -1093,6 +1138,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
               onTogglePin={togglePin}
               onPinAll={pinAll}
               onUnpinAll={unpinAll}
+              onPruneDesignations={pruneDesignations}
               onReap={reap}
               onApproveEvictions={approveEvictions}
               onEvict={evictModel}

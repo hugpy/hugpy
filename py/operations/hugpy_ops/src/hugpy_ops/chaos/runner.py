@@ -48,7 +48,7 @@ from pathlib import Path
 from hugpy_ops.chaos import alloc, observe
 from hugpy_ops.chaos.assortment import draw_combo, enumerate_assortment, worker_index
 from hugpy_ops.chaos.client import CentralClient, DEFAULT_BASE, default_base_url
-from hugpy_ops.chaos.schema import blank_observation, validate_observation
+from hugpy_ops.chaos.schema import blank_observation
 
 # Legacy fixed locations, kept as the documented names; the CLI defaults go
 # through default_out_dir() / default_env_file() so the platform's store root
@@ -154,12 +154,8 @@ class ChaosRunner:
         return False
 
     def _append(self, obs: dict):
-        problems = validate_observation(obs)
-        if problems:  # a malformed obs is a bug — record it, don't poison silently
-            obs.setdefault("_schema_problems", problems)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.obs_path, "a") as f:
-            f.write(json.dumps(obs) + "\n")
+        from hugpy_ops.chaos.observations import append_observation
+        append_observation(self.out_dir, self.obs_path, obs)
 
     def _write_manifest(self, status: str, started: float, ended: float | None,
                         assortment: dict):

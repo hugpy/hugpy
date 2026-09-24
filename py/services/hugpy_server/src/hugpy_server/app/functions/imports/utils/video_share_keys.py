@@ -60,18 +60,10 @@ def _load() -> dict[str, Any]:
     return data
 
 
+from hugpy_platform.atomic_json import save_json as _atomic_save_json
+
 def _save(data: dict[str, Any]) -> None:
-    path = _store_path()
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    # Unique temp name per write (pid+token): gunicorn runs multiple processes and
-    # a shared "<path>.tmp" would race between open() and os.replace() — the same
-    # bug api_keys.py documents. os.replace stays the atomicity point.
-    tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    _atomic_save_json(_store_path(), data)
 
 
 def _hash(token: str) -> str:
@@ -136,15 +128,10 @@ def list_share_keys() -> list[dict[str, Any]]:
     return out
 
 
+from hugpy_server.app.functions.imports.utils.key_store import revoke_key
+
 def revoke_share_key(key_id: str) -> bool:
-    with _LOCK:
-        data = _load()
-        rec = data["keys"].get(key_id)
-        if not rec:
-            return False
-        rec["revoked"] = True
-        _save(data)
-    return True
+    return revoke_key(key_id, _LOCK, _load, _save)
 
 
 def verify_share_key(token: Optional[str]) -> Optional[str]:

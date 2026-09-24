@@ -2,12 +2,25 @@ import { useMemo, useState, useCallback, useRef, useEffect, Fragment } from 'rea
 
 import { fetchJson } from '../../api'
 import ServingControl from './ServingControl'
-import QuantControl from './QuantControl'
+import QuantControl, { WorkerQuantSelect } from './QuantControl'
+import { sizeView } from './modelSize'
 import PlacementControl from './PlacementControl'
 import GroupHeaderRow, { MemberVerdicts } from './GroupHeaderRow'
+import ModelLogs from '../ModelLogs/ModelLogs'
 import { useModelGroups } from './useModelGroups'
 import useSessionState from '../../hooks/useSessionState'
+import { useModelStatus, refreshModelStatus } from './useModelStatus'
+import {
+  BUCKETS, BUCKET_LABELS, EMPTY_STATUS_FILTERS, STATUS_FILTER_OPTIONS, STATUS_SORTS, WORTH_META, WORTH_ORDER,
+  hasStatusFilters, matchesStatusFilters, parseStatusQuery, statusFor, summaryCounts, writeStatusQuery,
+} from './modelStatus'
+import {
+  AdmissionCell, FailureCell, GradeCell, ServableCell, ThroughputCell, VerificationCell, WorkerStateChips, WorthCell,
+} from './StatusCells'
+import ModelStatusDetail from './ModelStatusDetail'
+import { archiveMark, archiveText } from './archiveMark'
 import './ModelTable.css'
+import './ModelStatus.css'
 
 function fmtCtx(n) {
   if (n == null) return '?'
@@ -16,6 +29,8 @@ function fmtCtx(n) {
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`
   return String(n)
 }
+
+const isGgufFw = (fw) => { const f = String(fw || '').toLowerCase(); return f === 'gguf' || f === 'llama_cpp' }
 
 function fmtBytes(n) {
   if (n == null) return '–'
@@ -129,8 +144,8 @@ function DownloadProgress({ job, onCancel, onRetry }) {
         )}
         {job.status === 'running' && job.attempt > 1 && ` · try ${job.attempt}/${job.max_attempts}`}
         {job.status === 'running' && !job.stalled && bps > 0 && ` · ${fmtBytes(bps)}/s`}
-        {job.status === 'failed' && `✗ ${job.error_reason ? `[${job.error_reason}] ` : ''}${job.error ?? 'failed'}`}
-        {job.status === 'expired' && `✗ expired — ${job.message || 'never ran'}`}
+        {job.status === 'failed' && `✗ ${job.error_reason ? `[${job.error_reason}] ` : ''}${job.error ?? `job ${job.id} status=failed with no error text recorded (attempt ${job.attempt ?? '?'}/${job.max_attempts ?? '?'})`}`}
+        {job.status === 'expired' && `✗ expired — ${job.message || `job ${job.id} expired with no message recorded (attempt ${job.attempt ?? 0}/${job.max_attempts ?? '?'})`}`}
         {job.status === 'cancelled' && 'cancelled'}
       </span>
 
@@ -183,6 +198,31 @@ const COLUMNS = [
   { key: 'pgroup', label: 'Group', type: 'str', get: m => m.__pgroup ?? '' },
 ]
 
+// "Worth my time" columns (GET /llm/models/status; annotated as m.__status in
+// visibleModels). Only offered when the endpoint answers — feature-detected.
+const STATUS_COLUMNS = [
+  { key: 'worth', label: 'Worth', type: 'num', get: m => STATUS_SORTS.worth(m.__status), Cell: WorthCell },
+  { key: 'verification', label: 'Verification', type: 'num', get: m => STATUS_SORTS.verification(m.__status), Cell: VerificationCell },
+  { key: 'admission', label: 'Admission', type: 'num', get: m => STATUS_SORTS.admission(m.__status), Cell: AdmissionCell },
+  { key: 'grade', label: 'Grade', type: 'num', get: m => STATUS_SORTS.grade(m.__status), Cell: GradeCell },
+  { key: 'tps', label: 'tok/s (avg of calls)', type: 'num', get: m => m.__status?.throughput?.mean_tok_s ?? -1, Cell: ThroughputCell },
+  { key: 'failure', label: 'Last failure', type: 'num', get: m => STATUS_SORTS.failure(m.__status), Cell: FailureCell },
+  { key: 'servable', label: 'Servable now', type: 'num', get: m => STATUS_SORTS.servable(m.__status), Cell: ServableCell },
+  { key: 'wstate', label: 'Workers', type: 'str', get: m => (m.__status?.workers || []).map(w => w.state).join(','), Cell: WorkerStateChips },
+]
+
+// URL <-> status filters (ms_* params), replaceState: shareable, no reload.
+function readStatusFilters() {
+  try { return parseStatusQuery(window.location.search) } catch { return { ...EMPTY_STATUS_FILTERS } }
+}
+function writeStatusFilters(f) {
+  try {
+    const { pathname, search, hash } = window.location
+    const s = writeStatusQuery(search, f)
+    if (s !== search) window.history.replaceState(window.history.state, '', `${pathname}${s}${hash}`)
+  } catch { /* non-browser host */ }
+}
+
 export default function ModelTable({
   models,
   jobsByModel,
@@ -201,6 +241,36 @@ export default function ModelTable({
   onRefresh,
 }) {
   const [probe, setProbe] = useState({})   // `${workerId}:${modelKey}` -> 'probing'|result
+  const [logsOpen, setLogsOpen] = useState({})   // modelKey -> bool (failure log expanded)
+  // ARCHIVE MARK (POST/DELETE /llm/models/<key>/archive). The console only
+  // MARKS; the operator's `hugpy-model-archive --apply` sweep moves the files.
+  // Outcome shown inline per model (never an alert loop).
+  const [archiveNote, setArchiveNote] = useState({})   // modelKey -> {busy?, text}
+  const setArchive = useCallback((modelKey, mark) => {
+    let body
+    if (mark) {
+      // One prompt for the optional reason; Cancel aborts, empty = no reason.
+      const reason = window.prompt(
+        `Mark "${modelKey}" for archive?\n\nCentral stops placing and routing it at once; `
+        + 'nothing is moved or deleted until the operator runs `hugpy-model-archive --apply`.'
+        + '\n\nReason (optional):', '')
+      if (reason === null) return
+      body = JSON.stringify({ reason: reason.trim() || null })
+    }
+    setArchiveNote(n => ({ ...n, [modelKey]: { busy: true, text: mark ? 'marking…' : 'unmarking…' } }))
+    fetchJson(`/api/llm/models/${encodeURIComponent(modelKey)}/archive`, {
+      method: mark ? 'POST' : 'DELETE',
+      ...(body ? { headers: { 'Content-Type': 'application/json' }, body } : {}),
+    })
+      .then(d => {
+        const text = mark ? `✓ ${archiveText(d.archived)}`
+          : d.was_marked ? `✓ unmarked (was ${archiveText(d.was)})` : '✓ was not marked'
+        setArchiveNote(n => ({ ...n, [modelKey]: { text } }))
+        onRefresh?.()
+        refreshModelStatus()?.catch?.(() => {})
+      })
+      .catch(e => setArchiveNote(n => ({ ...n, [modelKey]: { text: `✗ ${e.message || e}` } })))
+  }, [onRefresh])
 
   // Session-sticky filters/sort: defaults on a fresh tab, the operator's picks
   // survive reloads/tab-switches within the session (see useSessionState).
@@ -212,6 +282,17 @@ export default function ModelTable({
   const [sortKey, setSortKey] = useSessionState('hugpy.sess.mt.sortKey', 'name')
   const [sortDir, setSortDir] = useSessionState('hugpy.sess.mt.sortDir', 'asc')
   const [detailKey, setDetailKey] = useState(null)
+
+  // WORTH MY TIME — one shared status snapshot (polls <=3 s while anything is
+  // downloading/loading/serving, else 15 s). Filters live in the URL.
+  const mstatus = useModelStatus()
+  const sIndex = mstatus.index
+  const statusOn = sIndex.available
+  const [sfilters, setSfilters] = useState(readStatusFilters)
+  useEffect(() => { writeStatusFilters(sfilters) }, [sfilters])
+  const setSf = useCallback((k, v) => setSfilters(f => ({ ...f, [k]: f[k] === v ? '' : v })), [])
+  const columns = useMemo(() => (statusOn ? [...COLUMNS, ...STATUS_COLUMNS] : COLUMNS), [statusOn])
+  const summary = useMemo(() => summaryCounts(sIndex), [sIndex])
 
   // MODEL GROUPS. Purely additive: when the endpoint reports no multi-member
   // group (or isn't there at all) `groupedRows` degrades to the plain
@@ -226,8 +307,8 @@ export default function ModelTable({
   // CON-03: size/quant/params/ctx + VRAM-annotated recommendations from THE
   // one metadata source (GET /models/<key>/meta), fetched lazily when a row
   // expands. Keys: "<model>" (base) and "<model>@<workerId>" (per-worker fit).
-  // Cached in parent state (ModelDetail is a nested component, so its own
-  // state wouldn't survive parent re-renders).
+  // Cached in parent state (the detail row is rendered by renderModelDetail, a
+  // plain function that holds no state of its own).
   const [modelMeta, setModelMeta] = useState({})
   const metaInflight = useRef(new Set())
   const loadModelMeta = useCallback((modelKey, workerIds = []) => {
@@ -354,10 +435,11 @@ export default function ModelTable({
       if (taskFilter && !modelTasks(m).includes(taskFilter)) return false
       if (statusFilter && modelStatus(m) !== statusFilter) return false
       if (assignedOnly && !assignedKeys.has(m.model_key ?? m.key)) return false
+      if (statusOn && !matchesStatusFilters(statusFor(sIndex, m), sfilters)) return false
       return true
-    }).map(m => ({ ...m, __pgroup: pgFor(m)?.name || '' }))
+    }).map(m => ({ ...m, __pgroup: pgFor(m)?.name || '', __status: statusOn ? statusFor(sIndex, m) : null }))
 
-    const col = COLUMNS.find(c => c.key === sortKey)
+    const col = columns.find(c => c.key === sortKey)
     if (!col) return filtered
 
     return [...filtered].sort((a, b) => {
@@ -373,7 +455,8 @@ export default function ModelTable({
 
       return sortDir === 'asc' ? cmp : -cmp
     })
-  }, [models, query, frameworkFilter, taskFilter, statusFilter, assignedOnly, assignedKeys, sortKey, sortDir, pgFor])
+  }, [models, query, frameworkFilter, taskFilter, statusFilter, assignedOnly, assignedKeys, sortKey, sortDir, pgFor,
+      statusOn, sIndex, sfilters, columns])
 
   /**
    * MODEL GROUPS — the render list, as a flat array of
@@ -457,6 +540,7 @@ export default function ModelTable({
     setTaskFilter('')
     setStatusFilter('')
     setAssignedOnly(false)
+    setSfilters({ ...EMPTY_STATUS_FILTERS })
   }, [])
 
   if (!models.length) {
@@ -481,7 +565,13 @@ const DETAIL_FIELDS = [
 
 const SHOWN_KEYS = new Set(DETAIL_FIELDS.map(([k]) => k))
 
-function ModelDetail({ model, colSpan }) {
+// A plain render FUNCTION, not a component: declared inside ModelTable's body,
+// `<ModelDetail/>` was a NEW component type on every ModelTable render (status
+// poll, workers poll), so React unmounted + remounted the whole expanded row
+// each time — every child re-ran its mount effects (PlacementControl's
+// GET /settings/shard_models/<key> per poll) and the row flickered. Called as
+// a function its children keep stable types and stay mounted. It uses no hooks.
+function renderModelDetail(model, colSpan) {
   // declared fields that actually have a value
   const rows = DETAIL_FIELDS
     .map(([k, label, fmt]) => [label, fmt(model[k])])
@@ -508,9 +598,12 @@ function ModelDetail({ model, colSpan }) {
       ? '⬇ Resume download'
       : '⬇ Download'
   const onlineWorkers = workers.filter(w => w.status === 'online')
+  const arch = archiveMark(model)
+  const archText = arch ? archiveText(arch) : ''
+  const archNote = archiveNote[modelKey]
 
   return (
-    <tr className="mt-detail-row">
+    <tr className={`mt-detail-row${arch ? ' mt-row-archived' : ''}`}>
       <td colSpan={colSpan}>
         <div className="mt-detail">
           <div className="mt-detail-actions">
@@ -522,6 +615,14 @@ function ModelDetail({ model, colSpan }) {
               onClick={() => onChat(modelKey)}
             >
               💬 Chat
+            </button>
+
+            <button
+              className={`mt-act${logsOpen[modelKey] ? ' mt-act-on' : ''}`}
+              title="Load failures, routing refusals, integrity verdict and admission reason for this model"
+              onClick={() => setLogsOpen(o => ({ ...o, [modelKey]: !o[modelKey] }))}
+            >
+              📜 Logs
             </button>
 
             <button
@@ -547,6 +648,26 @@ function ModelDetail({ model, colSpan }) {
               🗑 Delete files
             </button>
 
+            {arch ? (
+              <button
+                className="mt-act"
+                disabled={!!archNote?.busy}
+                title={`${archText} — clear the mark (the model returns to placement and routing)`}
+                onClick={() => setArchive(modelKey, false)}
+              >
+                ↩ Unarchive
+              </button>
+            ) : (
+              <button
+                className="mt-act mt-act-danger"
+                disabled={!!archNote?.busy}
+                title="Mark for archive: central stops placing/routing it now; `hugpy-model-archive --apply` later moves it to the ARCHIVE"
+                onClick={() => setArchive(modelKey, true)}
+              >
+                🗄 Archive
+              </button>
+            )}
+
             {!onDisk && onPrune && (
               <button
                 className="mt-act mt-act-danger"
@@ -559,12 +680,27 @@ function ModelDetail({ model, colSpan }) {
             )}
           </div>
 
+          {(arch || archNote?.text) && (
+            <div className="mt-archive-note">
+              {arch && <span>🗄 {archText}</span>}
+              {archNote?.text && <span className="mt-serve-msg">{archNote.text}</span>}
+            </div>
+          )}
+
+          {logsOpen[modelKey] && <ModelLogs modelKey={modelKey} model={model} />}
+
+          {statusOn && <ModelStatusDetail modelKey={modelKey} row={statusFor(sIndex, model)} model={model} />}
+
           {(() => {
             const bm = modelMeta[modelKey]
             if (!bm) return null
             return (
               <div className="mt-meta-strip"
                    title="From GET /models/<key>/meta — the single model-metadata source">
+                {bm.size_bytes == null && (() => {
+                  const sv = sizeView(model, fmtBytes)
+                  return <span className="mt-meta-chip" title={sv.title}>💾 {sv.text}</span>
+                })()}
                 {bm.size_bytes != null && (
                   <span className="mt-meta-chip"
                         title={bm.effective_gguf
@@ -605,7 +741,9 @@ function ModelDetail({ model, colSpan }) {
                   <div key={w.id} className="mt-worker-row">
                     <button
                       className={serving ? 'mt-worker-on' : ''}
-                      title={serving ? 'Already assigned — click to keep' : 'Assign this model to this worker'}
+                      disabled={!!arch}
+                      title={arch ? archText
+                        : serving ? 'Already assigned — click to keep' : 'Assign this model to this worker'}
                       onClick={() => { onAssignWorker?.(w, modelKey) }}
                     >
                       {serving ? '✓ ' : '+ '}{w.name}
@@ -614,7 +752,11 @@ function ModelDetail({ model, colSpan }) {
                         {tight && ' ⚠'}
                       </span>
                     </button>
-                    {fit && (
+                    {/* Per-worker quant (GGUF) with its own fit on THIS worker;
+                        a non-GGUF model shows its single artifact + size. */}
+                    <WorkerQuantSelect modelKey={modelKey} worker={w} model={model}
+                                       disabled={!!arch} disabledTitle={archText} />
+                    {fit && !isGgufFw(model.framework) && (
                       <span className={`mt-worker-fit ${fit.fits_vram ? 'mt-fit-ok'
                         : fit.fits_vram === false ? 'mt-fit-partial' : ''}`}
                             title={fit.reason || ''}>
@@ -626,8 +768,8 @@ function ModelDetail({ model, colSpan }) {
                     )}
                     <button
                       className="mt-worker-probe"
-                      title="Load the model on this GPU and report whether it fits"
-                      disabled={pr === 'probing'}
+                      title={arch ? archText : 'Load the model on this GPU and report whether it fits'}
+                      disabled={!!arch || pr === 'probing'}
                       onClick={async () => {
                         setProbe(p => ({ ...p, [pk]: 'probing' }))
                         const res = await onProbeWorker?.(w, modelKey)
@@ -660,7 +802,7 @@ function ModelDetail({ model, colSpan }) {
               serving config rather than inside a single worker's row. */}
           <div className="mt-serve-section">
             <div className="mt-serve-title">🖧 Worker preference &amp; polite load</div>
-            <PlacementControl modelKey={modelKey} workers={workers} />
+            <PlacementControl modelKey={modelKey} workers={workers} archived={arch} />
           </div>
 
           <div className="mt-serve-section">
@@ -804,7 +946,51 @@ function ModelDetail({ model, colSpan }) {
             />
             assigned{assignedKeys.size ? ` (${assignedKeys.size})` : ''}
           </label>
+          {statusOn && Object.entries(STATUS_FILTER_OPTIONS).filter(([k]) => k !== 'worth' && k !== 'bucket').map(([k, opts]) => (
+            <select key={k} value={sfilters[k]} title={`status filter: ${k}`}
+                    onChange={e => setSfilters(f => ({ ...f, [k]: e.target.value }))}>
+              <option value="">{{ ver: 'Any verification', adm: 'Any admission', grade: 'Any grade', fail: 'Any failures', serv: 'Any servability' }[k]}</option>
+              {opts.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          ))}
         </div>
+
+        {/* WORTH MY TIME — counts per label over the whole catalog; a click
+            filters (URL-backed). The three buckets are the one-click answers. */}
+        {statusOn ? (
+          <div className="ms-summary" role="group" aria-label="Worth summary">
+            {Object.keys(BUCKETS).map(b => (
+              <button key={b} type="button" className={`ms-bucket ms-bucket-${b}${sfilters.bucket === b ? ' on' : ''}`}
+                      aria-pressed={sfilters.bucket === b}
+                      title={`${BUCKET_LABELS[b]}: ${BUCKETS[b].join(' + ')}`}
+                      onClick={() => setSf('bucket', b)}>
+                {BUCKET_LABELS[b]} <b>{summary.buckets[b]}</b>
+              </button>
+            ))}
+            <span className="ms-summary-sep" />
+            {WORTH_ORDER.map(l => (
+              <button key={l} type="button" className={`ms-chip ms-${WORTH_META[l].tone} ms-lab${sfilters.worth === l ? ' on' : ''}`}
+                      aria-pressed={sfilters.worth === l} onClick={() => setSf('worth', l)}>
+                {WORTH_META[l].text} {summary.counts[l]}
+              </button>
+            ))}
+            {hasStatusFilters(sfilters) && (
+              <button type="button" className="btn-clear-filters" onClick={() => setSfilters({ ...EMPTY_STATUS_FILTERS })}>
+                clear status filters
+              </button>
+            )}
+            {mstatus.error && <span className="ms-note">status poll: {mstatus.error} (showing last good)</span>}
+            {Object.entries(sIndex.sources || {}).filter(([, v]) => v && v.error).map(([k, v]) => (
+              <span key={k} className="ms-note" title={v.error}>{k} source read failed: {v.error}</span>
+            ))}
+          </div>
+        ) : mstatus.loaded && (
+          <div className="ms-summary ms-note">
+            {mstatus.unsupported
+              ? `Worth / verification / grade columns empty: ${mstatus.unsupportedWhy || 'GET /llm/models/status not served by this central'}.`
+              : `GET /llm/models/status failed: ${mstatus.error || 'no response body and no error recorded by the poller'}`}
+          </div>
+        )}
       </div>
 
       <div className="table-wrap">
@@ -814,7 +1000,7 @@ function ModelDetail({ model, colSpan }) {
           <table className="model-table">
             <thead>
               <tr>
-                {COLUMNS.map(c => (
+                {columns.map(c => (
                   <th
                     key={c.key}
                     className="mt-sortable"
@@ -839,7 +1025,7 @@ function ModelDetail({ model, colSpan }) {
                 const isCollapsed = !!collapsed?.[`pg:${g.id}`]
                 return (
                   <tr key={`pgroup:${g.id}`} className="mt-pgroup-row">
-                    <td colSpan={COLUMNS.length}>
+                    <td colSpan={columns.length}>
                       <div className="mt-pgroup-bar">
                         <button type="button" className="mt-pgroup-caret"
                                 aria-expanded={!isCollapsed}
@@ -886,7 +1072,7 @@ function ModelDetail({ model, colSpan }) {
                   <GroupHeaderRow
                     key={`group:${row.group.group_key}`}
                     group={row.group}
-                    colSpan={COLUMNS.length}
+                    colSpan={columns.length}
                     enabled={groups.enabled}
                     offHint={groups.offHint}
                     collapsed={!!collapsed?.[row.group.group_key]}
@@ -905,7 +1091,8 @@ function ModelDetail({ model, colSpan }) {
               return (
   <Fragment key={rowKey}>
     <tr className={`${isActive ? 'row-active' : ''}${detailKey === rowKey ? ' row-expanded' : ''}`
-      + (row.group ? ' mt-group-member' : '')}>
+      + (row.group ? ' mt-group-member' : '') + (archiveMark(m) ? ' mt-row-archived' : '')}
+        title={archiveMark(m) ? archiveText(archiveMark(m)) : undefined}>
       <td className="col-num">
         <button
           type="button"
@@ -934,6 +1121,13 @@ function ModelDetail({ model, colSpan }) {
           {m.name ?? m.key}
         </span>
         <span className="hub-id">{m.hub_id}</span>
+        {archiveMark(m) && (
+          <span className="mt-archive-tag">🗄 {archiveText(archiveMark(m))}</span>
+        )}
+        {!m.effective_gguf && (() => {
+          const sv = sizeView(m, fmtBytes)
+          return <span className={`mt-size-tag${sv.known ? '' : ' mt-size-unknown'}`} title={sv.title}>💾 {sv.text}</span>
+        })()}
         {/* MODEL GROUPS: what this iteration does on each worker, or why it
             lost there. Only rendered for a grouped member row. */}
         {row.group && <MemberVerdicts group={row.group} modelKey={modelKey} />}
@@ -1014,11 +1208,12 @@ function ModelDetail({ model, colSpan }) {
                         ))}
                       </select>
                     </td>
+                    {statusOn && STATUS_COLUMNS.map(c => (
+                      <td key={c.key} className={`ms-td ms-td-${c.key}`}><c.Cell row={m.__status} /></td>
+                    ))}
                    </tr>
 
-    {detailKey === rowKey && (
-      <ModelDetail model={m} colSpan={COLUMNS.length} />
-    )}
+    {detailKey === rowKey && renderModelDetail(m, columns.length)}
   </Fragment>
 )
               })}

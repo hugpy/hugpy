@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo, useCallback } from 'react'
 import { fetchJson } from '../../api'
 import { useFeed } from '../../runtime/feeds'
+import ModelLiveState from '../ModelLiveState/ModelLiveState'
 import './AssessmentPanel.css'
 
 // ── formatters ───────────────────────────────────────────────────────────────
@@ -282,7 +283,7 @@ export default function AssessmentPanel({ models = [], workers = [] }) {
                 </span>
               ))}
             </button>
-            {open[r.key] && <Detail r={r} serving={serving} />}
+            {open[r.key] && <><div className="as-live"><ModelLiveState modelKey={r.key} /></div><Detail r={r} serving={serving} /></>}
           </div>
         ))}
       </div>

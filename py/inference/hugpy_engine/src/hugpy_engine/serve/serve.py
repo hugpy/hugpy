@@ -383,7 +383,11 @@ def _ngl_for_alloc_mode(alloc_mode, model_file, extra) -> "int | None":
                 fv = min(fv, cap) if fv else cap
         except (TypeError, ValueError):
             pass
-        return _spill.autofit_gpu_layers(model_file, free_vram=fv)
+        # Vision GGUF: the spec adds --mmproj, so the projector lands on the
+        # card beside the layers — reserve it (0 for text models).
+        return _spill.autofit_gpu_layers(
+            model_file, free_vram=fv,
+            extra_reserve_bytes=_spill.vision_projector_bytes(model_file))
     except Exception:  # noqa: BLE001 — spec build must never die on layer math
         return None
 

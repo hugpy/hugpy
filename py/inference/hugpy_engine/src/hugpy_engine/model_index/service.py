@@ -139,7 +139,7 @@ class ModelIndexService:
         if detail is not None and not isinstance(detail, str):
             import json
             try:
-                detail = json.dumps(detail, default=str)[:20000]
+                detail = json.dumps(detail, default=str)
             except Exception:  # noqa: BLE001
                 detail = None
         try:
@@ -183,7 +183,11 @@ class ModelIndexService:
     def record_call(self, model_name: str, worker: str, *, quant: str = "",
                     alloc_mode: str = "", tok_per_s=None, prompt_tokens=None,
                     completion_tokens=None, elapsed_s=None, task=None,
-                    request_id=None, state=None) -> bool:
+                    request_id=None, state=None, prompt_s=None,
+                    generation_s=None, gen_tokens=None) -> bool:
+        """Append ONE call to model_calls. ``tok_per_s`` must be
+        gen_tokens / generation_s of this call (see CallQueries.MIGRATIONS for
+        the generation split); None when the call had no generation window."""
         if not enabled() or not model_name or not worker:
             return False
         try:
@@ -196,7 +200,9 @@ class ModelIndexService:
                         tok_per_s=tok_per_s, prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                         elapsed_s=elapsed_s, task=task,
-                        request_id=request_id, state=state)
+                        request_id=request_id, state=state,
+                        prompt_s=prompt_s, generation_s=generation_s,
+                        gen_tokens=gen_tokens)
             return True
         except Exception as exc:  # noqa: BLE001
             self.db.mark_unavailable(exc, "recording a call")
@@ -229,15 +235,47 @@ class ModelIndexService:
             self.db.mark_unavailable(exc, "fetching model calls")
             return []
 
+    def fetch_call_stats(self, model_name: str = "") -> list:
+        """Throughput stats (Σtokens/Σgeneration-seconds over all recorded
+        calls, n, p50/p90, min/max, first/last) per (model, worker, quant,
+        alloc) cell plus a per-model rollup (worker None) nesting by_worker and
+        the explicit ``unstamped`` bucket — see CallsRepository.call_stats.
+        ``model_name`` '' = every model."""
+        if not enabled():
+            return []
+        try:
+            with self.db.lock:
+                with self.db.cursor() as cur:
+                    self.start(cur)
+                    return self.calls.call_stats(cur, name_forms(model_name) if model_name else None)
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "fetching call stats")
+            return []
+
     def fetch_worker_averages(self, model_name: str) -> list:
+        """Per-worker throughput of ``model_name`` over EVERY recorded call on
+        that worker: Σ tokens-in-window / Σ generation seconds (``mean_tok_s``;
+        ``avg_tok_s`` kept as its alias for older readers — it used to be the
+        mean of per-call rates, which the metrics contract forbids), with
+        n_calls / n_rated, spread, first/last and the explicit ``unstamped``
+        bucket (calls without a quant/alloc stamp, included in the totals).
+        Same numbers as call_stats' by_worker — one server-side source."""
         if not enabled() or not model_name:
             return []
         try:
             with self.db.lock:
                 with self.db.cursor() as cur:
                     self.start(cur)
-                    return self.calls.worker_averages(
-                        cur, name_forms(model_name))
+                    stats = self.calls.call_stats(cur, name_forms(model_name))
+            out = []
+            for st in stats:
+                if st.get("level") != "model":
+                    continue
+                for w, ws in (st.get("by_worker") or {}).items():
+                    out.append({**ws, "worker": w, "avg_tok_s": ws.get("mean_tok_s"),
+                                "last_ts": ws.get("last_at")})
+            out.sort(key=lambda r: -(r.get("n_calls") or 0))
+            return out
         except Exception as exc:  # noqa: BLE001
             self.db.mark_unavailable(exc, "fetching worker averages")
             return []

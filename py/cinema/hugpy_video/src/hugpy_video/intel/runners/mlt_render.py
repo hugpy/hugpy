@@ -230,13 +230,7 @@ def _resolve_output_path(spec: MltRenderSpec, job_id: str) -> str:
     return os.path.normpath(os.path.join(RENDERS_ROOT, rel))
 
 
-def _is_within(path: str, root: str) -> bool:
-    rp = os.path.realpath(path)
-    rr = os.path.realpath(root)
-    try:
-        return os.path.commonpath([rp, rr]) == rr
-    except ValueError:
-        return False
+from hugpy_platform.filesystem import is_within as _is_within
 
 
 def _write_custom_profile(dst_dir: str, width: int, height: int,

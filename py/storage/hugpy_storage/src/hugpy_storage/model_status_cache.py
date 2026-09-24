@@ -118,15 +118,10 @@ _STATS = {"hits": 0, "misses": 0, "live_calls": 0,
 # ──────────────────────────────────────────────────────────────────────────
 # tunables
 # ──────────────────────────────────────────────────────────────────────────
+from hugpy_storage.env import env_float
+
 def _env_float(name: str, default: float) -> float:
-    raw = (os.environ.get(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.debug("ignoring non-numeric %s=%r", name, raw)
-        return default
+    return env_float(name, default, logger=logger)
 
 
 def ttl_seconds() -> float:

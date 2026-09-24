@@ -10,14 +10,11 @@ managers/whisper_model/.../audio.py (resolve_bin, PIPE, text, returncode check).
 """
 from __future__ import annotations
 
-import json
 import mimetypes
 import os
-import subprocess
 from typing import Optional
 from uuid import uuid4
 
-from hugpy_platform.binaries import resolve_bin
 from hugpy_platform.constants import UPLOADS_HOME, DEFAULT_ROOT
 
 from hugpy_video.intel.media_schema import MediaRef, make_media_ref
@@ -67,41 +64,13 @@ def _parse_fps(rate: Optional[str]) -> Optional[float]:
 # --------------------------------------------------------------------------- #
 # storage jail
 # --------------------------------------------------------------------------- #
-def _is_within(path: str, root: str) -> bool:
-    rp = os.path.realpath(path)
-    rr = os.path.realpath(root)
-    try:
-        return os.path.commonpath([rp, rr]) == rr
-    except ValueError:
-        return False
+from hugpy_platform.filesystem import is_within as _is_within
 
 
 # --------------------------------------------------------------------------- #
 # ffprobe (resolved metadata, once)
 # --------------------------------------------------------------------------- #
-def _ffprobe(path: str) -> dict:
-    ffprobe = resolve_bin("ffprobe") or "ffprobe"
-    command = [
-        ffprobe,
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        path,
-    ]
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "ffprobe failed.\n\n"
-            f"Command:\n{' '.join(command)}\n\n"
-            f"stderr:\n{result.stderr}"
-        )
-    return json.loads(result.stdout or "{}")
+from hugpy_video.intel.ffprobe import ffprobe as _ffprobe
 
 
 def _classify(streams, fmt: dict, kind_hint: Optional[str]) -> str:

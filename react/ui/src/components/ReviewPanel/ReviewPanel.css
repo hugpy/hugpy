@@ -104,9 +104,31 @@
 .rv-screen-hub { flex: 1; min-width: 200px; }
 .rv-screen-reasons { flex-basis: 100%; color: var(--muted, #8a94a6); }
 .rv-benchmark { margin: 12px 0; padding: 12px; border: 1px solid var(--border, #303847); border-radius: 8px; background: rgba(35,45,60,.35); }
+/* Collapsed-by-default initiator: a one-line summary row (title + status),
+   auto-expanded only while a run is active. */
+.rv-benchmark-summary { display: flex; align-items: center; gap: 10px; cursor: pointer; list-style: none; font-size: .9rem; }
+.rv-benchmark-summary::-webkit-details-marker { display: none; }
+.rv-benchmark-summary::before { content: '▸'; color: var(--muted, #8a94a6); font-size: .8rem; }
+.rv-benchmark-collapse[open] > .rv-benchmark-summary::before { content: '▾'; }
+.rv-benchmark-title { font-weight: 600; }
+.rv-benchmark-collapse[open] > .rv-benchmark-head { margin-top: 10px; }
 .rv-benchmark-head, .rv-benchmark-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .rv-benchmark-head { justify-content: space-between; }
 .rv-benchmark-meta { margin-top: 8px; font-size: .82rem; opacity: .9; }
+/* Worker selector — compact wrapping chips, not stacked full-width rows. */
+.rv-benchmark-workers { margin-top: 8px; }
+.rv-benchmark-workers-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: .78rem; color: var(--muted, #8a94a6); text-transform: uppercase; letter-spacing: .05em; }
+.rv-worker-checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rv-worker-check { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--border, #303847); border-radius: 14px; background: rgba(0,0,0,.18); font-size: .82rem; white-space: nowrap; cursor: pointer; }
+.rv-worker-check input { margin: 0; }
+.rv-worker-check:hover { border-color: #4a90d9; }
+.rv-worker-inelig { opacity: .55; cursor: not-allowed; }
+.rv-benchmark-state { margin-top: 9px; font-size: .82rem; border: 1px solid var(--border, #303847); border-radius: 6px; padding: 7px 9px; background: rgba(0,0,0,.14); }
+.rv-benchmark-state summary { cursor: pointer; font-weight: 600; }
+.rv-state-block { margin-top: 6px; }
+.rv-state-list { margin: 4px 0 0; padding-left: 16px; }
+.rv-state-fail > b { color: #ff9b9b; }
+.rv-state-failline { color: #ff9b9b; font-family: ui-monospace, monospace; font-size: .78rem; margin-top: 2px; }
 .rv-benchmark-status { text-transform: uppercase; font-weight: 700; letter-spacing: .05em; }
 .rv-benchmark-status.running { color: #f6c85f; }
 .rv-benchmark-status.complete { color: #5fd69b; }

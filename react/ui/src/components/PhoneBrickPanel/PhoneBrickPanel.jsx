@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { runErrorText } from '../MetricsPanel/RunError'
 import { fetchJson } from '../../api'
+import { responseReason } from '../responseReason'
 import { resolveApiUrl, getHugpyConfig } from '../../runtime/config'
 import './PhoneBrickPanel.css'
 
@@ -45,7 +47,7 @@ function PhoneRow({ phone, selected, onToggle, onRemove }) {
       {live.queue_size != null && <span className="pb-queue">queue {live.queue_size}</span>}
       {ping && ping !== 'checking' && (
         <span className={`pb-ping ${ping.reachable ? 'pb-ping-ok' : 'pb-ping-bad'}`}
-              title={ping.reachable ? 'central can reach this phone' : (ping.error || 'unreachable')}>
+              title={ping.reachable ? 'central can reach this phone' : responseReason(ping)}>
           {ping.reachable ? '✓ reachable' : '✗ unreachable'}
         </span>
       )}
@@ -111,7 +113,7 @@ function RunView({ run, liveProgress, currentPhone, onCancel }) {
           <span className="pb-spin" />
         </div>
       )}
-      {run.status === 'error' && <div className="pb-run-error">Run failed: {run.error || 'unknown error'}</div>}
+      {run.status === 'error' && <div className="pb-run-error">Run {run.id} failed: {runErrorText(run.error) || `run record has status=error and no error field (image ${run.image || '?'}, ${(run.phases || []).length} phases recorded)`}</div>}
       {run.status === 'cancelled' && <div className="pb-run-cancelled">Run cancelled.</div>}
 
       {run.status === 'done' && run.output_rel && (
@@ -137,7 +139,10 @@ export default function PhoneBrickPanel({ embedded = false }) {
 
   const load = useCallback(() => {
     fetchJson('/api/phone-brick/phones')
-      .then(data => { setPhones(Array.isArray(data) ? data : []); setError(null) })
+      .then(data => {
+        if (Array.isArray(data)) { setPhones(data); setError(null) }
+        else setError(`GET /api/phone-brick/phones returned a non-list: ${responseReason(data)}`)
+      })
       .catch(e => setError(e.message))
   }, [])
 
@@ -182,7 +187,7 @@ export default function PhoneBrickPanel({ embedded = false }) {
     if (!image) { alert('Choose an image to analyze first.'); return }
     const ticked = phones.filter(p => selected[p.id] && p.status === 'online').map(p => p.id)
     const ids = ticked.length ? ticked : phones.filter(p => p.status === 'online').map(p => p.id)
-    if (!ids.length) { alert('No online phones to run on.'); return }
+    if (!ids.length) { alert(`No online phones to run on: ${phones.length} registered, statuses ${phones.map(p => `${p.name || p.id}=${p.status}`).join(', ') || '(none)'}`); return }
 
     const form = new FormData()
     form.append('image', image)
@@ -215,7 +220,7 @@ export default function PhoneBrickPanel({ embedded = false }) {
            onClick={embedded ? undefined : () => setOpen(o => !o)}>
         <span className="pb-title">📱 Phone Brick — video analytics pool</span>
         <span className="pb-count">{onlineCount} online / {phones.length} total</span>
-        {error && <span className="pb-err" title={error}>registry error</span>}
+        {error && <span className="pb-err" title={error}>registry read failed: {error}</span>}
         {!embedded && <span className="pb-toggle">{open ? '▾' : '▸'}</span>}
       </div>
 

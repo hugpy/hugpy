@@ -1,0 +1,18 @@
+/* Diagnostics tables — console theme tokens, monospace, never truncated. */
+.diag-view { display:grid; gap:8px; }
+.diag-kv, .diag-table { border-collapse:collapse; font:11px/1.45 ui-monospace,monospace; color:var(--text); }
+.diag-kv th, .diag-table th { text-align:left; color:var(--muted); font-weight:600; padding:3px 8px; border-bottom:1px solid var(--border); vertical-align:top; white-space:nowrap; }
+.diag-kv td, .diag-table td { padding:3px 8px; border-bottom:1px solid var(--border); vertical-align:top; white-space:pre-wrap; word-break:break-word; }
+.diag-tablewrap { overflow:auto; max-width:100%; border:1px solid var(--border); border-radius:6px; }
+.diag-table thead th { position:sticky; top:0; background:var(--surface-2); }
+.diag-section-title { font-size:11px; font-weight:700; color:var(--text); margin:2px 0 4px; }
+.diag-pre { margin:0; padding:8px; white-space:pre-wrap; word-break:break-word; font:11px/1.45 ui-monospace,monospace; background:var(--surface-1); border:1px solid var(--border); border-radius:6px; color:var(--text); }
+.diag-copy { background:var(--surface-1); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:2px 9px; font-size:11px; cursor:pointer; }
+.diag-copy:hover { border-color:var(--accent); }
+/* whole logs: scrollable, never clipped without a scrollbar */
+.diag-log { display:grid; gap:4px; }
+.diag-log-title { font-size:11px; font-weight:700; color:var(--text); white-space:pre-wrap; word-break:break-word; }
+.diag-log-meta { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; font:10.5px ui-monospace,monospace; color:var(--muted); }
+.diag-log-pre { max-height:70vh; overflow:auto; }
+.diag-log-empty { color:var(--muted); font-style:italic; }
+.diag-raw { font-size:11px; color:var(--accent); }

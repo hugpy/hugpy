@@ -258,6 +258,17 @@ class FleetBlocklist:
         from hugpy_fleet.central import blocklist
         return blocklist.block_reason(model_key)
 
+    def admission_reason(self, model_key: str) -> Optional[str]:
+        """Refusal text when the post-download admission HELD the model."""
+        from hugpy_fleet.central import admission_gate
+        return admission_gate.admission_reason(model_key)
+
+    def archive_reason(self, model_key: str) -> Optional[str]:
+        """Refusal text when the operator marked the model for archive
+        (hugpy.json["archive"]; see central/archive_gate.py)."""
+        from hugpy_fleet.central import archive_gate
+        return archive_gate.archive_reason(model_key)
+
 
 # ---------------------------------------------------------------------------
 # ModelMetrics
@@ -291,6 +302,14 @@ class FleetModelMetrics:
         if tok_output is None:
             return False
         try:
+            call = fields.get("call")
+            if call is not None:
+                try:
+                    # THIS call's own numbers for its durable row (per_call_row).
+                    return bool(self._s().record_call(str(model_key), float(tok_output),
+                                                      task=task, compute_s=compute_s, call=call))
+                except TypeError:   # a store that predates ``call=``
+                    pass
             return bool(self._s().record_call(str(model_key), float(tok_output),
                                               task=task, compute_s=compute_s))
         except Exception as exc:  # noqa: BLE001 - metrics never break serving
@@ -306,6 +325,49 @@ class FleetModelMetrics:
         except Exception as exc:  # noqa: BLE001
             log.debug("record_load failed for %s: %s", model_key, exc)
             return False
+
+    def record_load_failure(self, model_key: str, worker_card: str, **kw: Any) -> bool:
+        """One load/fail compute_actions row (model_metrics.record_load_failure)."""
+        try:
+            from hugpy_fleet.central import model_metrics
+            return bool(model_metrics.record_load_failure(
+                str(model_key), worker_card, store=self._s(), **kw))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("record_load_failure failed for %s: %s", model_key, exc)
+            return False
+
+    # ── routing refusals (2026-09-23): the structured diagnostics record of
+    # every refusal lands in the same compute_actions log as the load
+    # failures — action="call", outcome="refused", detail = the record.
+    def record_refusal(self, diag: Mapping[str, Any]) -> Optional[int]:
+        """Append the refusal row; returns its compute_actions id (or None)."""
+        try:
+            from hugpy_fleet.central import model_metrics
+            store = self._s()
+            model = ((diag.get("model") or {}).get("resolved")) or None
+            rid = diag.get("request_id")
+            if not store.append_action("call", model=model, outcome="refused",
+                                       detail=dict(diag)):
+                return None
+            for r in model_metrics.recent_actions(store, limit=20, action="call",
+                                                  model=model, outcome="refused"):
+                if (r.get("detail") or {}).get("request_id") == rid:
+                    return int(r["id"])
+        except Exception as exc:  # noqa: BLE001 — never break a refusal
+            log.debug("record_refusal failed: %s", exc)
+        return None
+
+    def find_refusal(self, request_id: str) -> Optional[Mapping[str, Any]]:
+        try:
+            from hugpy_fleet.central import model_metrics
+            for r in model_metrics.recent_actions(self._s(), limit=5000, action="call",
+                                                  outcome="refused"):
+                d = r.get("detail") or {}
+                if d.get("request_id") == request_id:
+                    return {**d, "log_ref": d.get("log_ref") or f"compute_actions#{r['id']}"}
+        except Exception as exc:  # noqa: BLE001
+            log.debug("find_refusal failed: %s", exc)
+        return None
 
     def get_call(self, model_key: str) -> Optional[Mapping[str, Any]]:
         try:

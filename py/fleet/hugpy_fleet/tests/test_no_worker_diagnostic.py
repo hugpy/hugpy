@@ -203,15 +203,19 @@ def _run_checks(cap, W, remote, policy):
         check("run() refusal now carries the actionable worker detail",
               raised is not None and "assigned to computron but engine unusable" in raised)
 
-        # Seam UNSET: the message must be byte-identical to local_serving_error(mk).
+        # Seam UNSET: the refusal is rendered from its stored diagnostics record
+        # (operator 2026-09-23: facts, not advice) — gate, predicate naming the
+        # policy flag, request id and log_ref; no advisory tail.
         remote.set_no_worker_diagnostic(None)
         raised = None
         try:
             asyncio.run(runner.run(req))
         except RuntimeError as exc:
             raised = str(exc)
-        check("run() refusal with the seam UNSET is byte-identical to the base message",
-              raised == policy.local_serving_error("test-model"))
+        check("run() refusal with the seam UNSET is the factual diagnostics rendering",
+              raised is not None and raised.startswith("gate=no_worker")
+              and "HUGPY_NO_LOCAL_SERVING" in raised and "request=rid-1" in raised
+              and "log_ref=" in raised and "Bring a worker online" not in raised)
     finally:
         remote.set_no_worker_diagnostic(orig_diag)
         os.environ.pop("HUGPY_NO_LOCAL_SERVING", None)

@@ -142,6 +142,50 @@ PyPI remains the public surface (`pip install hugpy` on a box that knows no
 central) and the tag flow above still publishes there; central's index is how
 the fleet itself converges, with or without PyPI.
 
+## Publishing to GitHub (a pipeline step, not a manual act)
+
+Pushing the source trees to GitHub is a STEP of the pkg_src pipeline, run by the
+same watcher that builds versions and promotes the fleet. `pkg_publish.py`
+(driven from `pkg_src.py`) commits and pushes the configured trees when a
+promotion the watcher judged reaches `healthy` (pkg_promote's `rollout_tick`).
+It is a scaffold, **OFF by default**, and inert until an operator writes the
+config and turns it on.
+
+```bash
+cp py/tooling/pkg_publish.example.toml /srv/hugpy/etc/pkg_publish.toml
+# edit /srv/hugpy/etc/pkg_publish.toml:  enabled = true,  mode = "dry-run"
+python3 py/tooling/pkg_src.py publish --config <NAME> --dry-run   # preview by hand
+# review the pkg_src.publishes rows, then set  mode = "push"
+```
+
+Roll out in two moves. With `enabled = true, mode = "dry-run"` the step stages,
+secret-scans and commits **locally** on every `promotion -> healthy`, but never
+pushes; with `mode = "push"` it also pushes each repo's branch. The config file
+(`$PKG_PUBLISH_CONFIG`, else `/srv/hugpy/etc/pkg_publish.toml`; absent =>
+disabled) lists each `[[repo]]` (path, https url, branch, include_untracked,
+extra_gitignore), the token env var + env file, and the commit author. Publishing
+is guarded so it can never block or fail a promotion, runs one-at-a-time under a
+flock, and every attempt is recorded per repo in `pkg_src.publishes` (promotion,
+config, release, repo, branch, commit sha, pushed, mode, secret-scan, status,
+scrubbed error, timings).
+
+Per repo, in order: a rebase/merge in progress, a detached HEAD or a wrong-branch
+checkout is refused (`dirty_state`); the remote branch is fetched over HTTPS and,
+if it holds commits the local branch lacks, the repo is **skipped, never
+force-pushed** (`diverged`); the tree is staged honoring `.gitignore`; then a
+**secret gate** scans the staged added content (gitleaks if installed, else a
+grep ruleset — private keys, `sk-`/`sk-ant-`/`hf_`/`ghp_`/`github_pat_`/`pypi-`/
+`npm_` tokens, `postgres://user:pass@`, `*_TOKEN|*_KEY|*_SECRET|PASSWORD=`
+literals, `.env`/`.pypirc`/`.npmrc`/`.git-credentials`/`htpasswd`/`.secret`/
+`.auth` filenames, WireGuard `PrivateKey`, files > 10 MB) — any hit unstages
+everything and blocks the push (`blocked_secret`, recording file:line+rule, never
+the value); nothing staged is `clean`; otherwise it commits `<config> ->
+<release>` (a `Published-By: pkg_src promotion <id>` trailer, no Co-Authored-By)
+and pushes (or stops at the local commit in dry-run). The token is never written
+to git config, a remote URL, a log or the DB: it is read from the env file at run
+time, handed to git only through a `GIT_ASKPASS` helper, and scrubbed from any
+captured output.
+
 ## The drift check
 
 `hugpy-drift-check` (from `hugpy-ops`) is read-only and exits 0 in sync,

@@ -48,6 +48,16 @@ def _payload() -> dict:
     return request.get_json(silent=True) or {}
 
 
+def _archive_refusal(model_key: str):
+    """``{"error", "archive"}`` when the operator marked ``model_key`` for
+    archive (hugpy_fleet.central.archive_gate), else None (fail-open)."""
+    try:
+        from hugpy_fleet.central.archive_gate import refusal
+        return refusal(model_key)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @model_group_bp.route("/llm/model-groups", methods=["GET"])
 def model_groups_list():
     """Every priority group, in display order. Member-readable.
@@ -242,9 +252,20 @@ def model_groups_allocate(group_id):
                     outcomes.append({"worker": row.get("name") or row["id"],
                                      "model": mk, "status": "not-in-manifest"})
                     continue
+                # ARCHIVE MARK: a model the operator marked for archive is never
+                # (re)designated — named per outcome with the recorded mark.
+                _arch = _archive_refusal(ck)
+                if _arch:
+                    outcomes.append({"worker": row.get("name") or row["id"],
+                                     "model": ck, "status": "archived",
+                                     "reason": _arch["error"],
+                                     "archive": _arch["archive"]})
+                    continue
                 status = "already" if ck in have else "designated"
                 if status == "designated":
-                    assign_model(row["id"], ck)
+                    # Automated designation (transient: pruned when idle,
+                    # never reloaded on restart — only a 📌 pin is).
+                    assign_model(row["id"], ck, source="model_group")
                     have.add(ck)
                 outcomes.append({"worker": row.get("name") or row["id"],
                                  "model": ck, "status": status})
@@ -419,6 +440,7 @@ def templates_activate(template_id):
         from hugpy_fleet.central.priority_group_settings import canonical_key
         manifest = get_models_dict(dict_return=True)
         designated = already = skipped = 0
+        archived_skips = []
         for row in rows:
             worker_store.set_pool(row["id"], t["id"])
             have = set(row.get("models") or [])
@@ -436,7 +458,13 @@ def templates_activate(template_id):
                     if ck in have:
                         already += 1
                         continue
-                    assign_model(row["id"], ck)
+                    _arch = _archive_refusal(ck)
+                    if _arch:
+                        archived_skips.append({"worker": row.get("name") or row["id"],
+                                               "model": ck, "reason": _arch["error"],
+                                               "archive": _arch["archive"]})
+                        continue
+                    assign_model(row["id"], ck, source="model_group")
                     have.add(ck)
                     designated += 1
         rec = mark_active(t["id"], True)
@@ -449,7 +477,8 @@ def templates_activate(template_id):
                         "reserved": [r.get("name") or r["id"] for r in rows],
                         "overruled": conflicts if body.get("force") else [],
                         "designated": designated, "already": already,
-                        "not_in_manifest": skipped}), 200
+                        "not_in_manifest": skipped,
+                        "archived": archived_skips}), 200
     except Exception as exc:  # noqa: BLE001
         logger.warning("POST /llm/templates/%s/activate failed: %s",
                        template_id, exc, exc_info=True)

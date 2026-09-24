@@ -94,7 +94,9 @@ __all__ = [
     "StreamingThinkSplitter",
 ]
 
-NO_THINK_DIRECTIVE = "/no_think"
+from hugpy_platform.no_think import (
+    NO_THINK_DIRECTIVE, THINK_BLOCK_RE, strip_think, with_no_think,
+)
 
 #: The HARD half of the stipulation (t74): rendered by the chat template itself
 #: (Qwen3-family ``enable_thinking``), so it works on models that ignore the
@@ -102,27 +104,6 @@ NO_THINK_DIRECTIVE = "/no_think"
 #: llama-server body; version-gated at the relay, ignored where a template has
 #: no such variable — always IN ADDITION to the directive, never instead.
 NO_THINK_CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
-
-#: Matches a think block, closed OR unclosed (``\Z`` alternative) — see the
-#: module docstring on why the unclosed case is not an edge case here.
-THINK_BLOCK_RE = re.compile(r"<think>(.*?)(?:</think>|\Z)", re.DOTALL | re.IGNORECASE)
-
-
-def strip_think(text: str) -> tuple[str, str]:
-    """Split a model reply into ``(prose, reasoning)``.
-
-    Removes every ``<think>...</think>`` block and returns the surviving prose
-    plus the concatenated reasoning. An UNCLOSED ``<think>`` (the token budget
-    ran out mid-thought) is treated as reasoning to the end of the string, so a
-    truncated ramble can never be served as prose. Returns ``("", reasoning)``
-    when the reply was nothing but thinking; the caller turns that into an honest
-    error rather than an empty result.
-    """
-    if not text:
-        return "", ""
-    reasoning = "\n".join(m.group(1).strip() for m in THINK_BLOCK_RE.finditer(text))
-    return THINK_BLOCK_RE.sub("", text).strip(), reasoning.strip()
-
 
 _OPEN_RE = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
 _CLOSE_RE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
@@ -205,18 +186,6 @@ class StreamingThinkSplitter:
         return ("", rest) if self._in_think else (rest, "")
 
 
-def with_no_think(user_text: str) -> str:
-    """PROPAGATE THE QUERY, then ask for it without the monologue.
-
-    Appending the directive (rather than replacing anything) is what keeps the
-    caller's own text intact. Idempotent — a query that already carries the
-    directive is returned untouched.
-    """
-    if not user_text:
-        return NO_THINK_DIRECTIVE
-    if NO_THINK_DIRECTIVE in user_text:
-        return user_text
-    return f"{user_text}\n\n{NO_THINK_DIRECTIVE}"
 
 
 def _content_with_no_think(content: Any) -> Any:
@@ -266,21 +235,7 @@ def apply_no_think(messages):
     return out
 
 
-def _result_text(result) -> str:
-    """Best-effort text extraction — a worker-relay dict, a pydantic ChatResult,
-    or any other TaskResult-shaped object all yield the same plain string."""
-    if isinstance(result, dict):
-        return result.get("text") or ""
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(result, attr, None)
-        if callable(fn):
-            try:
-                d = fn()
-                if isinstance(d, dict):
-                    return d.get("text") or ""
-            except TypeError:
-                continue
-    return getattr(result, "text", "") or ""
+from hugpy_platform.results import result_text as _result_text
 
 
 def _result_ok(result) -> bool:

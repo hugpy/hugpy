@@ -203,14 +203,10 @@ def _kv_line(rec: dict) -> str:
     return " ".join(parts)
 
 
+from hugpy_control.shared import recent_ring
+
 def recent(limit: int = 200) -> list[dict]:
-    """The PROCESS-local ring, oldest-first. On central the durable/cross-process
-    view is ``StudioAssistStore.recent``."""
-    with _RING_LOCK:
-        items = list(_RING)
-    if limit and limit > 0:
-        items = items[-limit:]
-    return items
+    return recent_ring(_RING, _RING_LOCK, limit)
 
 
 def reset_for_tests() -> None:
@@ -260,19 +256,7 @@ PRUNE_EVERY = 200
 MAX_FAILURES = 5
 
 
-def default_db_path() -> str:
-    """The comms db — the SAME resolution as ``comms.shared.default_db_path`` so
-    there is one HUGPY_COMMS_DB per service. Imported lazily so this module stays
-    usable when comms.shared is mid-edit."""
-    try:
-        from hugpy_control.shared import default_db_path as _p
-        return _p()
-    except Exception:  # noqa: BLE001 — mirror the fallback rather than fail
-        env = (os.environ.get("HUGPY_COMMS_DB") or "").strip()
-        if env:
-            return env
-        base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-        return os.path.join(base, f"hugpy-comms-{os.getuid()}.db")
+from hugpy_control.shared import default_db_path
 
 
 def _retry_on_emfile(fn):
@@ -295,48 +279,17 @@ class StudioAssistStore:
 
     def __init__(self, path: Optional[str] = None,
                  max_rows: int = MAX_ROWS) -> None:
-        self.path = path or default_db_path()
-        self.max_rows = max_rows
-        self._failures = 0
-        self._disabled = False
-        # HUGPY_COMMS_DB honors the disable sentinels the other mirrors do.
-        # shared.default_db_path returns the env VERBATIM, so without this check
-        # HUGPY_COMMS_DB=off creates a sqlite file literally named `off`.
-        if str(self.path).strip().lower() in ("off", "none", "0", "disabled"):
-            self._disabled = True
-        self._initialized = False
-        self._init_lock = threading.Lock()
-        self._appends = 0
+        from hugpy_control.shared import init_bounded_event_store
+        init_bounded_event_store(self, path, max_rows, default_db_path)
 
     # -- plumbing ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
-        conn = _retry_on_emfile(lambda: sqlite3.connect(self.path, timeout=2.0))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=2000")
-        return conn
+        from hugpy_control.shared import connect_wal
+        return connect_wal(self.path, retry=_retry_on_emfile)
 
     def _ensure(self) -> bool:
-        if self._disabled:
-            return False
-        if self._initialized:
-            return True
-        with self._init_lock:
-            if self._initialized:
-                return True
-            try:
-                d = os.path.dirname(self.path)
-                if d:
-                    os.makedirs(d, exist_ok=True)
-                with self._connect() as conn:
-                    conn.execute(_SCHEMA)
-                    for stmt in _INDEXES:
-                        conn.execute(stmt)
-                self._initialized = True
-                return True
-            except Exception as exc:  # noqa: BLE001
-                self._note_failure("init", exc)
-                return False
+        from hugpy_control.shared import ensure_store_schema
+        return ensure_store_schema(self, _SCHEMA, indexes=_INDEXES)
 
     def _note_failure(self, op: str, exc: BaseException) -> None:
         self._failures += 1
@@ -468,14 +421,10 @@ _STORE: Optional[StudioAssistStore] = None
 _STORE_LOCK = threading.Lock()
 
 
+from hugpy_control.shared import get_or_create_singleton
+
 def get_store() -> StudioAssistStore:
-    """The process-wide store singleton (central side)."""
-    global _STORE
-    if _STORE is None:
-        with _STORE_LOCK:
-            if _STORE is None:
-                _STORE = StudioAssistStore()
-    return _STORE
+    return get_or_create_singleton(globals(), "_STORE", _STORE_LOCK, StudioAssistStore)
 
 
 def set_store(store: Optional[StudioAssistStore]) -> None:

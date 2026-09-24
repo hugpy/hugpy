@@ -84,7 +84,14 @@ async def stream_query(
     **options: Any,
 ) -> AsyncIterator[Any]:
     payload = _request(prompt, messages, model_key, request_id, options)
-    async for event in stream_chat_request(cancel_event=cancel_event, **payload):
+    # Per-model output repair (hugpy.json["output_repair"], derived by
+    # hugpy-model-audit) — identity for every model without the block. The one
+    # place /v1 (stream + non-stream, incl. the benchmark grader) and the
+    # console chat relay all pass through.
+    from .output_repair import repair_stream
+    async for event in repair_stream(
+            stream_chat_request(cancel_event=cancel_event, **payload),
+            payload.get("model_key")):
         yield event
 
 

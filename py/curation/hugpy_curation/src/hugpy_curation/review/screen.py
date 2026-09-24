@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 from hugpy_curation.review.criteria import ReviewCriteria
+from hugpy_platform.utils import is_mmproj_file
 
 GGUF_QUANT_RE = re.compile(
     r"(IQ\d+_[A-Z]+|Q\d+_K_[MSL]|Q\d+_K|Q\d+_\d+|Q\d+_[01]|F16|BF16|F32)",
@@ -65,7 +66,8 @@ def _repo_info(api, hub_id: str) -> dict[str, Any] | None:
     """Repo metadata, through the permanent central cache when available."""
     try:
         from hugpy_storage.model_metadata import fetch_repo_info
-        payload = fetch_repo_info(hub_id, files_metadata=True, api=api)
+        payload = fetch_repo_info(hub_id, files_metadata=True, api=api,
+                                  purpose="discovery")
         if payload:
             return payload
     except Exception:
@@ -197,7 +199,7 @@ def gguf_options(files: list[dict]) -> list[QuantOption]:
         if not p.lower().endswith(".gguf"):
             continue
         # a vision projector is a sidecar, not a weight variant
-        if os.path.basename(p).lower().startswith("mmproj"):
+        if is_mmproj_file(p):
             continue
         groups.setdefault(quant_of(p) or p, []).append(f)
     out = []

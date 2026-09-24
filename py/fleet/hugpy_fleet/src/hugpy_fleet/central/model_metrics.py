@@ -34,11 +34,15 @@ TEMPERATURES = ("loaded", "unloaded")   # LOADED-at-pick (STATE-MODEL.md #3); ne
 # repaint the picture.
 EMA_ALPHA = float(os.environ.get("HUGPY_MODEL_METRICS_EMA_ALPHA", "0.3") or 0.3)
 
-# The durable compute-action log is bounded, exactly like eviction_events:
-# ~20k rows is hours of a busy fleet and a couple of MB. Pruning is amortized
-# (every PRUNE_EVERY appends) so the hot-path append stays a single INSERT.
-ACTIONS_MAX_ROWS = int(os.environ.get("HUGPY_COMPUTE_ACTIONS_MAX_ROWS", "20000")
-                       or 20000)
+# The durable compute-action log is NOT pruned by default (2026-09-23): it is
+# the log the console reads, the DB has no space shortage, and deleting rows
+# destroyed exactly the history an operator comes back for. A positive
+# HUGPY_COMPUTE_ACTIONS_MAX_ROWS opts back into the amortized prune; 0/unset
+# keeps every row.
+try:
+    ACTIONS_MAX_ROWS = int(os.environ.get("HUGPY_COMPUTE_ACTIONS_MAX_ROWS", "0") or 0)
+except ValueError:
+    ACTIONS_MAX_ROWS = 0
 ACTIONS_PRUNE_EVERY = 500
 
 # The action vocabulary the durable log speaks. NOT the eviction STAGE names —
@@ -94,18 +98,10 @@ def derive_variant(n_gpu_layers: Any, total_layers: Optional[int] = None,
     return "split"
 
 
+from hugpy_control.shared import project_db_path
+
 def default_db_path() -> str:
-    env = (os.environ.get("HUGPY_MODEL_METRICS_DB") or "").strip()
-    if env:
-        return env
-    base = (os.environ.get("PROJECTS_HOME") or "").strip()
-    if not base:
-        try:
-            from hugpy_platform.constants import PROJECTS_HOME as _PH
-            base = str(_PH)
-        except Exception:  # noqa: BLE001 — degrade to a per-user durable file
-            base = os.path.expanduser("~/.hugpy")
-    return os.path.join(base, "model_metrics.db")
+    return project_db_path("HUGPY_MODEL_METRICS_DB", "model_metrics.db")
 
 
 class ModelMetricsStore:
@@ -121,11 +117,8 @@ class ModelMetricsStore:
     def _connect(self) -> sqlite3.Connection:
         # Retry the store-open past the restart-burst EMFILE (see
         # comms.shared.retry_on_emfile) before running the handle-local PRAGMAs.
-        conn = retry_on_emfile(lambda: sqlite3.connect(self.path, timeout=2.0))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=2000")
-        return conn
+        from hugpy_control.shared import connect_wal
+        return connect_wal(self.path, retry=retry_on_emfile)
 
     def _ensure(self) -> bool:
         if self._disabled:
@@ -281,7 +274,8 @@ class ModelMetricsStore:
 
     def record_call(self, model: str, tok_output: float,
                     *, task: Optional[str] = None,
-                    compute_s: Optional[float] = None) -> bool:
+                    compute_s: Optional[float] = None,
+                    call: Optional[Dict[str, Any]] = None) -> bool:
         """Fold one completed call into the call EMAs.
 
         ``task`` (the router's pipeline task, in scope at the record site because
@@ -336,12 +330,22 @@ class ModelMetricsStore:
                 conn.close()
         except Exception:  # noqa: BLE001
             return False
-        # Durable log: one 'call' row carrying this call's output-token count;
-        # the task (when known) rides in detail so the log stays per-task too.
+        # Durable log: one 'call' row carrying THIS call's own numbers. ``call``
+        # (resolvers.remote.per_call_row) supplies worker, wall duration,
+        # tokens/duration and the prompt/gen split; without it the row still
+        # carries the token count and task, as before.
+        c = call if isinstance(call, dict) else {}
+        detail = dict(c.get("detail") or {})
+        if (task or "").strip():
+            detail.setdefault("task", task)
         self.append_action(ACTION_CALL, model=model,
+                           worker_card=c.get("worker_card"),
+                           duration_s=c.get("duration_s", compute_s if call is not None else None),
+                           tok_per_s=c.get("tok_per_s"),
                            tokens=int(tok_output)
                            if tok_output is not None else None,
-                           detail=({"task": task} if (task or "").strip() else None))
+                           outcome=c.get("outcome"),
+                           detail=detail or None)
         return True
 
     # -- durable compute-action log -----------------------------------------
@@ -414,8 +418,9 @@ class ModelMetricsStore:
         return True
 
     def _prune_actions(self) -> None:
-        """Keep the newest ``ACTIONS_MAX_ROWS`` rows. Best-effort, never fatal."""
-        if not self._ensure():
+        """Keep the newest ``ACTIONS_MAX_ROWS`` rows — only when an operator
+        set a positive cap (default: keep everything). Best-effort."""
+        if ACTIONS_MAX_ROWS <= 0 or not self._ensure():
             return
         try:
             conn = self._connect()
@@ -434,7 +439,8 @@ class ModelMetricsStore:
                        since_ts: Optional[float] = None,
                        action: Optional[str] = None,
                        model: Optional[str] = None,
-                       worker: Optional[str] = None) -> list:
+                       worker: Optional[str] = None,
+                       outcome: Optional[str] = None) -> list:
         """The durable log, NEWEST FIRST, bounded. Best-effort — returns [] on
         any fault so a broken store shows an empty panel, not a broken one.
 
@@ -454,6 +460,9 @@ class ModelMetricsStore:
         if model:
             clauses.append("model = ?")
             args.append(str(model))
+        if outcome:
+            clauses.append("outcome = ?")
+            args.append(str(outcome))
         if worker:
             w = str(worker)
             clauses.append("(worker_card = ? OR worker_card LIKE ?)")
@@ -488,6 +497,25 @@ class ModelMetricsStore:
                 "outcome": r[10], "detail": detail,
             })
         return out
+
+    def get_action(self, action_id: int) -> Optional[Dict[str, Any]]:
+        """ONE compute_actions row by id, detail whole. None when absent."""
+        if not self._ensure():
+            return None
+        try:
+            conn = self._connect()
+            try:
+                r = conn.execute(
+                    "SELECT id, ts, action, model, variant, worker_card,"
+                    " duration_s, tok_per_s, tokens, bytes, outcome, detail_json"
+                    " FROM compute_actions WHERE id = ?", (int(action_id),)).fetchone()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            return None
+        if not r:
+            return None
+        return _action_row(tuple(r))
 
     # -- reads ---------------------------------------------------------------
     def get_load(self, model: str, variant: str, worker_card: str,
@@ -634,6 +662,11 @@ model_metrics_store = ModelMetricsStore()
 # file (instant rollback, no code edit). Central runs from the share tree, so a
 # restart picks this up — no wheel publish needed.
 if os.environ.get("HUGPY_METRICS_BACKEND", "").strip().lower() != "sqlite":
+    # The toolserver store reads HUGPY_COMPUTE_ACTIONS_MAX_ROWS at import with a
+    # 20000 default (and treats 0 as "default"), pruning the log central writes.
+    # Keep every row unless an operator set a cap explicitly (2026-09-23).
+    if not os.environ.get("HUGPY_COMPUTE_ACTIONS_MAX_ROWS"):
+        os.environ["HUGPY_COMPUTE_ACTIONS_MAX_ROWS"] = str(10 ** 15)
     try:
         from abstract_toolserver.metrics import PgMetricsStore as _PgMetricsStore
         model_metrics_store = _PgMetricsStore()
@@ -677,3 +710,192 @@ def record_loads_from_calibration(worker_name, samples) -> int:
         except Exception:  # noqa: BLE001 — one bad sample must not drop the rest
             continue
     return folded
+
+
+# ── Failed-load log (2026-09-23) ─────────────────────────────────────────────
+# Every failed model load lands as ONE compute_actions row: action="load",
+# outcome="fail", model, variant (the GGUF file the loader opened), worker_card,
+# duration_s (the attempt), and detail = the worker's structured load_failure
+# ({class, loader_stderr (whole), log_ref, path}) + message + phase/source. Before this
+# nothing recorded a failed load; the why (e.g. Echo-Mini's check_tensor_dims
+# wrong shape) survived only in the worker journal. Callers: the /v1 relay's
+# worker-error path (remote.py, per-run) and set_load_report (the warm/probe
+# catch-all, deduped by the report's ts). Fail-open like every metrics write.
+ACTION_LOAD_FAIL_OUTCOME = "fail"
+_LOAD_FAIL_SEEN: "set" = set()
+_LOAD_FAIL_SEEN_MAX = 4096
+_LOAD_FAIL_LOCK = threading.Lock()
+
+
+def _action_row(r) -> Dict[str, Any]:
+    """A compute_actions tuple/mapping (12 columns) -> the reader dict."""
+    if isinstance(r, dict):
+        r = (r["id"], r["ts"], r["action"], r["model"], r["variant"],
+             r["worker_card"], r["duration_s"], r["tok_per_s"], r["tokens"],
+             r["bytes"], r["outcome"], r["detail_json"])
+    detail, raw = None, r[11]
+    if raw:
+        try:
+            detail = json.loads(raw)
+        except Exception:  # noqa: BLE001 — keep the stored text itself
+            detail = None
+    return {"id": int(r[0]), "ts": r[1], "action": r[2], "model": r[3],
+            "variant": r[4], "worker_card": r[5], "duration_s": r[6],
+            "tok_per_s": r[7], "tokens": r[8], "bytes": r[9],
+            "outcome": r[10], "detail": detail, "detail_json": raw}
+
+
+def get_action(action_id, store: Any = None) -> Optional[Dict[str, Any]]:
+    """ONE compute_actions row by id with its detail WHOLE (and the stored
+    detail_json text verbatim). Works on both backends: the store's own
+    ``get_action`` when it has one, else a direct SELECT through the
+    toolserver's Postgres connection. None when absent. Never raises."""
+    try:
+        aid = int(str(action_id).split("#")[-1])
+    except (TypeError, ValueError):
+        return None
+    store = store if store is not None else model_metrics_store
+    fn = getattr(store, "get_action", None)
+    if callable(fn):
+        try:
+            return fn(aid)
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        from abstract_toolserver import metrics as _pg
+        if not _pg._ensure():
+            return None
+        with _pg._conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT id, ts, action, model, variant, worker_card, duration_s,"
+                " tok_per_s, tokens, bytes, outcome, detail_json FROM compute_actions"
+                " WHERE id = %s", (aid,))
+            r = cur.fetchone()
+        return _action_row(r) if r else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def recent_actions(store: Any = None, limit: int = 200, *,
+                   since_ts: Optional[float] = None, action: Optional[str] = None,
+                   model: Optional[str] = None, worker: Optional[str] = None,
+                   outcome: Optional[str] = None) -> list:
+    """``store.recent_actions`` with an ``outcome`` filter on EVERY backend: a
+    store whose reader predates the filter (the toolserver Postgres store)
+    is over-fetched (max window) and filtered here. Never raises."""
+    store = store if store is not None else model_metrics_store
+    kw = dict(since_ts=since_ts, action=action, model=model, worker=worker)
+    if outcome:
+        try:
+            return store.recent_actions(limit=limit, outcome=outcome, **kw)
+        except TypeError:
+            rows = store.recent_actions(limit=5000, **kw) or []
+            lim = max(1, min(int(limit or 200), 5000))
+            return [r for r in rows if r.get("outcome") == outcome][:lim]
+    return store.recent_actions(limit=limit, **kw)
+
+
+def _variant_of(load_failure: Optional[dict], variant: Optional[str]) -> Optional[str]:
+    if variant:
+        return str(variant)
+    path = (load_failure or {}).get("path")
+    return os.path.basename(str(path)) if path else None
+
+
+def record_load_failure(model: str, worker_card: str, *,
+                        load_failure: Optional[dict] = None,
+                        message: Optional[str] = None,
+                        variant: Optional[str] = None,
+                        duration_s: Optional[float] = None,
+                        phase: Optional[str] = None,
+                        source: Optional[str] = None,
+                        report_ts: Optional[float] = None,
+                        store: Any = None) -> bool:
+    """Append ONE ``load``/``fail`` row. ``report_ts`` (a load report's own
+    stamp) dedupes: the same (model, worker_card, report_ts) is recorded once,
+    across beats AND restarts (the durable log is checked, not only memory).
+    Returns True when a row landed. Never raises."""
+    try:
+        if not model or not worker_card:
+            return False
+        store = store if store is not None else model_metrics_store
+        key = None
+        if report_ts is not None:
+            key = (str(model), str(worker_card), round(float(report_ts), 3))
+            with _LOAD_FAIL_LOCK:
+                if key in _LOAD_FAIL_SEEN:
+                    return False
+            try:
+                prior = recent_actions(store, limit=200, action="load",
+                                       model=str(model), worker=str(worker_card),
+                                       outcome=ACTION_LOAD_FAIL_OUTCOME)
+            except Exception:  # noqa: BLE001 — dedupe is best-effort
+                prior = []
+            for r in prior or ():
+                d = r.get("detail") or {}
+                rts = d.get("report_ts") if isinstance(d, dict) else None
+                if rts is not None and round(float(rts), 3) == key[2] \
+                        and r.get("worker_card") == str(worker_card):
+                    with _LOAD_FAIL_LOCK:
+                        _LOAD_FAIL_SEEN.add(key)
+                    return False
+        lf = dict(load_failure) if isinstance(load_failure, dict) else {}
+        if not lf.get("class"):
+            lf["class"] = "other"
+        lf.setdefault("loader_stderr", None)
+        lf.setdefault("path", None)
+        if message:
+            lf["message"] = str(message)       # whole — no cap (2026-09-23)
+        if phase:
+            lf["phase"] = str(phase)
+        if source:
+            lf["source"] = str(source)
+        if report_ts is not None:
+            lf["report_ts"] = float(report_ts)
+        ok = bool(store.append_action(
+            ACTION_LOAD, model=str(model), variant=_variant_of(lf, variant),
+            worker_card=str(worker_card),
+            duration_s=float(duration_s) if duration_s is not None else None,
+            outcome=ACTION_LOAD_FAIL_OUTCOME, detail=lf))
+        if ok and key is not None:
+            with _LOAD_FAIL_LOCK:
+                if len(_LOAD_FAIL_SEEN) >= _LOAD_FAIL_SEEN_MAX:
+                    _LOAD_FAIL_SEEN.clear()
+                _LOAD_FAIL_SEEN.add(key)
+        return ok
+    except Exception:  # noqa: BLE001 — metrics must never break serving
+        return False
+
+
+def record_load_report_failure(worker: Optional[dict], model: str,
+                               report: Optional[dict]) -> bool:
+    """The load_reports catch-all: a FAILED warm/probe report becomes one
+    load/fail row, deduped by the report's ``ts``. A "not local" probe verdict
+    is not a load attempt (the probe never loads absent weights) — skipped."""
+    try:
+        if not isinstance(report, dict) or report.get("ok", True) is not False:
+            return False
+        err = str(report.get("error") or "")
+        if err.startswith("not local"):
+            return False
+        lf = report.get("load_failure")
+        if not isinstance(lf, dict):
+            try:        # an older worker: classify its text the engine's way
+                from hugpy_engine.serve.load_failure import classify_text, _stderr_from_text
+                lf = {"class": classify_text(err), "loader_stderr": _stderr_from_text(err),
+                      "path": None}
+            except Exception:  # noqa: BLE001
+                lf = {"class": "other", "loader_stderr": None, "path": None}
+        w = worker or {}
+        card = f"{w.get('name') or w.get('id') or 'unknown'}:0"
+        ts = report.get("ts")
+        dur = None
+        if isinstance(ts, (int, float)):
+            dur = max(0.0, time.time() - float(ts))
+        return record_load_failure(
+            model, card, load_failure=lf, message=err or None,
+            variant=report.get("gguf_file"), duration_s=dur,
+            phase=report.get("phase") or "cold", source="load_report",
+            report_ts=ts if isinstance(ts, (int, float)) else None)
+    except Exception:  # noqa: BLE001
+        return False

@@ -2223,35 +2223,10 @@ def _assist_framing(kind):
     return (_PROMPT_ASSIST_SYSTEM, "image-generation prompt")
 
 
-def _await_sync(value):
-    """Drive execute_prompt's (possibly) awaitable result from WSGI — the exact
-    same idiom prompt_routes._await_sync / discord_routes._await_sync use (each
-    module keeps its own copy rather than sharing a private helper cross-file).
-    Uses the process-wide async runtime (one long-lived loop), not a fresh
-    per-request loop — see _platform/async_runtime."""
-    import inspect
-    if not inspect.isawaitable(value):
-        return value
-    from hugpy_platform import async_runtime
-    return async_runtime.run(value)
+from hugpy_platform.async_runtime import await_sync as _await_sync
 
 
-def _prompt_assist_result_text(result) -> str:
-    """Best-effort text extraction — mirrors discord_routes._result_text so a
-    worker-relay dict, a pydantic ChatResult, or any other TaskResult-shaped
-    object all yield the same plain string."""
-    if isinstance(result, dict):
-        return result.get("text") or ""
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(result, attr, None)
-        if callable(fn):
-            try:
-                d = fn()
-                if isinstance(d, dict):
-                    return d.get("text") or ""
-            except TypeError:
-                continue
-    return getattr(result, "text", "") or ""
+from hugpy_platform.results import result_text as _prompt_assist_result_text
 
 
 def _studio_no_think(raw: str):
@@ -3485,7 +3460,9 @@ def video_preset_apply(preset_id):
 
     # Designate = ready: assign then background-warm (never wait on the load).
     from hugpy_fleet.central.workers import assign_model
-    assigned = assign_model(worker["id"], model_key)
+    # Auto-picked worker → an automated ("autoplace") designation: transient,
+    # pruned when idle, never reloaded on restart (only a 📌 pin is).
+    assigned = assign_model(worker["id"], model_key, source="autoplace")
     if assigned is None:
         # Raced: the worker vanished between pick and assign.
         return jsonify({"ok": False, "error": {

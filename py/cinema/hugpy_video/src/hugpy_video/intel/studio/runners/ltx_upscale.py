@@ -55,9 +55,7 @@ from hugpy_video.intel.studio.runners.wan_i2v import (
 )
 
 
-def _resolve_source(manifest: RenderManifest) -> str | None:
-    src = getattr(manifest, "source_video", "") or ""
-    return src or None
+from hugpy_video.intel.studio.runners.source import resolve_source as _resolve_source
 
 
 def run_ltx_upscale(

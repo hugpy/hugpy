@@ -131,18 +131,10 @@ def clamp_correction(value: float) -> float:
     return max(lo, min(hi, float(value)))
 
 
+from hugpy_control.shared import project_db_path
+
 def default_db_path() -> str:
-    env = (os.environ.get("HUGPY_CALIBRATION_DB") or "").strip()
-    if env:
-        return env
-    base = (os.environ.get("PROJECTS_HOME") or "").strip()
-    if not base:
-        try:
-            from hugpy_platform.constants import PROJECTS_HOME as _PH
-            base = str(_PH)
-        except Exception:  # noqa: BLE001 — degrade to a per-user durable file
-            base = os.path.expanduser("~/.hugpy")
-    return os.path.join(base, "calibration.db")
+    return project_db_path("HUGPY_CALIBRATION_DB", "calibration.db")
 
 
 class CalibrationStore:
@@ -157,31 +149,12 @@ class CalibrationStore:
     def _connect(self) -> sqlite3.Connection:
         # Retry the store-open past the restart-burst EMFILE (see
         # comms.shared.retry_on_emfile) before running the handle-local PRAGMAs.
-        conn = retry_on_emfile(lambda: sqlite3.connect(self.path, timeout=2.0))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=2000")
-        return conn
+        from hugpy_control.shared import connect_wal
+        return connect_wal(self.path, retry=retry_on_emfile)
 
     def _ensure(self) -> bool:
-        if self._disabled:
-            return False
-        if self._initialized:
-            return True
-        with self._init_lock:
-            if self._initialized:
-                return True
-            try:
-                d = os.path.dirname(self.path)
-                if d:
-                    os.makedirs(d, exist_ok=True)
-                with self._connect() as conn:
-                    conn.executescript(_SCHEMA)
-                self._initialized = True
-                return True
-            except Exception as exc:  # noqa: BLE001
-                self._note_failure("init", exc)
-                return False
+        from hugpy_control.shared import ensure_store_schema
+        return ensure_store_schema(self, _SCHEMA, script=True)
 
     def _note_failure(self, op: str, exc: Exception) -> None:
         self._failures += 1

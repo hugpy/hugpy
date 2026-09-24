@@ -42,14 +42,13 @@ WHY SENTINEL TASKS AND NOT ``tasks: []``
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Dict, List, Optional
 
 __all__ = [
     "MODEL_INDEX_NAME",
-    "ADAPTER_TASK", "NEEDS_CLASSIFICATION_TASK",
+    "ADAPTER_TASK", "NEEDS_CLASSIFICATION_TASK", "PIPELINE_COMPONENT_TASK",
     "T2I", "I2I", "INPAINT",
     "read_model_index", "pipeline_class_name", "tasks_for_pipeline_class",
     "is_adapter_only_dir", "classify_model_dir", "is_speech_checkpoint_dir",
@@ -63,6 +62,11 @@ MODEL_INDEX_NAME = "model_index.json"
 # kept-and-visible but refuses with a reason (see models_config.derive_model_config_row).
 ADAPTER_TASK = "adapter"
 NEEDS_CLASSIFICATION_TASK = "needs-classification"
+# A sub-component of a diffusion/video pipeline (a latent upscaler/upsampler, a
+# split text-encoder/vae/transformer, a single-file quantized video transformer):
+# no RUNNER_PAIR, so the row is kept-and-visible but refuses with a CAUSE + FIX.
+# The literal is shared with models_config._correct_pipeline_component.
+PIPELINE_COMPONENT_TASK = "pipeline-component"
 
 T2I = "text-to-image"
 I2I = "image-to-image"
@@ -85,13 +89,7 @@ TTS = "text-to-speech"
 _SPEECH_WEIGHT_PREFIXES = (("ve.",), ("t3_", "t3."), ("s3gen",))
 
 
-def _read_json(path: str) -> Optional[dict]:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:  # noqa: BLE001 — absent/unreadable/malformed are all "no"
-        return None
-    return data if isinstance(data, dict) else None
+from hugpy_platform.atomic_json import read_json_dict as _read_json
 
 
 def read_model_index(model_dir: Optional[str]) -> Optional[dict]:
@@ -172,6 +170,16 @@ def tasks_for_pipeline_class(class_name: Optional[str], *,
     if not class_name:
         return None
     low = class_name.lower()
+    # A latent upscaler / upsampler pipeline (LTXLatentUpsamplePipeline, the
+    # StableDiffusion*UpscalePipeline family) refines the latents another
+    # generator produced — it is a pipeline COMPONENT, not a standalone servable
+    # model. Its model_index declares it truthfully; classify it as such so it is
+    # not offered as a chat model (its pipeline_tag ``video-to-video`` is not in
+    # HF_TASK_TO_TASKS and floored ltxv-spatial-upscaler to text-generation).
+    # Checked BEFORE the video-prefix defer, or LTX*Upsample* returns None and
+    # falls through to the same text-generation floor.
+    if "upscal" in low or "upsampl" in low:
+        return [PIPELINE_COMPONENT_TASK]
     if any(low.startswith(p) for p in _VIDEO_PIPELINE_PREFIXES):
         return None                                    # the video arm's vocabulary
     mapped = _CLASS_TASKS.get(low)

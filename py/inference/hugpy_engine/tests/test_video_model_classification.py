@@ -24,10 +24,14 @@ classifier just had no video vocabulary, and the row never carried the field.
 
 TWO FIXES, both asserted here:
   1. `_VIDEO_T2V` / `_VIDEO_I2V` model_type sets → `text-to-video` /
-     `image-to-video` (added to HF_TASK_TO_TASKS). They are advertised truthfully
-     but NOT servable by the LLM plane: there is no ("transformers","text-to-video")
-     RUNNER_PAIR, so chat routing excludes them. The studio arm serves them from
-     its own registry.
+     `image-to-video` (added to HF_TASK_TO_TASKS). 2026-09-24: a FULL video
+     pipeline is now SERVEABLE — its runner lives in hugpy_video's studio
+     registry, so ("transformers","text-to-video") / ("transformers",
+     "image-to-video") are RUNNER_PAIRS and the row is graded like any other
+     model (no-grader until a video suite exists) instead of the blanket
+     "unservable/pipeline component". Neither video task is in TASK_DEFAULTS, so
+     no chat/media route can bind a video model. A single-file GGUF video
+     transformer stays a pipeline-component (it is not a full pipeline).
   2. `_enrich_model_type` fills `model_type` from the model's own `config.json`
      when the row lacks it — content-authoritative, the same discipline
      `_correct_gguf_vision` applies to the mmproj question.
@@ -79,14 +83,29 @@ def test_vace_classifies_as_image_to_video(tmp_path):
     assert M._derive_tasks("transformers", enriched) == ["image-to-video"]
 
 
-def test_video_tasks_have_no_llm_runner():
-    """The point of classifying honestly: these become VISIBLE but not
-    chat-servable. If someone later adds a ("transformers","text-to-video")
-    RUNNER_PAIR, chat routing could bind a video model — fail loudly here."""
-    from hugpy_engine.categories import RUNNER_PAIRS
+def test_full_video_pipeline_is_serveable_via_hugpy_video(tmp_path):
+    """2026-09-24: a FULL video pipeline is serveable — its runner lives in
+    hugpy_video's studio registry, so ("transformers","text-to-video") /
+    ("transformers","image-to-video") are RUNNER_PAIRS. It is graded like any
+    other model (no video suite yet -> no-grader) instead of the blanket
+    "unservable/pipeline component" it read as before. A GGUF video task stays
+    OUT of RUNNER_PAIRS: a single-file GGUF is a component, never a full pipeline
+    (and no chat/media default binds a video model — neither is in TASK_DEFAULTS).
+    """
+    from hugpy_engine.categories import RUNNER_PAIRS, TASK_DEFAULTS, MEDIA_DEFAULTS
     for task in ("text-to-video", "image-to-video"):
-        assert ("transformers", task) not in RUNNER_PAIRS, task
+        assert ("transformers", task) in RUNNER_PAIRS, task
         assert ("gguf", task) not in RUNNER_PAIRS, task
+        assert task not in TASK_DEFAULTS, task
+    assert MEDIA_DEFAULTS["video"] == MEDIA_DEFAULTS["audio"]   # video routes to ASR, not a t2v model
+    # A discovered t2v row is written serveable=True with no unserveable_reason.
+    cfg, reason = M.derive_model_config_row(
+        "Wan2.1-T2V-1.3B",
+        {"hub_id": "Wan-AI/Wan2.1-T2V-1.3B", "framework": "transformers",
+         "pipeline_tag": "text-to-video", "dir": _wan_dir(tmp_path)})
+    assert cfg is not None, reason
+    assert cfg["tasks"] == ["text-to-video"] and cfg["serveable"] is True
+    assert cfg.get("unserveable_reason") in (None,) and cfg["unserveable_tasks"] == []
 
 
 def test_an_explicit_row_value_always_wins(tmp_path):
@@ -211,3 +230,60 @@ def test_component_word_in_the_name_only_does_not_trip_it():
 def test_pipeline_component_guard_is_gguf_only():
     row = {"filename": "unet/text_encoder/model.safetensors"}
     assert M._correct_pipeline_component("transformers", ["text-generation"], row) == ["text-generation"]
+
+
+# ── single-file video-model GGUFs (Wan VACE) ─────────────────────────────────
+# QuantStack/Wan2.1_14B_VACE-GGUF ships one file at the model root
+# (Wan2.1_14B_VACE-Q8_0.gguf): the quantized diffusion transformer ALONE, no VAE
+# / text-encoder / scheduler, so it is a pipeline-component like the split fp8
+# checkpoints. It has no component PATH segment and no config model_type, so the
+# only truthful signal is the Hub card's pipeline_tag / tags — which the gguf
+# floor ignores, flooring it to text-generation (then even graded weak).
+
+def test_single_file_video_gguf_is_a_pipeline_component_by_pipeline_tag():
+    row = {"filename": "Wan2.1_14B_VACE-Q8_0.gguf", "pipeline_tag": "text-to-video"}
+    assert M._correct_pipeline_component("gguf", ["text-generation"], row) == ["pipeline-component"]
+
+
+def test_single_file_video_gguf_is_a_pipeline_component_by_tags():
+    row = {"filename": "Wan2.1-VACE-1.3B-F16.gguf",
+           "tags": ["gguf", "video", "video-generation", "text-to-video"]}
+    assert M._correct_pipeline_component("gguf", ["text-generation"], row) == ["pipeline-component"]
+
+
+def test_plain_chat_gguf_with_text_generation_tag_is_left_alone():
+    """A real chat GGUF carries pipeline_tag text-generation and no video tag, so
+    the video-gguf branch never fires."""
+    row = {"filename": "gemma-3-12b-it-Q4_K_M.gguf", "pipeline_tag": "text-generation",
+           "tags": ["gguf", "text-generation", "conversational"]}
+    assert M._correct_pipeline_component("gguf", ["text-generation"], row) == ["text-generation"]
+
+
+# ── latent upscaler / upsampler pipelines are components ─────────────────────
+# ltxv-spatial-upscaler-0.9.7 / LTX-Video-spatial-upscaler-0.9.8: diffusers dirs
+# whose model_index _class_name is LTXLatentUpsamplePipeline and whose
+# pipeline_tag is video-to-video (not in HF_TASK_TO_TASKS) — floored to
+# text-generation, i.e. a video upscaler offering itself as a chat model.
+
+def test_latent_upscaler_pipeline_class_is_a_component():
+    from hugpy_engine.model_classifier import tasks_for_pipeline_class, PIPELINE_COMPONENT_TASK
+    assert tasks_for_pipeline_class("LTXLatentUpsamplePipeline") == [PIPELINE_COMPONENT_TASK]
+    # a StableDiffusion upscale pipeline is also a component (no upscale runner)
+    assert tasks_for_pipeline_class("StableDiffusionLatentUpscalePipeline") == [PIPELINE_COMPONENT_TASK]
+
+
+def test_upscaler_dir_classifies_as_component_through_correct_diffusers_task(tmp_path):
+    d = tmp_path / "ltxv-spatial-upscaler"
+    d.mkdir()
+    (d / "model_index.json").write_text(json.dumps({"_class_name": "LTXLatentUpsamplePipeline"}))
+    row = {"dir": str(d), "tasks": ["text-generation"]}
+    assert M._correct_diffusers_task("transformers", ["text-generation"], row) == ["pipeline-component"]
+
+
+def test_real_image_generator_is_untouched_by_the_upscaler_rule():
+    """The blast radius is upscalers only: a normal generative pipeline still
+    gets text-to-image + image-to-image."""
+    from hugpy_engine.model_classifier import tasks_for_pipeline_class
+    assert tasks_for_pipeline_class("StableDiffusionXLPipeline") == ["text-to-image", "image-to-image"]
+    # video generator pipelines still defer to the video corrector (None here)
+    assert tasks_for_pipeline_class("WanVACEPipeline") is None

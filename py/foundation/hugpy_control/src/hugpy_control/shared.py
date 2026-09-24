@@ -113,6 +113,42 @@ def retry_on_emfile(
             sleep(delay)
     raise last
 
+
+def connect_wal(path: str, *, retry=retry_on_emfile) -> sqlite3.Connection:
+    """Open a SQLite store with the shared retry and handle-local pragmas."""
+    conn = retry(lambda: sqlite3.connect(path, timeout=2.0))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=2000")
+    return conn
+
+
+def ensure_store_schema(store, schema: str, *, indexes=(), script: bool = False) -> bool:
+    """Initialize a store once under its lock and report failures through it."""
+    if store._disabled:
+        return False
+    if store._initialized:
+        return True
+    with store._init_lock:
+        if store._initialized:
+            return True
+        try:
+            parent = os.path.dirname(store.path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with store._connect() as conn:
+                if script:
+                    conn.executescript(schema)
+                else:
+                    conn.execute(schema)
+                for statement in indexes:
+                    conn.execute(statement)
+            store._initialized = True
+            return True
+        except Exception as exc:  # noqa: BLE001
+            store._note_failure("init", exc)
+            return False
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id               TEXT PRIMARY KEY,
@@ -236,6 +272,54 @@ def default_db_path() -> str:
     return os.path.join(base, f"hugpy-comms-{os.getuid()}.db")
 
 
+def project_db_path(env_name: str, filename: str) -> str:
+    """Resolve a per-feature project database with the common fallback root."""
+    override = (os.environ.get(env_name) or "").strip()
+    if override:
+        return override
+    base = (os.environ.get("PROJECTS_HOME") or "").strip()
+    if not base:
+        try:
+            from hugpy_platform.constants import PROJECTS_HOME as project_home
+            base = str(project_home)
+        except Exception:  # noqa: BLE001 — per-user durable fallback
+            base = os.path.expanduser("~/.hugpy")
+    return os.path.join(base, filename)
+
+
+def init_bounded_event_store(store, path, max_rows: int, resolve_path) -> None:
+    """Set up the common bounded event-store state."""
+    store.path = path or resolve_path()
+    store.max_rows = max_rows
+    store._failures = 0
+    store._disabled = str(store.path).strip().lower() in (
+        "off", "none", "0", "disabled")
+    store._initialized = False
+    store._init_lock = threading.Lock()
+    store._appends = 0
+
+
+def recent_ring(ring, lock, limit: int = 200) -> list[dict]:
+    """Snapshot a process-local ring oldest first, with an optional tail cap."""
+    with lock:
+        items = list(ring)
+    if limit and limit > 0:
+        items = items[-limit:]
+    return items
+
+
+def get_or_create_singleton(namespace: dict, name: str, lock, factory):
+    """Initialize a module's store exactly once while preserving its swap hook."""
+    store = namespace.get(name)
+    if store is None:
+        with lock:
+            store = namespace.get(name)
+            if store is None:
+                store = factory()
+                namespace[name] = store
+    return store
+
+
 class SqliteMirror:
     def __init__(self, path: Optional[str] = None,
                  retain_secs: float = 600.0) -> None:
@@ -261,11 +345,7 @@ class SqliteMirror:
         # sqlite3.connect is the store-open point that throws the transient
         # EMFILE / 'unable to open database file' under a restart burst — retry
         # just the open, then run the (handle-local) PRAGMAs normally.
-        conn = retry_on_emfile(lambda: sqlite3.connect(self.path, timeout=2.0))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=2000")
-        return conn
+        return connect_wal(self.path, retry=retry_on_emfile)
 
     def _ensure(self) -> bool:
         if self._disabled:

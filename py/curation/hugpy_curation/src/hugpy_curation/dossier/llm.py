@@ -106,15 +106,7 @@ def resolve_model() -> tuple[str | None, str]:
     return None, f"{why2}; matrix: {why}"
 
 
-def _no_think(prompt: str) -> str:
-    """NO-THINK, the package seam. A <think> block can eat the whole token
-    budget before the answer starts — the same failure ``review/judge.py``
-    documents."""
-    try:
-        from hugpy_engine.utils.no_think import with_no_think
-        return with_no_think(prompt)
-    except Exception:                               # noqa: BLE001
-        return prompt
+from hugpy_platform.no_think import with_no_think as _no_think
 
 
 def _dispatch(model: str, prompt: str, max_tokens: int) -> str:

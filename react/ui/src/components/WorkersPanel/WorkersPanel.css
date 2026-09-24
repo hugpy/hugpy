@@ -1636,3 +1636,7 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Archive mark in the load/designate picker (recorded facts, never pickable). */
+.wp-lt-archive-note { font-size: 0.8em; opacity: 0.85; font-style: italic; }
+.wp-lt-size-why { font-size: 0.8em; white-space: normal; }

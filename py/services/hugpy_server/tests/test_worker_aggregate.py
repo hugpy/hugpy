@@ -100,12 +100,12 @@ def test_latency_reservoir_is_bounded(agg):
     assert not any(k.startswith("_") for k in agg.document()["models"]["m1"])
 
 
-def test_last_error_is_bounded_but_verbatim(agg):
-    huge = "E" * (agg_mod.MAX_ERROR_CHARS * 3)
+def test_last_error_is_verbatim_and_whole(agg):
+    huge = "E" * 6000
     agg.record_serve("m1", ok=False, error=huge)
     stored = agg.document()["models"]["m1"]["last_error"]
-    assert len(stored) < len(huge)
-    assert stored.startswith("EEE") and "[elided]" in stored
+    assert agg_mod.MAX_ERROR_CHARS is None
+    assert stored == huge
 
 
 def test_selftest_history_bounded(agg):

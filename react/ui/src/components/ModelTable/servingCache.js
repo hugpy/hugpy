@@ -37,3 +37,32 @@ export function invalidateServing(modelKey) {
 export function primeServing(modelKey, data) {
   cache.set(modelKey, { at: Date.now(), data })
 }
+
+// Multi-GPU SHARD-eligibility flag (GET /settings/shard_models/<key>), same
+// shared/deduped cache. PlacementControl used to fetch it in a mount effect,
+// and the whole expanded row REMOUNTED on every table render (ModelDetail was a
+// component defined inside ModelTable's body — a new type each render), so
+// every status poll re-issued this GET per open row: the flicker. The flag only
+// changes when the operator toggles it here, which primes the cache.
+const shardCache = new Map()     // key -> { at, on }
+const shardInflight = new Map()  // key -> Promise<boolean>
+
+export async function getShardFlag(modelKey, { force = false } = {}) {
+  const hit = shardCache.get(modelKey)
+  if (!force && hit && Date.now() - hit.at < TTL_MS) return hit.on
+  if (!force && shardInflight.has(modelKey)) return shardInflight.get(modelKey)
+  const p = (async () => {
+    const r = await hugpyFetch(`/settings/shard_models/${encodeURIComponent(modelKey)}`)
+    if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
+    const d = await r.json()
+    const on = !!(d && d.value)
+    shardCache.set(modelKey, { at: Date.now(), on })
+    return on
+  })()
+  shardInflight.set(modelKey, p)
+  try { return await p } finally { shardInflight.delete(modelKey) }
+}
+
+export function primeShardFlag(modelKey, on) {
+  shardCache.set(modelKey, { at: Date.now(), on: !!on })
+}

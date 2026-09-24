@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react'
+import ModelLiveState from '../ModelLiveState/ModelLiveState'
 import { uploadFile } from '../../api'
 import * as chatStore from './chatStore'
+import { CopyButton, DiagnosticsView, toJsonText } from '../Diagnostics/Diagnostics'
+import { holdingWorkers } from './workers'
 import './ChatPanel.css'
 
 const PLACEHOLDER_CMDS = '/system <text> · /clear · /tokens <N>'
@@ -12,6 +15,22 @@ function isVLModel(model) {
   if (Array.isArray(model.tasks) && model.tasks.includes('image-text-to-text')) return true
   const task = model.primary_task || model.task
   return task === 'image-text-to-text'
+}
+
+function ErrorDetail({ detail }) {
+  if (!detail) return null
+  const { diagnostics, message, ...rest } = detail
+  const meta = Object.entries(rest).filter(([k, v]) => v != null && v !== '' && !['event', 'body'].includes(k) && typeof v !== 'object')
+  return <div className="msg-error-detail">
+    <div className="msg-error-meta">
+      {meta.map(([k, v]) => <span key={k}><b>{k}</b> {String(v)}</span>)}
+      <CopyButton text={() => toJsonText(detail)} label="copy diagnostics" />
+    </div>
+    <details className="msg-diag" open={diagnostics != null}>
+      <summary>diagnostics{diagnostics == null ? ' (none from server — raw error below)' : ''}</summary>
+      {diagnostics != null ? <DiagnosticsView value={diagnostics} /> : <pre className="diag-pre">{toJsonText(rest.event || rest.body || detail)}</pre>}
+    </details>
+  </div>
 }
 
 function readFileAsDataURL(file) {
@@ -53,6 +72,11 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
   const [system, setSystem]         = useState('')
   const [maxTokens, setMaxTokens]   = useState(null)   // null = model max (auto-continued)
   const [attachment, setAttachment] = useState(null)   // {name, isImage, dataUrl?, path?, uploading?}
+  // '' = system decides (no alloc sent); else a worker name -> alloc: {worker}
+  const [workerPin, setWorkerPinState] = useState(() => chatStore.getWorkerPin(modelKey))
+  const setWorkerPin = useCallback((w) => { setWorkerPinState(w); chatStore.setWorkerPin(modelKey, w) }, [modelKey])
+  useEffect(() => { setWorkerPinState(chatStore.getWorkerPin(modelKey)) }, [modelKey])
+  const holders = useMemo(() => holdingWorkers(model), [model])
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
   const fileRef   = useRef(null)
@@ -146,8 +170,8 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
     setMessages(history)
     setAttachment(null)
 
-    chatStore.sendMessage(modelKey, { model, history, system, maxTokens, attachment: att })
-  }, [input, attachment, messages, modelKey, model, system, maxTokens, streaming, setMessages])
+    chatStore.sendMessage(modelKey, { model, history, system, maxTokens, attachment: att, worker: workerPin })
+  }, [input, attachment, messages, modelKey, model, system, maxTokens, streaming, setMessages, workerPin])
 
   // Stop the in-flight response: tell the worker to halt generation (so the
   // GPU stops doing work), then abort the fetch. Explicit user action only —
@@ -163,6 +187,7 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
       <div className="chat-header">
         <div className="chat-title">
           <span className="chat-model">{model?.name ?? modelKey}</span>
+          <ModelLiveState modelKey={modelKey} compact />
           <span className="chat-meta">
             {model?.framework} · <span title={Array.isArray(model?.tasks) && model.tasks.length > 1 ? `all tasks: ${model.tasks.join(', ')}` : undefined}>{model?.primary_task ?? model?.task}</span>
             {system && <span className="system-set" title={system}> · sys</span>}
@@ -209,6 +234,16 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
         className={`chat-alloc ${allocation ? (allocation.servedBy === 'local' ? 'is-local' : 'is-worker') : 'is-pending'}`}
         title="The allocation that served the most recent request"
       >
+        <label className="alloc-pin" title="Where the next request runs: system decides (default), or pin one worker that holds this model (sends alloc: {worker}; the pin fails with the reason instead of rerouting)">
+          <span className="alloc-label">worker</span>
+          <select value={workerPin} onChange={e => setWorkerPin(e.target.value)} disabled={streaming}>
+            <option value="">system decides</option>
+            {holders.map(w => <option key={w.name} value={w.name} disabled={!w.online && w.name !== workerPin}>
+              {w.name}{w.hot ? ' · hot' : ' · on disk'}{w.online ? '' : ' · offline'}
+            </option>)}
+            {workerPin && !holders.some(w => w.name === workerPin) && <option value={workerPin}>{workerPin} · not holding this model</option>}
+          </select>
+        </label>
         <span className="alloc-label">allocation</span>
         <span className="alloc-value">
           {!allocation
@@ -247,6 +282,7 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
             <pre className="msg-content">{msg.content}
               {msg.role === 'assistant' && streaming && i === messages.length - 1 && <span className="cursor">▌</span>}
             </pre>
+            {msg.error && <ErrorDetail detail={msg.errorDetail} />}
           </div>
         ))}
         <div ref={bottomRef} />

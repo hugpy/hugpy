@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { hugpyFetch } from '../../runtime/config'
 import { getServing, invalidateServing } from './servingCache'
+import { responseReason } from '../responseReason'
 
 // Per-model serving control: mode + GPU layers + CPU threads + context.
 // Self-contained — talks straight to /api/llm/serving/<key>, so it needs no
@@ -52,7 +53,7 @@ export default function ServingControl({ modelKey, framework }) {
       if (apply) {
         const a = d.apply || {}
         setMsg(a.applied ? '✓ applied (unit written + restarted)'
-                          : `saved — ${a.reason || 'not applied'}`)
+                          : `saved — not applied: ${responseReason(a)}`)
       } else {
         setMsg('✓ saved (apply to (re)write the unit)')
       }

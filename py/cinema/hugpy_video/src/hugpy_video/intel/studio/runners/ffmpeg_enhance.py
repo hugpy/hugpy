@@ -73,12 +73,7 @@ from hugpy_video.intel.studio.runners.synthetic import (
 # --------------------------------------------------------------------------- #
 # Source-clip resolution (pure) — the enhancement INPUT
 # --------------------------------------------------------------------------- #
-def _resolve_source(manifest: RenderManifest) -> str | None:
-    """The absolute path of the clip this enhance transforms, or None if the
-    manifest carries none. ``source_video`` is part of the content_hash (B-2), so an
-    enhance is deterministically keyed on the clip it interpolates/upscales."""
-    src = getattr(manifest, "source_video", "") or ""
-    return src or None
+from hugpy_video.intel.studio.runners.source import resolve_source as _resolve_source
 
 
 # --------------------------------------------------------------------------- #

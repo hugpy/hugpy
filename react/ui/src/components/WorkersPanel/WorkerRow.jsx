@@ -25,10 +25,28 @@ import { isMeasuredResident } from './workerMetrics'
 import { findCatalogRow } from './catalogRow'
 import { getServing } from '../ModelTable/servingCache'
 import { WorkerLoadTable } from './WorkerLoadTable'
+import { useModelStatus } from '../ModelTable/useModelStatus'
+import { statusFor } from '../ModelTable/modelStatus'
+import { WorkerStateChips } from '../ModelTable/StatusCells'
+import { responseReason } from '../responseReason'
+
+// PIN state for one (worker, model), mirroring the backend's effective_pin
+// (central/workers.py): central's recorded decision on the ``designations`` row
+// wins; the legacy agent-side 📌 (worker.config.pinned) is read through ONLY
+// while central holds no decision (pin_origin absent). Returns a bool.
+export function effectivePin(worker, key) {
+  const row = (worker?.designations || []).find(d => d && d.model_key === key)
+  if (row && row.pin_origin === 'central') return !!row.pinned
+  return !!(worker?.config?.pinned || {})[key]
+}
 
 // A worker row: status + GPUs (with used/free) + provisioning state, the models
 // it serves with per-model load state + concise GPU allocation + free controls.
-export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null }) {
+export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null }) {
+  // The shared per-(model, worker) state vocabulary (GET /llm/models/status):
+  // the same words the Models table and the Metrics picker use. Feature-
+  // detected — an older central keeps the legacy pill below.
+  const mstatus = useModelStatus()
   const [pick, setPick]       = useState('')
   const [newSpill, setNewSpill] = useState({})   // allocation for the next assign
   const [allocMenu, setAllocMenu] = useState(null)   // model key whose in-place alloc menu is open
@@ -284,8 +302,10 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
     // to ram-only still displayed "⚡ Max GPU · auto". The tree was right and
     // already shipped; its answer simply never reached this cell.
     const derivedMode = worker.model_alloc_modes?.[key] || null
-    // 📌 pin = PERMANENT attribution to this worker — blocks unassign.
-    const isPinned = !!worker.config?.pinned?.[key]
+    // 📌 pin = PERMANENT attribution to this worker — blocks unassign. Central's
+    // recorded decision (designations[].pinned) wins; the legacy agent 📌 reads
+    // through only while central holds none (effectivePin).
+    const isPinned = effectivePin(worker, key)
     // Full attribution ladder (each stage reported by the worker):
     //   pulling n%  — files downloading from central/HF (live progress)
     //   heating     — weights loading into VRAM/RAM right now
@@ -519,9 +539,13 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
       // State — the EXISTING pill, verbatim (FixDoc on missing, live pulling %,
       // load_reports annotation when not resident).
       label: 'State', sortable: true, cls: 'wp-servtable-state',
-      render: ({ d }) => {
+      render: ({ d, key }) => {
         const { isPulling, isHeating, isServing, inSlot, isAnswering, isIdleResident,
                 isMissing, centralHas, pct, state, stateTitle, loadFailed, loadReport, loadStale } = d
+        const srow = mstatus.index.available ? statusFor(mstatus.index, key) : null
+        if (srow && (srow.workers || []).some(w => w.worker === worker.name)) {
+          return <WorkerStateChips row={srow} only={worker.name} />
+        }
         return (
           <>
             <span className={`wp-state-pill wp-pill-${state}`} title={stateTitle}>
@@ -1105,7 +1129,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
         )}
         {ping && ping !== 'checking' && (
           <span className={`wp-ping ${ping.reachable ? 'wp-ping-ok' : 'wp-ping-bad'}`}
-                title={ping.reachable ? 'central can reach this worker' : (ping.error || 'unreachable')}>
+                title={ping.reachable ? 'central can reach this worker' : responseReason(ping)}>
             {ping.reachable ? '✓ reachable' : '✗ unreachable'}
             {!ping.reachable && <FixDoc doc="worker-unreachable" />}
           </span>
@@ -1378,6 +1402,16 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
                           ? 'Agent is restarting to apply the previous change — retry in a few seconds.'
                           : 'Unpin ALL of this worker’s models — the undo for Pin all; lets them be unassigned again.'}
                         onClick={() => onUnpinAll(worker)}>📌✕ unpin all</button>
+              )}
+              {/* Prune AUTOMATED (non-pinned) designations — benchmark /
+                  admission / model_group / autoplace rows whose model is not
+                  loaded here and has not been called for the idle bound. Shows
+                  the DRY-RUN plan first, then applies only on confirm. Never
+                  touches pinned or operator designations. */}
+              {onPruneDesignations && (
+                <button className="wp-bulkpin-btn" disabled={applying}
+                        title="Prune this worker's AUTOMATED (non-pinned) designations that are idle past the bound — shows what would be removed first, applies only on confirm. Pinned & operator designations are never touched; nothing on the worker is unloaded."
+                        onClick={() => onPruneDesignations(worker)}>🧹 prune automated</button>
               )}
               {/* Bulk 4-bit (operator ask 2026-07-26), in the same row as pin
                   all / unpin all. Acts ONLY on the ELIGIBLE set — GGUF,

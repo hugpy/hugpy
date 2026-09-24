@@ -14,8 +14,6 @@ from abstract_essentials import (
     safe_dump_to_json,
     safe_load_from_json,
 )
-from huggingface_hub import HfApi
-from huggingface_hub.utils import HfHubHTTPError
 import logging
 logger = logging.getLogger(__name__)
 from hugpy_engine.apis.call_api import call_and_code, get_response_dir
@@ -44,7 +42,6 @@ from hugpy_platform.utils import (
 from hugpy_engine.schemas.model_schemas import ModelConfig
 from hugpy_storage.hugpy_marker import hub_id_for, read_hugpy_marker, sync_marker_quants
 from hugpy_storage.model_paths import exclude_dirs, get_model_dirs
-from huggingface_hub.errors import HFValidationError
 from hugpy_engine.model_classifier import classify_model_dir
 
 _norm_folder = normalize_folder
@@ -61,7 +58,7 @@ def clean_hub_id(directory: str, fallback: str = "") -> str:
 
 # hub_id "owner" prefixes that are LOCAL conventions, not HF namespaces —
 # never resolvable on huggingface.co, never sent there (see
-# resolve_hub_model_info). "comfy/<stem>" is synthesized per local ComfyUI
+# resolve_hub_meta). "comfy/<stem>" is synthesized per local ComfyUI
 # checkpoint by models_config._sweep_comfy_checkpoints.
 _LOCAL_HUB_NAMESPACES = {"comfy"}
 
@@ -260,8 +257,7 @@ def resolve_dir_declaration(directory: str, hub_id: str) -> dict:
     this resolver returns {} and the marker keeps its authority.
 
     Offline by construction — dir contents only, never the hub (hub metadata is a
-    bonus, never a dependency; see the fetch-once cache note in
-    resolve_hub_model_info)."""
+    bonus, never a dependency; see resolve_hub_meta)."""
     from hugpy_engine.model_classifier import classify_model_dir
     verdict = classify_model_dir(directory)
     if not verdict:
@@ -322,44 +318,39 @@ def resolve_layout_path(directory: str, hub_id: str) -> dict:
     return out
 
 
-def resolve_hub_model_info(directory: str, hub_id: str, api: HfApi) -> dict:
-    # Skip ids that aren't owner/repo — the HF validator raises on these,
-    # and a malformed id can't resolve anything anyway.
+def resolve_hub_meta(directory: str, hub_id: str) -> dict:
+    """The Hub-described fields (pipeline_tag, library_name, license, ...) for
+    an INSTALLED model — from its own record, never the network.
+
+    Operator ruling 2026-09-23: "no more verifying static values with api
+    calls; the only Hugging Face API calls should be ones that obviously are
+    needed". These facts are static per install, so they are captured ONCE at
+    download time into ``hugpy.json["hub_meta"]`` (hugpy_marker.write_hugpy_marker)
+    and read back here. A model installed before that capture falls back to
+    the LOCAL metadata-store row the download/discovery path cached (a sqlite
+    read). Nothing on disk and nothing cached -> ``{}``: the chain moves on to
+    the layout floor; it does not fetch. (Replaces resolve_hub_model_info,
+    which read through to a live ``model_info`` call on every cache miss.)"""
     if not is_valid_repo_id(hub_id):
         return {}
-
-    # LOCAL namespaces are not HF repos. models_config synthesizes
-    # hub_id = "comfy/<stem>" for ComfyUI checkpoint files (models_config.py
-    # _sweep_comfy_checkpoints) — asking huggingface.co about those yields a
-    # guaranteed 401/404 per checkpoint per registry walk (the ae log-spam wall,
-    # 2026-07-22) and needlessly names local files to HF. Never send them.
     if hub_id.split("/", 1)[0].lower() in _LOCAL_HUB_NAMESPACES:
         return {}
-
-    # Per-repo metadata rides the permanent central HF cache (fetch-once —
-    # comms/model_metadata.py). Upgraded to files_metadata=True: one RICHER fetch
-    # beats two (the sibling sizes then also serve model_size / spec / download
-    # estimates from the same cached row). Output contract unchanged.
-    from hugpy_storage.model_metadata import fetch_repo_info
-    try:
-        payload = fetch_repo_info(hub_id, files_metadata=True, api=api)
-    except (HfHubHTTPError, HFValidationError) as exc:
-        logger.warning("hub_model_info skipped for %r: %s", hub_id, exc)
+    marker = read_hugpy_marker(directory) or {}
+    meta = marker.get("hub_meta")
+    if not isinstance(meta, dict):
+        try:
+            from hugpy_storage.hugpy_marker import cached_hub_meta
+            meta = cached_hub_meta(hub_id)
+        except Exception as exc:  # noqa: BLE001 — a local cache miss is not an error
+            logger.debug("hub_meta: local metadata row unreadable for %r: %s", hub_id, exc)
+            meta = None
+    if not meta:
+        logger.debug("hub_meta: nothing captured for %r (no hugpy.json hub_meta, "
+                     "no cached row) — not fetching", hub_id)
         return {}
-    if payload is None:
-        return {}
-
-    gated = payload.get("gated")
-    return {
-        "pipeline_tag":     payload.get("pipeline_tag"),
-        "library_name":     payload.get("library_name"),
-        "auto_model_class": payload.get("auto_model_class"),
-        "parameter_count":  payload.get("safetensors_params"),
-        "license":          payload.get("license"),
-        "gated":            bool(gated) if gated is not None else None,
-        "languages":        payload.get("languages"),
-        "tags":             payload.get("tags"),
-    }
+    return {k: meta.get(k) for k in ("pipeline_tag", "library_name", "auto_model_class",
+                                      "parameter_count", "license", "gated",
+                                      "languages", "tags")}
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +359,18 @@ def resolve_hub_model_info(directory: str, hub_id: str, api: HfApi) -> dict:
 ResolverFn = Callable[[str, str], dict]
 
 
-def build_resolver_chain(*, api: Optional[HfApi] = None,
+def build_resolver_chain(*, api: Any = None,
                          use_hub: bool = True) -> List[Tuple[str, ResolverFn]]:
     # Order = priority (first non-None wins): the model's OWN pipeline/adapter
     # declaration (k61 — a stamp can be wrong, model_index.json cannot) beats the
     # declared identity (hugpy.json), which beats disk contents, which beats the
-    # Hub; the routed-path layout is the floor — anything is better than minting
-    # default framework/task attribution.
+    # Hub facts captured at install; the routed-path layout is the floor —
+    # anything is better than minting default framework/task attribution.
+    #
+    # NO NETWORK (2026-09-23): the former "hub_model_info" step read through to
+    # a live Hub call. ``use_hub`` now selects the install-time captured facts
+    # (resolve_hub_meta, local only); ``api`` is accepted for call-site
+    # compatibility and ignored.
     chain: List[Tuple[str, ResolverFn]] = [
         ("dir_declaration", resolve_dir_declaration),
         ("hugpy_marker",    resolve_hugpy_marker),
@@ -382,8 +378,7 @@ def build_resolver_chain(*, api: Optional[HfApi] = None,
         ("local_tokenizer", resolve_local_tokenizer),
     ]
     if use_hub:
-        hub_api = api or HfApi()
-        chain.append(("hub_model_info", lambda d, h: resolve_hub_model_info(d, h, hub_api)))
+        chain.append(("hub_meta", resolve_hub_meta))
     chain.append(("layout_path", resolve_layout_path))
     return chain
 

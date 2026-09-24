@@ -2092,22 +2092,7 @@ def _token_pid(claim_token: Optional[str]) -> Optional[int]:
     return pid if pid > 0 else None
 
 
-def _pid_alive(pid: int) -> bool:
-    """Is that PID alive on THIS host? signal 0 is the standard probe: it validates
-    the target without delivering anything. ProcessLookupError is the ONLY answer we
-    read as dead — PermissionError means the process exists under another uid (alive),
-    and any other error is treated as alive too. The bias is absolute and deliberate:
-    a false "alive" merely defers the reap to the movement gate, while a false "dead"
-    would terminalize a RUNNING render out from under its runner."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except Exception:  # noqa: BLE001 — unknown probe failure ⇒ assume alive
-        return True
-    return True
+from hugpy_platform.procutil import pid_alive as _pid_alive
 
 
 def _orphan_verdict(status: str, claim_token: Optional[str],

@@ -149,7 +149,7 @@ class LlamaCppChatRunner:
             # re-acquire — the rebuild re-seats AND loads, this call completes.
             logger.warning("stale slot seat for %s (%s) — evicting cached "
                            "runner and re-seating", self.model_key,
-                           str(exc)[:140])
+                           str(exc))
             evict_llama_runner(self.model_key)
             runner = self.runner
             text = await _generate(runner)
@@ -234,7 +234,7 @@ class LlamaCppChatRunner:
                 logger.warning("stale slot seat for %s (%s) — evicting cached "
                                "runner and re-seating the stream",
                                self.model_key,
-                               str(getattr(event, "message", ""))[:140])
+                               str(getattr(event, "message", "")))
                 evict_llama_runner(self.model_key)
                 async for retry_event in _make(self.runner):
                     yield retry_event

@@ -463,7 +463,10 @@ def _load_diffusers_pipeline(auto_cls, model_dir: str, model_key: str,
     return pipe, placement
 
 
-class ImageGenRunner:
+from hugpy_platform.runner_config import RunnerConfig
+
+
+class ImageGenRunner(RunnerConfig):
     """Runner for diffusers text-to-image pipelines.
 
     Per-process singleton cache (_PIPELINES) means many runner instances
@@ -477,10 +480,6 @@ class ImageGenRunner:
     _PIPELINES: Dict[str, Any] = {}
     _LOCK = threading.Lock()
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     # --- pipeline loading (lazy, singleton) ---------------------------------
 
@@ -636,7 +635,7 @@ class ImageGenRunner:
                              message=result.error or "image generation failed")
 
 
-class Img2ImgRunner:
+class Img2ImgRunner(RunnerConfig):
     """Runner for diffusers image-to-image (img2img) pipelines.
 
     SIBLING of ImageGenRunner — same lazy/singleton/thread-offload pattern, but
@@ -660,10 +659,6 @@ class Img2ImgRunner:
     _PIPELINES: Dict[str, Any] = {}
     _LOCK = threading.Lock()
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     # --- pipeline loading (lazy, singleton) ---------------------------------
 

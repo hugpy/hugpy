@@ -404,12 +404,4 @@ def _default_emit(stage: str, **fields) -> None:
         pass
 
 
-def _human(n: "Optional[int]") -> str:
-    if not n:
-        return "0 B"
-    v = float(n)
-    for u in ("B", "KB", "MB", "GB", "TB"):
-        if v < 1024 or u == "TB":
-            return f"{v:.1f} {u}"
-        v /= 1024
-    return f"{n} B"
+from hugpy_platform.formatting import human_bytes as _human

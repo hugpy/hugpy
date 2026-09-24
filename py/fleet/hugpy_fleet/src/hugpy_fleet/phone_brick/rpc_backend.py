@@ -40,7 +40,6 @@ Config (all via env):
 """
 from __future__ import annotations
 
-import json
 import os
 import socket
 import threading
@@ -116,22 +115,13 @@ def _resolve_rpc_bin(explicit: Optional[str]) -> str:
     return "rpc-server"
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
+from hugpy_platform.env import env_flag as _env_flag
 
+
+from hugpy_fleet.phone_brick.http import post_json
 
 def _post(url: str, body: dict, timeout: float = 10.0) -> tuple[int, dict]:
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8")
-        return resp.status, (json.loads(raw) if raw else {})
+    return post_json(url, body, timeout)
 
 
 def _cached_id() -> Optional[str]:

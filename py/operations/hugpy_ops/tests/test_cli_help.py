@@ -15,7 +15,20 @@ ENTRY_POINTS = {
     "hugpy-todo-keeper": "hugpy_ops.todo_keeper_daemon",
     "hugpy-provisioner": "hugpy_ops.provisioner",
     "hugpy-drift-check": "hugpy_ops.drift",
+    "hugpy-model-audit": "hugpy_ops.model_audit",
+    "hugpy-model-manifest-backfill": "hugpy_ops.model_manifest_backfill",
+    "hugpy-model-archive": "hugpy_ops.model_archive",
+    "hugpy-admission-seed": "hugpy_ops.admission:seed_main",
+    "hugpy-model-resweep": "hugpy_ops.resweep",
+    "hugpy-vl-reclassify": "hugpy_ops.admission:vl_reclassify_main",
 }
+
+
+def _target(module):
+    """``(module, function)`` — an entry is ``module`` (function ``main``)
+    or ``module:function``."""
+    mod, _, fn = module.partition(":")
+    return mod, fn or "main"
 
 
 def _strict_env():
@@ -31,9 +44,10 @@ def _run(code: str):
 
 @pytest.mark.parametrize("script, module", sorted(ENTRY_POINTS.items()))
 def test_console_script_help_in_strict_subprocess(script, module):
+    mod, fn = _target(module)
     code = (
         "import sys; sys.modules['abstract_hugpy_dev'] = None\n"
-        f"from {module} import main\n"
+        f"from {mod} import {fn} as main\n"
         "try:\n"
         "    rc = main(['--help'])\n"
         "except SystemExit as e:\n"
@@ -52,7 +66,8 @@ def test_pyproject_declares_every_console_script():
     scripts = data["project"]["scripts"]
     assert set(scripts) == set(ENTRY_POINTS)
     for name, module in ENTRY_POINTS.items():
-        assert scripts[name] == f"{module}:main"
+        mod, fn = _target(module)
+        assert scripts[name] == f"{mod}:{fn}"
 
 
 def test_import_hugpy_ops_is_light():

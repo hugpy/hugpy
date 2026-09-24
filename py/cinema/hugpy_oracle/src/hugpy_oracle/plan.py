@@ -219,27 +219,10 @@ class FrozenParams(_MappingABC):
 # ---------------------------------------------------------------------------
 
 
-def coerce_artifact_kind(value: ArtifactKind | str) -> ArtifactKind | str:
-    """``ArtifactKind`` when the string names one, otherwise the string itself.
-
-    The enum is the closed vocabulary of MEDIA kinds; a plan also moves logical
-    artifacts the enum will never enumerate (``dialogue_timeline``,
-    ``audio_master``, ``segment_spec``). Inventing enum members for artifacts
-    that do not exist yet would be the fabrication the doc warns about, so a
-    free string is legal and compared exactly, case-sensitively."""
-    if isinstance(value, ArtifactKind):
-        return value
-    text = str(value).strip()
-    if not text:
-        raise ValueError("artifact_kind must be non-empty")
-    try:
-        return ArtifactKind(text)
-    except ValueError:
-        return text
+from hugpy_oracle.contracts import coerce_artifact_kind
 
 
-def kind_value(kind: ArtifactKind | str) -> str:
-    return kind.value if isinstance(kind, ArtifactKind) else str(kind)
+from hugpy_oracle.contracts import kind_value
 
 
 @dataclass(frozen=True, slots=True)

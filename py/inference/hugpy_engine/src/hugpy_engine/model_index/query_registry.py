@@ -117,6 +117,25 @@ class MetricsQueries:
         "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS grade_suite TEXT;",
         "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS grade_detail TEXT;",
         "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS graded_at TIMESTAMPTZ;",
+        # Recorded cold loads (2026-09-23, review_routes._persist_cold_split):
+        # the central->worker transfer and load split of a measured cold seat,
+        # read back so a benchmark never cold-resets a triple it already timed.
+        "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS transfer_s DOUBLE PRECISION;",
+        "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS transfer_bytes BIGINT;",
+        "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS load_s DOUBLE PRECISION;",
+        "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS bytes_per_s DOUBLE PRECISION;",
+        "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS cold_measured_at TIMESTAMPTZ;",
+        # INTEGRITY IS NOT APTITUDE (2026-09-23). The integrity audit
+        # (hugpy_ops.model_audit --record, suite 'integrity', grade 100/0 +
+        # {"verdict": ...} detail) used to be stamped across EVERY serving row
+        # of a model by UPDATE_GRADE; a later benchmark result that carried no
+        # valid grade then overwrote only grade_suite (COALESCE in
+        # review_routes._persist_benchmark_result), leaving an integrity 100
+        # labelled as an aptitude suite (e.g. 'hugpy-vision-v1'). Relabel any
+        # row whose detail is an integrity verdict. Idempotent.
+        "UPDATE model_metrics SET grade_suite = 'integrity'"
+        " WHERE grade_suite IS DISTINCT FROM 'integrity'"
+        " AND left(grade_detail, 12) = '{\"verdict\": ';",
     )
 
     # A tok_per_s sample advances the running average and n_samples; every
@@ -167,6 +186,22 @@ class MetricsQueries:
            graded_at = now(), updated_at = now()
      WHERE model_name = ANY(%(names)s)
        AND (%(q)s = '' OR quant = %(q)s)
+       AND alloc_mode <> 'integrity'
+    """
+
+    # The integrity verdict has ONE row per model, keyed apart from every
+    # serving row (alloc_mode 'integrity', quant/worker ''), so it can never
+    # overwrite an aptitude grade nor be overwritten by one. Readers select it
+    # by grade_suite = 'integrity' exactly as before.
+    UPSERT_INTEGRITY = """
+    INSERT INTO model_metrics
+      (model_name, quant, alloc_mode, worker, n_samples,
+       grade, grade_suite, grade_detail, graded_at, updated_at)
+    VALUES (%(m)s, '', 'integrity', '', 0, %(g)s, 'integrity', %(d)s, now(), now())
+    ON CONFLICT (model_name, quant, alloc_mode, worker) DO UPDATE SET
+      grade = EXCLUDED.grade, grade_suite = EXCLUDED.grade_suite,
+      grade_detail = EXCLUDED.grade_detail, graded_at = now(),
+      updated_at = now()
     """
 
     INSERT_GRADE_STUB = """
@@ -223,18 +258,137 @@ class CallQueries:
         "ON model_calls (worker);",
     )
 
+    # THE GENERATION SPLIT (2026-09-23). Additive, idempotent, run with the
+    # CREATE on every process start (CREATE TABLE IF NOT EXISTS never alters):
+    #   prompt_s     — prompt evaluation seconds (llama-server timings.prompt_ms)
+    #   generation_s — the generation window (timings.predicted_ms; else
+    #                  elapsed - prompt_s; else elapsed — see gen_basis in state)
+    #   gen_tokens   — the tokens decoded INSIDE generation_s. llama-server
+    #                  samples the first completion token from the prompt pass
+    #                  (its time is in prompt_ms) and starts predicted_ms after
+    #                  it, so an engine-timed window holds predicted_n - 1
+    #                  tokens; a wall-clock window holds completion_tokens.
+    # tok_per_s = gen_tokens / generation_s (NULL when either is <= 0: a
+    # 1-token reply has no decode window and no rate).
+    MIGRATIONS = (
+        "ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS prompt_s DOUBLE PRECISION;",
+        "ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS generation_s DOUBLE PRECISION;",
+        "ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS gen_tokens INT;",
+    )
+
     INSERT_CALL = """
     INSERT INTO model_calls
       (model_name, worker, quant, alloc_mode, tok_per_s, prompt_tokens,
-       completion_tokens, elapsed_s, task, request_id, state)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+       completion_tokens, elapsed_s, task, request_id, state,
+       prompt_s, generation_s, gen_tokens)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
     """
 
     FETCH_BY_MODEL = """
     SELECT extract(epoch from ts), worker, quant, alloc_mode, tok_per_s,
-           prompt_tokens, completion_tokens, elapsed_s, task, request_id
+           prompt_tokens, completion_tokens, elapsed_s, task, request_id, state,
+           prompt_s, generation_s, gen_tokens
     FROM model_calls WHERE model_name = ANY(%s)
     ORDER BY ts DESC LIMIT %s
+    """
+
+    # THROUGHPUT = Σ tokens-in-window / Σ generation seconds over EVERY
+    # recorded call (never an EMA, never "the last one"), with n, the spread
+    # and first/last. Per-row effective window (``gs``) and its tokens (``gt``):
+    #   generation_s column (rows written since 2026-09-23)  -> gen_tokens
+    #   state.generation_s (benchmark rows: the grader's copy of the reply's
+    #     timings, persisted in state)                      -> state.gen_tokens
+    #   state.engine_gen_s (relay rows 2026-09-23 before the column existed:
+    #     llama-server predicted_ms)                         -> completion - 1
+    #   state.request.ttft_s (streamed relay rows: first->last token clock)
+    #                                                        -> completion - 1
+    #   else the wall clock (elapsed_s)                      -> completion
+    # ``basis`` names which one each row used; the stats count rows per basis
+    # so a mean never hides what it is made of.
+    # MEASURE ONCE: a benchmark call is recorded twice — the relay's row (the
+    # serving path's measurement) and the benchmark's own grade row
+    # (state.benchmark / caller 'orchestrator'). The benchmark row is the
+    # TWIN and is dropped from throughput when its relay row exists: same
+    # request_id, or (older rows without one) same model/worker, relay row
+    # written within the call's window before it, elapsed within 1 s.
+    # UNSTAMPED rows (quant '' or alloc_mode '') are counted at the worker and
+    # model level and reported as their own bucket (``u``), never dropped.
+    # Levels (GROUPING SETS): cell (model, worker, quant, alloc), worker
+    # (model, worker), model, and the unstamped bucket per worker / per model.
+    CALL_STATS = """
+    WITH b AS (
+      SELECT c.id, {model_expr} AS model_name,
+             regexp_replace(c.model_name, '^.*~', '') AS tail,
+             c.worker, c.quant, c.alloc_mode, c.ts, c.request_id,
+             c.completion_tokens AS ct, c.elapsed_s AS el,
+             COALESCE(c.state ? 'benchmark' OR c.state->>'caller' = 'orchestrator', false) AS bench,
+             c.generation_s AS gen_col, c.gen_tokens AS gt_col,
+             CASE WHEN jsonb_typeof(c.state->'generation_s') = 'number'
+                  THEN (c.state->>'generation_s')::float8 END AS gen_st,
+             CASE WHEN jsonb_typeof(c.state->'gen_tokens') = 'number'
+                  THEN (c.state->>'gen_tokens')::float8 END AS gt_st,
+             CASE WHEN jsonb_typeof(c.state->'engine_gen_s') = 'number'
+                  THEN (c.state->>'engine_gen_s')::float8 END AS eng_s,
+             CASE WHEN jsonb_typeof(c.state->'request'->'ttft_s') = 'number'
+                  THEN (c.state->'request'->>'ttft_s')::float8 END AS ttft,
+             c.state->>'gen_basis' AS basis_st
+      FROM model_calls c
+      WHERE TRUE {model_filter}
+    ), tw AS (
+      SELECT DISTINCT x.id FROM b x JOIN b r
+        ON r.tail = x.tail AND r.worker = x.worker AND r.id <> x.id
+       AND x.bench AND NOT r.bench
+       AND ((x.request_id IS NOT NULL AND r.request_id = x.request_id)
+         OR (x.request_id IS NULL AND x.el IS NOT NULL AND r.el IS NOT NULL
+             AND r.ts BETWEEN x.ts - make_interval(secs => x.el + 180) AND x.ts + interval '2 seconds'
+             AND abs(r.el - x.el) < 1.0))
+    ), e AS (
+      SELECT b.*,
+        CASE WHEN gen_col IS NOT NULL THEN gen_col
+             WHEN gen_st IS NOT NULL THEN gen_st
+             WHEN eng_s IS NOT NULL THEN eng_s
+             WHEN ttft IS NOT NULL AND el > ttft THEN el - ttft
+             ELSE el END AS gs,
+        CASE WHEN gen_col IS NOT NULL THEN gt_col
+             WHEN gen_st IS NOT NULL THEN gt_st
+             WHEN eng_s IS NOT NULL OR (ttft IS NOT NULL AND el > ttft) THEN ct - 1
+             ELSE ct END AS gt,
+        COALESCE(basis_st,
+                 CASE WHEN gen_col IS NOT NULL OR gen_st IS NOT NULL THEN 'reported'
+                      WHEN eng_s IS NOT NULL THEN 'engine'
+                      WHEN ttft IS NOT NULL AND el > ttft THEN 'stream'
+                      ELSE 'wall' END) AS basis,
+        (quant = '' OR alloc_mode = '') AS u,
+        (b.id IN (SELECT id FROM tw)) AS twin
+      FROM b
+    ), d AS (
+      SELECT e.*, (NOT twin AND gt > 0 AND gs > 0) AS rated FROM e
+    )
+    SELECT model_name, worker, quant, alloc_mode, u,
+           GROUPING(worker) AS g_worker, GROUPING(quant) AS g_quant, GROUPING(u) AS g_u,
+           count(*) FILTER (WHERE NOT twin) AS n_calls,
+           count(*) FILTER (WHERE rated) AS n_rated,
+           sum(gt) FILTER (WHERE rated) AS tokens,
+           sum(gs) FILTER (WHERE rated) AS seconds,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY gt / gs) FILTER (WHERE rated) AS p50,
+           percentile_cont(0.9) WITHIN GROUP (ORDER BY gt / gs) FILTER (WHERE rated) AS p90,
+           min(gt / gs) FILTER (WHERE rated) AS mn,
+           max(gt / gs) FILTER (WHERE rated) AS mx,
+           min(extract(epoch from ts)) FILTER (WHERE NOT twin) AS first_at,
+           max(extract(epoch from ts)) FILTER (WHERE NOT twin) AS last_at,
+           sum(ct) FILTER (WHERE NOT twin AND ct > 0) AS completion_tokens,
+           count(*) FILTER (WHERE NOT twin AND (ct IS NULL OR ct <= 0)) AS n_no_tokens,
+           count(*) FILTER (WHERE NOT twin AND ct > 0 AND NOT rated) AS n_no_window,
+           count(*) FILTER (WHERE rated AND basis IN ('engine', 'reported')) AS n_engine,
+           count(*) FILTER (WHERE rated AND basis = 'stream') AS n_stream,
+           count(*) FILTER (WHERE rated AND basis NOT IN ('engine', 'reported', 'stream')) AS n_wall,
+           count(*) FILTER (WHERE NOT twin AND bench) AS n_bench,
+           count(*) FILTER (WHERE twin) AS n_bench_twins,
+           count(*) FILTER (WHERE NOT twin AND quant = '') AS n_no_quant,
+           count(*) FILTER (WHERE NOT twin AND alloc_mode = '') AS n_no_alloc
+    FROM d
+    GROUP BY GROUPING SETS ((model_name, worker, quant, alloc_mode), (model_name, worker),
+                            (model_name), (model_name, worker, u), (model_name, u))
     """
 
     WORKER_AVERAGES_BY_MODEL = """

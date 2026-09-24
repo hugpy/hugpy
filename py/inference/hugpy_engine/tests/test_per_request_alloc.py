@@ -24,8 +24,18 @@ def test_per_request_gpu_only_uses_loader_placement_wire(monkeypatch):
         "text-generation", _request({"alloc_mode": "gpu_only"}),
         "Qwen3.5-0.8B", "worker-1", worker={"pkg_version": "0.1.266"})
 
-    assert payload["spill"] == {"n_gpu_layers": -1}
+    # Placement still crosses on the established n_gpu_layers wire (-1 = gpu-only),
+    # and alloc_mode is never forwarded to the (extra=forbid) worker.
+    assert payload["spill"]["n_gpu_layers"] == -1
     assert "alloc_mode" not in payload["spill"]
+    # Per-request alloc provenance (2026-09-23): rides the spill so the seat the
+    # worker loads records WHO asked for this placement. `at`/`request_id` are
+    # nondeterministic, so assert the stable structure only.
+    src = payload["spill"]["alloc_source"]
+    assert src["kind"] == "per-request"
+    assert src["mode"] == "gpu-only"
+    assert src["designation_mode"] == "max-gpu"
+    assert set(src) == {"kind", "mode", "request_id", "at", "designation_mode"}
 
 
 def test_per_request_ram_only_uses_loader_placement_wire(monkeypatch):
@@ -35,8 +45,15 @@ def test_per_request_ram_only_uses_loader_placement_wire(monkeypatch):
         "text-generation", _request({"alloc_mode": "ram_only"}),
         "Qwen3.5-0.8B", "worker-1", worker={"pkg_version": "0.1.266"})
 
-    assert payload["spill"] == {"n_gpu_layers": "off"}
+    assert payload["spill"]["n_gpu_layers"] == "off"
     assert "alloc_mode" not in payload["spill"]
+    # Per-request alloc provenance (2026-09-23) rides the spill; assert its
+    # stable structure (`at`/`request_id` are nondeterministic).
+    src = payload["spill"]["alloc_source"]
+    assert src["kind"] == "per-request"
+    assert src["mode"] == "ram-only"
+    assert src["designation_mode"] == "max-gpu"
+    assert set(src) == {"kind", "mode", "request_id", "at", "designation_mode"}
 
 
 def test_per_request_mode_composes_with_four_bit(monkeypatch):
@@ -47,7 +64,15 @@ def test_per_request_mode_composes_with_four_bit(monkeypatch):
         _request({"alloc_mode": "gpu_only", "bnb_4bit": True}),
         "Qwen3.5-0.8B", "worker-1", worker={"pkg_version": "0.1.266"})
 
-    assert payload["spill"] == {"n_gpu_layers": -1, "bnb_4bit": True}
+    assert payload["spill"]["n_gpu_layers"] == -1
+    assert payload["spill"]["bnb_4bit"] is True
+    # Per-request alloc provenance (2026-09-23) rides the spill alongside the
+    # placement wire; assert its stable structure only.
+    src = payload["spill"]["alloc_source"]
+    assert src["kind"] == "per-request"
+    assert src["mode"] == "gpu-only"
+    assert src["designation_mode"] == "max-gpu"
+    assert set(src) == {"kind", "mode", "request_id", "at", "designation_mode"}
 
 
 def test_explicit_worker_bypasses_automatic_candidate_filters(monkeypatch):

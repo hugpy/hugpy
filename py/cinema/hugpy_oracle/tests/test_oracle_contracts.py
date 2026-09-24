@@ -432,9 +432,9 @@ def test_frozen_map_refuses_non_json_values():
 
 
 def test_coerce_artifact_kind_agrees_with_the_plan_module():
-    """k103 wrote the same function first; two spellings of one vocabulary is
-    exactly the drift this contract layer exists to stop."""
+    """Plan uses the contract function, including its rejection behavior."""
     from hugpy_oracle import plan
+    assert plan.coerce_artifact_kind is coerce_artifact_kind
     for value in ("audio", "dialogue_timeline", ArtifactKind.VIDEO):
         assert coerce_artifact_kind(value) == plan.coerce_artifact_kind(value)
     with pytest.raises(ValueError):

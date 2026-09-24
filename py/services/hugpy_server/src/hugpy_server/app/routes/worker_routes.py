@@ -154,6 +154,35 @@ def _blocked_keys() -> set:
         return set()
 
 
+def _archive_refusal(model_key: str):
+    """ARCHIVE MARK gate (hugpy_fleet.central.archive_gate): the structured 409
+    body ``{"error": "'<key>' is marked for archive by <by> at <at>: <reason>",
+    "archive": {marked, at, by, reason}}`` when the operator marked the model
+    for archive, else None (fail-open = not marked). Distinct from the block."""
+    try:
+        from hugpy_fleet.central.archive_gate import refusal
+        return refusal(model_key)
+    except Exception:  # noqa: BLE001 — never let the gate break a route
+        return None
+
+
+def _archived_keys() -> frozenset:
+    try:
+        from hugpy_fleet.central.archive_gate import archived_keys
+        return archived_keys()
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _admission_held(model_key: str) -> bool:
+    """Post-download admission HELD this model (fail-open = not held)."""
+    try:
+        from hugpy_fleet.central.admission_gate import is_held
+        return is_held(model_key)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _polite_warm_ok(worker, model_key) -> bool:
     """k56: may a POLITE (``no_evict``) model be warmed onto this worker?
 
@@ -205,6 +234,13 @@ def _kick_warm(worker, model_keys, source: str) -> list:
     # candidate, never a transfer target.
     blocked = _blocked_keys()
     model_keys = [mk for mk in (model_keys or []) if mk not in blocked]
+    # ADMISSION (2026-09-23): a model the post-download admission HELD is not a
+    # warm/provision target either — same choke, same reason as the block.
+    model_keys = [mk for mk in model_keys if not _admission_held(mk)]
+    # ARCHIVE MARK (2026-09-23): a model the operator marked for archive is not
+    # a warm/provision target — same choke, at least as strict as the block.
+    _arch = _archived_keys()
+    model_keys = [mk for mk in model_keys if mk not in _arch]
     # k56 POLITE WARM. A warm probe is a LOAD: it runs the worker's admission,
     # which for an unflagged model evicts to fit. A polite model must never be
     # warmed by evicting anyone, and the probe carries no spill (so the worker
@@ -420,7 +456,104 @@ def _reconcile_warm_set(worker) -> list:
     # Operator BLOCK outranks warm: a blocked model is never kept warm, even if
     # it is static. Intersect the curated set with not-blocked.
     curated -= _blocked_keys()
+    curated -= _archived_keys()      # archive mark outranks static too
     return sorted(curated)
+
+
+# ── 📌 PIN RESTORE + automated-designation prune (2026-09-23) ────────────────
+# Operator: "it should allocate only those that are pinned if the hugpy api
+# restarts. for the sake of model testing, where they all load at one point."
+# The pin is central's per-(worker, model) record (workers.effective_pin). What
+# gets (re)loaded after a WORKER boot (a /register stamps agent_boot_at) or a
+# CENTRAL restart (this process's latch starts empty) is exactly the pinned set
+# — never the automated designations, never the boot ⭐ (a separate, untouched
+# media lever). Bounded so it can never become the per-beat re-warm the
+# 2026-07-23 incident reverted:
+#   * one attempt per (worker, agent_boot_at, model) per central process — a
+#     pinned model evicted later STAYS cold until the next boot/restart;
+#   * only inside HUGPY_PIN_RESTORE_WINDOW_S (default 900s) of the later of
+#     central start / agent boot;
+#   * only files already on the worker's disk (models_local — no pulls), and
+#     only what _warmable_subset says fits in free VRAM together (no eviction);
+#   * through _kick_warm, so block / archive / admission-hold / polite gates
+#     and the per-worker sequential probe all apply unchanged.
+_CENTRAL_STARTED_AT = _time.time()
+_PIN_RESTORE_WINDOW_S = float(os.environ.get("HUGPY_PIN_RESTORE_WINDOW_S", "900"))
+_pin_restore_done: dict = {}     # (worker_id, agent_boot_at) -> set(model_key)
+_pin_restore_lock = _threading.Lock()
+
+
+def _pin_restore_warm(worker) -> list:
+    """Kick the one-shot pin reload for this worker; returns what was scheduled.
+    Never raises (a missed restore costs one first-call load)."""
+    try:
+        from hugpy_fleet.central.workers import pinned_keys
+        wid = (worker or {}).get("id")
+        if not wid:
+            return []
+        epoch = worker.get("agent_boot_at") or 0.0
+        start = max(_CENTRAL_STARTED_AT, float(epoch or 0.0))
+        key = (wid, epoch)
+        with _pin_restore_lock:
+            done = _pin_restore_done.setdefault(key, set())
+        pins = pinned_keys(worker)
+        if not pins:
+            return []
+        present = set(worker.get("models_local") or [])
+        busy = (set(worker.get("loaded_models") or [])
+                | set(worker.get("loading") or [])
+                | set(worker.get("provisioning") or []))
+        pending = [mk for mk in pins
+                   if mk not in done and mk in present and mk not in busy]
+        if not pending:
+            return []
+        if _time.time() - start > _PIN_RESTORE_WINDOW_S:
+            with _pin_restore_lock:
+                done.update(pending)       # window closed — give up quietly
+            return []
+        warm_now = _warmable_subset(worker, pending)
+        scheduled = _kick_warm(worker, warm_now, "pin-restore") if warm_now else []
+        with _pin_restore_lock:
+            # Latch what was scheduled AND what does not fit now (boot-once: a
+            # pin that does not fit is not retried every beat); anything merely
+            # deferred by _kick_warm's busy/cooldown gate stays pending.
+            done.update(scheduled)
+            done.update(mk for mk in pending if mk not in warm_now)
+        if scheduled:
+            logger.info("pin restore on %s: reloading pinned %s",
+                        worker.get("name") or wid, scheduled)
+        return scheduled
+    except Exception:  # noqa: BLE001 — never fail a heartbeat
+        logger.debug("pin restore failed", exc_info=True)
+        return []
+
+
+_PRUNE_INTERVAL_S = float(os.environ.get("HUGPY_DESIGNATION_PRUNE_INTERVAL_S", "3600"))
+_prune_last: dict = {}           # worker_id -> monotonic ts of last auto-prune
+
+
+def _maybe_prune_designations(worker_id: str) -> None:
+    """Hourly (per worker, per process) automated-designation prune — the
+    maintenance half of POST /llm/workers/<id>/designations/prune. Recorded
+    automated sources only (never "unrecorded", never pinned/operator).
+    HUGPY_DESIGNATION_PRUNE_AUTO=0 disables it. Never raises."""
+    try:
+        if os.environ.get("HUGPY_DESIGNATION_PRUNE_AUTO", "1").strip().lower() in (
+                "0", "false", "no", "off"):
+            return
+        now = _time.monotonic()
+        with _pin_restore_lock:
+            if now - _prune_last.get(worker_id, -1e18) < _PRUNE_INTERVAL_S:
+                return
+            _prune_last[worker_id] = now
+        from hugpy_fleet.central.workers import prune_designations
+        plan = prune_designations(worker_id, apply=True) or {}
+        if plan.get("remove"):
+            logger.info("auto-prune %s: removed %d automated designation(s): %s",
+                        plan.get("worker"), len(plan["remove"]),
+                        [(r["model_key"], r["source"]) for r in plan["remove"]])
+    except Exception:  # noqa: BLE001
+        logger.debug("designation auto-prune failed", exc_info=True)
 
 
 def _bearer_token() -> str | None:
@@ -560,16 +693,7 @@ def _is_dangerous_callback_host(host: str) -> bool:
         return False
 
 
-def _client_ip() -> str:
-    """The worker's real source IP as seen by central.
-
-    Honors X-Forwarded-For (left-most) when behind nginx/a proxy, else the raw
-    socket peer. This is the address central can actually call back on.
-    """
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.remote_addr or ""
+from hugpy_server.app.auth_common import client_ip as _client_ip
 
 
 def _host_of(url: str) -> str:
@@ -747,6 +871,10 @@ class HeartbeatRequest(BaseModel):
     #     ineligibility before dispatch instead of a runtime failure.
     environment_digest: dict | None = None
     doctrine_status: dict | None = None
+    # Measured central->worker transfer rate (bytes/s, EMA over completed
+    # provisions — hugpy_storage.provision.transfer_rate). The benchmark derives
+    # its cold-load budget from it. Additive; None from an older worker.
+    load_bytes_per_s: float | None = None
 
 
 class AssignRequest(BaseModel):
@@ -758,6 +886,20 @@ class AssignRequest(BaseModel):
     # normalization; legacy names resolved), leniency_pct (0..100, % of the
     # model), priority_device ("gpu"|"ram").
     spill: dict | None = None
+    # Who is designating (2026-09-23 pin-vs-designation): "operator" (default —
+    # the console and hand calls) or an automation tag ("benchmark" |
+    # "admission" | "model_group" | "autoplace"). Unknown values read as
+    # operator. Automated designations are transient (pruned, never reloaded).
+    source: str | None = None
+
+
+def _assign_source(body) -> str:
+    """The designation source for an /assign or /load call (default operator)."""
+    try:
+        from hugpy_fleet.central.workers import _norm_source
+        return _norm_source(getattr(body, "source", None)) or "operator"
+    except Exception:  # noqa: BLE001
+        return "operator"
 
 
 @worker_bp.route("/llm/workers", methods=["GET"])
@@ -998,7 +1140,9 @@ def workers_install_sh():
               .joinpath("bootstrap.sh").read_text(encoding="utf-8"))
     # Default --central to the central actually serving this script, so the
     # curl|bash one-liner needs only --name and --token.
-    base = (request.host_url or "").rstrip("/")
+    # The public ORIGIN (forwarded proto/host): behind nginx request.host_url
+    # is plain http, and port 80 does not answer. The script adds /api itself.
+    base = _central_base_url().rstrip("/")
     if base:
         script = re.sub(r'^CENTRAL="[^"]*"', f'CENTRAL="{base}"',
                         script, count=1, flags=re.M)
@@ -1130,7 +1274,7 @@ def workers_register():
 def workers_get(worker_id):
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     # Surface the boot-prewarm star here too (mirrors workers_list).
     try:
         worker["boot_prewarm"] = worker_boot_prewarm_state().get(worker_id) or None
@@ -1155,7 +1299,7 @@ def workers_toks(worker_id):
     from hugpy_fleet.central.workers import read_toks_log
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     limit = request.args.get("limit", 50)
     entries = read_toks_log(worker_id, limit=limit,
                             model_key=request.args.get("model") or None)
@@ -1463,7 +1607,7 @@ def workers_health(worker_id):
     """
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
 
     from hugpy_fleet.central import worker_http
 
@@ -1530,11 +1674,12 @@ def workers_heartbeat(worker_id):
         aggregate=body.aggregate,
         environment_digest=body.environment_digest,
         doctrine_status=body.doctrine_status,
+        load_bytes_per_s=body.load_bytes_per_s,
     )
     if worker is None:
         # The agent thinks it's registered but central forgot it (restart,
         # cleared registry). 410 tells the agent to re-register.
-        abort(410, description="Unknown worker id; please re-register.")
+        abort(410, description=f"no worker {worker_id!r} in the central worker registry (central restarted or the registry was cleared); the agent re-registers on 410")
     if worker.get("admission") == "blocked":
         # Persistent eviction: 403 stops the agent instead of letting it limp on.
         abort(403, description="Worker is blocked by the operator.")
@@ -1556,6 +1701,13 @@ def workers_heartbeat(worker_id):
                 _kick_warm(worker, warm_now, "reconcile")
     except Exception:
         pass  # readiness convergence must never fail a heartbeat
+    # 📌 PIN RESTORE (2026-09-23): once per (agent boot × central process),
+    # reload this worker's PINNED models that are on its disk but not resident.
+    # Separate from the per-beat 🔒static warm above — pins are never re-warmed
+    # every beat (the 2026-07-23 re-warm incident); see _pin_restore_warm.
+    _pin_restore_warm(worker)
+    # Automated-designation PRUNE — event-driven off the beat, throttled.
+    _maybe_prune_designations(worker_id)
     # AUTO-REAP (slice 8, Part B): event-driven — this beat is the trigger, no
     # timer/daemon. Fires the guarded reap-approve flow ONLY when the worker
     # opted in AND is over budget with a proposal AND the cooldown elapsed. Its
@@ -1633,6 +1785,18 @@ def workers_heartbeat(worker_id):
             reply_extra["blocked_models"] = blocked
     except Exception:  # noqa: BLE001 — block propagation is best-effort; never 5xx a beat
         logger.debug("blocklist heartbeat hook failed", exc_info=True)
+    # ARCHIVE MARK (2026-09-23): same additive/omit-when-empty idiom, its own
+    # key (a distinct concept): {model_key: "marked for archive by … at …: …"}
+    # so the worker's background loops skip it and log the recorded mark.
+    try:
+        _arch = _archived_keys()
+        if _arch:
+            from hugpy_fleet.central.archive_gate import archive_block
+            from hugpy_storage.archive_mark import archive_text
+            reply_extra["archived_models"] = {
+                mk: archive_text(archive_block(mk)) or "" for mk in sorted(_arch)}
+    except Exception:  # noqa: BLE001 — never 5xx a beat
+        logger.debug("archive heartbeat hook failed", exc_info=True)
     # FLEET-WIDE eviction policy (2026-07-25): publish the drop-pass switch so
     # every worker's auto-evict runs the SAME pass central's storage_proposal
     # preview runs — Parity (spec assets/evictionflow.html) is the whole reason
@@ -1675,7 +1839,7 @@ def workers_heartbeat(worker_id):
 @worker_bp.route("/llm/workers/<worker_id>", methods=["DELETE"])
 def workers_remove(worker_id):
     if not remove_worker(worker_id):
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     return jsonify({"removed": True, "id": worker_id})
 
 
@@ -1694,7 +1858,7 @@ def workers_forget_memory(worker_id):
     except ValueError as exc:
         abort(409, description=str(exc))
     if result == "unknown":
-        abort(404, description="Unknown worker id in assignment memory.")
+        abort(404, description=f"no worker {worker_id!r} in central assignment memory")
     return jsonify({"forgot": worker_id})
 
 
@@ -1704,7 +1868,7 @@ def workers_forget_memory(worker_id):
 def _set_admission_or_404(worker_id, state):
     worker = set_worker_admission(worker_id, state)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     return jsonify(worker)
 
 
@@ -1727,7 +1891,7 @@ def workers_set_pool(worker_id):
     body = request.get_json(silent=True) or {}
     worker = set_worker_pool(worker_id, body.get("pool", ""))
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     return jsonify(worker)
 
 
@@ -1743,7 +1907,7 @@ def workers_set_limits(worker_id):
     except ValueError as exc:
         abort(400, description=str(exc))
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     return jsonify(worker)
 
 
@@ -1775,7 +1939,7 @@ def enroll_tokens_create():
 def enroll_tokens_revoke(token_id):
     """Revoke a token — its workers are refused (401) and their agents stop."""
     if not revoke_enrollment_token(token_id):
-        abort(404, description="Unknown token id.")
+        abort(404, description=f"no enrollment token {token_id!r} in the token store (revoke_enrollment_token returned False)")
     return jsonify({"revoked": True, "id": token_id})
 
 
@@ -1985,9 +2149,10 @@ def workers_assign(worker_id):
                        "'%s' on %s (cleanup path — empty spill on an existing "
                        "designation)", body.model_key,
                        _wclear.get("name") or worker_id)
-        worker = assign_model(worker_id, body.model_key, spill={})
+        worker = assign_model(worker_id, body.model_key, spill={},
+                              source=_assign_source(body), retag=False)
         if worker is None:
-            abort(404, description="Unknown worker id.")
+            abort(404, description=f"no worker {worker_id!r} in the central worker registry")
         return jsonify(worker)
     # CASE A AUTO-BLOCK (operator ruling 2026-07-25): "models that … simply will
     # not fit on a worker no matter what, if allocated, should be blocked. the
@@ -2032,6 +2197,11 @@ def workers_assign(worker_id):
                         "pool by the operator — unblock it (Models tab) before "
                         "assigning it to a worker",
                         "blocked_by": _bi.get("by") or "operator"}), 409
+    # ARCHIVE MARK gate (2026-09-23): a model the operator marked for archive
+    # may not be (re)designated — 409 naming the recorded mark.
+    _arch = _archive_refusal(_alias_mk or body.model_key)
+    if _arch:
+        return jsonify(_arch), 409
     # Item 4 guard: a model can't be designated unless central itself holds the
     # files — otherwise the worker silently pulls ~50GB from HF at internet
     # speed (the 2026-07-03 sdxl-turbo saga). Clear 409 with the fix.
@@ -2066,9 +2236,13 @@ def workers_assign(worker_id):
         body.spill, worker_id, body.model_key)
     if not ok2:
         return jsonify({"error": reason2}), 409
-    worker = assign_model(worker_id, body.model_key, spill=body.spill)
+    # Provenance: a plain assign (no spill) by the operator adopts the
+    # designation as operator-owned; a spill edit leaves its source alone.
+    worker = assign_model(worker_id, body.model_key, spill=body.spill,
+                          source=_assign_source(body),
+                          retag=body.spill is None)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     # SAY WHAT WAS ACTUALLY PERSISTED (2026-07-25). The max-gpu incident was not
     # only that the write was lost — it was that the response said nothing was
     # wrong. The operator picked a mode, got a 200 with an approved-looking body,
@@ -2095,15 +2269,18 @@ def workers_unassign(worker_id):
     # of the model to this worker, so a pinned designation cannot be removed
     # — unpin first. The pin lives in the agent's own settings and rides back
     # in every heartbeat's `config`, so the registry row is the truth here.
+    # 2026-09-23: the pin is the central record (designation_meta), with a
+    # legacy agent-side 📌 read through only while central holds no decision.
     _w = get_worker(worker_id)
-    if _w is not None and ((_w.get("config") or {}).get("pinned") or {}).get(body.model_key):
+    from hugpy_fleet.central.workers import effective_pin as _effective_pin
+    if _w is not None and _effective_pin(_w, body.model_key)["pinned"]:
         return jsonify({"ok": False, "error": {
             "code": "Pinned",
             "message": (f"{body.model_key} is pinned to "
                         f"{_w.get('name') or worker_id} — unpin first")}}), 409
     worker = unassign_model(worker_id, body.model_key)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     return jsonify(worker)
 
 
@@ -2161,7 +2338,7 @@ def workers_unload(worker_id):
 
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     body = request.get_json(silent=True) or {}
     try:
         r = worker_http.post(worker, "/models/unload", json=body, call="control")
@@ -2199,7 +2376,7 @@ def _relay_worker_op(worker_id: str, op_path: str, body: dict,
 
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     audit(f"worker.{action}", {"worker_id": worker_id,
                                "worker": worker.get("name"), "body": body})
 
@@ -2231,11 +2408,17 @@ def _relay_worker_op(worker_id: str, op_path: str, body: dict,
         try:
             r = _call()
             return jsonify(r.json()), r.status_code
-        except worker_http.WorkerUnreachable:
+        except worker_http.WorkerUnreachable as exc2:
+            cause2 = getattr(exc2, "__cause__", None) or exc2
             return jsonify({"ok": False, "error": {
                 "code": "AgentRestarting",
-                "message": ("worker agent is restarting to apply a previous "
-                            "change — retry in a few seconds")}}), 503
+                "message": (f"{action} on worker {worker.get('name') or worker_id}: the control "
+                            f"agent refused the connection twice, 3s apart (first: "
+                            f"{type(getattr(exc, '__cause__', None) or exc).__name__}: "
+                            f"{getattr(exc, '__cause__', None) or exc}; second: "
+                            f"{type(cause2).__name__}: {cause2}) — consistent with the agent "
+                            "re-exec'ing after a /ops/config change"),
+                "worker": worker.get("name") or worker_id, "action": action}}), 503
         except Exception as exc2:  # noqa: BLE001 — non-connect retry failure
             return _fail(exc2)
     except Exception as exc:  # noqa: BLE001
@@ -2319,7 +2502,7 @@ def workers_aggregate(worker_id):
     """
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
 
     fresh = (request.args.get("fresh") or "").strip().lower() in ("1", "true", "yes")
     ttl = _aggregate_ttl_s()
@@ -2418,7 +2601,7 @@ def workers_external(worker_id):
     from hugpy_fleet.central import worker_http
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     try:
         r = worker_http.get(worker, "/ops/residents", read_timeout=10.0)
         data = r.json() if r.status_code == 200 else {}
@@ -2500,7 +2683,7 @@ def workers_slot_relaunch(worker_id, slot_id):
     every other worker op."""
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     if worker.get("status") != "online":
         # Offline worker: there is no agent to relay to. Refuse cleanly (409)
         # rather than let the relay time out into a generic 502.
@@ -2541,7 +2724,7 @@ def workers_slot_unload(worker_id, slot_id):
     evict/relaunch), audited like every other worker op."""
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     if worker.get("status") != "online":
         return jsonify({"ok": False, "error": {
             "code": "WorkerOffline",
@@ -2565,70 +2748,131 @@ def workers_config(worker_id):
 
 def _relay_pin_all(worker_id, pin: bool):
     """Pin (pin=True) or unpin (pin=False) EVERY model currently designated to
-    this worker, reusing the SAME code path the single-model pin uses.
+    this worker — the bulk form of POST /llm/workers/<id>/pin.
 
-    The single pin (UI togglePin → workers_config) is one /ops/config POST with
-    ``{"pinned": {model_key: true|null}}``; the worker agent's /ops/config
-    ITERATES that map and applies it as one atomic settings-write + one re-exec.
-    So the whole-worker action is that exact relay with EVERY key in the dict
-    instead of one — no duplicated pin logic, and one agent restart rather than
-    one per model (which would stack restarts and spuriously fail later pins).
+    2026-09-23 (operator: "the pin ... is meant to indicate what the user wants
+    allocated to those workers"): the pin is now CENTRAL's per-(worker, model)
+    record (designation_meta.pinned), so this no longer relays an /ops/config
+    re-exec to the agent — it writes the registry, one record per model, and the
+    agent never restarts. ``restarting`` stays in the reply (always False) for
+    old console builds. Pinned models are what central reloads onto the worker
+    after a worker boot or a central restart (_pin_restore_warm); nothing is
+    loaded or evicted by pinning itself.
 
-    Returns a Flask (json, 200): per-model ``results`` ({model_key: "ok"|error
-    message}), summary ``counts`` and the relay's ``restarting`` flag. Resilient
-    by design — a relay failure marks every model errored and STILL returns the
-    full map (never a bare 5xx that would abort the caller before it sees which
-    models were affected)."""
+    Returns (json, 200): per-model ``results`` ({model_key: "ok"|error}),
+    summary ``counts`` and ``restarting``: False."""
+    from hugpy_fleet.central.workers import set_pin
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     keys = list(worker.get("models") or [])
-    action = "pin_all" if pin else "unpin_all"
     if not keys:
         return jsonify({"ok": True, "pinned": pin, "results": {},
                         "counts": {"ok": 0, "error": 0, "total": 0},
                         "restarting": False,
                         "note": "no models are designated to this worker"})
-    # Same payload shape as the single pin (workers_config), just every key.
-    payload = {"pinned": {mk: (True if pin else None) for mk in keys}}
-    resp, status = _relay_worker_op(worker_id, "/ops/config", payload,
-                                    timeout=15.0, action=action,
-                                    retry_on_connect=True)
-    data = resp.get_json(silent=True) or {}
-    ok = (200 <= status < 300) and data.get("ok", True) is not False
-    if ok:
-        results = {mk: "ok" for mk in keys}
-        counts = {"ok": len(keys), "error": 0, "total": len(keys)}
-    else:
-        err = data.get("error")
-        msg = ((err.get("message") if isinstance(err, dict) else err)
-               or data.get("reason") or f"config relay failed (HTTP {status})")
-        results = {mk: msg for mk in keys}
-        counts = {"ok": 0, "error": len(keys), "total": len(keys)}
-    out = {"ok": ok, "pinned": pin, "results": results, "counts": counts,
-           "restarting": bool(data.get("restarting"))}
-    if not ok and data.get("error"):
-        out["error"] = data["error"]      # let the UI's fetchJson surface it too
-    # Always 200: the structured body (ok + counts) carries success/failure, so
-    # the caller sees the per-model map even when the underlying relay failed.
-    return jsonify(out)
+    by = _operator_name()
+    results = {}
+    for mk in keys:
+        try:
+            results[mk] = "ok" if set_pin(worker_id, mk, pin, by=by) is not None \
+                else "worker vanished"
+        except Exception as exc:  # noqa: BLE001 — one bad key must not abort the rest
+            results[mk] = str(exc)
+    okN = sum(1 for v in results.values() if v == "ok")
+    return jsonify({"ok": okN == len(keys), "pinned": pin, "results": results,
+                    "counts": {"ok": okN, "error": len(keys) - okN,
+                               "total": len(keys)},
+                    "restarting": False})
+
+
+def _operator_name() -> str:
+    """Best-effort authorship for pin records; never raises."""
+    try:
+        from hugpy_server.app.operator_auth import current_principal
+        p = current_principal() or {}
+        return str(p.get("name") or p.get("id") or "operator")
+    except Exception:  # noqa: BLE001
+        return "operator"
+
+
+@worker_bp.route("/llm/workers/<worker_id>/pin", methods=["POST"])
+def workers_pin(worker_id):
+    """📌 Operator PIN for one (worker, model): body ``{"model_key": str,
+    "pinned": bool}``. Persisted in central's designation record
+    (designation_meta: pinned, pinned_by, pinned_at). A pinned model is what
+    central reloads onto this worker after a worker boot or a central restart
+    (from files already on the worker's disk, fit-capped, never by eviction).
+    Pinning an undesignated model designates it (source "operator"); unpinning
+    keeps the designation. No agent restart, no load, no eviction here."""
+    from hugpy_fleet.central.workers import set_pin
+    raw = request.get_json(silent=True) or {}
+    mk = str(raw.get("model_key") or "").strip()
+    if not mk:
+        return jsonify({"error": "model_key is required"}), 400
+    if "pinned" not in raw or not isinstance(raw.get("pinned"), bool):
+        return jsonify({"error": "pinned must be true or false"}), 400
+    if raw["pinned"]:
+        _arch = _archive_refusal(mk)
+        if _arch:
+            return jsonify(_arch), 409
+        _pw = get_worker(worker_id)
+        if (_pw is not None and mk not in (_pw.get("models") or [])
+                and mk not in get_models_dict(dict_return=True)):
+            return jsonify({"error": f"unknown model key '{mk}' — it is not "
+                            "designated here and not in central's manifest"}), 404
+    worker = set_pin(worker_id, mk, raw["pinned"], by=_operator_name())
+    if worker is None:
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    row = next((d for d in (worker.get("designations") or [])
+                if d.get("model_key") == mk), None)
+    return jsonify({"ok": True, "worker_id": worker_id, "model_key": mk,
+                    "pinned": raw["pinned"], "designation": row})
+
+
+@worker_bp.route("/llm/workers/<worker_id>/designations/prune", methods=["POST"])
+def workers_designations_prune(worker_id):
+    """Prune AUTOMATED designations (benchmark / admission / model_group /
+    autoplace) on this worker whose model is not loaded here and has not been
+    called on this worker for N hours. DRY-RUN BY DEFAULT: returns what it
+    would remove and why — ``remove: [{model_key, source, at, last_call,
+    loaded, reason}]`` plus ``kept`` counts by reason. Body (all optional):
+    ``{"apply": bool, "max_age_hours": float, "include_unrecorded": bool}``.
+    ``include_unrecorded`` extends the rule to designations written before
+    provenance was recorded (source "unrecorded"). Never touches pinned or
+    operator designations, and never unloads or deletes anything on the worker
+    — it only drops registry designations."""
+    from hugpy_fleet.central.workers import (prune_designations,
+                                             designation_prune_hours)
+    raw = request.get_json(silent=True) or {}
+    try:
+        hours = float(raw.get("max_age_hours") or designation_prune_hours())
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_age_hours must be a number"}), 400
+    hours = min(max(hours, 1.0), 720.0)
+    plan = prune_designations(worker_id, max_age_s=hours * 3600.0,
+                              include_unrecorded=bool(raw.get("include_unrecorded")),
+                              apply=bool(raw.get("apply")))
+    if plan is None:
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    return jsonify(plan)
 
 
 @worker_bp.route("/llm/workers/<worker_id>/pin-all", methods=["POST"])
 def workers_pin_all(worker_id):
     """Tiers v3 bulk action: 📌 pin EVERY model currently designated to this
-    worker, in ONE settings-write via the single-pin relay (see _relay_pin_all).
-    Sticky by design — each pinned model then refuses unassign (409 'unpin
-    first') until /unpin-all (or a per-model unpin) reverses it. Operator-gated
-    + audited like every other /ops/config relay."""
+    worker — central's pin record per model (see _relay_pin_all; no agent
+    restart). Sticky by design — each pinned model then refuses unassign (409
+    'unpin first') until /unpin-all (or a per-model unpin) reverses it, and is
+    reloaded after a worker boot / central restart. Operator-gated."""
     return _relay_pin_all(worker_id, pin=True)
 
 
 @worker_bp.route("/llm/workers/<worker_id>/unpin-all", methods=["POST"])
 def workers_unpin_all(worker_id):
     """Inverse of /pin-all — the undo. Unpins EVERY model designated to this
-    worker in one /ops/config write (a `pinned` map of nulls), same relay/code
-    path; afterward the models can be unassigned again."""
+    worker (central records pinned=false, which also overrides any legacy
+    agent-side 📌); afterward the models can be unassigned again."""
     return _relay_pin_all(worker_id, pin=False)
 
 
@@ -2686,7 +2930,7 @@ def _relay_residency_map(worker_id, model_keys, mode):
     """
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     wire = _normalize_residency(mode)
     if wire == "__invalid__":
         return jsonify({"ok": False, "error": {
@@ -3072,7 +3316,7 @@ def _apply_alloc_map(worker_id, model_keys, spill):
 
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     # Only act on keys ACTUALLY designated to this worker — a selection can go
     # stale between render and click. Off-worker keys are reported as skipped and
     # never assigned (assign_model would otherwise ADD them, silently designating
@@ -3097,7 +3341,14 @@ def _apply_alloc_map(worker_id, model_keys, spill):
     results = {}
     okN = 0
     skipN = 0
+    _arch_keys = _archived_keys()
     for mk in keys:
+        # ARCHIVE MARK: no new contract on a model marked for archive.
+        if mk in _arch_keys:
+            _a = _archive_refusal(mk)
+            results[mk] = f"skipped — {(_a or {}).get('error') or 'marked for archive'}"
+            skipN += 1
+            continue
         # ENGINE GATE: a GGUF-only spill must not touch a non-GGUF model. Skip it
         # with an honest reason (registry untouched) instead of writing a knob
         # the transformers loader ignores. Unknown engine -> treat as non-GGUF
@@ -3128,7 +3379,9 @@ def _apply_alloc_map(worker_id, model_keys, spill):
             # normalize_spill, so it is fixed by the same change).
             # The model is already designated (we filtered to `designated`), so
             # this only rewrites the contract — it never newly-adds a model.
-            w = assign_model(worker_id, mk, spill=spill)
+            # retag=False: a spill edit never changes designation provenance.
+            w = assign_model(worker_id, mk, spill=spill, source="operator",
+                             retag=False)
             if w is None:
                 results[mk] = "worker vanished mid-apply"
             else:
@@ -3193,7 +3446,7 @@ def _apply_alloc_map_multi(worker_id, model_keys, spills_by_key):
 
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     # Only act on keys ACTUALLY designated to this worker — same staleness guard
     # as _apply_alloc_map.
     designated = set(worker.get("models") or [])
@@ -3215,8 +3468,14 @@ def _apply_alloc_map_multi(worker_id, model_keys, spills_by_key):
     results = {}
     okN = 0
     skipN = 0
+    _arch_keys = _archived_keys()
     for mk in keys:
         spill = spills_by_key.get(mk) or {}
+        if mk in _arch_keys:
+            _a = _archive_refusal(mk)
+            results[mk] = f"skipped — {(_a or {}).get('error') or 'marked for archive'}"
+            skipN += 1
+            continue
         # ENGINE GATE: same rule as the broadcast path, evaluated against THIS
         # key's own spill (a per-model map can carry different explicit-budget
         # keys per member, unlike the single shared `spill`).
@@ -3230,7 +3489,9 @@ def _apply_alloc_map_multi(worker_id, model_keys, spills_by_key):
                 continue
         try:
             # assign_model writes spill_by_model[mk] = spill ({} clears it).
-            w = assign_model(worker_id, mk, spill=spill)
+            # retag=False: a spill edit never changes designation provenance.
+            w = assign_model(worker_id, mk, spill=spill, source="operator",
+                             retag=False)
             if w is None:
                 results[mk] = "worker vanished mid-apply"
             else:
@@ -3597,7 +3858,7 @@ def workers_set_auto_reap(worker_id):
     enabled = bool(body.get("enabled"))
     worker = set_worker_auto_reap(worker_id, enabled)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     return jsonify(worker)
 
 
@@ -3647,7 +3908,7 @@ def workers_reap_approve(worker_id):
     """
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     body = request.get_json(silent=True) or {}
     approved = body.get("model_keys")
     if not isinstance(approved, list) or not approved:
@@ -3755,17 +4016,24 @@ def llm_identity(model_key):
 
 @worker_bp.route("/llm/workers/<worker_id>/probe", methods=["POST"])
 def workers_probe(worker_id):
-    """Live VRAM-fit probe: ask the worker to load the model and report fit.
+    """THE LOAD HALF: ask the worker to LOAD the model into VRAM and report fit.
 
     Body: {"model_key": ...}. Relays to the worker's /probe, which loads the
-    model on its GPU and returns {fit, vram_free_before/after, vram_used}.
+    model on its GPU and returns {fit, vram_free_before/after, vram_used}. It
+    pulls-if-absent as part of loading (fetch-then-load), so it stays the
+    download+load combo; the fetch-only (disk, no VRAM) verb is
+    POST /llm/workers/<id>/fetch (operator ruling 2026-09-24).
     """
     from hugpy_fleet.central import worker_http
 
     body = AssignRequest(**(request.get_json(silent=True) or {}))
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    # ARCHIVE MARK: a probe LOADS (and may pull) the model — refused like /load.
+    _arch = _archive_refusal(body.model_key)
+    if _arch:
+        return jsonify({"ok": False, "fit": False, **_arch}), 409
     try:
         # Loading can be slow (download + load), so allow generous READ time —
         # but reaching the box is still a 3s question (call class "load").
@@ -3775,6 +4043,55 @@ def workers_probe(worker_id):
         return jsonify({**exc.as_error(), "fit": False})
     except Exception as exc:
         return jsonify({"ok": False, "fit": False,
+                        "error": f"{type(exc).__name__}: {exc}"})
+
+
+@worker_bp.route("/llm/workers/<worker_id>/fetch", methods=["POST"])
+def workers_fetch(worker_id):
+    """THE FETCH HALF: download a model onto the worker's DISK without loading it
+    into VRAM (operator ruling 2026-09-24 — /probe was an undocumented
+    download+load combo; this is the download-only primitive).
+
+    Relays to the worker agent's /models/fetch, which uses the SAME normal
+    central->worker transfer path lazy first-call provisioning uses (transfer
+    ledger + heartbeat provision_progress), so the console shows "downloading
+    from central". Returns immediately; the model ends resident on DISK, not in
+    VRAM. Body: {"model_key": ...}.
+
+    BACKWARD COMPATIBILITY: an older agent without /models/fetch answers 404 —
+    surfaced here as a clear 501 "does not support fetch-to-disk" refusal, never
+    a silent load.
+    """
+    from hugpy_fleet.central import worker_http
+
+    body = AssignRequest(**(request.get_json(silent=True) or {}))
+    worker = get_worker(worker_id)
+    if worker is None:
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    # ARCHIVE MARK: a fetch PULLS the model — refuse like probe/load.
+    _arch = _archive_refusal(body.model_key)
+    if _arch:
+        return jsonify({"ok": False, "started": False, **_arch}), 409
+    # Workers provision FROM central, so central must hold the files first (the
+    # same guard /assign and /load apply — never a silent internet pull).
+    missing = _central_missing_reason(body.model_key)
+    if missing:
+        return jsonify({"ok": False, "started": False,
+                        "error": f"central does not have '{body.model_key}' on disk ({missing}) "
+                                 "— download it on the Models tab first; workers provision from central"}), 409
+    try:
+        r = worker_http.post(worker, "/models/fetch",
+                             json={"model_key": body.model_key}, call="control")
+        if r.status_code == 404:
+            return jsonify({"ok": False, "started": False, "unsupported": True,
+                            "error": "this worker agent does not support fetch-to-disk "
+                                     "(POST /models/fetch); update the worker — refusing rather "
+                                     "than silently loading it into VRAM"}), 501
+        return jsonify(r.json())
+    except worker_http.WorkerUnreachable as exc:
+        return jsonify({**exc.as_error(), "started": False})
+    except Exception as exc:
+        return jsonify({"ok": False, "started": False,
                         "error": f"{type(exc).__name__}: {exc}"})
 
 
@@ -4057,6 +4374,13 @@ def model_placement_preview(model_key):
                               "the operator — unblock it to place it"),
             "blocked": True,
         })
+    _arch = _archive_refusal(model_key)
+    if _arch:
+        return jsonify({
+            "model_key": model_key, "size_bytes": None, "workers": [],
+            "feasible_workers": [], "winner": None,
+            "winner_reason": _arch["error"], "archive": _arch["archive"],
+        })
 
     size_bytes = None
     try:
@@ -4225,6 +4549,10 @@ def workers_load(worker_id):
         # never a raw <!doctype> 404 page dumped into the UI.
         return jsonify({"error": f"unknown model key '{body.model_key}' — it is "
                         "not in central's manifest"}), 404
+    # ARCHIVE MARK gate — same refusal as /assign (load designates + seats).
+    _arch = _archive_refusal(_alias_mk or body.model_key)
+    if _arch:
+        return jsonify({"loaded": False, **_arch}), 409
     # Item 4 guard — same invariant as /assign: central must hold the files.
     missing = _central_missing_reason(_alias_mk or body.model_key)  # ALIAS-MANIFEST-V2-20260910
     if missing:
@@ -4233,7 +4561,7 @@ def workers_load(worker_id):
                         "workers provision from central"}), 409
     worker = get_worker(worker_id)
     if worker is None:
-        abort(404, description="Unknown worker id.")
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
     # Disk-aware allocation — refuse a pull the worker's model volume can't
     # hold (force does NOT bypass this: a full disk mid-pull helps nobody).
     disk_no = _disk_preflight_reason(worker, body.model_key)
@@ -4250,7 +4578,8 @@ def workers_load(worker_id):
                         "reason": verdict["reason"], "preflight": verdict}), 409
 
     # passed (or forced/undecided) → assign, then warm in the background
-    assign_model(worker_id, body.model_key, spill=body.spill)
+    assign_model(worker_id, body.model_key, spill=body.spill,
+                 source=_assign_source(body), retag=body.spill is None)
 
     def _warm():
         # Best-effort warm, but NEVER silent: the probe outcome (the worker's
@@ -4409,7 +4738,7 @@ def _model_dir_or_404(model_key: str):
     manifest = get_models_dict(dict_return=True)
     key = _resolve_manifest_key(manifest, model_key)
     if key is None:
-        abort(404, description="Unknown model key.")
+        abort(404, description=f"model key {model_key!r} is not in the model catalog")
     model = manifest[key]
     dest = route_destination(model)
     if not os.path.isdir(dest):
@@ -4494,7 +4823,41 @@ def _budget_refusal_for_transfer(model, incoming_bytes):
     }
 
 
-def _elect_gguf_transfer_set(entries, model):
+def _is_projector_gguf(rel, root=None) -> bool:
+    """Is ``rel`` (a path inside a model dir) a vision projector, not a quant?
+    The GGUF header decides when the file is readable under ``root``; the
+    name / ``mmproj/`` parent-dir fallback otherwise (hugpy_platform's rule)."""
+    try:
+        from hugpy_platform.utils import is_mmproj_file
+        path = os.path.join(root, rel) if root else str(rel)
+        return bool(is_mmproj_file(path))
+    except Exception:  # noqa: BLE001
+        return "mmproj" in str(rel).lower()
+
+
+def _transfer_weight_files(files, root=None) -> list:
+    """The WEIGHT entries of a transfer set ``[(rel, size)]``: a non-projector
+    .gguf, or a non-GGUF weight file. Empty = the set is sidecars/projector
+    only and is NOT a model."""
+    weight_exts = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx",
+                   ".h5", ".msgpack", ".npz", ".pkl", ".joblib", ".tflite", ".nemo")
+    floor = 1024 * 1024
+    out = []
+    for (r, s) in files:
+        low = str(r).lower()
+        size = int(s or 0)
+        if low.endswith(".gguf"):
+            if size > floor and not _is_projector_gguf(r, root):
+                out.append(r)
+        elif low.endswith(weight_exts):
+            if size > floor:
+                out.append(r)
+        elif size >= 64 * 1024 * 1024:
+            out.append(r)
+    return out
+
+
+def _elect_gguf_transfer_set(entries, model, root=None):
     """Collapse a multi-quant GGUF listing to the ONE quant that is actually
     served: the elected (or pinned) quant's member file(s) + the projector
     (mmproj) + every non-.gguf sidecar. ``entries`` is ``[(relpath, size)]``.
@@ -4514,20 +4877,29 @@ def _elect_gguf_transfer_set(entries, model):
     ``model['filename']`` (a single entrypoint basename, brings its whole shard
     set) or ``model['include']`` (glob patterns). Degrades to ``entries``
     unchanged when there is no servable .gguf (not a GGUF repo) or nothing can be
-    elected (only incomplete litter) — never fewer-than-correct."""
+    elected (only incomplete litter) — never fewer-than-correct.
+
+    ``root`` (the model dir on central) lets the projector test read each
+    file's GGUF header (``general.architecture == clip``) instead of trusting
+    its basename: zerodigest/Qwen3.8-27B-Uncensored-YMQ-MTP-GGUF keeps its
+    projectors as ``mmproj/<model>-vision-Q6_K.gguf`` — no "mmproj" in the
+    basename — so they were elected as the QUANT (2026-09-23)."""
     import fnmatch
     from hugpy_engine import gguf_election as _ge
 
     def _base(r):
         return os.path.basename(str(r)).lower()
 
+    def _is_proj(r):
+        return _is_projector_gguf(r, root)
+
     gguf = [(r, s) for (r, s) in entries if str(r).lower().endswith(".gguf")]
     if not gguf:
         return entries                       # not a GGUF repo — leave it be
     # mmproj (the vision projector) is a .gguf but NOT a quant variant: it rides
     # alongside whatever quant is served and must never enter the election.
-    mmproj = [(r, s) for (r, s) in gguf if "mmproj" in _base(r)]
-    quant_entries = [(r, s) for (r, s) in gguf if "mmproj" not in _base(r)]
+    mmproj = [(r, s) for (r, s) in gguf if _is_proj(r)]
+    quant_entries = [(r, s) for (r, s) in gguf if not _is_proj(r)]
     # SIDECARS are the small config/tokenizer/readme files a GGUF serve needs —
     # NEVER another weight format. A repo that also ships its transformers
     # weights (ponpoke/flux2-klein: a 16.4 GB model.safetensors beside the
@@ -4599,6 +4971,117 @@ def model_metrics_card(model_key):
                         "worker_averages": [], "calls": []})
 
 
+def _transfer_selection(raw, model, dest):
+    """The files central would SEND a worker for ``model`` out of its dir
+    listing ``raw`` ``[(rel, size)]``: one weight format (select_files) and, for
+    GGUF, the one served quant + projector + sidecars. Shared by /manifest and
+    the explicit-pin gate so "what would be sent" is one answer."""
+    from hugpy_storage.format_select import select_files
+    framework = model.get("framework")
+    selected = select_files(raw, framework=framework)
+    if str(framework or "").lower() in ("gguf", "llama_cpp"):
+        selected = _elect_gguf_transfer_set(selected, model, root=dest)
+    return selected
+
+
+def _no_weights_reason(model_key, model, selected, dest) -> str | None:
+    """Why the transfer set ``selected`` is not a model, or None when it
+    carries weights."""
+    if _transfer_weight_files(selected, root=dest):
+        return None
+    return (f"central holds no weights for {model_key} "
+            f"({model.get('filename') or 'no quant designated'}): "
+            f"{len(selected)} file(s) in central's llm_storage ({dest}), none "
+            f"of them model weights (vision projector / sidecars only)")
+
+
+def _central_weights_refusal(model_key: str) -> str | None:
+    """Would central's /manifest hand a worker WEIGHTS for ``model_key``?
+    None = yes; else the precise reason (same resolution + selection the
+    transfer endpoints use)."""
+    manifest = get_models_dict(dict_return=True)
+    key = _resolve_manifest_key(manifest, model_key)
+    if key is None:
+        try:
+            cfg = get_model_config(model_key)
+            for alt in (getattr(cfg, "model_key", None), getattr(cfg, "hub_id", None),
+                        getattr(cfg, "name", None)):
+                if alt:
+                    key = _resolve_manifest_key(manifest, str(alt))
+                    if key is not None:
+                        break
+        except Exception:  # noqa: BLE001 — unknown key handled below
+            key = None
+    if key is None:
+        return (f"central holds no weights for {model_key}: no row for it in "
+                f"central's model registry")
+    model = manifest[key]
+    quant = model.get("filename") or "no quant designated"
+    dest = route_destination(model)
+    if not os.path.isdir(dest):
+        return (f"central holds no weights for {model_key} ({quant}): no model "
+                f"directory in central's llm_storage ({dest})")
+    from hugpy_storage.format_select import walk_listing
+    selected = _transfer_selection(walk_listing(dest), model, dest)
+    return _no_weights_reason(model_key, model, selected, dest)
+
+
+def _explicit_pin_refusal(worker: dict, model_key: str) -> str | None:
+    """Admission for an explicit ``alloc.worker`` pin (hugpy_engine
+    resolvers.remote.set_worker_pin_gate). The pin bypasses SELECTION — never
+    these two facts:
+
+      1. central's llm_storage holds the model's weights (the set /manifest
+         would send), because a worker takes weights from central only;
+      2. that model fits the named worker, per the SAME static feasibility
+         normal routing applies (``worker_can_hold``: GPU+RAM combined; None =
+         unknown never refuses).
+
+    A box already holding the model (resident or local on disk) is exempt:
+    nothing is sent, and it is feasible by observation (routing's k67 rule)."""
+    forms = {str(model_key)}
+    try:
+        cfg = get_model_config(model_key)
+        forms |= {str(v) for v in (getattr(cfg, "model_key", None),
+                                   getattr(cfg, "hub_id", None)) if v}
+    except Exception:  # noqa: BLE001
+        pass
+    held = set(worker.get("loaded_models") or []) | set(worker.get("models_local") or [])
+    if forms & {str(m) for m in held}:
+        return None
+    wname = worker.get("name") or worker.get("id") or "worker"
+    reason = _central_weights_refusal(model_key)
+    if reason:
+        return reason
+    try:
+        from hugpy_fleet.central.workers import worker_can_hold, feasibility_context
+        verdict = worker_can_hold(worker, model_key)
+    except Exception:  # noqa: BLE001 — an unreadable fit is no opinion
+        verdict = None
+    if verdict is False:
+        ctx = {}
+        try:
+            ctx = feasibility_context(worker.get("id"), model_key) or {}
+        except Exception:  # noqa: BLE001
+            ctx = {}
+
+        def _gib(v):
+            return "?" if not v else f"{int(v) / 2**30:.1f} GiB"
+        return (f"{model_key} ({_gib(ctx.get('model_bytes'))}) does not fit "
+                f"{wname}: GPU {_gib(ctx.get('gpu_total_bytes'))} + RAM "
+                f"{_gib(ctx.get('ram_total_bytes'))} combined cannot hold it in "
+                f"any allocation mode (static feasibility, as normal placement)")
+    return None
+
+
+# Registered at import, exactly like the free-room probe above.
+try:
+    from hugpy_engine.resolvers.remote import set_worker_pin_gate
+    set_worker_pin_gate(_explicit_pin_refusal)
+except Exception:  # noqa: BLE001 — unregistered = pins ungated (old behaviour)
+    logger.debug("worker pin gate not registered", exc_info=True)
+
+
 @worker_bp.route("/llm/models/<path:model_key>/manifest", methods=["GET"])
 def model_file_manifest(model_key):
     if not _transfer_authorized():
@@ -4610,7 +5093,7 @@ def model_file_manifest(model_key):
     # .cache/.git, see walk_listing's docstring), then SINGLE-FORMAT filter it.
     # Shared with /archive via format_select.walk_listing — one walk, one skip
     # list, not a hand-copied mirror.
-    from hugpy_storage.format_select import select_files, walk_listing
+    from hugpy_storage.format_select import walk_listing
     raw = walk_listing(dest)       # [(rel, size)]
     raw_total = sum(s for (_r, s) in raw)
 
@@ -4626,11 +5109,19 @@ def model_file_manifest(model_key):
     # worker's per-file puller drives off this `files` list, so this is what
     # actually lands on the worker's disk.
     framework = model.get("framework")
-    selected = select_files(raw, framework=framework)
-    if str(framework or "").lower() in ("gguf", "llama_cpp"):
-        selected = _elect_gguf_transfer_set(selected, model)
+    selected = _transfer_selection(raw, model, dest)
     files = [{"path": r, "size": s} for (r, s) in selected]
     total = sum(s for (_r, s) in selected)
+
+    # WEIGHTS GATE (2026-09-23): a transfer set without a single weight file
+    # (a vision projector + sidecars) is not a model. Offering it let a worker
+    # "provision" two mmproj files, call the model present, and then go to
+    # Hugging Face for the weights. Refuse with the reason instead.
+    reason = _no_weights_reason(model_key, model, selected, dest)
+    if reason:
+        logger.warning("transfer of %s REFUSED: %s", model_key, reason)
+        return jsonify({"error": reason, "reason": reason,
+                        "state": "no_weights"}), 409
 
     # BUDGET GATE (2026-07-17): the manifest is the FIRST thing both the per-file
     # and the archive transports fetch, so refusing a background-over-budget pull
@@ -4642,6 +5133,14 @@ def model_file_manifest(model_key):
         logger.info("transfer of %s REFUSED (budget): %s", model_key,
                     refusal.get("reason"))
         return jsonify({"error": refusal["reason"], **refusal}), 409
+
+    # CENTRAL TRANSFER LEDGER: the pull starts here — record the file set the
+    # worker is about to fetch (the authoritative "downloading from central").
+    try:
+        from hugpy_server.app.transfer_ledger import ledger as _tledger, transfer_worker_id
+        _tledger.manifest(model_key, transfer_worker_id(request), files, total)
+    except Exception:  # noqa: BLE001 — accounting never breaks a transfer
+        logger.debug("transfer ledger: manifest hook failed", exc_info=True)
 
     return jsonify({
         "model_key": model_key,
@@ -4767,7 +5266,8 @@ _ARCHIVE_JOIN_S = float(os.environ.get("HUGPY_CENTRAL_ARCHIVE_JOIN_S", "30"))
 def _transfer_busy_response() -> Response:
     """503 + Retry-After for a request that couldn't get a transfer permit."""
     resp = Response(
-        "Central weight-transfer capacity is saturated; retry shortly.",
+        f"central weight-transfer capacity saturated: all {_TRANSFER_CAP} transfer permits "
+        f"(HUGPY_CENTRAL_TRANSFER_MAX) stayed held for the full {_TRANSFER_WAIT_S:g}s wait",
         status=503,
         mimetype="text/plain",
     )
@@ -4936,6 +5436,14 @@ def model_file(model_key):
     if permit is None:
         return _transfer_busy_response()
 
+    # CENTRAL TRANSFER LEDGER: one segment in flight; bytes are counted as they
+    # are written, the segment ends when the stream does (any way it ends).
+    from hugpy_server.app.transfer_ledger import CountingIter, ledger as _tledger, transfer_worker_id
+    try:
+        _ttoken = _tledger.begin(model_key, transfer_worker_id(request), rel, size)
+    except Exception:  # noqa: BLE001 — accounting never breaks a transfer
+        _ttoken = None
+
     if rng is None:
         # Full-file GET. send_file streams via wsgi.file_wrapper (sendfile) and
         # sets Content-Length/Content-Type/Last-Modified. conditional=False so
@@ -4949,7 +5457,8 @@ def model_file(model_key):
         # _ReleaseOnCloseIter's docstring for why). Wrap the iterable itself
         # so the permit releases exactly once when the WSGI server (or a
         # dropped connection) closes it — stream finished OR aborted.
-        resp.response = _ReleaseOnCloseIter(resp.response, permit.release)
+        inner = CountingIter(resp.response, _ttoken, _tledger) if _ttoken else resp.response
+        resp.response = _ReleaseOnCloseIter(inner, permit.release)
         return resp
 
     # Satisfiable single range -> 206 with a real seek (O(1) to the offset).
@@ -4958,8 +5467,19 @@ def model_file(model_key):
 
     def _ranged_body():
         try:
-            yield from _stream_file_window(target, start, end)
+            for buf in _stream_file_window(target, start, end):
+                if _ttoken:
+                    try:
+                        _tledger.served(_ttoken, len(buf))
+                    except Exception:  # noqa: BLE001
+                        pass
+                yield buf
         finally:
+            if _ttoken:
+                try:
+                    _tledger.end(_ttoken)
+                except Exception:  # noqa: BLE001
+                    pass
             # Released on normal completion AND on client disconnect/error:
             # a generator's `finally` still runs when werkzeug closes it via
             # GeneratorExit (dropped connection) or an exception propagates.
@@ -5217,11 +5737,7 @@ def _apply_serving(model_key):
         subprocess.run(list(argv), check=True)
         return " ".join(argv)
 
-    def _write(path, content):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(content)
-        return path
+    from hugpy_platform.filesystem import write_text as _write
 
     apply_plan(plan, run=_run, write=_write)
     return {"applied": True, "commands": plan.describe()}
@@ -5484,6 +6000,13 @@ def serving_get(model_key):
 @worker_bp.route("/llm/serving/<model_key>", methods=["POST"])
 def serving_set(model_key):
     body = request.get_json(silent=True) or {}
+    # ARCHIVE MARK: a non-empty worker preference list is a placement write
+    # (PlacementControl's save) — refused for a marked model. Clearing it
+    # (an empty list) and every other serving knob stay writable.
+    if body.get("worker_prefs"):
+        _arch = _archive_refusal(model_key)
+        if _arch:
+            return jsonify(_arch), 409
     do_apply = bool(body.pop("apply", False))
     set_override(model_key, body)
 
@@ -5573,6 +6096,9 @@ def slots_load():
     body = request.get_json(silent=True) or {}
     if not body.get("model_key"):
         return jsonify({"error": "missing model_key"}), 400
+    _arch = _archive_refusal(body["model_key"])
+    if _arch:
+        return jsonify({"loaded": False, "reason": _arch["error"], **_arch}), 409
     # optional per-load compute knobs (blank/omitted = autofit/default)
     opts = {k: body[k] for k in ("n_gpu_layers", "ctx", "threads", "cpus", "gpu")
             if body.get(k) not in (None, "")}

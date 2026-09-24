@@ -120,7 +120,10 @@ class CentralClient:
         spill_by_model[model_key]. Returns (status_code, body). A non-200 (e.g.
         409 engine-gate refusal) is returned, never raised."""
         return self._post(f"/llm/workers/{worker_id}/assign",
-                          {"model_key": model_key, "spill": spill},
+                          # source: a chaos/benchmark sweep's designation is
+                          # automated (transient) — never operator intent.
+                          {"model_key": model_key, "spill": spill,
+                           "source": "benchmark"},
                           operator=True)
 
     def unload(self, worker_id: str, model_key: str) -> tuple[int, dict]:

@@ -56,11 +56,18 @@ save_discovery = _service.save_discovery
 load_discovery = _service.load_discovery
 record_metric = _service.record_metric
 record_call = _service.record_call
+fetch_call_stats = _service.fetch_call_stats
 record_grade = _service.record_grade
 record_cold_load = _service.record_cold_load
 fetch_model_metrics = _service.fetch_model_metrics
 fetch_model_calls = _service.fetch_model_calls
 fetch_worker_averages = _service.fetch_worker_averages
+
+
+def last_db_error():
+    """The service client's last recorded fault ({doing, error, at}) or None."""
+    return _service.db.last_error
+
 
 __all__ = [
     "DatabaseClient", "ModelIndexService", "enabled", "resolve_dsn",
@@ -70,5 +77,6 @@ __all__ = [
     "CallsRepository",
     "save_discovery", "load_discovery", "record_metric", "record_call",
     "record_grade", "record_cold_load",
-    "fetch_model_metrics", "fetch_model_calls", "fetch_worker_averages",
+    "fetch_model_metrics", "fetch_model_calls", "fetch_worker_averages", "fetch_call_stats",
+    "last_db_error",
 ]

@@ -46,6 +46,10 @@ class RunCancelled(Exception):
 # ---------------------------------------------------------------------------
 # Detections (the unit of inference output)
 # ---------------------------------------------------------------------------
+def _confidence_pct(value: float) -> int:
+    return int(round(value * 100))
+
+
 if _HAS_PYDANTIC:
     class Detection(BaseModel):
         """One detected object: a class label, a confidence, and a pixel box.
@@ -64,7 +68,7 @@ if _HAS_PYDANTIC:
         @property
         def conf_pct(self) -> int:
             """Confidence as an integer percent, e.g. ``0.873 -> 87``."""
-            return int(round(self.conf * 100))
+            return _confidence_pct(self.conf)
 else:
     @dataclass(frozen=True)
     class Detection:
@@ -77,7 +81,7 @@ else:
         @property
         def conf_pct(self) -> int:
             """Confidence as an integer percent, e.g. ``0.873 -> 87``."""
-            return int(round(self.conf * 100))
+            return _confidence_pct(self.conf)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +161,7 @@ if _HAS_PYDANTIC:
 
         @property
         def top_conf_pct(self) -> int:
-            return int(round(self.top_conf * 100))
+            return _confidence_pct(self.top_conf)
 
     class ChainResult(BaseModel):
         """The collated verdict of a whole chain over one image."""
@@ -181,7 +185,7 @@ else:
 
         @property
         def top_conf_pct(self) -> int:
-            return int(round(self.top_conf * 100))
+            return _confidence_pct(self.top_conf)
 
     @dataclass(frozen=True)
     class ChainResult:

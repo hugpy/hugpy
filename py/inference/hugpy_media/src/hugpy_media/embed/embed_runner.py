@@ -27,7 +27,10 @@ from hugpy_media.schemas.embeded_schemas import EmbedRequest, EmbedResult
 logger = logging.getLogger(__name__)
 
 
-class FeatureExtractionRunner:
+from hugpy_platform.runner_config import RunnerConfig
+
+
+class FeatureExtractionRunner(RunnerConfig):
     """Runner for sentence-transformer-style embedding models.
 
     Per-process singleton cache (_MODELS) means many runner instances
@@ -43,10 +46,6 @@ class FeatureExtractionRunner:
     _MODELS: Dict[str, Any] = {}
     _LOCK = threading.Lock()
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     # --- model loading (lazy, singleton) -----------------------------------
 

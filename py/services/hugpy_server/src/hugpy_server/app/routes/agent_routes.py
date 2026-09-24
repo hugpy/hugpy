@@ -137,15 +137,7 @@ def _require_operator() -> None:
         abort(401, description="Operator authentication required for this route.")
 
 
-def _api_key_bearer() -> "str | None":
-    """A console API key from ``Authorization: Bearer <key>`` (or ``?api_key=``
-    for curl), the same extraction ``/v1`` and ``/ml`` use for their key gate.
-    Distinct from ``_agent_token()`` (that is a NODE'S enroll token; this is a
-    console API key)."""
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return request.args.get("api_key")
+from hugpy_server.app.auth_common import bearer_token as _api_key_bearer
 
 
 def _require_api_key() -> None:
@@ -702,16 +694,7 @@ def _require_operator_strict() -> None:
 _MEMBER_LINK_SCOPES = ("v1", "ml")
 
 
-def _require_member_strict() -> None:
-    """Member-or-operator, with NO ``HUGPY_AGENT_OPEN`` waiver (this surface
-    mints credentials — same rule as _require_operator_strict). Fails closed if
-    the gate module is unavailable."""
-    try:
-        from hugpy_server.app.operator_auth import member_authenticated
-    except Exception:
-        abort(401, description="Authentication required for this route.")
-    if not member_authenticated():
-        abort(401, description="Authentication required for this route.")
+from hugpy_server.app.auth_common import require_member_strict as _require_member_strict
 
 
 def _require_member_or_api_key() -> None:
@@ -752,14 +735,7 @@ def _caller_is_operator() -> bool:
         return False
 
 
-def _caller_username():
-    """The central username behind this request, or None (operator-token M2M,
-    open mode, or no session). None is what makes a link "operator-owned"."""
-    try:
-        from hugpy_server.app.operator_auth import principal_username
-        return principal_username()
-    except Exception:  # noqa: BLE001
-        return None
+from hugpy_server.app.auth_common import caller_username as _caller_username
 
 
 def _serve_install_py(link_id: str):

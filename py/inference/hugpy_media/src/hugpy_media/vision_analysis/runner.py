@@ -37,7 +37,10 @@ from hugpy_media.vision_analysis.schemas import VisionAnalysisRequest, VisionAna
 logger = logging.getLogger(__name__)
 
 
-class VisionAnalysisRunner:
+from hugpy_platform.runner_config import RunnerConfig
+
+
+class VisionAnalysisRunner(RunnerConfig):
     """Generic transformers-pipeline runner for single-image analysis tasks."""
 
     request_type = VisionAnalysisRequest
@@ -47,10 +50,6 @@ class VisionAnalysisRunner:
     _PIPELINES: Dict[tuple, Any] = {}
     _LOCK = threading.Lock()
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     # --- pipeline loading (lazy, singleton) ---------------------------------
 

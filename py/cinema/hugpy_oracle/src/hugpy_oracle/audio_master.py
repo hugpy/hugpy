@@ -183,18 +183,10 @@ class _Artifact:
         return hashlib.sha256(self.canonical_bytes).hexdigest()
 
 
-def _require_text(value: Any, what: str) -> str:
-    text = str(value or "")
-    if not text.strip():
-        raise ValueError(f"{what} must be non-empty")
-    return text
+from hugpy_oracle.validation import require_text as _require_text
 
 
-def _require_non_negative(value: Any, what: str) -> float:
-    number = float(value)
-    if number < 0:
-        raise ValueError(f"{what} must be non-negative, got {number}")
-    return number
+from hugpy_oracle.validation import require_non_negative as _require_non_negative
 
 
 # ---------------------------------------------------------------------------

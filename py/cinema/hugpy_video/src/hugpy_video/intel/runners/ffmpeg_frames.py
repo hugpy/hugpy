@@ -46,11 +46,7 @@ _FRAME_SEM = threading.BoundedSemaphore(1)
 _EXT = {"jpg": "jpg", "png": "png", "webp": "webp"}
 
 
-def _fmt_num(x) -> str:
-    """Compact numeric string for ffmpeg (avoid float noise)."""
-    if isinstance(x, float) and x.is_integer():
-        return str(int(x))
-    return repr(x) if isinstance(x, float) else str(x)
+from hugpy_platform.formatting import ffmpeg_num as _fmt_num
 
 
 def _mjpeg_qscale(quality: int) -> int:

@@ -79,9 +79,14 @@ def rig(monkeypatch):
                         lambda worker, mk: state["disk_reason"])
     monkeypatch.setattr(wr, "_worker_fit", lambda mk, worker: dict(state["fit"]))
 
-    def _fake_assign(worker_id, model_key, spill=None):
+    def _fake_assign(worker_id, model_key, spill=None, source=None, retag=True):
+        # PINS round (2026-09-23): assign_model gained provenance (source) and a
+        # retag flag; /load stamps source="operator" (default) and retag when it
+        # is not editing an existing spill. Recorded so the historical
+        # {worker_id, model_key, spill} shape assertions stay intact.
         state["assign_calls"].append(
             {"worker_id": worker_id, "model_key": model_key, "spill": spill})
+        state["assign_provenance"] = {"source": source, "retag": retag}
         return dict(WORKER)
     monkeypatch.setattr(wr, "assign_model", _fake_assign)
 
@@ -150,6 +155,9 @@ def test_explicit_spill_persisted_and_forwarded_to_probe(rig):
     assert r.status_code == 200
     assert rig.state["assign_calls"] == [
         {"worker_id": "wid", "model_key": MODEL_KEY, "spill": spill}]
+    # PINS round: /load stamps operator provenance; a spill edit does NOT retag
+    # the designation (retag only when no spill is supplied).
+    assert rig.state["assign_provenance"] == {"source": "operator", "retag": False}
     _wait_warm(rig)
     assert rig.state["probe_calls"] == [
         {"url": "http://worker:9100/probe/" + MODEL_KEY,

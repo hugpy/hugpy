@@ -222,7 +222,12 @@ def test_device_source_is_the_only_new_key(monkeypatch):
         "rss_bytes", "n_gpu_layers", "ctx", "vram_bytes", "device",
     }
     out = _alloc(monkeypatch, _slot_row(), gpu_procs={})
-    assert set(out[0]) - baseline == {"device_source", "serving", "last_used"}
+    assert set(out[0]) - baseline == {
+        "device_source", "serving", "last_used",
+        # alloc-mismatch provenance added 2026-09-23: what the seat was loaded
+        # FOR and by whom, what it actually got, and why it replaced a resident.
+        "alloc_requested", "alloc_source", "alloc_effective", "reload_reason",
+    }
 
 
 def test_existing_field_meanings_unchanged(monkeypatch):

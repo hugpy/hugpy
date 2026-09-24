@@ -31,7 +31,9 @@ from hugpy_engine.config.models.models_config import MODELS, MODEL_REGISTRY
 from hugpy_engine.config.models.models_default import DEFAULT_CHAT_MODEL
 from hugpy_engine.schemas.task_schemas import Resolution
 from hugpy_platform.constants import HUGPY_AUTO_DOWNLOAD, PROJECTS_HOME
-from hugpy_storage.download_models import ensure_model
+# Serve path: weights are local-or-central on a worker, never Hugging Face
+# (hugpy_storage.provision.ensure_serving_weights; computron 2026-09-23).
+from hugpy_storage.provision import ensure_serving_weights
 from hugpy_engine.resolvers.categories.builders import MODEL_REQUEST_BUILDERS
 from hugpy_engine.resolvers.categories.frameworks import FRAMEWORK_RUNNERS, KNOWN_TASKS_REGISTRY
 from hugpy_engine.resolvers.assure_model_key import assure_model_key
@@ -126,6 +128,58 @@ def _refuse_if_unclassified(model_key, cfg) -> None:
 # resolve_model_key — picks the model. Default-resolution chain only.
 # Does NOT pick task; that's resolve()'s job.
 # ---------------------------------------------------------------------------
+def _adopt_vl_tasks_from_disk(model_key, cfg, task):
+    """A stale registry row refusing ``image-text-to-text`` for a GGUF: re-apply
+    the vision-GGUF rule (hugpy_marker.vl_gguf_tasks — the rule the marker
+    writer and ``hugpy-vl-reclassify`` use) to the model's own dir on THIS box.
+
+    The in-memory registry is derived once (boot / refresh) from the discovery
+    report + the local marker copy; a reclassify done on central afterwards
+    never reaches it. The mmproj on disk is the fact, so when the dir holds one
+    the row is re-derived in place (MODEL_REGISTRY + MODEL_REGISTRY_DICT +
+    task registries) and the updated cfg returned. None when the dir says the
+    model is not vision (the caller refuses exactly as before)."""
+    if task != "image-text-to-text":
+        return None
+    fw = cfg.framework[0] if isinstance(cfg.framework, (list, tuple)) else cfg.framework
+    if fw not in ("gguf", "llama_cpp"):
+        return None
+    dirs = []
+    try:
+        from hugpy_engine.config.main import get_model_path
+        dirs.append(get_model_path(model_key))
+    except Exception:  # noqa: BLE001 — unresolvable local path: try the row's dir
+        pass
+    dirs.append(getattr(cfg, "dir", None))
+    try:
+        from hugpy_storage.hugpy_marker import vl_gguf_tasks
+    except Exception:  # noqa: BLE001
+        return None
+    for directory in dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        new_t, new_p = vl_gguf_tasks(directory, fw, list(cfg.tasks or []), cfg.primary_task)
+        if task not in (new_t or []):
+            continue
+        import dataclasses
+        from hugpy_engine.config.models.models_config import MODEL_REGISTRY_DICT
+        fresh = dataclasses.replace(cfg, tasks=list(new_t), primary_task=new_p)
+        MODEL_REGISTRY[model_key] = fresh
+        row = MODEL_REGISTRY_DICT.get(model_key)
+        if isinstance(row, dict):
+            row["tasks"], row["primary_task"] = list(new_t), new_p
+        try:
+            from hugpy_engine.config.models.models_default import refresh_task_registries
+            refresh_task_registries()
+        except Exception:  # noqa: BLE001
+            logger.debug("task registry refresh after VL adopt failed", exc_info=True)
+        logger.warning("registry row %s re-derived from %s: tasks %s -> %s "
+                       "(mmproj projector on disk)", model_key, directory,
+                       list(cfg.tasks or []), list(new_t))
+        return fresh
+    return None
+
+
 def resolve_model_key(
     *,
     model_key: Optional[str] = None,
@@ -165,7 +219,8 @@ def resolve_model_key(
                 f"no near matches (see /models for the catalog)"
             )
         _refuse_if_unclassified(model_key, MODEL_REGISTRY[model_key])
-        if task is not None and task not in MODEL_REGISTRY[model_key].tasks:
+        if task is not None and task not in MODEL_REGISTRY[model_key].tasks \
+                and _adopt_vl_tasks_from_disk(model_key, MODEL_REGISTRY[model_key], task) is None:
             raise ValueError(
                 f"Model {model_key!r} does not support task={task!r}; "
                 f"supported: {sorted(MODEL_REGISTRY[model_key].tasks)}"
@@ -228,7 +283,7 @@ def resolve_model_key(
 #
 # MODELS (models_config.py) is the hardcoded default fleet shipped with the
 # package: a fresh pip install has those registry rows but no weights on disk.
-# When resolve() lands on a staple that may run locally, ensure_model() pulls
+# When resolve() lands on a staple that may run locally, ensure_serving_weights() pulls
 # its weights right here — same download path the runners use — so first use
 # works out of the box. Non-staple rows come from disk discovery (already on
 # disk) or runtime registration (provisioned via worker sync), so they are
@@ -258,7 +313,15 @@ def ensure_staple_weights(model_key: str) -> Optional[str]:
     with lock:
         if model_key in _ensured_staples:
             return None
-        path = ensure_model(model_key)   # fast no-op when already on disk
+        try:
+            # Fast no-op when already on disk. On a WORKER this is
+            # local-or-central only and RAISES when central holds no weights —
+            # a staple is best-effort here, so that becomes the warning below.
+            path = ensure_serving_weights(model_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("resolve: staple %s weights unavailable: %s",
+                           model_key, exc)
+            path = None
         if path:
             _ensured_staples.add(model_key)
             return path
@@ -316,6 +379,8 @@ def resolve(prompt_kwargs: Dict[str, Any]) -> Resolution:
     logger.info("resolve types: model=%s framework=%r task=%r primary=%r tasks=%r",
                 model_key, cfg.framework, task, cfg.primary_task, cfg.tasks)
 
+    if task not in cfg.tasks:
+        cfg = _adopt_vl_tasks_from_disk(model_key, cfg, task) or cfg
     if task not in cfg.tasks:
         raise ValueError(
             f"Model {model_key!r} does not support task={task!r}; "

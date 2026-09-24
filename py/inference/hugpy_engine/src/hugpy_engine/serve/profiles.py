@@ -181,12 +181,14 @@ def _is_inflight(name: str) -> bool:
 def _run(cmd: "list[str]", timeout: float = 1800.0) -> None:
     """Run a venv/pip subprocess, raising on non-zero. This is the SINGLE seam
     tests fake to exercise the lifecycle without a real pip. Output is captured
-    (never inherits the agent's stdout) and the tail rides the error record."""
+    (never inherits the agent's stdout) and rides the error record WHOLE
+    (2026-09-23: stdout + stderr, no tail cut)."""
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip()[-800:]
+        out = "\n".join(x for x in ((proc.stdout or "").strip(), (proc.stderr or "").strip()) if x)
         raise RuntimeError(
-            f"command failed (rc={proc.returncode}): {' '.join(cmd)}\n{tail}")
+            f"command failed (rc={proc.returncode}): {' '.join(cmd)}\n"
+            f"{out or '(stdout and stderr empty, bytes=0)'}")
 
 
 def materialize(name: str, packages) -> dict:

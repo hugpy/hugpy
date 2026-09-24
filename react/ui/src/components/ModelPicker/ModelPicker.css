@@ -17,12 +17,40 @@
 
 .mp-pop {
   position: absolute; z-index: 40; top: calc(100% + 4px); left: 0;
-  min-width: 480px; max-width: 640px;
+  min-width: min(480px, calc(100vw - 16px)); max-width: min(640px, calc(100vw - 16px));
   background: var(--surface, #12141a);
   border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
   border-radius: 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
   padding: 6px;
 }
+/* Flipped to right-anchored when a left-anchored popover would spill past the
+   viewport's right edge (see the on-open measurement) — grows leftward, never
+   widens the page. */
+.mp-pop-right { left: auto; right: 0; }
+
+/* Optional header line (e.g. the Grader's "N of M models match filters"). */
+.mp-note { padding: 2px 8px 6px; font-size: 11px; color: var(--muted, #8e8e93); }
+/* The current selection pinned when an upstream filter hides it. */
+.mp-row.mp-pinned { background: rgba(240, 198, 116, 0.10); border: 1px dashed var(--border, rgba(255,255,255,0.18)); }
+.mp-pinned-note { color: #f0c674; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Grader trailing cells. */
+.mp-grade { color: var(--text-secondary, #c7c7cc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-suite { color: var(--muted, #8e8e93); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-suite.mp-nosuite { color: #d29922; }
+
+/* Multi-select (grading): a select-all/clear bar + a checkbox per row. Ticking
+   a box (include in the batch) is distinct from clicking the name (view). */
+.mp-multibar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 8px 6px; }
+.mp-multibar-count { font-size: 11px; color: var(--text, #e6e6e9); font-weight: 600; }
+.mp-multibar-btn { font-size: 11px; padding: 2px 8px; border-radius: 5px; cursor: pointer;
+  color: var(--text-secondary, #c7c7cc); background: var(--surface-2, #1a1d24);
+  border: 1px solid var(--border, rgba(255,255,255,0.12)); }
+.mp-multibar-btn:disabled { opacity: 0.5; cursor: default; }
+.mp-name-multi { display: flex; align-items: center; gap: 7px; overflow: visible; }
+.mp-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mp-check { flex: 0 0 auto; width: 14px; height: 14px; cursor: pointer; accent-color: var(--accent, #7cc4ff); }
+/* A row whose box is ticked reads as included even before you look at the box. */
+.mp-row:has(.mp-check:checked) { background: rgba(124, 196, 255, 0.08); }
 
 .mp-filter {
   width: 100%; box-sizing: border-box; margin-bottom: 6px;
@@ -68,3 +96,8 @@
 .mp-status-installed     { color: var(--green, #3fb950); }
 .mp-status-partial       { color: var(--amber, #d29922); }
 .mp-status-not_installed { color: var(--muted, #8e8e93); }
+
+/* A model the operator marked for archive: visible, never pickable. */
+.mp-row.mp-archived { opacity: 0.45; cursor: not-allowed; text-decoration: line-through; }
+/* Unknown size renders the server's recorded reason (never a bare dash). */
+.mp-size.mp-size-none { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }

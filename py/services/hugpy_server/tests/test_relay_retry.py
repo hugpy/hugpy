@@ -75,12 +75,22 @@ def test_blip_then_recovery(relay):
 
 
 def test_persistent_blip_honest_503(relay):
-    """both attempts fail -> honest 503, not a bare 502."""
+    """both attempts fail -> honest 503, not a bare 502.
+
+    The message-discipline sweep rebuilt this message from recorded facts: it
+    names the action, the worker, BOTH transport failures verbatim, and the one
+    true cause it is consistent with (an agent re-exec after /ops/config). The
+    code is the durable contract; the message is asserted structurally against
+    those recorded facts, not against a fixed sentence."""
     relay.outcomes[:] = [httpx.ConnectError("refused"), httpx.ConnectTimeout("slow")]
     body, status = relay.run(retry=True)
     assert status == 503
-    assert "restarting" in body["error"]["message"]
     assert body["error"]["code"] == "AgentRestarting"
+    msg = body["error"]["message"]
+    # honest about the persistent blip: both real errors, and the re-exec cause.
+    assert "ConnectError: refused" in msg and "ConnectTimeout: slow" in msg
+    assert "twice" in msg and "re-exec" in msg
+    assert body["error"]["worker"] == "t" and body["error"]["action"] == "config"
 
 
 def test_non_config_ops_single_shot_502(relay):

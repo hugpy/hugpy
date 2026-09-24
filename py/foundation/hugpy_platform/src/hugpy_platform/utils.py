@@ -261,11 +261,79 @@ def get_guffs_in_dir(directory: str) -> List[str]:
 # llama-cpp-python via a chat handler's clip_model_path. These helpers keep the
 # projector out of model-file selection and locate it for the vision wiring.
 _MMPROJ_HINTS = ("mmproj", "mm-proj", "mm_proj", "projector")
+# llama.cpp writes every projector with general.architecture = "clip" (the
+# mtmd loader still reads it under that name); a language model never is.
+_MMPROJ_ARCHS = ("clip",)
+
+# GGUF scalar value types -> byte width (spec: ggml/docs/gguf.md). 8 = string,
+# 9 = array; everything else here is fixed-width.
+_GGUF_WIDTH = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def gguf_architecture(path: str) -> Optional[str]:
+    """``general.architecture`` from a GGUF header, or None if unreadable.
+
+    Stdlib-only and cheap: values it doesn't want are SEEKED past, never
+    decoded, so a 150k-entry tokenizer array costs nothing. (The full KV
+    reader, hugpy_storage.gguf_inspect, sits above this package.)"""
+    import struct
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) != b"GGUF":
+                return None
+            if struct.unpack("<I", fh.read(4))[0] < 2:
+                return None
+            fh.read(8)                                     # tensor count
+            n_kv = struct.unpack("<Q", fh.read(8))[0]
+
+            def skip(t: int) -> None:
+                if t in _GGUF_WIDTH:
+                    fh.seek(_GGUF_WIDTH[t], 1)
+                elif t == 8:
+                    fh.seek(struct.unpack("<Q", fh.read(8))[0], 1)
+                elif t == 9:
+                    et = struct.unpack("<I", fh.read(4))[0]
+                    n = struct.unpack("<Q", fh.read(8))[0]
+                    if et in _GGUF_WIDTH:
+                        fh.seek(_GGUF_WIDTH[et] * n, 1)
+                    else:
+                        for _ in range(n):
+                            skip(et)
+                else:
+                    raise ValueError(f"unknown gguf type {t}")
+
+            for _ in range(n_kv):
+                klen = struct.unpack("<Q", fh.read(8))[0]
+                key = fh.read(klen)
+                vtype = struct.unpack("<I", fh.read(4))[0]
+                if key == b"general.architecture" and vtype == 8:
+                    n = struct.unpack("<Q", fh.read(8))[0]
+                    return fh.read(n).decode("utf-8", "replace").strip().lower()
+                skip(vtype)
+    except Exception:  # noqa: BLE001 — best-effort; caller falls back to the name
+        return None
+    return None
+
 
 def is_mmproj_file(name: str) -> bool:
-    """True if a filename looks like a multimodal projector gguf, not a model."""
-    n = os.path.basename(str(name or "")).lower()
-    return n.endswith(".gguf") and any(h in n for h in _MMPROJ_HINTS)
+    """True if ``name`` is a multimodal projector gguf, not a model.
+
+    The GGUF header is the authority when ``name`` is a readable file: a
+    projector's ``general.architecture`` is ``clip``. Filenames are only a
+    fallback (remote listings, relative names) — they miss real projectors, e.g.
+    ``<model>/mmproj/Qwen3.8-27B-Uncensored-vision-Q4_K_S.gguf`` (computron
+    2026-09-23: elected as the model, llama-server refused arch 'clip'). So the
+    fallback also honors a projector-named parent dir."""
+    p = str(name or "")
+    if not p.lower().endswith(".gguf"):
+        return False
+    if os.path.isfile(p):
+        arch = gguf_architecture(p)
+        if arch is not None:
+            return arch in _MMPROJ_ARCHS
+    n = os.path.basename(p).lower()
+    parent = os.path.basename(os.path.dirname(p)).lower()
+    return any(h in n for h in _MMPROJ_HINTS) or parent in _MMPROJ_HINTS
 
 def find_mmproj(model_file_or_dir: str) -> Optional[str]:
     """Return the mmproj projector gguf living beside a model, else None.

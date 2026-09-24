@@ -407,13 +407,7 @@ def keybert_available() -> bool:
 # Combined pipeline
 # ---------------------------------------------------------------------------
 
-def _resolve(explicit, from_preset, schema_default):
-    """First non-None wins."""
-    if explicit is not None:
-        return explicit
-    if from_preset is not None:
-        return from_preset
-    return schema_default
+from hugpy_platform.choices import first_not_none as _resolve
 
 
 def extract_keywords(

@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field, asdict
 
 from hugpy_curation.review import store
+from hugpy_platform.utils import is_mmproj_file
 from hugpy_curation.review.criteria import ReviewCriteria
 from hugpy_curation.review.screen import ScreenResult, screen, search_candidates, _hf_api
 
@@ -124,13 +125,13 @@ def _find_gguf(directory: str, quant: str) -> str | None:
     hits = []
     for root, _dirs, names in os.walk(directory):
         for n in names:
-            if n.lower().endswith(".gguf") and not n.lower().startswith("mmproj"):
+            if n.lower().endswith(".gguf") and not is_mmproj_file(os.path.join(root, n)):
                 if quant.upper() in n.upper():
                     hits.append(os.path.join(root, n))
     if not hits:
         for root, _dirs, names in os.walk(directory):
             for n in names:
-                if n.lower().endswith(".gguf") and not n.lower().startswith("mmproj"):
+                if n.lower().endswith(".gguf") and not is_mmproj_file(os.path.join(root, n)):
                     hits.append(os.path.join(root, n))
     return sorted(hits)[0] if hits else None
 

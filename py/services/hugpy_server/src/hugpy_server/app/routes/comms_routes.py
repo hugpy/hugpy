@@ -399,4 +399,7 @@ def model_meta_route(model_key):
                     break
         except Exception:
             pass
-    return jsonify(model_meta(cfg, vram_bytes=vram))
+    # ?gguf=<basename|quant> sizes + recommends for THAT variant (the per-worker
+    # quant dropdown's fit readout); absent = the effective quant, as before.
+    sel = (request.args.get("gguf") or "").strip() or None
+    return jsonify(model_meta(cfg, vram_bytes=vram, select_gguf=sel))

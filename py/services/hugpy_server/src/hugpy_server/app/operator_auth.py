@@ -112,7 +112,12 @@ _SENSITIVE = [
     # dispatch-eligible, so gating it closes anonymous self-admission → SSRF.
     # (alloc-all = bulk GPU-allocation write for a selection of a worker's models
     #  — worker_routes._apply_alloc_map; same registry-write privilege as assign.)
-    ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/(admit|block|admission|assign|unassign|alloc-all|unload|probe|pool|limits|load|moe|bnb|auto-reap)$")),
+    ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/(admit|block|admission|assign|unassign|alloc-all|unload|probe|fetch|pool|limits|load|moe|bnb|auto-reap)$")),
+    # PIN + automated-designation PRUNE (2026-09-23): the 📌 pin is operator
+    # intent (what a worker reloads after a boot / central restart) and the
+    # prune drops designations — both registry writes of the assign tier. The
+    # prune is gated even as a dry run (one verb, one rule).
+    ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/(pin|designations/prune)$")),
     # Per-worker KEEP-WARM STAR ("star") — operator intent that projects onto the
     # fleet (which model a worker keeps warm; reconcile-kept every beat), same
     # registry-write privilege tier as assign. The GET map
@@ -137,6 +142,14 @@ _SENSITIVE = [
     # slashes (`<path:...>`), so `.+` spans it; the GET placement/meta reads stay
     # open. Matched after the /api strip, bare and dual-mounted.
     ({"POST"},                   re.compile(r"^/llm/models/.+/(un)?block$")),
+    # ARCHIVE MARK (2026-09-23): mark (POST) / unmark (DELETE) a model for
+    # archive — a placement/routing-registry write of the same tier as block.
+    # The GET on the same path is the worker tar stream (its own credential
+    # gate in worker_routes), deliberately not listed here.
+    ({"POST", "DELETE"},         re.compile(r"^/llm/models/.+/archive$")),
+    # Post-download admission re-run (2026-09-23): re-queues the static audit +
+    # benchmark for a model and flips a HELD model back to routable pending.
+    ({"POST"},                   re.compile(r"^/llm/admission/.+/rerun$")),
     # EXPLICIT model PRIORITY GROUPS (operator directive 2026-08-06): an ordered
     # fallback list that decides WHICH model key a request resolves to. That is
     # a routing-registry write of exactly the same tier as assign/block, so
@@ -272,6 +285,10 @@ _SENSITIVE = [
     # node-token pull (GET /agent/<id>/tasks — no seg) and the node-token result
     # POST (POST /agent/<id>/tasks/<seq>/result — extra seg) both stay M2M-open.
     ({"GET"},                    re.compile(r"^/agent/[^/]+/tasks/[^/]+$")),
+    # The console Help button's help agent (routes/help_routes.py): its backend
+    # reads logs and EDITS CODE, so every verb is operator-only. Enforced in the
+    # route too, without the HUGPY_AGENT_OPEN waiver (path is /llm/, not /agent/).
+    ({"GET", "POST", "DELETE"},  re.compile(r"^/llm/help(/.*)?$")),
     # Civitai checkpoint download — writes multi-GB files into central's
     # /checkpoints store (which self-registers models) — operator-only.
     ({"POST"},                   re.compile(r"^/civitai/download$")),

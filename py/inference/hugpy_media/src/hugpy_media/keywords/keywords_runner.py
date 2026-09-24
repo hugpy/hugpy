@@ -43,7 +43,10 @@ def _render_text(result: KeywordTaskResult) -> str:
     return "\n".join(parts) or "no keywords extracted"
 
 
-class KeywordRunner:
+from hugpy_platform.runner_config import RunnerConfig
+
+
+class KeywordRunner(RunnerConfig):
     request_type = KeywordTaskRequest
     result_type = KeywordTaskResult
 
@@ -51,10 +54,6 @@ class KeywordRunner:
     _MODELS: Dict[str, Any] = {}
     _LOCK = threading.Lock()
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     # --- model loading (lazy, singleton) -----------------------------------
 

@@ -43,6 +43,14 @@ def install_storage_providers(*, with_registrar: bool = True) -> Dict[str, Any]:
     providers.set_transfer_telemetry(evictions)
     if with_registrar:
         providers.set_executor_registrar(_executor_registrar)
+    # Storage's catalog seam defaults to NullCatalogSource (knows no models):
+    # without the engine bridge every scan row is not_local/no_config, every
+    # catalog_register "does not stick", and calls die "unknown model_key".
+    try:
+        from hugpy_engine import catalog_bridge
+        catalog_bridge.install()
+    except Exception:  # noqa: BLE001
+        log.warning("catalog bridge not installed; storage will see no models", exc_info=True)
     out = {
         "budget_gate": providers.get_budget_gate(),
         "transfer_telemetry": providers.get_transfer_telemetry(),

@@ -26,9 +26,12 @@ def test_engine_rate_above_ceiling_is_dropped():
 
 
 def test_derived_rate_within_bound_is_kept():
-    # 100 tokens in 1000 ms = 100 tok/s
+    # 100 predicted tokens over a 1000 ms window that timed the (n-1) decode
+    # steps (llama-server starts the generation clock after the first token):
+    # the decode rate is (100 - 1) * 1000 / 1000 = 99.0 tok/s, well within the
+    # ceiling, so it is kept.
     assert EV.tok_s_from_timings(
-        {"timings": {"predicted_n": 100, "predicted_ms": 1000.0}}) == 100.0
+        {"timings": {"predicted_n": 100, "predicted_ms": 1000.0}}) == 99.0
 
 
 def test_derived_rate_from_degenerate_window_is_dropped():

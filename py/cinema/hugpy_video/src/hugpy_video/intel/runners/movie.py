@@ -35,7 +35,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -71,58 +70,10 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # vision verdict parsing — a small, isolated, unit-testable helper
 # --------------------------------------------------------------------------- #
-def parse_vision_verdict(text: str) -> dict:
-    """Parse the judge's reply into ``{"verdict","score","why"}``.
-
-    The judge is asked to reply exactly ``VERDICT=YES|NO; SCORE=0-100;
-    WHY=<one sentence>`` but real models drift, so this is TOLERANT:
-      * VERDICT: the ``VERDICT=YES|NO`` field, else a bare YES/NO word; upper-cased
-        ("YES"/"NO") or None if neither is present.
-      * SCORE: the ``SCORE=<int>`` field (clamped to 0..100), else None.
-      * WHY: the ``WHY=<...>`` tail (trailing period stripped), else "".
-
-    Returns DATA only — never raises (a judge that produces garbage yields
-    verdict=None/score=None, which the orchestrator treats as "unscored, keep")."""
-    t = text or ""
-    verdict = None
-    m = re.search(r"VERDICT\s*[=:]\s*(YES|NO)", t, re.I)
-    if m:
-        verdict = m.group(1).upper()
-
-    score = None
-    m = re.search(r"SCORE\s*[=:]\s*(\d{1,3})", t, re.I)
-    if m:
-        score = max(0, min(100, int(m.group(1))))
-
-    why = ""
-    m = re.search(r"WHY\s*[=:]\s*(.+)", t, re.I | re.S)
-    if m:
-        why = m.group(1).strip().splitlines()[0].strip().rstrip(".").strip()
-
-    if verdict is None:
-        if re.search(r"\bYES\b", t, re.I):
-            verdict = "YES"
-        elif re.search(r"\bNO\b", t, re.I):
-            verdict = "NO"
-
-    return {"verdict": verdict, "score": score, "why": why}
+from hugpy_platform.verdict import parse_verdict as parse_vision_verdict
 
 
-def _vision_text(res) -> str:
-    """Best-effort extract the reply text from an execute_prompt result object."""
-    txt = getattr(res, "text", None)
-    if txt:
-        return txt
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(res, attr, None)
-        if callable(fn):
-            try:
-                d = fn()
-            except TypeError:
-                continue
-            if isinstance(d, dict) and d.get("text"):
-                return d["text"]
-    return str(res)
+from hugpy_platform.results import vision_result_text as _vision_text
 
 
 def _score_keyframe(goal: str, keyframe_uri: str, judge_model_id) -> dict:
@@ -668,28 +619,4 @@ def _resume_segment(seg_bundle: str):
         return None
 
 
-def _write_spec_sidecar(out_dir: str, job_id: str, kind: str, spec_obj) -> None:
-    """Drop prompt.txt + manifest.json NEXT TO the render (2026-08-13, operator
-    ask: "the prompt info is not associated clearly with the directory in which
-    the media is saved" — until now the spec lived only in media_jobs.db and
-    every output dir shipped bare). Best-effort — a sidecar failure must never
-    fail a render."""
-    try:
-        import dataclasses as _dc
-        import json as _json
-        import time as _time
-        d = _dc.asdict(spec_obj) if _dc.is_dataclass(spec_obj) else (
-            spec_obj if isinstance(spec_obj, dict) else {"repr": repr(spec_obj)})
-        prompts = [p.get("text") for p in (d.get("parts") or [])
-                   if isinstance(p, dict) and p.get("kind") == "text" and p.get("text")]
-        prompts += [g.get("prompt") for g in (d.get("goals") or [])
-                    if isinstance(g, dict) and g.get("prompt")]
-        if d.get("prompt"):
-            prompts.append(d["prompt"])
-        with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
-            _json.dump({"job_id": job_id, "kind": kind, "created": _time.time(),
-                        "spec": d}, fh, indent=1, default=str)
-        with open(os.path.join(out_dir, "prompt.txt"), "w", encoding="utf-8") as fh:
-            fh.write("\n\n".join(p for p in prompts if p) + "\n")
-    except Exception:  # noqa: BLE001 — sidecars are documentation, never load-bearing
-        pass
+from hugpy_video.intel.runners.sidecar import write_spec_sidecar as _write_spec_sidecar

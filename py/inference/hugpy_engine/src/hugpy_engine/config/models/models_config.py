@@ -16,7 +16,6 @@ refresh_registry() explicitly — e.g. on hugpy module startup.
 
 import json
 import os
-import re
 from dataclasses import MISSING, fields
 from typing import Dict
 from abstract_essentials import get_logFile, safe_dump_to_file, safe_load_from_json
@@ -221,11 +220,7 @@ _VISION  = {"qwen2_5_vl", "minicpmv4_6", "mllama", "idefics3", "internvl"}
 _VIDEO_T2V = {"t2v", "ti2v"}
 _VIDEO_I2V = {"i2v", "vace"}
 
-def _safe_path_part(value):
-    value = value.strip().replace("\\", "/")
-    value = re.sub(r"[^A-Za-z0-9._/\-]+", "_", value)
-    value = re.sub(r"/+", "/", value)
-    return value.strip("/")
+from hugpy_platform.paths import safe_path_part as _safe_path_part
 
 def _runtime_folder(framework, hub_id, include=None, filename=None):
     framework = (framework or "").lower().strip()
@@ -366,6 +361,28 @@ def _correct_gguf_vision(framework, tasks, row):
     return tasks                                        # not on disk, no declared mmproj
 
 
+def _correct_gguf_vl_projector(framework, tasks, row):
+    """``(tasks, primary_or_None)`` — the vision-GGUF rule applied to the row's
+    OWN dir (hugpy_marker.vl_gguf_tasks, the one rule the marker writer and
+    ``hugpy-vl-reclassify`` use): a gguf dir holding an mmproj projector serves
+    image-text-to-text with text-generation kept. The counterpart of
+    :func:`_correct_gguf_vision`'s downgrade, so a row whose cached tasks
+    predate the rule (a worker's copied marker, a report row written before
+    the reclassify) derives what the files on disk say. ``primary`` is None
+    when nothing changed."""
+    if framework != "gguf" or not row.get("dir"):
+        return tasks, None
+    try:
+        from hugpy_storage.hugpy_marker import vl_gguf_tasks
+        new_t, new_p = vl_gguf_tasks(row.get("dir"), framework, list(tasks),
+                                     row.get("primary_task"))
+    except Exception:  # noqa: BLE001 — can't inspect → leave the task untouched
+        return tasks, None
+    if list(new_t or []) == list(tasks):
+        return tasks, None
+    return list(new_t), new_p
+
+
 def _correct_video_task(framework, tasks, row):
     """A model whose own config says it is VIDEO must not advertise text-generation.
 
@@ -412,26 +429,53 @@ def _correct_video_task(framework, tasks, row):
 _PIPELINE_COMPONENT_DIRS = ("text_encoders", "text_encoder", "vae",
                             "transformer", "unet", "image_encoder")
 
+# Hub metadata that names a GGUF as a VIDEO/diffusion model. A single-file GGUF
+# of a video model (e.g. QuantStack/Wan2.1_14B_VACE-GGUF ->
+# ``Wan2.1_14B_VACE-Q8_0.gguf``) is the quantized diffusion transformer ALONE —
+# it carries no VAE/text-encoder/scheduler, so it cannot be served standalone;
+# it is a pipeline-component exactly like the split fp8 checkpoints above. Such
+# a file lives at the model root (no component dir segment) and has no config
+# ``model_type``, so the two disk-shape tests miss it — its only truthful signal
+# is the Hub card's pipeline_tag / tags, which the gguf floor in _base_tasks
+# ignores (flooring it to text-generation: a video GGUF offering itself as a chat
+# model, then even graded weak). These are the tokens that name it video.
+_VIDEO_PIPELINE_TAGS = ("text-to-video", "image-to-video")
+_VIDEO_TAGS = ("text-to-video", "image-to-video", "video-generation")
+
+
+def _is_video_gguf(row) -> bool:
+    """A GGUF whose Hub metadata names a video/diffusion task (pipeline_tag or a
+    tag is text-to-video / image-to-video / video-generation)."""
+    pt = str(row.get("pipeline_tag") or "").lower()
+    if pt in _VIDEO_PIPELINE_TAGS:
+        return True
+    tags = {str(t).lower() for t in (row.get("tags") or [])}
+    return bool(tags & set(_VIDEO_TAGS))
+
 
 def _correct_pipeline_component(framework, tasks, row):
     """A GGUF that is a sub-component of a diffusion/video pipeline is NOT a
     chat model, however chat-like its architecture looks.
 
-    PATH-AUTHORITATIVE, and deliberately narrow: it fires ONLY when the row's
-    own file path contains a pipeline-component directory segment
-    (``.../text_encoders/…``, ``.../vae/…``). A standalone Gemma/Qwen GGUF lives
-    at its model root, never under one of those segments, so this can never
-    re-label a genuine chat model. Returns ``["pipeline-component"]`` — a task
-    with no runner, so the derive keeps the row visible but flags it
-    ``serveable: False`` with an honest reason instead of letting it advertise
-    text-generation and crash at the loader (silent-unavailability-by-
-    misclassification, operator doctrine 2026-07-29: a model must be knowable,
-    not hidden behind a misleading failure)."""
+    PATH-AUTHORITATIVE first, then Hub-metadata: it fires when the row's own
+    file path contains a pipeline-component directory segment
+    (``.../text_encoders/…``, ``.../vae/…``), OR when the row is a single-file
+    GGUF whose Hub card names it a video model (_is_video_gguf) — a quantized
+    diffusion transformer with no pipeline around it. A standalone Gemma/Qwen
+    GGUF lives at its model root AND carries pipeline_tag text-generation, so
+    neither test can re-label a genuine chat model. Returns
+    ``["pipeline-component"]`` — a task with no runner, so the derive keeps the
+    row visible but flags it ``serveable: False`` with an honest reason instead
+    of letting it advertise text-generation and crash at the loader (silent-
+    unavailability-by-misclassification, operator doctrine 2026-07-29: a model
+    must be knowable, not hidden behind a misleading failure)."""
     if framework != "gguf":
         return tasks
     fn = str(row.get("filename") or row.get("effective_gguf") or "")
     segs = {s.lower() for s in fn.replace("\\", "/").split("/")}
     if segs & set(_PIPELINE_COMPONENT_DIRS):
+        return ["pipeline-component"]
+    if _is_video_gguf(row):
         return ["pipeline-component"]
     return tasks
 
@@ -677,6 +721,7 @@ def derive_model_config_row(name, row):
     row = _enrich_model_type(framework, row)   # believe the model when it names itself
     tasks = _derive_tasks(framework, row)
     tasks = _correct_gguf_vision(framework, tasks, row)   # mmproj-authoritative, not pipeline_tag/path
+    tasks, _vl_primary = _correct_gguf_vl_projector(framework, tasks, row)  # mmproj on disk -> image-text-to-text
     tasks = _correct_video_task(framework, tasks, row)    # config-authoritative: t2v/vace are NOT chat models
     tasks = _correct_diffusers_task(framework, tasks, row) # model_index-authoritative: the pipeline's own declaration wins
     tasks = _correct_speech_task(framework, tasks, row)    # content-authoritative: a TTS checkpoint is not a chat model
@@ -684,6 +729,8 @@ def derive_model_config_row(name, row):
     tasks = _inherit_adapter_base_task(framework, tasks, row)  # a pairable delta serves what its base serves
     tasks = _correct_pipeline_component(framework, tasks, row)  # path-authoritative: an encoder/vae split is not a chat model
     primary = row.get("primary_task") if row.get("primary_task") in tasks else tasks[0]
+    if _vl_primary and _vl_primary in tasks:
+        primary = _vl_primary
     no_runner = [t for t in tasks if (framework, t) not in RUNNER_PAIRS]
     # A pipeline component fails the runner test (no ("gguf","pipeline-component")
     # pair) so it is KEPT-but-unserveable; give the refusal a CAUSE + FIX rather

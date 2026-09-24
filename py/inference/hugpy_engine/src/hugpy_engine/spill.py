@@ -707,8 +707,20 @@ def vision_projector_bytes(model_path: str) -> int:
 
     Self-contained (no import of the imports package) so the fit math stays
     offline-testable and can never be broken by a heavy import chain. Best-effort:
-    any filesystem error yields 0 (fail open — never inflate the reserve)."""
+    any filesystem error yields 0 (fail open — never inflate the reserve).
+
+    Sized as THE projector the child loads (2026-09-23): the slot passes
+    ``--mmproj find_mmproj(path)``, so reserve exactly that file when the
+    resolver is importable — a repo shipping mmproj-F32 + BF16 must not reserve
+    one and load the other. Falls back to the filename scan below."""
     _hints = ("mmproj", "mm-proj", "mm_proj", "projector")
+    try:
+        from hugpy_platform.utils import find_mmproj as _find_mmproj
+        _pick = _find_mmproj(model_path)
+        if _pick and os.path.isfile(_pick):
+            return int(os.path.getsize(_pick))
+    except Exception:  # noqa: BLE001 — resolver unavailable: filename scan below
+        pass
     try:
         directory = model_path if os.path.isdir(model_path) else os.path.dirname(model_path)
         if not directory or not os.path.isdir(directory):

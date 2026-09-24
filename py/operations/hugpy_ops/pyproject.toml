@@ -61,6 +61,12 @@ hugpy-keeper = "hugpy_ops.keeper:main"
 hugpy-todo-keeper = "hugpy_ops.todo_keeper_daemon:main"
 hugpy-provisioner = "hugpy_ops.provisioner:main"
 hugpy-drift-check = "hugpy_ops.drift:main"
+hugpy-model-audit = "hugpy_ops.model_audit:main"
+hugpy-model-manifest-backfill = "hugpy_ops.model_manifest_backfill:main"
+hugpy-admission-seed = "hugpy_ops.admission:seed_main"
+hugpy-model-resweep = "hugpy_ops.resweep:main"
+hugpy-model-archive = "hugpy_ops.model_archive:main"
+hugpy-vl-reclassify = "hugpy_ops.admission:vl_reclassify_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

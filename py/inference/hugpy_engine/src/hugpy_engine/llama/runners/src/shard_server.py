@@ -27,7 +27,9 @@ import httpx
 from hugpy_engine.config.main import get_gguf_file, get_model_config
 from hugpy_engine.llama.runners.src.imports.constants import DEFAULT_N_CTX
 from hugpy_engine.llama.runners.src.imports.init_imports import logger
-from hugpy_storage.download_models import ensure_model
+# Serve path: weights are local-or-central on a worker, never Hugging Face
+# (hugpy_storage.provision.ensure_serving_weights; computron 2026-09-23).
+from hugpy_storage.provision import ensure_serving_weights
 
 _SERVERS: dict = {}            # (model_key, rpc, ts) -> {"proc": Popen, "base_url": str}
 _LOCK = threading.Lock()
@@ -146,7 +148,7 @@ def ensure_shard_server(
 
         try:
             cfg = get_model_config(model_key)
-            model_dir = ensure_model(model_key)
+            model_dir = ensure_serving_weights(model_key)
             model_path = get_gguf_file(model_dir, cfg)
         except Exception as exc:
             logger.warning("ensure_shard_server: model resolve failed for %s: %s",
@@ -286,7 +288,7 @@ def ensure_vision_server(model_key: str) -> Optional[str]:
             return None
         try:
             cfg = get_model_config(model_key)
-            model_dir = ensure_model(model_key)
+            model_dir = ensure_serving_weights(model_key)
             model_path = get_gguf_file(model_dir, cfg)
         except Exception as exc:
             logger.warning("ensure_vision_server: model resolve failed for %s: %s",

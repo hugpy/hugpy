@@ -51,6 +51,10 @@ class DatabaseClient:
         self._conn = None
         self._pid = None
         self._warned = False
+        # The last recorded fault (what was being done, the real exception
+        # text, when) — surfaced by read/write routes so an empty result or a
+        # failed write says WHY instead of reading as "nothing recorded".
+        self.last_error = None
 
     # ── lifecycle ─────────────────────────────────────────────────────────
     def connect(self):
@@ -88,6 +92,9 @@ class DatabaseClient:
         except Exception:  # noqa: BLE001
             pass
         self._conn = None
+        import time
+        self.last_error = {"doing": doing, "error": f"{type(exc).__name__}: {exc}",
+                           "at": time.time()}
         if not self._warned:
             self._warned = True
             logger.warning("registry DB unavailable while %s (%s) — falling "

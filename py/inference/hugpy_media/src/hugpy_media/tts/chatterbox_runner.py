@@ -403,11 +403,7 @@ def _write_wav(path: str, samples: list[float], sample_rate: int
 # --------------------------------------------------------------------------- #
 
 
-def _output_dir() -> str:
-    """``DEFAULT_ROOT/video_intel/tts`` — the sibling of ffmpeg_audio's audio
-    dir. Lazy import so the module top stays stdlib-only."""
-    from hugpy_platform.constants import DEFAULT_ROOT
-    return os.path.join(DEFAULT_ROOT, "video_intel", "tts")
+from hugpy_media.tts.paths import output_dir as _output_dir
 
 
 def _resolve_device(requested: str | None) -> str:

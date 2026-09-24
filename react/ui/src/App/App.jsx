@@ -18,7 +18,9 @@ import StationDemo from '../showroom/StationDemo'
 import { readSavedCentral, probeLocalCentral, isDemoHost } from './../runtime/localCentral'
 // The sitewide Help widget — one shared, framework-free module, mounted
 // identically by all four surfaces (see ui_shared/help/helpWidget.js).
-import { mountHelpWidget, openHelpWidget } from './../../../ui_shared/help/helpWidget'
+import { mountHelpWidget, setHelpWidgetOverride } from './../../../ui_shared/help/helpWidget'
+// The operator's hugpy help agent (logs + code + tests) — the console's Help.
+import HelpPanel, { openHelpPanel } from './../components/HelpPanel'
 import './App.css'
 
 // NOTE: the embedded Console tab (KeeperConsole -> @hugpy/console + xterm) is
@@ -50,13 +52,24 @@ export function Console({ banner = null }) {
   // hugpy.activeChat below); unknown/stale ids fall back to the default.
   const [activeTab, setActiveTab] = useState(() => {  // overview(mobile) | models | add | compute | status | api
     const fallback = initialMobile ? 'overview' : 'status'
+    const known = ['overview', 'status', 'compute', 'models', 'add', 'api', 'nodes', 'evictions', 'metrics', 'calls', 'review', 'settings']
     try {
+      // `?tab=<id>` (shareable links, e.g. the Metrics panel's ?tab=metrics&model=…) wins over the saved tab.
+      const fromUrl = new URLSearchParams(window.location.search).get('tab')
+      if (known.includes(fromUrl)) return fromUrl
       const saved = localStorage.getItem('hugpy.activeTab')
-      return ['overview', 'status', 'compute', 'models', 'add', 'api', 'nodes', 'evictions', 'metrics', 'calls', 'review', 'settings'].includes(saved) ? saved : fallback
+      return known.includes(saved) ? saved : fallback
     } catch { return fallback }
   })
   useEffect(() => {
     try { localStorage.setItem('hugpy.activeTab', activeTab) } catch { /* ignore (private mode / quota) */ }
+    try {  // keep a `?tab=` already in the URL in step, so a reload lands where you are
+      const q = new URLSearchParams(window.location.search)
+      if (q.has('tab') && q.get('tab') !== activeTab) {
+        q.set('tab', activeTab)
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}?${q}${window.location.hash}`)
+      }
+    } catch { /* non-browser host */ }
   }, [activeTab])
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 640px)')
@@ -331,6 +344,12 @@ export function Console({ banner = null }) {
   }, [refreshModels])
 
 
+  // Inside the console the floating Help button opens the help agent too.
+  useEffect(() => {
+    setHelpWidgetOverride(() => openHelpPanel())
+    return () => setHelpWidgetOverride(null)
+  }, [])
+
   const jobsByModel = {}
   Object.values(jobs).forEach(j => { if (j.model_key) jobsByModel[j.model_key] = j })
 
@@ -349,9 +368,10 @@ export function Console({ banner = null }) {
           own sticky header stack, directly beneath the nav (operator directive
           2026-07-21) — instead of floating above the nav in a separate context. */}
       <Navbar banner={banner}>
-        <button onClick={() => openHelpWidget()} title="Open help" className="hugpy-navbar-action">Help</button>
+        <button onClick={() => openHelpPanel()} title="Ask the hugpy help agent (logs, code, tests)" className="hugpy-navbar-action">Help</button>
         <button onClick={signOut} title="Sign out of the console" className="hugpy-navbar-action">Sign out</button>
       </Navbar>
+      <HelpPanel tab={activeTab} model={activeChat || ''} error={error || ''} />
 
       {/* Desktop: the Overview is a permanent bar on top (stats, queue, fleet,
           peers). Mobile: it's the "Overview" tab below instead. */}
@@ -569,7 +589,7 @@ export function Console({ banner = null }) {
 
         {activeTab === 'metrics' && (
           <div className="tab-pane">
-            <MetricsPanel />
+            <MetricsPanel models={models} />
           </div>
         )}
 

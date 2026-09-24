@@ -215,34 +215,83 @@ def annotate_size(model: dict, mk: str) -> None:
     weight format + sidecars a worker actually holds, NOT the whole-snapshot sum
     (a mirrored HF repo carries the same weights in 3-5 formats + an fp32 dupe;
     ledgering the dir sum made an ~11GB model read as 45GB — the 2026-07-16 scare).
-    ``dir_bytes`` keeps the whole-dir footprint for diagnostics. ``None`` when the
-    model isn't on disk."""
+    ``dir_bytes`` keeps the whole-dir footprint for diagnostics.
+
+    SOURCES, in order (2026-09-23 "size must never be blank"):
+      1. the size fields stamped on the model's hugpy.json (derived from the
+         install manifest at install / by hugpy-model-manifest-backfill);
+      2. the install manifest on the marker, summed now and stamped back;
+      3. only when the marker has no manifest: the directory walk, stamped
+         back onto the marker so it is measured once.
+    ``size_source`` names which one answered; when none can, ``size_bytes`` is
+    None and ``size_reason`` says why (never a silent blank).
+
+    BUG FIXED AT SOURCE (2026-09-23): the footprint selector the server
+    installs (format_select.effective_bytes) took ``framework`` KEYWORD-only
+    while the providers.Footprint contract (and this call) is positional; the
+    TypeError was swallowed by the except below, and every non-GGUF model (plus
+    multi-quant GGUF without a pin) persisted ``size_bytes: None`` — 107 of 204
+    catalog rows. effective_bytes now honors the contract."""
     eff = model.get("effective_bytes")
     if eff:
         model["size_bytes"] = eff
         model.setdefault("dir_bytes", eff)
+        model["size_source"] = "gguf_effective"
         return
+    model_dir = None
+    try:
+        model_dir = model.get("destination") or _model_dir(mk, model)
+    except Exception:  # noqa: BLE001
+        model_dir = None
+    if not model_dir or not os.path.isdir(model_dir):
+        model["size_bytes"] = None
+        model["size_reason"] = (f"no install directory on central (resolved {model_dir!r}; "
+                                f"status {model.get('status') or 'unknown'})")
+        return
+    try:
+        from hugpy_storage.hugpy_marker import (SIZE_MARKER_KEYS, read_hugpy_marker,
+                                                stamp_marker_sizes)
+        marker = read_hugpy_marker(model_dir)
+        if isinstance(marker, dict):
+            if marker.get("size_bytes") is None:
+                # Manifest first; the walk only when there is no manifest.
+                fields, why = stamp_marker_sizes(model_dir, marker=marker, allow_walk=True)
+                if fields is None:
+                    model["size_bytes"] = None
+                    model["size_reason"] = why
+                    return
+            model["size_bytes"] = marker.get("size_bytes")
+            model["dir_bytes"] = marker.get("manifest_bytes") or marker.get("size_bytes")
+            model["size_source"] = marker.get("size_source") or "marker"
+            if marker.get("size_note"):
+                model["size_note"] = marker["size_note"]
+            if marker.get("effective_bytes") and not model.get("effective_bytes"):
+                model["effective_bytes"] = marker["effective_bytes"]
+            return
+    except Exception as exc:  # noqa: BLE001 — fall through to the walk, record why
+        logger.debug("marker size read failed for %s", mk, exc_info=True)
+        model["size_note"] = f"marker size unreadable ({type(exc).__name__}: {exc}); walked the dir"
     try:
         from hugpy_storage.model_presence import dir_size_bytes, walk_listing
         from hugpy_storage.providers import get_footprint_selector
-        model_dir = model.get("destination") or _model_dir(mk, model)
         dir_bytes = dir_size_bytes(model_dir)          # whole snapshot (all formats)
         model["dir_bytes"] = dir_bytes
-        if model_dir:
-            listing = walk_listing(model_dir)
-            if listing:
-                # Same single-format selection the transfer manifest applies
-                # (the server installs format_select.effective_bytes via
-                # providers.set_footprint_selector), so the ledger equals what
-                # a worker would actually hold post-pull. Default: the sum.
-                model["size_bytes"] = get_footprint_selector()(
-                    listing, model.get("framework"))
-            else:
-                model["size_bytes"] = dir_bytes
+        listing = walk_listing(model_dir)
+        if listing:
+            # Same single-format selection the transfer manifest applies
+            # (the server installs format_select.effective_bytes via
+            # providers.set_footprint_selector), so the ledger equals what
+            # a worker would actually hold post-pull. Default: the sum.
+            model["size_bytes"] = get_footprint_selector()(
+                listing, model.get("framework"))
         else:
             model["size_bytes"] = dir_bytes
-    except Exception:  # noqa: BLE001 — never break the models list over sizing
+        model["size_source"] = "dir_walk"
+        if model["size_bytes"] is None:
+            model["size_reason"] = f"no hugpy.json and no files under {model_dir}"
+    except Exception as exc:  # noqa: BLE001 — never break the models list over sizing
         model["size_bytes"] = None
+        model["size_reason"] = f"size walk of {model_dir} failed: {type(exc).__name__}: {exc}"
 
 
 def _dir_mtime(destination: Optional[str]) -> Optional[float]:
@@ -374,6 +423,12 @@ def size_fields(model: dict, mk: Optional[str] = None, *,
         fields, state = lookup_physical(mk, model, ASPECT_SIZE)
     except Exception:  # noqa: BLE001
         fields, state = None, "absent"
+    # A record that says "no size" WITHOUT a recorded reason predates the
+    # 2026-09-23 fix (annotate_size's swallowed TypeError) — re-derive it
+    # instead of serving the blank for the rest of its lifetime.
+    if state == "fresh" and (fields or {}).get("size_bytes") is None \
+            and not (fields or {}).get("size_reason"):
+        state = "unsized"
     if state == "fresh":
         return fields or {}
     status = status_fields(model, mk, source=source)

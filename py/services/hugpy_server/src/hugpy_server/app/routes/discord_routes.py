@@ -59,8 +59,6 @@ from hugpy_server.app.functions.imports.utils.discord_bindings import (
     prune_sessions,
     session_by_token,
 )
-import asyncio
-import inspect
 import os
 import time
 
@@ -276,31 +274,10 @@ def discord_bridge_send(bridge_id):
 
 
 # ── candidate generation (the bridge's "brain") ───────────────────────────
-def _await_sync(value):
-    """Drive a (possibly) awaitable execute_prompt result from WSGI.
-
-    Uses the process-wide async runtime (one long-lived loop) rather than a
-    fresh per-request loop — see _platform/async_runtime.
-    """
-    if not inspect.isawaitable(value):
-        return value
-    from hugpy_platform import async_runtime
-    return async_runtime.run(value)
+from hugpy_platform.async_runtime import await_sync as _await_sync
 
 
-def _result_text(result) -> str:
-    if isinstance(result, dict):
-        return result.get("text") or ""
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(result, attr, None)
-        if callable(fn):
-            try:
-                d = fn()
-                if isinstance(d, dict):
-                    return d.get("text") or ""
-            except TypeError:
-                continue
-    return getattr(result, "text", "") or ""
+from hugpy_platform.results import result_text as _result_text
 
 
 _DIRECTIVE_DECIDE = (
@@ -693,16 +670,7 @@ _BOT_LINK_TITLES = {
 _BOT_INVITE_PERMISSIONS = 1024 + 2048 + 16384 + 32768 + 65536   # 117760
 
 
-def _require_member_bot() -> None:
-    """Member-or-operator gate for the bot-link surface. No HUGPY_AGENT_OPEN /
-    testing waiver: these routes MINT credentials. Fails closed if the gate
-    module is unavailable (mirrors agent_routes._require_member_strict)."""
-    try:
-        from hugpy_server.app.operator_auth import member_authenticated
-    except Exception:  # noqa: BLE001
-        abort(401, description="Authentication required for this route.")
-    if not member_authenticated():
-        abort(401, description="Authentication required for this route.")
+from hugpy_server.app.auth_common import require_member_strict as _require_member_bot
 
 
 def _bot_caller_is_operator() -> bool:
@@ -713,12 +681,7 @@ def _bot_caller_is_operator() -> bool:
         return False
 
 
-def _bot_caller_username():
-    try:
-        from hugpy_server.app.operator_auth import principal_username
-        return principal_username()
-    except Exception:  # noqa: BLE001
-        return None
+from hugpy_server.app.auth_common import caller_username as _bot_caller_username
 
 
 def _public_api_base() -> str:

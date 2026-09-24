@@ -234,6 +234,8 @@ async def stream_events(body: ChatBody):
     except Exception:
         pass
 
+    import time as _time
+    _t0 = _time.monotonic()
     try:
         async for event in stream_query(cancel_event=cancel_event,
                                         **prompt_kwargs):
@@ -262,7 +264,18 @@ async def stream_events(body: ChatBody):
             job_store.finish(rid, error=exc)
         except Exception:
             pass
-        yield sse_event({"type": "error", "message": _friendly_stream_error(exc)})
+        _lf = None
+        try:
+            from hugpy_engine.serve.load_failure import load_failure_of
+            _lf = load_failure_of(exc)
+        except Exception:  # noqa: BLE001
+            pass
+        yield sse_event({"type": "error",
+                         "message": _friendly_stream_error(
+                             exc, model_key=body.model_key, request_id=rid,
+                             elapsed_s=_time.monotonic() - _t0),
+                         "error_class": type(exc).__name__, "request_id": rid,
+                         "model": body.model_key, "load_failure": _lf})
     finally:
         # Resolves to done, or cancelled if a cancel was requested; no-op when
         # the except above already marked it failed.
@@ -272,30 +285,23 @@ async def stream_events(body: ChatBody):
             pass
 
 
-def _friendly_stream_error(exc: Exception) -> str:
-    """Map known operational failures to actionable, user-facing messages.
-
-    A raw ``str(exc)`` would otherwise leak internals (e.g. the literal
-    ``No module named 'llama_cpp'`` or a low-level ``Connection refused``) into
-    the chat bubble. Unexpected errors still fall through to ``str(exc)`` so we
-    don't hide genuine bugs. Full detail is always in the server log above.
-    """
-    name = type(exc).__name__
-    msg = str(exc)
-    if name == "LocalEngineUnavailable" or name in ("ModuleNotFoundError", "ImportError") \
-            or "llama_cpp" in msg:
-        return (
-            "No inference engine is available to serve this model right now: "
-            "no model slot is running, no worker produced output, and this central "
-            "has no local engine installed. Start a model slot, bring a worker online, "
-            "or install the engine (pip install 'hugpy[engine]')."
-        )
-    if name in ("ConnectError", "ConnectTimeout", "ReadTimeout") or "Connection refused" in msg:
-        return (
-            "The selected worker could not be reached and no local engine was "
-            "available to fall back to. Check that a worker or model slot is online."
-        )
-    return msg
+def _friendly_stream_error(exc: Exception, *, model_key=None, request_id=None,
+                           elapsed_s=None) -> str:
+    """The error line shown for a failed call, built from what happened: the
+    model, the request id, the seconds spent, and the real exception chain
+    (type + text of each distinct link) — never a canned remedy."""
+    parts, seen, e = [], set(), exc
+    while e is not None and id(e) not in seen and len(parts) < 4:
+        seen.add(id(e))
+        text = f"{type(e).__name__}: {e}".strip()
+        if text not in parts:
+            parts.append(text)
+        e = e.__cause__ or e.__context__
+    ctx = [f"model={model_key}" if model_key else None,
+           f"request={request_id}" if request_id else None,
+           f"after {elapsed_s:.1f}s" if elapsed_s is not None else None]
+    ctx = ", ".join(c for c in ctx if c)
+    return " <- ".join(parts) + (f" ({ctx})" if ctx else "")
 
 
 def _request_bearer():

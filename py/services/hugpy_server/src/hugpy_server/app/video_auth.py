@@ -73,11 +73,7 @@ logger = logging.getLogger(__name__)
 _VIDEO_SURFACE = re.compile(r"^/(video|movie)(/|$)")
 
 
-def _normalized_path() -> str:
-    path = request.path or "/"
-    if path == "/api" or path.startswith("/api/"):
-        path = path[len("/api"):] or "/"
-    return path
+from hugpy_server.app.auth_common import normalized_path as _normalized_path
 
 
 def _is_video_surface() -> bool:
@@ -166,15 +162,7 @@ def _video_authorized() -> bool:
     return False
 
 
-def _is_shell_request() -> bool:
-    """True when the request is a browser navigation for the SPA shell (as
-    opposed to an XHR/fetch to a data/media route). Used only to choose the
-    DENY SHAPE (redirect a browser to the console login vs 401 a data call);
-    both are denials. Keyed off the shell catch-all's endpoint (see
-    wsgi_app._mount_ui, endpoint ``_hugpy_ui``) with a Sec-Fetch-Dest fallback."""
-    if request.endpoint == "_hugpy_ui":
-        return True
-    return request.headers.get("Sec-Fetch-Dest") == "document"
+from hugpy_server.app.auth_common import is_shell_request as _is_shell_request
 
 
 def install_video_gate(app) -> None:

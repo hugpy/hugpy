@@ -179,6 +179,136 @@ def status_satisfies_opts(status: dict, opts: dict | None) -> bool:
     return True
 
 
+# ── allocation identity of a seat (2026-09-23) ──────────────────────────────
+# A slot child's placement is fixed at launch. What a REQUEST asks for (its
+# designation spill, or a per-request override) must be compared with what the
+# resident seat was LOADED FOR — otherwise a per-request ram-only benchmark
+# lane leaves a 0/64-layer seat that every later ordinary request reuses.
+# The comparison is requested-vs-requested (the slot records ``alloc_requested``
+# at load), so an autofit/make-room plan that differs from the request never
+# reads as a mismatch.
+
+def _mode(value):
+    v = str(value or "").strip().lower().replace("_", "-")
+    return v or None
+
+
+def alloc_signature(opts: dict | None) -> dict:
+    """The placement a caller ASKED for: ``{"n_gpu_layers", "alloc_mode"}``,
+    normalized (``off``/``cpu`` -> 0, ints, lowercase dashed mode), None when
+    not asked. Everything else (make-room plans, ctx, threads) is excluded."""
+    opts = opts or {}
+    ngl = opts.get("n_gpu_layers")
+    return {"n_gpu_layers": None if ngl in (None, "", "auto") else _ngl(ngl),
+            "alloc_mode": _mode(opts.get("alloc_mode"))}
+
+
+def _asked(sig: dict) -> bool:
+    return any(v is not None for v in (sig or {}).values())
+
+
+def _describe_sig(sig: dict | None) -> str:
+    sig = sig or {}
+    parts = []
+    if sig.get("n_gpu_layers") is not None:
+        parts.append(f"n_gpu_layers={sig['n_gpu_layers']}")
+    if sig.get("alloc_mode"):
+        parts.append(f"alloc_mode={sig['alloc_mode']}")
+    return ", ".join(parts) or "default placement (nothing asked)"
+
+
+def describe_alloc_source(src: dict | None) -> str:
+    """'per-request ram-only from request <id> at <ts>' / 'designation gpu-only'
+    / 'operator …' / 'unknown source'."""
+    if not isinstance(src, dict) or not src.get("kind"):
+        return "unknown source"
+    kind = str(src["kind"])
+    bits = [kind]
+    if src.get("mode"):
+        bits.append(str(src["mode"]))
+    out = " ".join(bits)
+    if src.get("request_id"):
+        out += f" from request {src['request_id']}"
+    if src.get("at"):
+        try:
+            out += " at " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(src["at"])))
+        except (TypeError, ValueError):
+            out += f" at {src['at']}"
+    if src.get("via"):
+        out += f" via {src['via']}"
+    return out
+
+
+def alloc_mismatch(status: dict, requested: dict,
+                   source: dict | None = None) -> str | None:
+    """None when the live seat implements the requested allocation, else the
+    human reason it does not (the reload reason the load report carries).
+
+    * The seat records what it was loaded FOR (``alloc_requested``) and by whom
+      (``alloc_source``). A request that asks for a placement must match it.
+    * A request that asks for NOTHING matches any seat EXCEPT one seated by a
+      per-request override: an override never outlives its request.
+    * An older slot (no ``alloc_requested``) is judged only on what the request
+      explicitly asked (status_satisfies_opts), as before."""
+    have = status.get("alloc_requested")
+    src = status.get("alloc_source") if isinstance(status.get("alloc_source"), dict) else None
+    if not isinstance(have, dict):
+        return None
+    have_sig = alloc_signature(have)
+    by_override = bool(src and src.get("kind") == "per-request")
+    if _asked(requested):
+        if have_sig == requested:
+            return None
+        if not _asked(have_sig) and not by_override:
+            # seated with nothing asked (autofit/default): whether it implements
+            # the explicit ask is decided on the EFFECTIVE placement, as before
+            return None
+    elif not by_override:
+        return None
+    total = status.get("total_layers")
+    eff = status.get("n_gpu_layers")
+    return (f"reloaded: resident had n_gpu_layers={eff}"
+            + (f" of {total}" if total is not None else "")
+            + f" ({_describe_sig(have_sig)}; {describe_alloc_source(src)}), request wants "
+            + f"{_describe_sig(requested)} ({describe_alloc_source(source)})")
+
+
+def env_alloc_source() -> dict | None:
+    """The per-request provenance the worker agent projected from central's
+    spill (HUGPY_ALLOC_SOURCE, JSON; cleared when absent)."""
+    raw = os.environ.get("HUGPY_ALLOC_SOURCE")
+    if not raw:
+        return None
+    try:
+        import json as _json
+        val = _json.loads(raw)
+    except ValueError:
+        return None
+    return val if isinstance(val, dict) else None
+
+
+def env_request_opts(opts: dict | None = None) -> dict:
+    """``opts`` + the placement the CURRENT request projected into env (the
+    worker agent's _apply_spill), exactly as endpoint_for seats with it."""
+    eff_opts = dict(opts or {})
+    for env, key in (("HUGPY_GPU_MEM_GIB", "gpu_mem_gib"),
+                     ("HUGPY_CPU_MEM_GIB", "cpu_mem_gib"),
+                     ("HUGPY_N_CPU_MOE", "n_cpu_moe"),
+                     ("HUGPY_ALLOC_MODE", "alloc_mode"),
+                     ("DEFAULT_LLAMA_THREADS", "threads")):
+        value = os.environ.get(env)
+        if value not in (None, ""):
+            eff_opts.setdefault(key, value)
+    raw_ngl = os.environ.get("HUGPY_N_GPU_LAYERS", "").strip().lower()
+    if "n_gpu_layers" not in eff_opts and raw_ngl not in ("", "auto"):
+        try:
+            eff_opts["n_gpu_layers"] = (0 if raw_ngl in ("off", "cpu", "none")
+                                         else int(raw_ngl))
+        except ValueError:
+            pass
+    return eff_opts
+
+
 def _drop_runner(model_key) -> None:
     """STALE-SLOT-FIX-20260910: a model swapped out of its seat must not keep a cached HTTP
     runner pointing at that seat - the seat's NEW occupant would answer for it."""
@@ -189,6 +319,14 @@ def _drop_runner(model_key) -> None:
         evict_llama_runner(model_key)
     except Exception:  # noqa: BLE001
         logger.debug("drop runner for %s failed", model_key, exc_info=True)
+
+
+def _alloc_body(requested: dict, source: dict | None, reload_reason: str | None) -> dict:
+    """Additive /load body keys (an older slot agent ignores unknown keys)."""
+    out = {"alloc_requested": dict(requested), "alloc_source": dict(source or {})}
+    if reload_reason:
+        out["reload_reason"] = reload_reason
+    return out
 
 
 class SlotPool:
@@ -282,25 +420,16 @@ class SlotPool:
         # (below) may hand back a PARTIAL-offload plan for an oversize GGUF — the
         # honest layers-that-fit count — which we thread in here so the slot child
         # launches with --n-gpu-layers N (not the shard-blind autofit -1).
-        eff_opts = dict(opts or {})
         # Every entry point (including serve_endpoint and stale-runner refresh)
         # must carry request placement to the separate slot process. Its boot
         # environment cannot see _apply_spill's per-model changes.
-        for env, key in (("HUGPY_GPU_MEM_GIB", "gpu_mem_gib"),
-                         ("HUGPY_CPU_MEM_GIB", "cpu_mem_gib"),
-                         ("HUGPY_N_CPU_MOE", "n_cpu_moe"),
-                         ("HUGPY_ALLOC_MODE", "alloc_mode"),
-                         ("DEFAULT_LLAMA_THREADS", "threads")):
-            value = os.environ.get(env)
-            if value not in (None, ""):
-                eff_opts.setdefault(key, value)
-        raw_ngl = os.environ.get("HUGPY_N_GPU_LAYERS", "").strip().lower()
-        if "n_gpu_layers" not in eff_opts and raw_ngl not in ("", "auto"):
-            try:
-                eff_opts["n_gpu_layers"] = (0 if raw_ngl in ("off", "cpu", "none")
-                                             else int(raw_ngl))
-            except ValueError:
-                pass
+        eff_opts = env_request_opts(opts)
+        # What THIS request asked for, captured BEFORE any make-room plan edits
+        # eff_opts, plus who asked (designation / per-request / operator). The
+        # seat records both at load; reuse compares against them.
+        requested = alloc_signature(eff_opts)
+        source = env_alloc_source() or {"kind": "designation" if _asked(requested) else "default"}
+        reload_reason = None
         statuses = self.statuses()
 
         # 1. already serving OR currently loading it — reuse, never load a 2nd
@@ -314,8 +443,13 @@ class SlotPool:
                 continue
             ep = s.get("endpoint") or s["_control"]
             if s.get("healthy"):
-                if status_satisfies_opts(s, eff_opts):
+                why = alloc_mismatch(s, requested, source)
+                if why is None and status_satisfies_opts(s, eff_opts):
                     return ep
+                reload_reason = why or (
+                    f"reloaded: resident seat (n_gpu_layers={s.get('n_gpu_layers')}, "
+                    f"path={s.get('model_path')!r}) does not implement the requested "
+                    f"load contract {eff_opts!r} ({describe_alloc_source(source)})")
                 # An explicit load-time contract changed.  The old child cannot
                 # morph in place; discard it and let the ordinary free-slot load
                 # below recreate the seat with the requested quant/allocation.
@@ -328,9 +462,9 @@ class SlotPool:
                         raise RuntimeError(
                             f"slot remained busy while changing the seat for {model_key}")
                 logger.info("slot seat mismatch for %s on %s; evicting before reload "
-                            "(current ngl=%r path=%r, requested=%r)", model_key,
+                            "(current ngl=%r path=%r, requested=%r): %s", model_key,
                             s.get("_control"), s.get("n_gpu_layers"),
-                            s.get("model_path"), eff_opts)
+                            s.get("model_path"), eff_opts, reload_reason)
                 self.unload(s["_control"])
                 _drop_runner(model_key)
                 statuses = self.statuses()
@@ -484,10 +618,16 @@ class SlotPool:
             if "error" in s:
                 continue
             if not s.get("model_key"):
-                body = {"model_key": model_key, **eff_opts}
+                body = {"model_key": model_key, **eff_opts,
+                        **_alloc_body(requested, source, reload_reason)}
                 resp = _post(s["_control"] + "/load", body, load_timeout)
                 if isinstance(resp, dict) and resp.get("error"):
-                    raise RuntimeError(f"slot load failed: {resp['error']}")
+                    # Typed (2026-09-23): a HARD loader rejection arrives as
+                    # HardLoadFailure carrying the loader stderr + path, so
+                    # get_llama_runner refuses the in-process fallback.
+                    from hugpy_engine.serve.load_failure import from_slot_reply
+                    raise from_slot_reply(resp["error"], resp, model_key=model_key,
+                                          path=eff_opts.get("path"))
                 return resp.get("endpoint") or s["_control"]
 
         # 3. everything busy — tiers-v2 promotion: bump the LRU *idle*
@@ -532,10 +672,16 @@ class SlotPool:
                                    victim["_control"], exc)
                     continue
                 _drop_runner(victim.get("model_key"))   # STALE-SLOT-FIX-20260910
-                body = {"model_key": model_key, **eff_opts}
+                body = {"model_key": model_key, **eff_opts,
+                        **_alloc_body(requested, source, reload_reason)}
                 resp = _post(victim["_control"] + "/load", body, load_timeout)
                 if isinstance(resp, dict) and resp.get("error"):
-                    raise RuntimeError(f"slot load failed: {resp['error']}")
+                    # Typed (2026-09-23): a HARD loader rejection arrives as
+                    # HardLoadFailure carrying the loader stderr + path, so
+                    # get_llama_runner refuses the in-process fallback.
+                    from hugpy_engine.serve.load_failure import from_slot_reply
+                    raise from_slot_reply(resp["error"], resp, model_key=model_key,
+                                          path=eff_opts.get("path"))
                 return resp.get("endpoint") or victim["_control"]
 
         # Static-lock check (tiers v3): when EVERY slot's occupant is static

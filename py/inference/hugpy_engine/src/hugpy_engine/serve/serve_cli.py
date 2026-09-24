@@ -15,7 +15,6 @@ SSH-backed run/write instead (the plan is host-agnostic argv).
 """
 
 import argparse
-import os
 import subprocess
 
 from hugpy_engine.serve.serve import (
@@ -31,11 +30,7 @@ def _run(argv):
     return subprocess.run(argv, check=True)
 
 
-def _write(path, content):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    return path
+from hugpy_platform.filesystem import write_text as _write
 
 
 def main():
@@ -82,4 +77,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

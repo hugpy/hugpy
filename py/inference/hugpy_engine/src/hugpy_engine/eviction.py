@@ -336,22 +336,30 @@ def tok_s_from_timings(payload: Any) -> Optional[float]:
     if not isinstance(t, dict):
         return None
     try:
+        # THE OFF-BY-ONE (root cause of the 2277 / 4952 tok/s rows, 2026-09-23).
+        # llama-server samples the FIRST completion token from the prompt pass
+        # and only then starts the generation clock (server-context.cpp: at
+        # n_decoded == 1, t_start_generation = now; t_prompt_processing ends
+        # there). predicted_ms therefore times predicted_n - 1 decode steps, and
+        # its predicted_per_second = predicted_n / predicted_ms is inflated by
+        # n/(n-1): a 1-token reply divides 1 token by a ~0.2 ms window. The
+        # decode rate is (predicted_n - 1) / predicted_ms; a reply of <= 1 token
+        # has no decode window and no rate (None — absent, never guessed).
+        n, ms = t.get("predicted_n"), t.get("predicted_ms")
+        if n is not None and ms is not None:
+            n_f, ms_f = float(n), float(ms)
+            if n_f <= 1 or ms_f <= 0:
+                return None
+            derived = ((n_f - 1.0) * 1000.0) / ms_f
+            return derived if derived <= _MAX_PLAUSIBLE_TOK_S else None
+        # A build that reports only the derived rate: nothing to correct with.
         rate = t.get("predicted_per_second")
         if rate is not None:
             f = float(rate)
             if not (f > 0.0 and f == f and f != float("inf")):
                 return None
             return f if f <= _MAX_PLAUSIBLE_TOK_S else None
-        n, ms = t.get("predicted_n"), t.get("predicted_ms")
-        if n is None or ms is None:
-            return None
-        n_f, ms_f = float(n), float(ms)
-        # predicted_n == 0 is a generation that produced no tokens: it reports
-        # nothing about decode speed, so it is absent rather than 0 tok/s.
-        if n_f <= 0 or ms_f <= 0:
-            return None
-        derived = (n_f * 1000.0) / ms_f
-        return derived if derived <= _MAX_PLAUSIBLE_TOK_S else None
+        return None
     except (TypeError, ValueError):
         return None
 

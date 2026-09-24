@@ -16,6 +16,9 @@ tool is a separate console script and is loaded lazily from this namespace:
 * :mod:`hugpy_ops.provisioner` — declared-but-missing weights across the
   engine, studio and comfy registries, enqueued on ``hugpy_storage``'s
   download queue (``hugpy-provisioner``).
+* :mod:`hugpy_ops.model_audit` — per-model integrity verdict (working /
+  broken download / faulty model / misconfigured) with its verbatim evidence
+  log (``hugpy-model-audit``).
 * :mod:`hugpy_ops.versions` — the ecosystem distribution versions the
   sentinel reports next to a worker version skew.
 
@@ -33,8 +36,8 @@ try:  # the installed distribution's version: the workspace tag/commit, never a 
 except Exception:  # noqa: BLE001 — source tree without metadata
     __version__ = "0.0.0+unknown"
 
-_SUBMODULES = ("chaos", "drift", "keeper", "provisioner", "sentinel", "todo_keeper",
-               "todo_keeper_daemon", "versions")
+_SUBMODULES = ("chaos", "drift", "keeper", "model_audit", "provisioner", "sentinel",
+               "todo_keeper", "todo_keeper_daemon", "versions")
 
 __all__ = ["__version__", *_SUBMODULES]
 

@@ -481,6 +481,7 @@
 .mt-act:hover:not(:disabled) { background: rgba(255, 255, 255, 0.09); border-color: var(--accent); }
 .mt-act:disabled { opacity: 0.4; cursor: not-allowed; }
 .mt-act-danger { color: var(--red); }
+.mt-act-on { border-color: var(--accent); color: var(--accent); }
 .mt-act-danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.12); border-color: var(--red); }
 
 .mt-worker-section { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
@@ -663,3 +664,17 @@
 }
 .mt-pgroup-allocate { font-size: 11.5px; }
 .col-pgroup { white-space: nowrap; }
+
+/* ARCHIVE MARK: a row the operator marked for archive — greyed, still readable;
+   the text is the recorded mark (who / when / why). */
+.model-table tr.mt-row-archived > td { opacity: 0.5; }
+.model-table tr.mt-row-archived.mt-detail-row > td { opacity: 0.85; }
+.mt-archive-tag { display: block; font-size: 0.8em; font-style: italic; }
+.mt-archive-note { display: flex; gap: 1em; flex-wrap: wrap; font-size: 0.9em; margin: 0.4em 0; font-style: italic; }
+/* Size is never blank: bytes, or the server's recorded reason. */
+.mt-size-tag { display: block; font-size: 0.8em; opacity: 0.8; }
+.mt-size-tag.mt-size-unknown { font-style: italic; }
+/* Per-worker quant pin in the "Run on worker" rows. */
+.mt-wq { display: inline-flex; gap: 0.4em; align-items: center; flex-wrap: wrap; }
+.mt-wq select { max-width: 28em; }
+.mt-wq-single { font-size: 0.85em; opacity: 0.85; }

@@ -54,15 +54,10 @@ def _scope_ok(rec: dict[str, Any], required_scope: Optional[str]) -> bool:
     return "full" in scopes or required_scope in scopes
 
 
+from hugpy_server.app.functions.imports.utils.key_store import is_expired
+
 def _is_expired(rec: dict[str, Any], now: Optional[float] = None) -> bool:
-    """Key expiry — legacy rows have no `expires_at` and never expire."""
-    exp = rec.get("expires_at")
-    if not exp:
-        return False
-    try:
-        return float(exp) <= (now if now is not None else time.time())
-    except (TypeError, ValueError):
-        return False
+    return is_expired(rec, now, clock=time.time)
 
 
 def _store_path() -> str:
@@ -83,21 +78,10 @@ def _load() -> dict[str, Any]:
     return data
 
 
+from hugpy_platform.atomic_json import save_json as _atomic_save_json
+
 def _save(data: dict[str, Any]) -> None:
-    path = _store_path()
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    # Temp name must be unique PER WRITE: gunicorn runs several processes, and
-    # concurrent /v1 auths all bump last_used — two writers sharing one
-    # "<path>.tmp" race between open() and os.replace(), and the loser's
-    # replace() dies FileNotFoundError → a raw 500 at AUTH time (bit a
-    # concurrent batch 2026-07-11). pid+token keeps the write atomic AND
-    # collision-free; os.replace stays the atomicity point.
-    tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    _atomic_save_json(_store_path(), data)
 
 
 def _hash(token: str) -> str:
@@ -179,15 +163,10 @@ def list_api_keys() -> list[dict[str, Any]]:
     return out
 
 
+from hugpy_server.app.functions.imports.utils.key_store import revoke_key
+
 def revoke_api_key(key_id: str) -> bool:
-    with _LOCK:
-        data = _load()
-        rec = data["keys"].get(key_id)
-        if not rec:
-            return False
-        rec["revoked"] = True
-        _save(data)
-    return True
+    return revoke_key(key_id, _LOCK, _load, _save)
 
 
 def prune_api_keys(*, expired: bool = True,

@@ -256,7 +256,53 @@ class LlamaCppBaseRunner(ABC):
 
     def _take_stream_timings(self) -> "Optional[dict]":
         t, self._stream_timings = self._stream_timings, None
+        if isinstance(t, dict) and t and "served" not in t:
+            # WHAT SERVED THIS CALL (2026-09-23): the seat's own statement of
+            # the GGUF file and the layer placement it is running, beside the
+            # engine's timings, so central stamps the call ledger with the
+            # quant/allocation hugpy actually used — never with what a caller
+            # asked for. Rides the existing timings wire (DoneEvent.timings /
+            # TaskResult extra), no schema change. Absent when unknowable.
+            served = self._served_identity()
+            if served:
+                t = {**t, "served": served}
         return t
+
+    def _served_identity(self) -> "Optional[dict]":
+        """{model_file, n_gpu_layers, total_layers, n_cpu_moe, slot_id,
+        loaded_at, source} for the endpoint this runner talks to, read from the
+        slot control's ``/status`` (slot seats) or llama-server's ``/props``
+        (managed servers: model_path only). One local GET at completion;
+        None on any failure — never raises, never guesses."""
+        base = getattr(self, "base_url", None)
+        if not base:
+            return None
+        import os
+        try:
+            import httpx
+        except Exception:  # noqa: BLE001
+            return None
+        for path, source in (("/status", "slot-status"), ("/props", "llama-props")):
+            try:
+                resp = httpx.get(str(base).rstrip("/") + path, timeout=0.5)
+                if resp.status_code != 200:
+                    continue
+                d = resp.json()
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(d, dict) or not d.get("model_path"):
+                continue
+            out = {"model_file": os.path.basename(str(d["model_path"])),
+                   "model_path": str(d["model_path"]),
+                   "n_gpu_layers": d.get("n_gpu_layers"),
+                   "total_layers": d.get("total_layers"),
+                   "n_cpu_moe": d.get("n_cpu_moe"),
+                   "slot_id": d.get("slot_id"),
+                   "slot_model_key": d.get("model_key"),
+                   "loaded_at": d.get("loaded_at"),
+                   "source": source}
+            return {k: v for k, v in out.items() if v is not None}
+        return None
 
     def _usage_for(self, engine_usage, messages, completion_text) -> "Optional[dict]":
         """Best-effort token accounting for a DoneEvent — never load-bearing.

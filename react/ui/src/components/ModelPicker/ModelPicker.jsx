@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './ModelPicker.css'
+import { archiveMark, archiveText } from '../ModelTable/archiveMark'
+import { sizeView } from '../ModelTable/modelSize'
 
 // ModelPicker — the load-model dropdown, grown into an informative picker.
 //
@@ -50,11 +52,36 @@ export default function ModelPicker({
   placeholder = 'Pick a model…',
   disabled = false,
   autoFocus = false,
+  // ── optional extensions (defaults preserve the load-a-model behaviour) ──
+  // header      : node shown above the column head (e.g. a filter-match count).
+  // pinned      : extra pickable rows shown before the filtered set (e.g. the
+  //               current selection when it is hidden by an upstream filter).
+  // gridTemplate: override the row/head grid-template-columns (custom columns).
+  // headCells   : override the column head labels.
+  // renderCells : override the per-row trailing cells (everything after Model).
+  // emptyText   : the "no rows" message (defaults to "no models match").
+  header = null,
+  pinned = null,
+  gridTemplate = null,
+  headCells = null,
+  renderCells = null,
+  emptyText = 'no models match',
+  // Opt-in multi-select (grading): a checkbox per row, a select-all/clear bar,
+  // and a live count. Ticking a box is INDEPENDENT of picking (clicking) a row —
+  // pick = view that model, tick = include it in the batch. Off by default, so
+  // every other caller keeps the plain single-pick behaviour.
+  multiSelect = false,
+  selectedKeys = null,
+  onToggleKey = null,
+  onSelectAll = null,
+  onClearSelected = null,
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
+  const [flip, setFlip] = useState(false)
   const rootRef = useRef(null)
   const inputRef = useRef(null)
+  const popRef = useRef(null)
 
   const current = useMemo(
     () => models.find(m => keyOf(m) === value) || null,
@@ -88,79 +115,135 @@ export default function ModelPicker({
   useEffect(() => { if (open) inputRef.current?.focus() }, [open])
   useEffect(() => { if (autoFocus && !disabled) setOpen(true) }, [autoFocus, disabled])
 
+  // Overflow guard (works for a picker on either side of the layout): once the
+  // popover is on screen, if its left-anchored box would spill past the right
+  // viewport edge, flip it to right-anchored so it grows leftward instead —
+  // never widening the page. Re-measured on resize while open.
+  useEffect(() => {
+    if (!open) return undefined
+    const measure = () => {
+      const root = rootRef.current, pop = popRef.current
+      if (!root || !pop) return
+      const left = root.getBoundingClientRect().left
+      const w = pop.getBoundingClientRect().width
+      setFlip(left + w > window.innerWidth - 8)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [open, q, models, pinned])
+
   const pick = (m) => {
+    // A model the operator marked for archive is never pickable for a
+    // placement/load — central refuses it; the row says why.
+    if (archiveMark(m)) return
     onPick?.(keyOf(m), m)
     setOpen(false)
     setQ('')
   }
+  const selSet = useMemo(() => new Set(selectedKeys || []), [selectedKeys])
 
   return (
     <span className="mp-root" ref={rootRef}>
       <button
         type="button"
-        className={`mp-trigger${current ? '' : ' mp-empty'}`}
+        className={`mp-trigger${current || value ? '' : ' mp-empty'}`}
         disabled={disabled}
         onClick={() => setOpen(o => !o)}
-        title={current ? keyOf(current) : placeholder}
+        title={current ? keyOf(current) : (value || placeholder)}
       >
-        <span className="mp-trigger-label">{current ? (current.name || keyOf(current)) : placeholder}</span>
+        <span className="mp-trigger-label">{current ? (current.name || keyOf(current)) : (value || placeholder)}</span>
         <span className="mp-caret">{open ? '▴' : '▾'}</span>
       </button>
 
       {open && (
-        <div className="mp-pop" role="listbox">
+        <div className={`mp-pop${flip ? ' mp-pop-right' : ''}`} role="listbox" ref={popRef}>
           <input
             ref={inputRef}
             className="mp-filter"
             placeholder="filter by name / task / lib…"
             value={q}
             onChange={e => setQ(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && filtered.length > 0) pick(filtered[0]) }}
+            onKeyDown={e => {
+              if (e.key !== 'Enter') return
+              const first = filtered.find(m => !archiveMark(m))
+              if (first) pick(first)
+            }}
           />
-          <div className="mp-grid mp-head">
-            <span>Model</span><span>Task</span><span>Lib</span><span>Ctx</span><span>Size</span><span>Status</span>
+          {header}
+          {multiSelect && (
+            <div className="mp-multibar">
+              <span className="mp-multibar-count">{(selectedKeys || []).length} selected for grading</span>
+              <button type="button" className="mp-multibar-btn"
+                onClick={() => onSelectAll?.(models.map(keyOf))}>select all {models.length} matching filters</button>
+              <button type="button" className="mp-multibar-btn" disabled={!(selectedKeys || []).length}
+                onClick={() => onClearSelected?.()}>clear</button>
+            </div>
+          )}
+          <div className="mp-grid mp-head" style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}>
+            {headCells
+              ? headCells.map((h, i) => <span key={i}>{h}</span>)
+              : <><span>Model</span><span>Task</span><span>Lib</span><span>Ctx</span><span>Size</span><span>Status</span></>}
           </div>
           <div className="mp-rows">
-            {filtered.length === 0 && <div className="mp-none">no models match</div>}
-            {filtered.map(m => {
-              const id = keyOf(m)
-              const task = m.primary_task || (m.tasks || [])[0] || '—'
-              const extraTasks = (m.tasks || []).filter(t => t !== task)
-              return (
-                <div
-                  key={id}
-                  className={`mp-grid mp-row${id === value ? ' mp-current' : ''}`}
-                  role="option"
-                  aria-selected={id === value}
-                  onClick={() => pick(m)}
-                  title={id}
-                >
-                  <span className="mp-name">{m.name || id}</span>
-                  <span className="mp-task" title={(m.tasks || []).join(', ')}>
-                    {task}
-                    {extraTasks.length > 0 && <em className="mp-more"> +{extraTasks.length}</em>}
-                  </span>
-                  <span className={`mp-fw mp-fw-${m.framework || 'unknown'}`}>{m.framework || '—'}</span>
-                  <span className="mp-ctx">{fmtCtx(m.model_max_length)}</span>
-                  {(() => {
-                    const sz = sizeOf(m)
-                    return (
-                      <span className={`mp-size${sz == null ? ' mp-size-none' : ''}`}
-                            title={sz == null ? 'size unknown (not on disk)'
-                              : m.framework === 'gguf'
-                                ? `effective quant ${m.effective_gguf || ''} — ${fmtBytes(sz)}`
-                                : `${fmtBytes(sz)} on disk`}>
-                        {fmtBytes(sz)}
-                      </span>
-                    )
-                  })()}
-                  <span className={`mp-status mp-status-${m.status || 'unknown'}`}>{m.status || '—'}</span>
-                </div>
-              )
-            })}
+            {(pinned || []).map(m => renderRow(m, ' mp-pinned'))}
+            {filtered.length === 0 && !(pinned || []).length && <div className="mp-none">{emptyText}</div>}
+            {filtered.map(m => renderRow(m))}
           </div>
         </div>
       )}
     </span>
   )
+
+  // One row — shared by the pinned set and the filtered set. Custom callers
+  // (renderCells/gridTemplate) get their own trailing cells; the default is the
+  // load-a-model column grid, unchanged.
+  function renderRow(m, extra = '') {
+    const id = keyOf(m)
+    const arch = archiveMark(m)
+    return (
+      <div
+        key={id}
+        className={`mp-grid mp-row${id === value ? ' mp-current' : ''}${arch ? ' mp-archived' : ''}${extra}`}
+        style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
+        role="option"
+        aria-selected={id === value}
+        aria-disabled={arch ? true : undefined}
+        onClick={() => pick(m)}
+        title={arch ? `${id} — ${archiveText(arch)}` : (m._note ? `${id} — ${m._note}` : id)}
+      >
+        {multiSelect
+          ? <span className="mp-name mp-name-multi">
+              {!m._pinned && <input type="checkbox" className="mp-check"
+                checked={selSet.has(id)} onClick={e => e.stopPropagation()}
+                onChange={() => onToggleKey?.(id)} aria-label={`include ${id} in grading`} />}
+              <span className="mp-name-text" title={m.name || id}>{m.name || id}</span>
+            </span>
+          : <span className="mp-name">{m.name || id}</span>}
+        {renderCells ? renderCells(m) : (() => {
+          const task = m.primary_task || (m.tasks || [])[0] || '—'
+          const extraTasks = (m.tasks || []).filter(t => t !== task)
+          const sz = sizeOf(m)
+          const sv = sizeView(m, fmtBytes)
+          return <>
+            <span className="mp-task" title={(m.tasks || []).join(', ')}>
+              {task}{extraTasks.length > 0 && <em className="mp-more"> +{extraTasks.length}</em>}
+            </span>
+            <span className={`mp-fw mp-fw-${m.framework || 'unknown'}`}>{m.framework || '—'}</span>
+            <span className="mp-ctx">{fmtCtx(m.model_max_length)}</span>
+            <span className={`mp-size${sz == null ? ' mp-size-none' : ''}`}
+                  title={sz == null ? sv.title
+                    : m.framework === 'gguf'
+                      ? `effective quant ${m.effective_gguf || ''} — ${fmtBytes(sz)}`
+                      : `${fmtBytes(sz)} on disk`}>
+              {sz == null ? sv.text : fmtBytes(sz)}
+            </span>
+            {arch
+              ? <span className="mp-status mp-status-archived" title={archiveText(arch)}>🗄 {archiveText(arch)}</span>
+              : <span className={`mp-status mp-status-${m.status || 'unknown'}`}>{m.status || '—'}</span>}
+          </>
+        })()}
+      </div>
+    )
+  }
 }

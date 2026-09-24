@@ -20,7 +20,6 @@ bound pool or an explicit per-request `pool` still wins over the default.
 """
 from __future__ import annotations
 
-import inspect
 import os
 
 from abstract_flask import get_bp
@@ -34,12 +33,7 @@ from hugpy_server.app.functions.imports.utils.api_keys import (
 ml_bp, logger = get_bp("ml_bp", __name__)
 
 
-def _bearer_token():
-    """Bearer token from the Authorization header (or ?api_key= for curl)."""
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return request.args.get("api_key")
+from hugpy_server.app.auth_common import bearer_token as _bearer_token
 
 
 # Endpoints exempt from the media gate: the gate-management routes themselves
@@ -142,23 +136,10 @@ def _general_route_tasks() -> set:
     return {t.strip() for t in raw.split(",") if t.strip()}
 
 
-def _await_sync(value):
-    """Drive execute_prompt's (possibly) awaitable result on the shared loop."""
-    if not inspect.isawaitable(value):
-        return value
-    from hugpy_platform import async_runtime
-    return async_runtime.run(value)
+from hugpy_platform.async_runtime import await_sync as _await_sync
 
 
-def _result_payload(result) -> dict:
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(result, attr, None)
-        if callable(fn):
-            try:
-                return fn()
-            except TypeError:
-                continue
-    return {"text": str(result)}
+from hugpy_platform.results import result_payload as _result_payload
 
 
 def _run_extract(body: dict):

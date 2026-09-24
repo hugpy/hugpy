@@ -342,16 +342,17 @@ def _probe_llama_cpp_subprocess() -> dict:
         return {"installed": False, "error": f"{type(exc).__name__}: {exc}"}
     out = (proc.stdout or "").strip()
     if not out:
-        tail = (proc.stderr or "").strip()[-300:]
+        stderr = (proc.stderr or "").strip()
         return {"installed": False,
                 "error": f"llama_cpp probe produced no output "
-                         f"(rc={proc.returncode}): {tail}"}
+                         f"(rc={proc.returncode}): "
+                         f"{stderr or '(stderr empty, bytes=0)'}"}
     try:
         return json.loads(out)
     except Exception as exc:  # noqa: BLE001
         return {"installed": False,
                 "error": f"llama_cpp probe output unparseable "
-                         f"({type(exc).__name__}): {out[:300]}"}
+                         f"({type(exc).__name__}): {out}"}
 
 
 def _prime_torch_before_llama() -> None:
@@ -879,16 +880,10 @@ def _ensure_present_streaming(payload: dict, central_url: str | None, state=None
         logger.warning("streaming provisioning for %s failed: %s", model_key, exc)
 
 
+from hugpy_platform.formatting import human_bytes
+
 def _human(n) -> str:
-    if not n:
-        return "?"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    v = float(n)
-    i = 0
-    while v >= 1024 and i < len(units) - 1:
-        v /= 1024
-        i += 1
-    return f"{v:.1f} {units[i]}"
+    return human_bytes(n, empty="?")
 
 
 def _materialize_file(payload: dict) -> str | None:
@@ -963,6 +958,27 @@ def _jsonable(o):
     return str(o)
 
 
+def _load_failure_payload(exc, *, classify: bool = False):
+    """The additive ``load_failure`` dict for an error payload (2026-09-23):
+    {class, loader_stderr, path} from the engine's structured marker on the
+    cause chain, so central / the audit tool / the grader classify a failed
+    load without regex. None when ``exc`` is not a load failure (unless
+    ``classify`` — for /probe, where every failure IS a load failure) or the
+    engine predates the marker. Older central ignores the unknown key."""
+    try:
+        from hugpy_engine.serve.load_failure import load_failure_of
+        return load_failure_of(exc, classify=classify)
+    except Exception:  # noqa: BLE001 — never fail an error path over metadata
+        return None
+
+
+def _with_load_failure(body: dict, exc, *, classify: bool = False) -> dict:
+    lf = _load_failure_payload(exc, classify=classify)
+    if lf:
+        body["load_failure"] = lf
+    return body
+
+
 def _run_once(payload: dict) -> dict:
     #from abstract_hugpy_dev.managers.dispatch import execute_prompt
 
@@ -1029,6 +1045,11 @@ _SPILL_ENV = {
     # flag would silently make the NEXT model refuse instead of making room,
     # which is a dead-wrong knob in the other direction.
     "no_evict": "HUGPY_NO_EVICT",
+    # Allocation PROVENANCE (2026-09-23): central's {"kind": "designation" |
+    # "per-request", "mode", "request_id", "at"} for this request's placement,
+    # projected as JSON so the slot records who asked for the seat it loads.
+    # Not a load contract (see _LOAD_CONTRACT_KEYS) — it names the asker only.
+    "alloc_source": "HUGPY_ALLOC_SOURCE",
 }
 
 # Mode-contract keys are CLEARED when absent from a request's spill: a leaked
@@ -1058,7 +1079,9 @@ _SPILL_ENV_CLEAR_WHEN_ABSENT = ("alloc_mode", "leniency_pct", "priority_device",
                                 # cross-request leak, not a default. Every
                                 # sibling key above already clears; this one was
                                 # simply missed.
-                                "n_gpu_layers")
+                                "n_gpu_layers",
+                                # provenance is per-request by definition
+                                "alloc_source")
 
 
 # ── operator resource limits (two-tier) ─────────────────────────────────────
@@ -1962,6 +1985,13 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
             "rss_bytes": s.get("rss_bytes"),
             "n_gpu_layers": s.get("n_gpu_layers"), "ctx": s.get("ctx"),
             "vram_bytes": vram_bytes, "device": device,
+            # Allocation provenance (2026-09-23), None from an older slot:
+            # what the seat was loaded FOR and by whom, what it actually got,
+            # and why it replaced a resident of the same model.
+            "alloc_requested": s.get("alloc_requested"),
+            "alloc_source": s.get("alloc_source"),
+            "alloc_effective": s.get("alloc_effective"),
+            "reload_reason": s.get("reload_reason"),
             # Idle-vs-serving for SLOT rows, same semantics as the ram rows
             # below (_SERVING_WINDOW_S against the worker's OWN clock). Before
             # this, slot rows never set `serving` at all, so a slot that had
@@ -2450,6 +2480,9 @@ def _apply_spill(spill: dict | None) -> None:
         if key not in spill or spill[key] is None:
             continue
         val = spill[key]
+        if isinstance(val, dict):
+            os.environ[env_name] = json.dumps(val, sort_keys=True, default=str)
+            continue
         if isinstance(val, (list, tuple)):
             val = ",".join(str(x) for x in val)
         os.environ[env_name] = str(val)
@@ -2460,7 +2493,23 @@ def _apply_spill(spill: dict | None) -> None:
 # second request cannot reuse a resident created under a different contract.
 _LOAD_CONTRACTS: dict[str, tuple] = {}
 _LOAD_CONTRACTS_LOCK = threading.Lock()
-_LOAD_CONTRACT_KEYS = tuple(sorted(_SPILL_ENV))
+# alloc_source is provenance (differs per request id), never a contract term.
+_LOAD_CONTRACT_KEYS = tuple(sorted(k for k in _SPILL_ENV if k != "alloc_source"))
+
+
+def _contract_key(model_key: str) -> str:
+    """The key the resident is actually held under on this worker. Central
+    may send any spelling (bare / ``owner~name``); the slot and the loaded-key
+    set use the worker's canonical registry key, so a contract recorded under
+    the spelling missed the resident entirely (2026-09-23: a per-request
+    ram-only seat of AtomicChat~Qwen3.8-27B-GGUF held as Qwen3.8-27B-GGUF was
+    never evicted). Resolution rule unchanged — get_model_config's own."""
+    try:
+        from hugpy_engine.config.main import get_model_config as _gmc
+        resident = [k for k in (loaded_model_keys() or [])]
+        return _gmc(model_key, prefer=resident or None).model_key or model_key
+    except Exception:  # noqa: BLE001 — unresolvable: keep the spelling
+        return model_key
 
 
 def _load_contract(spill: dict | None) -> tuple:
@@ -2480,6 +2529,7 @@ def _prepare_load_contract(state, model_key: str | None,
     """
     if not model_key:
         return
+    model_key = _contract_key(model_key)
     wanted = _load_contract(spill)
     with _LOAD_CONTRACTS_LOCK:
         previous = _LOAD_CONTRACTS.get(model_key)
@@ -2632,7 +2682,8 @@ def _stream_sync(payload: dict, request_id: str | None = None):
                 job_store.finish(request_id, error=exc)
             except Exception:
                 pass
-        yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        yield _sse(_with_load_failure(
+            {"type": "error", "message": f"{type(exc).__name__}: {exc}"}, exc))
     finally:
         if request_id:
             # done, or cancelled if a cancel was requested; no-op if the
@@ -3808,15 +3859,16 @@ def build_app(state: "WorkerState") -> Flask:
                 _agg_key, ok=False,
                 latency_ms=(time.time() - _agg_t0) * 1000.0,
                 error=f"{type(exc).__name__}: {exc}", task=_agg_task)
-            return jsonify({
+            return jsonify(_with_load_failure({
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
-                "traceback_tail": tb[-1500:],
+                # whole traceback (2026-09-23); the old key name is kept
+                "traceback_tail": tb,
                 # Attribution at the source: direct API consumers (and any
                 # relay that keeps the body) see WHICH box failed without
                 # having to know who they called.
                 "worker": {"id": state.worker_id, "name": state.name},
-            }), 500
+            }, exc)), 500
 
     @app.route("/infer/stream", methods=["POST"])
     def infer_stream():
@@ -3892,10 +3944,11 @@ def build_app(state: "WorkerState") -> Flask:
             _apply_spill(request_spill)
         except Exception as exc:  # before Response: retain a real HTTP error
             gate_token.release()
-            return jsonify({"ok": False,
-                            "error": f"{type(exc).__name__}: {exc}",
-                            "worker": {"id": state.worker_id,
-                                       "name": state.name}}), 500
+            return jsonify(_with_load_failure(
+                {"ok": False,
+                 "error": f"{type(exc).__name__}: {exc}",
+                 "worker": {"id": state.worker_id,
+                            "name": state.name}}, exc)), 500
 
         def _generate():
             # A stream's outcome is only known in the generator's finally — the
@@ -4043,7 +4096,9 @@ def build_app(state: "WorkerState") -> Flask:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=560)
-            rc, tail = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
+            # Whole output (2026-09-23): output_tail kept as the key name for
+            # older consumers; it now carries every byte pip wrote.
+            rc, tail = proc.returncode, (proc.stdout + proc.stderr)
         except Exception as exc:
             return jsonify({"ok": False, "error": {
                 "code": type(exc).__name__, "message": str(exc)}}), 502
@@ -4121,7 +4176,9 @@ def build_app(state: "WorkerState") -> Flask:
             proc = subprocess.run(
                 [sys.executable, "-m", "pip", "install", pkg],
                 capture_output=True, text=True, timeout=560)
-            rc, tail = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
+            # Whole output (2026-09-23): output_tail kept as the key name for
+            # older consumers; it now carries every byte pip wrote.
+            rc, tail = proc.returncode, (proc.stdout + proc.stderr)
         except Exception as exc:
             return jsonify({"ok": False, "error": {
                 "code": type(exc).__name__, "message": str(exc)}}), 502
@@ -4453,9 +4510,13 @@ def build_app(state: "WorkerState") -> Flask:
 
     @app.route("/probe/<path:model_key>", methods=["POST", "GET"])
     def probe(model_key):
-        # Live VRAM-fit check: actually load the model on this worker's GPU and
-        # report whether it fit, plus before/after free VRAM. Loading is cached
-        # by dispatch, so a probe also warms the model for the first real chat.
+        # THE LOAD HALF (operator ruling 2026-09-24): a live VRAM-fit check that
+        # actually LOADS the model on this worker's GPU and reports whether it
+        # fit, plus before/after free VRAM. It pulls-if-absent as part of loading
+        # (fetch-then-load), so it remains the download+load combo for callers
+        # that want both; the fetch-only primitive is POST /models/fetch (disk,
+        # no VRAM). Loading is cached by dispatch, so a probe also warms the model
+        # for the first real chat.
         #
         # Optional POST body: {"spill": {...}} — TASK C (2026-07-25): the ONLY
         # path central's workers_load warm call has to seat an explicit
@@ -4605,6 +4666,194 @@ def build_app(state: "WorkerState") -> Flask:
                             "skipped_count": 0, "reapable_vram_bytes": 0,
                             "error": f"{type(exc).__name__}: {exc}"})
 
+    # ── external lease surface (gpu_lease, 2026-08-11; restored 2026-09-24) ──
+    # A foreign batch job (OCR run, render sweep) registers here as a
+    # pseudo-model: it appears in the pid registry with host_mode "external"
+    # (measured VRAM, heartbeat-fed, visible to the eviction planner and to
+    # central), and its supervisor's control URL lets _evict_model pause it on
+    # real demand. The claim verb is the demand direction back: evict IDLE
+    # managed models so the lease can retake the card. See
+    # worker/external_residents.py and worker/gpu_lease.py.
+    @app.route("/ops/external/register", methods=["POST"])
+    def ops_external_register():
+        body = request.get_json(silent=True) or {}
+        model_key = str(body.get("model_key") or "").strip()
+        if not model_key:
+            return jsonify({"ok": False, "reason": "missing model_key"}), 400
+        pid = body.get("pid")
+        try:
+            pid = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "reason": f"bad pid {pid!r}"}), 400
+        vram_gib = body.get("vram_gib")
+        try:
+            vram_gib = float(vram_gib) if vram_gib is not None else None
+        except (TypeError, ValueError):
+            vram_gib = None
+        evictable = body.get("evictable")
+        if evictable is not None:
+            evictable = bool(evictable)
+        resume = body.get("resume")
+        if resume is not None and resume not in ("enabled", "disabled"):
+            return jsonify({"ok": False,
+                            "reason": f"bad resume {resume!r} "
+                                      "(enabled|disabled)"}), 400
+        try:
+            from hugpy_fleet.worker import external_residents as _extres
+            rec = _extres.register(model_key, pid,
+                                   control_url=body.get("control_url"),
+                                   vram_gib=vram_gib, note=body.get("note"),
+                                   evictable=evictable, resume=resume)
+            if pid:
+                from hugpy_fleet.worker import pid_registry as _pidreg
+                _pidreg.record_launch(model_key, pid, "external",
+                                      cmdline_hint=body.get("note"))
+            return jsonify({"ok": True, "resident": rec})
+        except Exception as exc:  # noqa: BLE001 — never 500 the control plane
+            return jsonify({"ok": False,
+                            "reason": f"{type(exc).__name__}: {exc}"})
+
+    @app.route("/ops/external/unregister", methods=["POST"])
+    def ops_external_unregister():
+        body = request.get_json(silent=True) or {}
+        model_key = str(body.get("model_key") or "").strip()
+        if not model_key:
+            return jsonify({"ok": False, "reason": "missing model_key"}), 400
+        try:
+            from hugpy_fleet.worker import external_residents as _extres
+            from hugpy_fleet.worker import pid_registry as _pidreg
+            was = _extres.unregister(model_key)
+            _pidreg.forget(model_key)
+            return jsonify({"ok": True, "was_registered": was})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False,
+                            "reason": f"{type(exc).__name__}: {exc}"})
+
+    @app.route("/ops/external/set", methods=["POST"])
+    def ops_external_set():
+        # Operator lever for the wildcard-process policy (2026-08-12):
+        # {"model_key": ..., "evictable"?: bool, "resume"?: "enabled"|"disabled"}
+        # Updates the worker-side registry (which the eviction paths enforce)
+        # and best-effort forwards the change to the lease supervisor's own
+        # control URL so its client-side copy — and therefore its heartbeat
+        # re-registers and its resume behaviour — agree.
+        body = request.get_json(silent=True) or {}
+        model_key = str(body.get("model_key") or "").strip()
+        if not model_key:
+            return jsonify({"ok": False, "reason": "missing model_key"}), 400
+        evictable = body.get("evictable")
+        if evictable is not None:
+            evictable = bool(evictable)
+        resume = body.get("resume")
+        if resume is not None and resume not in ("enabled", "disabled"):
+            return jsonify({"ok": False,
+                            "reason": f"bad resume {resume!r} "
+                                      "(enabled|disabled)"}), 400
+        if evictable is None and resume is None:
+            return jsonify({"ok": False,
+                            "reason": "nothing to set: pass evictable "
+                                      "and/or resume"}), 400
+        try:
+            from hugpy_fleet.worker import external_residents as _extres
+            rec = _extres.set_policy(model_key, evictable=evictable,
+                                     resume=resume)
+            if rec is None:
+                return jsonify({"ok": False,
+                                "reason": f"no external lease {model_key!r} "
+                                          "registered"}), 404
+            supervisor_acked = None
+            url = (rec.get("control_url") or "").rstrip("/")
+            if url:
+                try:
+                    import httpx
+                    payload = {}
+                    if evictable is not None:
+                        payload["evictable"] = evictable
+                    if resume is not None:
+                        payload["resume"] = resume
+                    r = httpx.post(url + "/set", json=payload, timeout=10.0)
+                    supervisor_acked = (r.status_code == 200)
+                except Exception:  # noqa: BLE001 — registry is authoritative
+                    supervisor_acked = False
+            return jsonify({"ok": True, "resident": rec,
+                            "supervisor_acked": supervisor_acked})
+        except Exception as exc:  # noqa: BLE001 — never 500 the control plane
+            return jsonify({"ok": False,
+                            "reason": f"{type(exc).__name__}: {exc}"})
+
+    @app.route("/ops/external/claim", methods=["POST"])
+    def ops_external_claim():
+        # {"model_key": ..., "target_free_gib"?: float, "min_idle_s"?: float,
+        #  "include_external"?: bool} — evict idle managed models until free
+        # VRAM >= target, then report honestly. The supervisor launches ONLY on
+        # reached=true and polls again later otherwise. Never blocks, never
+        # forces, never launches. include_external (studio demand class) lets
+        # the claim treat evictable PEER leases as last-resort candidates.
+        body = request.get_json(silent=True) or {}
+        model_key = str(body.get("model_key") or "").strip()
+        if not model_key:
+            return jsonify({"ok": False, "reason": "missing model_key"}), 400
+        try:
+            from hugpy_fleet.worker import external_residents as _extres
+            rec = _extres.get(model_key) or {}
+            tgt = body.get("target_free_gib")
+            if tgt is None:
+                tgt = rec.get("vram_gib")
+            try:
+                target_bytes = int(float(tgt) * 2**30) if tgt else 0
+            except (TypeError, ValueError):
+                return jsonify({"ok": False,
+                                "reason": f"bad target_free_gib {tgt!r}"}), 400
+            if target_bytes <= 0:
+                return jsonify({"ok": False, "reason":
+                                "no target: pass target_free_gib or register "
+                                "with vram_gib first"}), 400
+            mi = body.get("min_idle_s")
+            try:
+                mi = float(mi) if mi is not None else None
+            except (TypeError, ValueError):
+                mi = None
+            include_external = bool(body.get("include_external"))
+            return jsonify({"ok": True, "model_key": model_key,
+                            **_external_claim_headroom(
+                                state, model_key, target_bytes, min_idle_s=mi,
+                                include_external=include_external)})
+        except Exception as exc:  # noqa: BLE001 — claim must never 500
+            return jsonify({"ok": False, "model_key": model_key,
+                            "reached": False,
+                            "reason": f"{type(exc).__name__}: {exc}"})
+
+    @app.route("/ops/residents", methods=["GET"])
+    def ops_residents():
+        # The local residents view central's /llm/workers/<id>/external round-
+        # trips to: measured VRAM residents joined with the dispatch LRU clock,
+        # plus the external-lease records and the card's free/total. Read-only,
+        # always 200.
+        out = {"ok": True, "residents": [], "external": [],
+               "last_used": {}, "free_vram": None, "total_vram": None}
+        try:
+            out["free_vram"] = _free_vram_bytes()
+            out["total_vram"] = _total_vram_bytes()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            lru = _dispatch_last_used()
+            out["last_used"] = lru
+            rows = _vram_residents(state)
+            for r in rows:
+                r = dict(r)
+                r["last_used"] = lru.get(r.get("model_key"), 0.0)
+                r["residency"] = _residency(r.get("model_key") or "")
+                out["residents"].append(r)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from hugpy_fleet.worker import external_residents as _extres
+            out["external"] = _extres.snapshot()
+        except Exception:  # noqa: BLE001
+            pass
+        return jsonify(out)
+
     @app.route("/identity", methods=["GET"])
     def identity():
         """IDENTITY-QUERY-20260910: what actually serves ?model_key=K on this worker.
@@ -4686,7 +4935,7 @@ def build_app(state: "WorkerState") -> Flask:
                     if r.status_code == 200:
                         out["answered_as"] = (r.json() or {}).get("model")
                     else:
-                        out["error"] = f"probe {r.status_code}: {r.text[:200]}"
+                        out["error"] = f"probe {r.status_code}: {r.text}"
                         out["verified"] = False
             else:
                 llm = getattr(runner, "llm", None)
@@ -4879,6 +5128,45 @@ def build_app(state: "WorkerState") -> Flask:
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
+    @app.route("/models/fetch", methods=["POST"])
+    def fetch():
+        """Download a model to THIS worker's DISK without loading it into VRAM.
+
+        The FETCH half of provisioning (operator ruling 2026-09-24): the old
+        /probe was an undocumented download+load combo; this is the download-only
+        primitive. It uses the SAME normal central->worker transfer path lazy
+        first-call provisioning uses (ensure_model_present via _kick_provision),
+        so the pull rides the transfer ledger and the heartbeat's
+        provision_progress — the console shows "downloading from central". It
+        returns immediately (fire-and-forget); the model ends resident on DISK,
+        not in VRAM. Load is a separate, explicit step (POST /probe).
+
+        Body: {"model_key": ...}. Answers {ok, model_key, already_local, started,
+        provisioning}. Never starts a runner.
+        """
+        body = request.get_json(silent=True) or {}
+        model_key = body.get("model_key")
+        if not model_key:
+            return jsonify({"ok": False, "error": "missing model_key"}), 400
+        try:
+            from hugpy_storage.provision import model_is_local
+            try:
+                already = bool(model_is_local(model_key))
+            except Exception:  # noqa: BLE001 — unknown key: not local, kick the pull
+                already = False
+            if already:
+                return jsonify({"ok": True, "model_key": model_key,
+                                "already_local": True, "started": False,
+                                "provisioning": False})
+            _kick_provision(state, model_key, purpose="fetch", load=False)
+            with state._provision_lock:
+                provisioning = model_key in state._provisioning
+            return jsonify({"ok": True, "model_key": model_key,
+                            "already_local": False, "started": True,
+                            "provisioning": provisioning})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
     @app.route("/reap", methods=["POST"])
     def reap():
         """Disk reclaim (tiers-v2 slice 4). The bookend to unassign: delete the
@@ -5046,32 +5334,40 @@ def _probe_model(model_key: str, state: "WorkerState") -> dict:
         # the native --mmproj server path exists). The load "succeeds" but
         # every image turn silently degrades to text-only, so report the probe
         # as FAILED with the actionable reason instead of ok:true.
+        # Since 2026-09-23 the engine REFUSES that load (vision_needs_slot,
+        # surfaced through the except below), so this is a backstop for an
+        # older engine build. Vision == a projector on disk (find_mmproj), NOT
+        # the registry's task list: a GGUF tagged image-text-to-text without a
+        # projector is a text model and loads correctly in-process (that task
+        # test mis-flagged Qwen2.5-7B-Instruct-GGUF).
         if not base_url:
             try:
                 from hugpy_platform.utils import find_mmproj
                 from hugpy_fleet.worker.imports import get_model_config, get_model_path
                 cfg = get_model_config(canonical)
-                tasks = list(getattr(cfg, "tasks", None) or [])
                 mpath = None
                 try:
                     mpath = get_model_path(canonical)
                 except Exception:
                     mpath = getattr(cfg, "dir", None)
-                is_vision = ("image-text-to-text" in tasks
-                             or bool(mpath and find_mmproj(str(mpath))))
-                if is_vision:
+                if mpath and find_mmproj(str(mpath)):
                     result.update(
                         ok=False, fit=False,
-                        error=("vision model loaded in-process (text-only — the "
-                               "python binding cannot load the mmproj projector), "
-                               "so images would be silently ignored. Provide a "
-                               "native llama-server (LLAMA_SERVER_BIN or `hugpy "
-                               "install-engine`) or a healthy slot child so the "
-                               "projector loads."))
+                        error=("vision_needs_slot — vision model loaded in-process "
+                               "(text-only — the python binding cannot load the "
+                               "mmproj projector), so images would be silently "
+                               "ignored. Provide a native llama-server "
+                               "(LLAMA_SERVER_BIN or `hugpy install-engine`) or a "
+                               "healthy slot child so the projector loads."),
+                        load_failure={"class": "vision_needs_slot",
+                                      "loader_stderr": None, "path": str(mpath)})
             except Exception:
                 pass  # capability check is advisory — never turn it into a probe crash
     except Exception as exc:
         result.update(ok=False, fit=False, error=f"{type(exc).__name__}: {exc}")
+        # The load report central stores (load_reports[key]) gets the typed
+        # verdict too — every probe failure IS a load failure, so classify.
+        _with_load_failure(result, exc, classify=True)
     return result
 
 
@@ -5145,6 +5441,16 @@ class WorkerState:
         """A lock-safe copy of per-model download progress for the heartbeat."""
         with self._provision_lock:
             return {k: dict(v) for k, v in self._provision_progress.items()}
+
+
+def _load_bytes_per_s():
+    """The provisioner's measured central->worker transfer rate (bytes/s), or
+    None — never raises (telemetry must not break a heartbeat)."""
+    try:
+        from hugpy_storage.provision import transfer_rate
+        return transfer_rate()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _eager_pull(model_key: str) -> bool:
@@ -5289,10 +5595,12 @@ def _sync_assignment(state: "WorkerState", worker: dict) -> None:
 
 
 def _kick_provision(state: "WorkerState", model_key: str,
-                    purpose: str = "reconcile") -> None:
-    """Provision (and per-policy preload) ONE assigned model in the background.
+                    purpose: str = "reconcile", load: bool = True) -> None:
+    """Provision (and, when ``load``, per-policy preload) ONE model in the
+    background.
 
-    Shared by assignment adoption and the UTIL-08 reconcile loop; the
+    Shared by assignment adoption, the UTIL-08 reconcile loop, and the fetch-only
+    verb (``load=False`` — download to disk, never warm into VRAM); the
     _provisioning guard makes concurrent kicks a no-op.
 
     ``purpose`` ("assign" from adoption, "reconcile" from the loop) is a
@@ -5362,6 +5670,12 @@ def _kick_provision(state: "WorkerState", model_key: str,
                                          state=state, purpose=purpose)
                     logger.info("pre-provisioned %s", mk)
                     state.refused.pop(mk, None)   # it fit after all
+                if not load:
+                    # Fetch-only (operator ruling 2026-09-24): the files are on
+                    # disk now; do NOT warm/seat/preload. Load into VRAM is a
+                    # separate, explicit step (/probe). This is the download half
+                    # the post-test restore uses so a re-provision never re-seats.
+                    return
                 # Warm-up policy (v3 final semantics):
                 #   * slots box — seat assignment is the SLOT-FILLER's job
                 #     (slice 9, static-first): no in-process preload here, so
@@ -5890,6 +6204,12 @@ _LOAD_STARTED: dict = {}
 _BLOCKED_MODELS: set = set()
 _BLOCKED_LOGGED: set = set()
 _BLOCKED_LOCK = threading.Lock()
+# ARCHIVE MARK (2026-09-23): central also publishes the models the operator
+# marked for archive (worker['archived_models'] = {model_key: "marked for
+# archive by <by> at <at>: <reason>"}), a DISTINCT concept from the block. The
+# worker's own background loops skip them exactly like blocked models, and the
+# skip log quotes the recorded mark rather than claiming a block.
+_ARCHIVED_MODELS: dict = {}
 
 
 def _adopt_blocked_models(worker: "dict | None") -> None:
@@ -5900,10 +6220,16 @@ def _adopt_blocked_models(worker: "dict | None") -> None:
     raw = (worker or {}).get("blocked_models") or []
     parsed = ({str(mk) for mk in raw if mk}
               if isinstance(raw, (list, tuple, set)) else set())
+    araw = (worker or {}).get("archived_models") or {}
+    archived = ({str(k): str(v or "") for k, v in araw.items() if k}
+                if isinstance(araw, dict) else {})
     with _BLOCKED_LOCK:
         _BLOCKED_MODELS.clear()
         _BLOCKED_MODELS.update(parsed)
-        _BLOCKED_LOGGED.intersection_update(parsed)  # re-arm anything unblocked
+        _ARCHIVED_MODELS.clear()
+        _ARCHIVED_MODELS.update(archived)
+        # re-arm anything unblocked / unmarked
+        _BLOCKED_LOGGED.intersection_update(parsed | set(archived))
 
 
 def _adopt_least_reaping(worker: "dict | None") -> None:
@@ -5951,7 +6277,7 @@ def _is_blocked_locally(model_key: "str | None") -> bool:
     if not model_key:
         return False
     with _BLOCKED_LOCK:
-        return model_key in _BLOCKED_MODELS
+        return model_key in _BLOCKED_MODELS or model_key in _ARCHIVED_MODELS
 
 
 def _log_blocked_skip_once(model_key: str, where: str) -> None:
@@ -5963,6 +6289,12 @@ def _log_blocked_skip_once(model_key: str, where: str) -> None:
         if model_key in _BLOCKED_LOGGED:
             return
         _BLOCKED_LOGGED.add(model_key)
+        archived = _ARCHIVED_MODELS.get(model_key)
+    if archived is not None and model_key not in _BLOCKED_MODELS:
+        logger.info("%s: skipping %s — %s (central's heartbeat reply; won't "
+                    "retry until unmarked)", where, model_key,
+                    archived or "marked for archive")
+        return
     logger.info("%s: skipping %s — blocked from the serving pool by the "
                 "operator (won't retry until unblocked)", where, model_key)
 
@@ -7651,6 +7983,50 @@ def _comfy_free_models(state: "WorkerState") -> "tuple[bool, str]":
         return False, f"comfy unreachable at {url}: {type(exc).__name__}: {exc}"
 
 
+def _external_pause(ext: dict) -> "tuple[bool, str]":
+    """Ask an EXTERNAL leased resident's supervisor to yield the card via its
+    OWN control API — never a PID kill (the worker doesn't own the job; the
+    supervisor does, and it performs the SIGTERM->grace->SIGKILL on its child
+    process group itself, then replies AFTER the VRAM is actually free). The
+    comfy /free idiom, pointed at ``gpu_lease``'s POST /pause. Degrades
+    gracefully: a dead registered pid is an already-freed resident (idempotent
+    success); an unreachable supervisor with a live pid is an honest refusal —
+    we never os.kill a foreign pid from here (same doctrine as the not-resident
+    branch of _evict_model)."""
+    pid = ext.get("pid")
+    url = (ext.get("control_url") or "").rstrip("/")
+
+    def _pid_alive(p) -> bool:
+        try:
+            os.kill(int(p), 0)
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+
+    if pid and not _pid_alive(pid):
+        return True, f"external pid {pid} already gone — nothing holds the card"
+    if not url:
+        if not pid:
+            return True, "external lease has no live pid — nothing to pause"
+        return False, (f"external pid {pid} is alive but the lease registered "
+                       "no control_url — cannot pause (worker never kills a "
+                       "foreign pid directly)")
+    try:
+        import httpx
+        r = httpx.post(url + "/pause", json={"reason": "evicted by worker"},
+                       timeout=45.0)
+        if r.status_code == 200:
+            return True, ("external supervisor paused its job (child pgroup "
+                          "terminated before replying)")
+        return False, f"external supervisor /pause returned HTTP {r.status_code}"
+    except Exception as exc:  # noqa: BLE001 — supervisor down: degrade, never 500
+        if pid and not _pid_alive(pid):
+            return True, (f"external supervisor unreachable but pid {pid} is "
+                          "gone — treating as already freed")
+        return False, (f"external supervisor unreachable at {url}: "
+                       f"{type(exc).__name__}: {exc}")
+
+
 def _comfy_base_url(state: "WorkerState") -> str:
     """The adopted ComfyUI base URL: the operator/comfy_url setting projects onto
     COMFY_URL (see _apply_settings_env); default 127.0.0.1:8188 matches
@@ -7846,7 +8222,10 @@ def _model_footprint_before_evict(model_key: str, host_mode: str,
     to this one model_key from this hosting mode; never a fabricated number."""
     out = {"vram_bytes": None, "ram_anon_bytes": None, "ram_file_bytes": None,
            "measured_from": None}
-    if host_mode == "slot" and handle:
+    # "external" measures exactly like "slot": a foreign pid whose real VRAM
+    # nvidia-smi attributes directly (the gpu_lease supervisor registers the
+    # GPU-holding descendant pid, so the join is honest).
+    if host_mode in ("slot", "external") and handle:
         pid = handle.get("child_pid")
         if pid is not None:
             try:
@@ -7863,7 +8242,9 @@ def _model_footprint_before_evict(model_key: str, host_mode: str,
                 out["ram_file_bytes"] = detail.get("rss_file_bytes")
             except Exception:  # noqa: BLE001 — /proc unreadable -> stays None
                 pass
-            out["measured_from"] = "slot child pid nvidia-smi + /proc rss split"
+            out["measured_from"] = (
+                ("slot child" if host_mode == "slot" else "external job")
+                + " pid nvidia-smi + /proc rss split")
         return out
     if host_mode == "in_process":
         try:
@@ -8040,6 +8421,44 @@ def _evict_model(state: "WorkerState", model_key: str,
                        "in-process refs dropped + CUDA cache/host arena trimmed"
                        if dropped else "in-process handle already gone",
                        footprint=footprint)
+
+    # 3.5 EXTERNAL leased resident — an adopted foreign batch job (an OCR run,
+    #     a render sweep) supervised by ``worker.gpu_lease``. Mirror of the
+    #     comfy idiom: the worker never owns the PID; it asks the job's
+    #     registered supervisor to yield via its control URL, and the
+    #     supervisor terminates its child process group BEFORE replying, so
+    #     the _result() free-VRAM delta is real. Eviction here never CANCELS
+    #     the job — it pauses it; the supervisor re-claims headroom and
+    #     relaunches once the models go idle again (checkpoint-and-resume is
+    #     the admission contract for registering as external at all).
+    from hugpy_fleet.worker import external_residents as _extres
+    ext = _extres.get(model_key)
+    if ext is not None:
+        # non-evictable is the external twin of static residency (wildcard-
+        # process policy, 2026-08-12): no demand path may pause this job; only
+        # an operator force does. Same override semantics as static.
+        if not ext.get("evictable", True) and not force:
+            return _result("external", False,
+                           "external lease is non-evictable — pass force to "
+                           "override (or /ops/external/set evictable=true)",
+                           child_pid=ext.get("pid"))
+        allowed, why = (True, "") if force else _evict_gate(model_key)
+        if not allowed:
+            return _result("external", False, f"eviction gated: {why}",
+                           child_pid=ext.get("pid"))
+        # Footprint BEFORE the pause — the pid must still hold VRAM to measure.
+        footprint = _model_footprint_before_evict(
+            model_key, "external", {"child_pid": ext.get("pid")})
+        ok, note = _external_pause(ext)
+        if ok:
+            _extres.mark_yielded(model_key)
+            try:
+                from hugpy_fleet.worker import pid_registry as _pidreg
+                _pidreg.forget(model_key)
+            except Exception:  # noqa: BLE001 — sweep_dead reaps it next beat anyway
+                pass
+        return _result("external", ok, note, footprint=footprint,
+                       child_pid=ext.get("pid"))
 
     # 4. Nothing here holds it. This ALSO covers the foreign/rogue case: a model
     #    that resolves only to a process the agent did not spawn (and isn't comfy)
@@ -8646,15 +9065,7 @@ def _note_vram_eviction(victim: str, subject: str, freed: "int | None",
                 victim, host_mode, _human_bytes(freed), subject)
 
 
-def _human_bytes(n: "int | None") -> str:
-    if not n:
-        return "0 B"
-    v = float(n)
-    for u in ("B", "KB", "MB", "GB", "TB"):
-        if v < 1024 or u == "TB":
-            return f"{v:.1f} {u}"
-        v /= 1024
-    return f"{n} B"
+from hugpy_platform.formatting import human_bytes as _human_bytes
 
 
 def _need_split_str(det: dict) -> str:
@@ -10319,6 +10730,22 @@ def _comfy_headroom_candidates(exclude: str | None) -> list[str]:
                 keys.add(mk)                     # slot children DO hold VRAM
     except Exception:  # noqa: BLE001 — no slots / pool error -> in-process only
         pass
+    try:
+        # External leases (gpu_lease batch jobs) yield to an image gen exactly
+        # like a cold LLM does — they are in neither loaded_model_keys nor the
+        # slot pool (foreign pids), so without this they'd be invisible here
+        # and a comfy gen could never preempt an OCR run holding the card.
+        # Never-touched keys sort coldest (lru 0.0), so the lease yields FIRST.
+        # A NON-EVICTABLE lease is dropped here the same way static residency
+        # is below — never a candidate, only operator force touches it. (An
+        # external-lease claim that must not evict its peers filters these out
+        # itself; see _external_claim_headroom.)
+        from hugpy_fleet.worker import external_residents as _extres
+        for rec in _extres.snapshot():
+            if rec.get("evictable", True):
+                keys.add(rec["model_key"])
+    except Exception:  # noqa: BLE001 — no lease registry -> managed models only
+        pass
     if exclude:
         keys.discard(exclude)
     # Drop static (locked) — never a candidate. On-demand (incl. pinned, which
@@ -10418,6 +10845,156 @@ def _comfy_need_report(detail: dict) -> dict:
         out["checkpoint"] = detail["checkpoint"]
         out["checkpoint_bytes"] = detail.get("checkpoint_bytes")
     return out
+
+
+# ── external lease claim (gpu_lease demand direction, 2026-08-11) ────────────
+def _external_min_idle_s() -> float:
+    """OPTIONAL extra damper on lease claims (HUGPY_EXTERNAL_MIN_IDLE_S,
+    default 0 = off). Operator ruling 2026-08-11: eviction eligibility is
+    "is it SERVING or not" — the in-flight gate inside _evict_model (never
+    rip an actively-replying model) is the one true guard, and a model that
+    is not serving may yield to a lease claim regardless of when it last
+    served. Wall-clock idle thresholds are a proxy and stay off by default.
+    The anti-thrash role the old 300s default played now lives client-side:
+    gpu_lease backs off its claim cadence when its resumes keep getting
+    displaced quickly (contention-derived, not hardcoded). Set this env only
+    if a box needs a hard floor anyway."""
+    raw = os.environ.get("HUGPY_EXTERNAL_MIN_IDLE_S")
+    try:
+        val = float(raw) if raw is not None and str(raw).strip() else 0.0
+    except ValueError:
+        logger.warning("ignoring non-numeric HUGPY_EXTERNAL_MIN_IDLE_S=%r; "
+                       "using 0", raw)
+        val = 0.0
+    return max(0.0, val)
+
+
+def _external_claim_headroom(state: "WorkerState", model_key: str,
+                             target_bytes: int,
+                             min_idle_s: "float | None" = None,
+                             include_external: bool = False) -> dict:
+    """Evict IDLE on-demand managed models (LRU, via the SAME _evict_model verb
+    everything else uses, unforced) until free VRAM >= ``target_bytes``, so an
+    external lease (gpu_lease batch job) can take the card. The mirror of
+    _worker_ensure_comfy_headroom, with two deliberate differences:
+
+    * IDLE GUARD: only models unused for >= min_idle_s are candidates. A comfy
+      gen is a user waiting NOW, so it evicts anything evictable; a batch job
+      is nobody waiting, so it only takes the card from models that have
+      genuinely gone quiet. The unforced _evict_gate still protects in-flight
+      generations on top of this.
+    * NO honest-degrade-proceed: this never launches anything. It reports
+      ``reached`` honestly and the SUPERVISOR decides (it polls again later) —
+      a batch job that can't get the card simply stays paused, which is the
+      whole contract.
+
+    ``include_external`` (studio-render demand class, 2026-08-13): normally the
+    OTHER external leases are never candidates here (two leases evicting each
+    other is a ping-pong with no user behind either side; operator arbitrates
+    that by hand). A studio render, though, IS a user waiting, so its claim
+    passes include_external=True to make evictable peer leases (bluebook OCR)
+    last-resort candidates — their supervisors park and resume afterwards. The
+    claimant's own key is always excluded. A non-evictable peer is never a
+    candidate either way (it is dropped by _comfy_headroom_candidates). If
+    models alone don't reach target, an idle comfy is reclaimed last (TTL
+    waived — same as every contention path)."""
+    if min_idle_s is None:
+        min_idle_s = _external_min_idle_s()
+    fv = _free_vram_bytes()
+    if fv is None:
+        return {"target": target_bytes, "free_before": None, "free_after": None,
+                "evicted": [], "skipped": [], "reached": False,
+                "min_idle_s": min_idle_s, "note": "no GPU / unmeasurable"}
+    free_before = fv
+    evicted: list[str] = []
+    skipped: list[dict] = []
+    tried: set[str] = set()
+    try:
+        from hugpy_fleet.worker import external_residents as _extres
+        all_ext = set(_extres.keys())
+    except Exception:  # noqa: BLE001
+        all_ext = set()
+    # Peer leases this claim will NOT touch: every other external lease when
+    # include_external is False; only the claimant itself when it is True.
+    excluded_ext = ({model_key} if include_external
+                    else (all_ext | {model_key}))
+    # FEASIBILITY PRE-CHECK (2026-08-11, with min-idle now defaulting to 0):
+    # if free + everything this claim could possibly reclaim still falls short
+    # of target, evict NOTHING. Without this, a claim polling every 60s while
+    # a busy model holds the card would strip the other idle residents as
+    # pure collateral — reload cost for zero lease progress. Measured bytes
+    # come from the same pid-registry/slot union the evict planner ranks; a
+    # small optimism factor absorbs under-attribution.
+    if fv < target_bytes:
+        measured = {r["model_key"]: int(r.get("vram_bytes") or 0)
+                    for r in _vram_residents(state)}
+        reclaimable = sum(
+            measured.get(mk, 0)
+            for mk in _comfy_headroom_candidates(exclude=model_key)
+            if mk not in excluded_ext)
+        try:
+            reclaimable += int(_comfy_process_vram() or 0)
+        except Exception:  # noqa: BLE001
+            pass
+        if (fv + reclaimable) < int(target_bytes * 0.95):
+            return {"target": target_bytes, "free_before": free_before,
+                    "free_after": fv, "evicted": [], "skipped": [],
+                    "reached": False, "min_idle_s": min_idle_s,
+                    "note": (f"infeasible: free {fv/2**30:.1f}GiB + "
+                             f"reclaimable {reclaimable/2**30:.1f}GiB < target "
+                             f"{target_bytes/2**30:.1f}GiB — nothing evicted "
+                             "(no pointless collateral)")}
+    while fv < target_bytes:
+        now = time.time()
+        last = {}
+        try:
+            last = _dispatch_last_used()
+        except Exception:  # noqa: BLE001 — no LRU clock -> everything reads idle
+            pass
+        cands = []
+        for mk in _comfy_headroom_candidates(exclude=model_key):
+            if mk in tried or mk in excluded_ext:
+                continue
+            idle = now - float(last.get(mk, 0.0))
+            if idle < min_idle_s:
+                tried.add(mk)
+                skipped.append({"model_key": mk, "why":
+                                f"used {idle:.0f}s ago (< min_idle "
+                                f"{min_idle_s:.0f}s)"})
+                continue
+            cands.append(mk)
+        if not cands:
+            break
+        victim = cands[0]
+        tried.add(victim)
+        try:
+            res = _evict_model(state, victim, force=False)
+        except Exception:  # noqa: BLE001 — one bad evict must not wedge the claim
+            logger.warning("external-claim: evict of %s raised; skipping",
+                           victim, exc_info=True)
+            continue
+        if res.get("evicted"):
+            evicted.append(victim)
+            logger.info("external-claim: evicted idle %s (%s) so lease %s can "
+                        "take the card", victim, res.get("host_mode"), model_key)
+        else:
+            skipped.append({"model_key": victim,
+                            "why": str(res.get("reason") or "not evicted")})
+        fv = _free_vram_bytes()
+        if fv is None:
+            break
+    # Models alone short of target: an idle comfy pays last (same clauses as
+    # every contention path — a rendering comfy is never disturbed).
+    if fv is not None and fv < target_bytes:
+        freed = _comfy_reclaim_idle_vram(state, incoming_model=None,
+                                         need_bytes=target_bytes - fv)
+        if freed:
+            evicted.append("comfy")
+            fv = _free_vram_bytes()
+    reached = (fv is not None and fv >= target_bytes)
+    return {"target": target_bytes, "free_before": free_before,
+            "free_after": fv, "evicted": evicted, "skipped": skipped,
+            "reached": reached, "min_idle_s": min_idle_s}
 
 
 def _prune_stale_residency(state: "WorkerState") -> None:
@@ -11174,6 +11751,17 @@ def _vram_headroom_sweep_body(state: "WorkerState", total: int, fv: int) -> None
             _evt_emit("candidate.skip", model_key=mk, tier=_tier,
                       reason="comfy (own headroom path)")
             continue                         # comfy has its own path; never here
+        if str(r.get("host_mode")) == "external":
+            # An external lease (gpu_lease batch job) legitimately holds most
+            # of the card WHENEVER it runs — that is not the out-of-band-growth
+            # deadlock this sweep exists to break, and sweeping it would put
+            # the job in a permanent 60s pause/resume thrash with no demand
+            # behind it. Real demand still evicts it: admission evict-to-fit,
+            # the comfy headroom path, external claims, and explicit /ops/evict
+            # all reach the external branch of _evict_model.
+            _evt_emit("candidate.skip", model_key=mk, tier=_tier,
+                      reason="external lease (demand-evictable only)")
+            continue
         if _residency(mk) == "static":
             _evt_emit("candidate.skip", model_key=mk, tier=_tier,
                       reason="static (locked residency)")
@@ -11558,29 +12146,11 @@ def _terminal_exit(exc: "WorkerRejected") -> None:
     os._exit(0)
 
 
-def env_status() -> dict:
-    """Runtime-env capability snapshot: which env TIER this worker serves.
+from hugpy_platform.environment_status import environment_status
 
-    The tier names the venv this unit runs (WORKER_ENV_TIER, default "stable" —
-    the known-good pinned env; "edge" = bleeding-edge libs for models the stable
-    env can't load). Library versions are read from the running env itself, so
-    central sees the truth rather than a config claim. Central routes a model
-    mapped in HUGPY_MODEL_ENV_TIERS only to workers advertising that tier.
-    """
-    import platform
-    tier = (os.environ.get("WORKER_ENV_TIER") or "stable").strip().lower()
-    info: dict = {"tier": tier or "stable", "python": platform.python_version()}
-    try:
-        from importlib.metadata import version
-        for pkg in ("llama-cpp-python", "transformers", "torch",
-                    "diffusers", "accelerate", "bitsandbytes"):
-            try:
-                info[pkg] = version(pkg)
-            except Exception:  # noqa: BLE001 — absent package: simply unreported
-                pass
-    except Exception:  # noqa: BLE001
-        pass
-    return info
+def env_status() -> dict:
+    return environment_status(("llama-cpp-python", "transformers", "torch",
+                               "diffusers", "accelerate", "bitsandbytes"))
 
 
 # ── install-shape detection (central-side drift detection) ──────────────────
@@ -12007,6 +12577,10 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
                     "models_local": _models_local(state),
                     "provisioning": sorted(state._provisioning),
                     "provision_progress": state.provision_snapshot(),
+                    # Measured central->worker transfer rate (B/s, EMA over
+                    # completed provisions; None until one lands). The
+                    # benchmark derives its cold-load budget from it.
+                    "load_bytes_per_s": _load_bytes_per_s(),
                     "spill": _spill_describe(),
                     "url": state.url,     # None -> central keeps source-IP URL
                     "port": state.port,
@@ -12311,6 +12885,18 @@ def main(argv: list[str] | None = None) -> int:
         install_storage_providers()
     except Exception as _exc:  # noqa: BLE001 — an ungated pull beats no worker
         logger.warning("storage providers not installed: %s", _exc)
+    # 2026-09-23: the split worker resolves models via direct engine imports and
+    # never constructs a LocalBackend, so nothing installed the engine catalog
+    # source into this process. hugpy_storage.catalog_register then no-ops against
+    # NullCatalogSource and central can teach the worker NO model — every unbuilt
+    # key 400s "unknown model_key … central could not teach it one", leaving zero
+    # hot models fleet-wide. Install the bridge here at the worker composition root
+    # so the live registry backs catalog_register / ensure_model_registered.
+    try:
+        from hugpy_engine.catalog_bridge import install as _install_catalog_bridge
+        _install_catalog_bridge()
+    except Exception as _exc:  # noqa: BLE001 — a box without the engine still boots
+        logger.warning("engine catalog bridge not installed: %s", _exc)
     # BOOT DETOX (2026-07-08 ae crash-loop): a 0.1.158 studio render setdefault'ed
     # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, which SURVIVES the agent's
     # re-exec (os.environ is inherited by execv) and this driver/torch combo dies
@@ -12328,6 +12914,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.central:
         print("error: --central (or WORKER_CENTRAL_URL) is required", file=sys.stderr)
         return 2
+
+    # WORKER_CENTRAL_URL is the worker marker the storage layer reads
+    # (hugpy_storage.provision.worker_central_url): on a worker, serve-path
+    # weights come from central ONLY, never Hugging Face. A worker started with
+    # just --central / HUGPY_BASE_URL must carry it too — for this process and
+    # every slot child (they inherit os.environ).
+    os.environ.setdefault("WORKER_CENTRAL_URL", args.central)
 
     _apply_cli_spill(args)
 

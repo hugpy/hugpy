@@ -18,7 +18,7 @@ Implementations live in ``hugpy_fleet.central.placement``; see
 ``py/EXTRACTION_GUIDE.md`` section 4. Each Protocol lists, per method, the
 fleet function it replaces so the provider is a thin adapter:
 
-    WorkerRegistry    central.workers   (workers_for_model, _match_keys -> key_forms)
+    WorkerRegistry    central.workers   (workers_for_model, shared model-key forms)
     WorkerTransport   central.worker_http (base_url, breaker_key, guard, note_ok,
                                           note_failure, breaker_snapshot,
                                           breaker_scope, async_client,
@@ -182,6 +182,13 @@ class Blocklist(Protocol):
 
     def block_reason(self, model_key: str) -> Optional[str]: ...
 
+    # Optional (2026-09-23): the post-download admission gate's refusal for a
+    # HELD model. Callers use getattr — an implementation without it = "never held".
+    # def admission_reason(self, model_key: str) -> Optional[str]: ...
+    # Optional (2026-09-23): the operator's ARCHIVE mark refusal (hugpy.json
+    # "archive"). Callers use getattr — absent = "never marked".
+    # def archive_reason(self, model_key: str) -> Optional[str]: ...
+
 
 @runtime_checkable
 class ModelMetrics(Protocol):
@@ -217,22 +224,7 @@ class PriorityGroups(Protocol):
 # Null defaults: single-box / no-fleet behaviour.
 # ---------------------------------------------------------------------------
 
-def local_key_forms(model_key: Any) -> set:
-    """The engine-side mirror of the fleet's key-form rule: raw, lower-cased,
-    the ``/``-tail and the ``~``-tail (each lower-cased too)."""
-    if not model_key:
-        return set()
-    raw = str(model_key).strip()
-    forms = {raw, raw.lower()}
-    tail = raw.split("/")[-1]
-    forms.add(tail)
-    forms.add(tail.lower())
-    if "~" in raw:
-        base = raw.split("~", 1)[1]
-        if base:
-            forms.add(base)
-            forms.add(base.lower())
-    return forms
+from hugpy_platform.model_keys import model_key_forms as local_key_forms
 
 
 class NullWorkerRegistry:
@@ -357,6 +349,12 @@ class NullBlocklist:
         return ()
 
     def block_reason(self, model_key: str):
+        return None
+
+    def admission_reason(self, model_key: str):
+        return None
+
+    def archive_reason(self, model_key: str):
         return None
 
 

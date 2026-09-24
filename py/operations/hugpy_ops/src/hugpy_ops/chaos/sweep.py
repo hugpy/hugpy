@@ -67,7 +67,6 @@ from hugpy_ops.chaos.schema import (
     SWEEP_VRAM_PCTS_COARSE,
     blank_observation,
     blank_sweep,
-    validate_observation,
 )
 
 GIB = 1 << 30
@@ -325,12 +324,8 @@ class SweepRunner:
         self.counts[key] = self.counts.get(key, 0) + 1
 
     def _append(self, obs: dict):
-        problems = validate_observation(obs)
-        if problems:
-            obs.setdefault("_schema_problems", problems)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.obs_path, "a") as f:
-            f.write(json.dumps(obs) + "\n")
+        from hugpy_ops.chaos.observations import append_observation
+        append_observation(self.out_dir, self.obs_path, obs)
 
     def _is_sweep_job(self, job: dict) -> bool:
         rid = str(job.get("id") or job.get("request_id") or "")

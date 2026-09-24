@@ -39,17 +39,16 @@ def studio_model_id(model_key: str) -> str:
     return mid
 
 
-class StudioVideoRunner:
+from hugpy_platform.runner_config import RunnerConfig
+
+
+class StudioVideoRunner(RunnerConfig):
     """Serves ``text-to-video`` (capability t2v) and ``image-to-video``
     (capability i2v — a request carrying ``start_image``/``source_video``)."""
 
     request_type = VideoGenRequest
     result_type = VideoGenResult
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     def _render(self, req: VideoGenRequest) -> VideoGenResult:
         from hugpy_video.intel.runners.studio_i2v import render_clip

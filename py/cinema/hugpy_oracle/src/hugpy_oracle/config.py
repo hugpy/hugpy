@@ -70,10 +70,7 @@ LEDGER_CACHE_ROOT_ENV = "HUGPY_INTERIM_LEDGER_ROOT"
 LEGACY_BENCHMARK_ROOT = "/home/ubuntu/station/model-battery"
 
 
-def _env(name: str) -> Optional[str]:
-    value = os.environ.get(name)
-    value = value.strip() if value else ""
-    return value or None
+from hugpy_platform.env import env_value as _env
 
 
 def _platform_home() -> str:

@@ -349,3 +349,16 @@
   border-radius: var(--radius-lg);
 }
 .btn-stop:hover:not(:disabled) { background: #ff9a9a; border-color: #ff9a9a; }
+
+/* Worker pin (system decides | one holding worker) and dev-grade error detail */
+.chat-alloc .alloc-pin { display:inline-flex; align-items:center; gap:6px; margin-right:10px; user-select:auto; }
+.chat-alloc .alloc-pin select {
+  font-size: 11px; padding: 1px 6px; max-width: 220px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+}
+.chat-alloc .alloc-pin select:focus { outline: none; border-color: var(--accent); }
+.msg-error-detail { display:grid; gap:6px; margin-top:6px; max-width:100%; user-select:text; }
+.msg-error-meta { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; font:11px ui-monospace,monospace; color:var(--muted); }
+.msg-error-meta b { color:var(--text); font-weight:600; }
+.msg-diag summary { cursor:pointer; font-size:11px; color:var(--accent); margin-bottom:4px; }

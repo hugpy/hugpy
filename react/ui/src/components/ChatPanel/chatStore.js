@@ -78,6 +78,47 @@ export function subscribe(listener) {
 export function getSnapshot() { return snapshot }
 
 export function getMessages(modelKey) { return chats[modelKey] || EMPTY }
+
+// Per-model worker pin for the chat box: '' = "system decides" (no alloc in
+// the body); a worker name = `alloc: {worker}` (an explicit pin is a contract
+// server-side: it fails naming why rather than rerouting). Persisted per model.
+const PIN_KEY = 'hugpy.chat.worker.v1'
+function loadPins() { try { return JSON.parse(localStorage.getItem(PIN_KEY)) || {} } catch { return {} } }
+export function getWorkerPin(modelKey) { return loadPins()[modelKey] || '' }
+export function setWorkerPin(modelKey, worker) {
+  const pins = loadPins()
+  if (worker) pins[modelKey] = worker; else delete pins[modelKey]
+  try { localStorage.setItem(PIN_KEY, JSON.stringify(pins)) } catch { /* quota / private mode */ }
+}
+
+// A chat failure, kept whole (dev console — no placation): the server's
+// message verbatim, its `diagnostics` object when present, request id,
+// log_ref and the raw body/event for anything else.
+function errorDetail({ status, message, data, event, requestId, worker }) {
+  const src = event || data || {}
+  const d = {
+    message: String(message ?? ''),
+    status: status ?? undefined,
+    request_id: src.request_id || requestId || undefined,
+    log_ref: src.log_ref || undefined,
+    worker_pin: worker || undefined,
+    diagnostics: src.diagnostics ?? undefined,
+  }
+  if (event) d.event = event
+  else if (data !== undefined) d.body = data
+  return d
+}
+function failTurn(modelKey, detail, { replaceEmpty = true } = {}) {
+  setMessages(modelKey, prev => {
+    const copy = [...prev]
+    const last = copy[copy.length - 1]
+    const bubble = { role: 'assistant', content: `[Error: ${detail.message}]`, error: true, errorDetail: detail }
+    if (last?.role === 'assistant' && (replaceEmpty ? last.content === '' : true)) {
+      copy[copy.length - 1] = { ...last, ...bubble, model: last.model, status: null }
+    } else copy.push(bubble)
+    return copy
+  })
+}
 export function isStreaming(modelKey) { return !!streaming[modelKey] }
 export function getAllocation(modelKey) { return allocation[modelKey] || null }
 
@@ -113,7 +154,7 @@ export function stopMessage(modelKey) {
 // Issue the chat request and stream the response straight into this module's
 // store. Deliberately a plain function — NOT a hook, NOT inside a component's
 // render/effect — so nothing about a component's lifecycle can touch it.
-export async function sendMessage(modelKey, { model, history, system, maxTokens, attachment }) {
+export async function sendMessage(modelKey, { model, history, system, maxTokens, attachment, worker }) {
   if (streaming[modelKey]) return
   streaming[modelKey] = true
   allocation[modelKey] = null
@@ -140,6 +181,7 @@ export async function sendMessage(modelKey, { model, history, system, maxTokens,
   if (maxTokens) payload.max_new_tokens = maxTokens
   if (attachment?.path) payload.file = attachment.path
   if (attachment?.isImage && attachment?.dataUrl) payload.images = [attachment.dataUrl]
+  if (worker) payload.alloc = { worker }
 
   const modelName = model?.name ?? modelKey
   setMessages(modelKey, prev => [...prev, { role: 'assistant', content: '', model: modelName }])
@@ -153,7 +195,15 @@ export async function sendMessage(modelKey, { model, history, system, maxTokens,
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     })
-    if (!resp.ok) throw new Error(`${resp.status}: ${await resp.text()}`)
+    if (!resp.ok) {
+      const text = await resp.text()
+      let data
+      try { data = JSON.parse(text) } catch { data = text }
+      const msg = (data && typeof data === 'object' && (data.error || data.detail || data.message)) || text || `HTTP ${resp.status}`
+      const err = new Error(`${resp.status}: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`)
+      err.detail = errorDetail({ status: resp.status, message: err.message, data, requestId: requestIds[modelKey], worker })
+      throw err
+    }
 
     const reader = resp.body.getReader()
     const dec = new TextDecoder()
@@ -196,12 +246,7 @@ export async function sendMessage(modelKey, { model, history, system, maxTokens,
               return copy
             })
           } else if (evt.type === 'error') {
-            setMessages(modelKey, prev => {
-              const copy = [...prev]
-              const last = copy[copy.length - 1]
-              if (last?.role === 'assistant') copy[copy.length - 1] = { ...last, content: `[Error: ${evt.message}]`, error: true }
-              return copy
-            })
+            failTurn(modelKey, errorDetail({ message: evt.message, event: evt, requestId: requestIds[modelKey], worker }), { replaceEmpty: false })
           }
         } catch { /* ignore malformed SSE line */ }
       }
@@ -218,16 +263,8 @@ export async function sendMessage(modelKey, { model, history, system, maxTokens,
         return copy
       })
     } else {
-      setMessages(modelKey, prev => {
-        const copy = [...prev]
-        const last = copy[copy.length - 1]
-        if (last?.role === 'assistant' && last.content === '') {
-          copy[copy.length - 1] = { role: 'assistant', content: `[Error: ${e.message}]`, error: true }
-        } else {
-          copy.push({ role: 'assistant', content: `[Error: ${e.message}]`, error: true })
-        }
-        return copy
-      })
+      failTurn(modelKey, e.detail || errorDetail({ message: e.message, requestId: requestIds[modelKey], worker,
+        data: { name: e.name, stack: e.stack } }))
     }
   } finally {
     streaming[modelKey] = false

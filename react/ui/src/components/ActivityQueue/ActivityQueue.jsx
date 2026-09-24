@@ -1,5 +1,9 @@
 import { useEffect, useState, useRef } from 'react'
 import { fetchJson } from '../../api'
+import { EMPTY_ARRAY, useFeed } from '../../runtime/feeds'
+import { WorkerPulls } from '../ModelTable/StatusCells'
+import { workerProvisioning } from '../ModelTable/modelStatus'
+import '../ModelTable/ModelStatus.css'
 import './ActivityQueue.css'
 
 // Live in-flight GENERATION across ALL transports (CON-01). Polls GET
@@ -50,7 +54,10 @@ export default function ActivityQueue() {
     return () => { alive = false; clearInterval(timer.current) }
   }, [])
 
-  const busy = jobs.length > 0
+  // Worker pulls from central are activity too (heartbeat provisioning).
+  const fWorkers = useFeed('workers', EMPTY_ARRAY)
+  const pulls = workerProvisioning(fWorkers)
+  const busy = jobs.length > 0 || pulls.length > 0
   const byTransport = jobs.reduce((acc, j) => {
     const t = j.transport || j.kind || '?'
     acc[t] = (acc[t] || 0) + 1
@@ -87,11 +94,13 @@ export default function ActivityQueue() {
         title="Live generation across every transport (web, /v1, discord, cli)"
       >
         <span className={`dot ${busy ? 'dot-amber' : 'dot-dim'}`} />
-        {busy ? `${jobs.length} live · ${transportSummary}` : 'queue idle'}
+        {busy ? [jobs.length && `${jobs.length} live · ${transportSummary}`, pulls.length && `${pulls.length} pulling`].filter(Boolean).join(' · ') : 'queue idle'}
       </button>
 
       {open && busy && (
         <div className="aq-pop" role="status">
+          {pulls.length > 0 && <><div className="aq-head">Worker pulls from central · {pulls.length}</div>
+            <div className="aq-row"><WorkerPulls workers={fWorkers} /></div></>}
           <div className="aq-head">In-flight jobs · {jobs.length}</div>
           {jobs.map(j => (
             <div key={j.id} className={`aq-row aq-${j.status}`}>

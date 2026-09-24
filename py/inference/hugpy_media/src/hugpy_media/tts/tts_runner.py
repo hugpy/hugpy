@@ -72,12 +72,7 @@ def _adapter_path() -> str:
     return _adapter().__file__
 
 
-def _output_dir() -> str:
-    """``DEFAULT_ROOT/video_intel/tts`` — the adapter's own output home, resolved
-    here so the child (which cannot import the package) can be told where to
-    write."""
-    from hugpy_platform.constants import DEFAULT_ROOT
-    return os.path.join(DEFAULT_ROOT, "video_intel", "tts")
+from hugpy_media.tts.paths import output_dir as _output_dir
 
 
 def _weights_dir(model_key: str) -> str | None:
@@ -172,7 +167,10 @@ def _run_in_process(spec_kwargs: dict[str, Any], out_dir: str) -> dict[str, Any]
     return payload
 
 
-class ChatterboxTtsRunner:
+from hugpy_platform.runner_config import RunnerConfig
+
+
+class ChatterboxTtsRunner(RunnerConfig):
     """Runner for the chatterbox TTS backend.
 
     Stateless by design: the backend lives in a child process whose lifetime is
@@ -184,10 +182,6 @@ class ChatterboxTtsRunner:
     request_type = TtsRequest
     result_type = TtsResult
 
-    def __init__(self, cfg, **runtime_kwargs):
-        self.cfg = cfg
-        self.model_key = cfg.model_key
-        self._runtime_kwargs = runtime_kwargs
 
     # --- synthesis ----------------------------------------------------------
 

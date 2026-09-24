@@ -144,15 +144,7 @@ def _list_workers() -> List[Dict[str, Any]]:
         return []
 
 
-def _url_host(url: str) -> str:
-    from urllib.parse import urlparse
-    if not url:
-        return ""
-    u = url if "://" in url else "http://" + url
-    try:
-        return (urlparse(u).hostname or "").lower()
-    except Exception:  # noqa: BLE001
-        return ""
+from hugpy_video.intel.net import url_host as _url_host
 
 
 def _delegation_base(template: ReservationTemplate) -> str:

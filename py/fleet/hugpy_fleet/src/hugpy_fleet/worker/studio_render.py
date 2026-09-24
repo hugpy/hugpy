@@ -82,14 +82,10 @@ def _cancelled_payload(message: str) -> dict:
         "code": "cancelled", "message": message, "retryable": False}}
 
 
+from hugpy_platform.versioning import module_version
+
 def _pkg_version() -> str:
-    """This worker's package version — echoed on every response so central can log
-    a version skew against its own. Best-effort; 'unknown' if unresolved."""
-    try:
-        from hugpy_fleet import __version__
-        return str(__version__)
-    except Exception:  # noqa: BLE001
-        return "unknown"
+    return module_version("hugpy_fleet")
 
 
 class _RenderJob:

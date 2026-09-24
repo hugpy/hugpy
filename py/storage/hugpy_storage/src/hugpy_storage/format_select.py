@@ -202,10 +202,16 @@ def select_files(
 
 def effective_bytes(
     files: Iterable[Tuple[str, int]],
-    *,
     framework: Optional[str] = None,
 ) -> int:
-    """Sum of the single-format effective file set — the honest ledger size."""
+    """Sum of the single-format effective file set — the honest ledger size.
+
+    ``framework`` is positional-or-keyword ON PURPOSE: this is the function the
+    server installs as the storage footprint selector, whose contract
+    (providers.Footprint) is ``(listing, framework)`` positional. It was
+    keyword-only until 2026-09-23, so every selector call raised TypeError and
+    console/model_physical.annotate_size recorded ``size_bytes: None`` for every
+    non-GGUF model."""
     return sum(s for (_r, s) in select_files(files, framework=framework))
 
 

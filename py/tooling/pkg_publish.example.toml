@@ -1,0 +1,79 @@
+# pkg_publish — the GitHub commit+push step of the pkg_src pipeline.
+#
+# This is an EXAMPLE. Nothing reads it here. To turn publishing on, copy it to
+# the real path and edit it there:
+#
+#     cp py/tooling/pkg_publish.example.toml /srv/hugpy/etc/pkg_publish.toml
+#     # then edit /srv/hugpy/etc/pkg_publish.toml: enabled = true, mode = "dry-run"
+#
+# Load order: $PKG_PUBLISH_CONFIG, else /srv/hugpy/etc/pkg_publish.toml. If the
+# file is absent, publishing is disabled (a hard no-op — the watcher never acts).
+#
+# Roll out in two moves, reviewing the pkg_src.publishes rows between them:
+#   1. enabled = true, mode = "dry-run"  -> the watcher stages + secret-scans +
+#      commits LOCALLY on each promotion->healthy, but never pushes; or run it by
+#      hand:  python3 py/tooling/pkg_src.py publish --config <NAME> --dry-run
+#   2. mode = "push"                     -> the same, and it pushes.
+#
+# The token is NEVER written to git config, a remote URL, a log, or the DB. It is
+# read from `env_file` at run time and handed to git only via a GIT_ASKPASS
+# helper, then scrubbed from any captured output.
+
+# Master switch. false = the step is inert no matter what the watcher sees.
+enabled = false
+
+# "dry-run" = stage + scan + commit locally, never push.
+# "push"    = the above, then push to each repo's remote branch.
+mode = "dry-run"
+
+# The GitHub PAT: variable NAME and the .env-style file it is read from.
+# (Never put the value here or anywhere in git.)
+token_env = "HUGPY_GIPPA_FIAIN"
+env_file  = "/srv/hugpy/.env"
+
+# Commit author. A "Published-By: pkg_src promotion <id>" trailer is added by the
+# step itself. No Co-Authored-By line: the hook is the pipeline's own action.
+[author]
+name  = "putkoff"
+email = "putkey2@sbcglobal.net"
+
+# One [[repo]] block per tree to publish. include_untracked=false stages only
+# tracked modifications (git add -u); true also adds new files (git add -A),
+# always honoring .gitignore. extra_gitignore unstages extra glob patterns after
+# staging. A diverged remote branch is skipped (never force-pushed).
+
+[[repo]]
+path              = "/srv/hugpy/src/hugpy"
+url               = "https://github.com/hugpy/hugpy.git"
+branch            = "main"
+include_untracked = true
+extra_gitignore   = []
+
+[[repo]]
+path              = "/srv/hugpy/src"
+url               = "https://github.com/hugpy/hugpy-dev-mono.git"
+branch            = "dev"
+include_untracked = true
+# hugpy/ and py/hugpy_agent are nested repos, already gitignored by this tree.
+extra_gitignore   = []
+
+[[repo]]
+path              = "/srv/pyit/dev/hugpy_agent"
+url               = "https://github.com/hugpy/hugpy-agent.git"
+branch            = "main"
+include_untracked = true
+extra_gitignore   = []
+
+[[repo]]
+path              = "/srv/pyit/dev/abstract_toolserver"
+url               = "https://github.com/AbstractEndeavors/abstract-toolserver.git"
+branch            = "main"
+include_untracked = true
+extra_gitignore   = []
+
+[[repo]]
+path              = "/srv/pyit/dev/abstract_claude"
+url               = "https://github.com/AbstractEndeavors/abstract-claude.git"
+branch            = "main"
+include_untracked = true
+extra_gitignore   = []

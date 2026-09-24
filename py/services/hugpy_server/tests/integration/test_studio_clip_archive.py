@@ -122,6 +122,13 @@ ARCHIVE_ID = "archive-me"
 CONTROL_ID = "leave-me-listed"
 _ARCHIVE_URI = None
 
+
+def _ok_result(uri):
+    out = {"asset_id": "asset-archive", "uri": uri, "kind": "video",
+           "mime": "video/mp4", "width": 320, "height": 180, "duration_s": 2.0}
+    return {"job_id": "x", "ok": True, "outputs": [out], "error": None}
+
+
 if _FFMPEG:
     req = CapabilityRequest(capability=Capability.I2V,
                             target_resolution=Resolution(320, 180, 12),
@@ -129,11 +136,6 @@ if _FFMPEG:
     _spec = dataclasses.asdict(make_studio_i2v(
         capability="i2v", width=320, height=180, fps=12, vram_budget_gb=0.5, seed=0,
         out_root=_WORK, prompt="synthetic archive-test clip"))
-
-    def _ok_result(uri):
-        out = {"asset_id": "asset-archive", "uri": uri, "kind": "video",
-               "mime": "video/mp4", "width": 320, "height": 180, "duration_s": 2.0}
-        return {"job_id": "x", "ok": True, "outputs": [out], "error": None}
 
     _res_a = produce_clip(req, env=_env(), out_root=_WORK)
     assert _res_a.is_ok(), _res_a
@@ -152,11 +154,6 @@ else:
         capability="i2v", width=320, height=180, fps=12, vram_budget_gb=0.5, seed=0,
         out_root=_WORK, prompt="synthetic archive-test clip (no ffmpeg)"))
     _fake_uri = os.path.join(_WORK, "no-ffmpeg-stub", "clip.mp4")
-
-    def _ok_result(uri):
-        out = {"asset_id": "asset-archive", "uri": uri, "kind": "video",
-               "mime": "video/mp4", "width": 320, "height": 180, "duration_s": 2.0}
-        return {"job_id": "x", "ok": True, "outputs": [out], "error": None}
 
     _insert_job(ARCHIVE_ID, "studio_i2v", "done", _ok_result(_fake_uri), _spec)
     _insert_job(CONTROL_ID, "studio_i2v", "done", _ok_result(_fake_uri), _spec)

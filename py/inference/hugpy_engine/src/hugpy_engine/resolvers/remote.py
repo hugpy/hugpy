@@ -92,6 +92,38 @@ def set_worker_lookup_provider(lookup_fn: Optional[Callable]) -> None:
                 getattr(lookup_fn, "__name__", lookup_fn))
 
 
+# Explicit-pin admission (2026-09-23). An ``alloc.worker`` pin bypasses
+# locality / designation / pool / task selection — it must NOT bypass the two
+# facts that make a load possible at all: central's llm_storage holds the
+# model's WEIGHTS (workers take weights from central only), and the quant fits
+# the named box (the same static feasibility normal placement applies). The web
+# layer registers ``gate_fn(worker, model_key) -> refusal reason | None``.
+# Unset (standalone / older web layer) = no gate, behaviour unchanged.
+_worker_pin_gate: Optional[Callable[[dict, str], Optional[str]]] = None
+
+
+def set_worker_pin_gate(gate_fn: Optional[Callable]) -> None:
+    """Register the explicit-pin admission check (web -> core), optional."""
+    global _worker_pin_gate
+    _worker_pin_gate = gate_fn
+    logger.info("worker pin gate registered: %s",
+                getattr(gate_fn, "__name__", gate_fn))
+
+
+def _pin_refusal(worker: dict, model_key: str) -> Optional[str]:
+    """The registered gate's refusal for pinning ``model_key`` to ``worker``,
+    or None. A gate that RAISES is not a verdict — it never blocks a call."""
+    if _worker_pin_gate is None:
+        return None
+    try:
+        reason = _worker_pin_gate(worker, model_key)
+    except Exception as exc:  # noqa: BLE001 — a broken gate must not invent a refusal
+        logger.warning("worker pin gate failed for %s on %s: %s", model_key,
+                       worker.get("name") or worker.get("id"), exc)
+        return None
+    return (str(reason).strip() or None) if reason else None
+
+
 def set_placement_provider(place_fn: Optional[Callable]) -> None:
     """Register the allocator-driven shard placement (web -> core), optional."""
     global _placement_provider
@@ -173,6 +205,14 @@ def _query_meta(worker: dict, model_key: str, payload: Any, *,
     if isinstance(timings, dict):
         prompt_tokens = timings.get("prompt_n")
         completion_tokens = timings.get("predicted_n")
+        # The engine's own split of THIS call's wall time: prompt eval vs
+        # generation (llama-server timings, milliseconds).
+        for src, dst in (("prompt_ms", "prompt_s"), ("predicted_ms", "engine_gen_s")):
+            try:
+                if timings.get(src) is not None:
+                    meta[dst] = round(float(timings[src]) / 1000.0, 4)
+            except (TypeError, ValueError):
+                pass
     if usage:
         prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
         completion_tokens = usage.get("completion_tokens", completion_tokens)
@@ -199,6 +239,23 @@ def _query_meta(worker: dict, model_key: str, payload: Any, *,
         meta.pop("estimated", None)
     if source:
         meta["source"] = source
+    # THE CALL-LEDGER ROW's own numbers (2026-09-23): the generation split
+    # (prompt_s / generation_s / gen_tokens / gen_basis / call_tok_s) and the
+    # serving stamp (worker / quant / alloc_mode) — from the engine timings and
+    # what the serving seat reported, never from the request.
+    try:
+        split = generation_split(timings, elapsed_s=elapsed_s, gen_s=gen_s,
+                                 completion_tokens=completion_tokens)
+        for k in ("prompt_s", "generation_s", "gen_tokens", "gen_basis"):
+            if split.get(k) is not None:
+                meta[k] = split[k]
+        meta["call_tok_s"] = split.get("tok_per_s")
+        stamp = call_stamp(worker, model_key, timings)
+        meta["stamp"] = stamp
+        if isinstance(timings, dict) and isinstance(timings.get("served"), dict):
+            meta["served"] = timings["served"]
+    except Exception:  # noqa: BLE001
+        pass
     for k, v in (("prompt_tokens", prompt_tokens),
                  ("completion_tokens", completion_tokens),
                  ("elapsed_s", elapsed_s), ("ttft_s", ttft_s),
@@ -232,6 +289,244 @@ def _query_meta(worker: dict, model_key: str, payload: Any, *,
     return tok_s, meta
 
 
+def per_call_row(worker: Optional[dict], model_key: str, tok_s: Optional[float],
+                 meta: Dict[str, Any], *, task: Optional[str] = None,
+                 caller: Optional[str] = None) -> Dict[str, Any]:
+    """The durable per-call row for ONE completed relay: its OWN numbers.
+
+    ``tok_per_s`` is completion tokens / wall duration of THIS call (what a
+    caller experiences); the engine's generation-only rate, the prompt-eval and
+    generation seconds ride beside it when the worker reported them. Pure."""
+    w = worker or {}
+    tokens = meta.get("completion_tokens")
+    dur = meta.get("elapsed_s")
+    if "call_tok_s" in meta:
+        # The call ledger's own number (gen_tokens / generation_s, see
+        # generation_split) — one tok/s definition for both logs.
+        tps = meta.get("call_tok_s")
+    else:
+        try:
+            tps = (float(tokens) / float(dur)) if tokens and dur and float(dur) > 0 else None
+        except (TypeError, ValueError):
+            tps = None
+    req_caller = caller or meta.get("caller")
+    detail = {"task": task, "prompt_tokens": meta.get("prompt_tokens"),
+              "gen_s": meta.get("gen_s"), "ttft_s": meta.get("ttft_s"),
+              "prompt_s": meta.get("prompt_s"), "engine_gen_s": meta.get("engine_gen_s"),
+              "generation_s": meta.get("generation_s"), "gen_tokens": meta.get("gen_tokens"),
+              "gen_basis": meta.get("gen_basis"),
+              "engine_tok_s": round(float(tok_s), 3) if tok_s is not None else None,
+              "tok_s_source": meta.get("source"), "estimated": bool(meta.get("estimated")),
+              "request_id": meta.get("request_id"), "streaming": meta.get("streaming"),
+              "ok": meta.get("ok"), "caller": req_caller or "api",
+              "quant": ((meta.get("stamp") or {}).get("quant") or None) if isinstance(meta.get("stamp"), dict)
+              else (w.get("quant") or ((w.get("model_quants") or {}).get(model_key)
+                                       if isinstance(w.get("model_quants"), dict) else None)),
+              "alloc_mode": ((meta.get("stamp") or {}).get("alloc_mode") or None) if isinstance(meta.get("stamp"), dict)
+              else ((w.get("model_alloc_modes") or {}).get(model_key)
+                    if isinstance(w.get("model_alloc_modes"), dict) else None),
+              "worker": w.get("name") or w.get("id")}
+    return {"worker_card": f"{w.get('name') or w.get('id')}:0" if (w.get("name") or w.get("id")) else None,
+            "tokens": int(tokens) if tokens else None,
+            "duration_s": round(float(dur), 4) if dur else None,
+            "tok_per_s": round(tps, 3) if tps is not None else None,
+            "outcome": "ok" if meta.get("ok", True) else "error",
+            "detail": {k: v for k, v in detail.items() if v is not None}}
+
+
+def _num_or_none(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def generation_split(timings: Any, *, elapsed_s: Optional[float] = None,
+                     gen_s: Optional[float] = None,
+                     completion_tokens: Any = None) -> Dict[str, Any]:
+    """THIS call's prompt / generation split for the call ledger. Pure.
+
+    ``{prompt_s, generation_s, gen_tokens, gen_basis, tok_per_s}``:
+
+    * ``engine`` — llama-server ``timings``: prompt_s = prompt_ms, generation_s
+      = predicted_ms, gen_tokens = predicted_n - 1 (the first token is sampled
+      by the prompt pass and timed in prompt_ms; predicted_ms starts after it —
+      see eviction.tok_s_from_timings);
+    * ``wall-minus-prompt`` — prompt_ms known but no predicted_ms: generation_s
+      = elapsed - prompt_s, gen_tokens = completion - 1;
+    * ``stream`` — no engine timings on a streamed relay: generation_s = first
+      -> last token clock, gen_tokens = completion - 1;
+    * ``wall`` — nothing better: generation_s = elapsed, gen_tokens = completion.
+
+    tok_per_s = gen_tokens / generation_s, None when either is <= 0 (a 1-token
+    reply has no generation window — that is an absence, not a rate)."""
+    t = timings if isinstance(timings, dict) else {}
+    out: Dict[str, Any] = {}
+    prompt_ms = _num_or_none(t.get("prompt_ms"))
+    pred_ms = _num_or_none(t.get("predicted_ms"))
+    pred_n = _num_or_none(t.get("predicted_n"))
+    ct = _num_or_none(completion_tokens)
+    el = _num_or_none(elapsed_s)
+    gs = _num_or_none(gen_s)
+    if prompt_ms is not None and prompt_ms >= 0:
+        out["prompt_s"] = round(prompt_ms / 1000.0, 4)
+    if pred_ms is not None and pred_ms >= 0 and pred_n is not None:
+        out.update(generation_s=round(pred_ms / 1000.0, 4),
+                   gen_tokens=max(0, int(pred_n) - 1), gen_basis="engine")
+    elif out.get("prompt_s") is not None and el is not None and ct is not None:
+        out.update(generation_s=round(max(0.0, el - out["prompt_s"]), 4),
+                   gen_tokens=max(0, int(ct) - 1), gen_basis="wall-minus-prompt")
+    elif gs is not None and gs > 0 and ct is not None:
+        out.update(generation_s=round(gs, 4), gen_tokens=max(0, int(ct) - 1),
+                   gen_basis="stream")
+    elif el is not None and ct is not None:
+        out.update(generation_s=round(el, 4), gen_tokens=max(0, int(ct)),
+                   gen_basis="wall")
+    g, n = out.get("generation_s"), out.get("gen_tokens")
+    out["tok_per_s"] = (round(n / g, 3) if isinstance(n, int) and n > 0
+                        and g is not None and g > 0 else None)
+    return out
+
+
+def _ledger_alloc(n_gpu_layers: Any, total_layers: Any, n_cpu_moe: Any) -> Optional[str]:
+    """The allocation a seat actually runs, in the call ledger's vocabulary
+    (the benchmark lanes' names): 'explicit' (MoE experts pinned to CPU via
+    n_cpu_moe), 'ram_only' (0 layers on GPU), 'gpu_only' (-1 / every layer),
+    'split' (a partial layer count). None when unknowable."""
+    if n_cpu_moe not in (None, "", 0, "0"):
+        return "explicit"
+    if isinstance(n_gpu_layers, str) and n_gpu_layers.strip().lower() in ("off", "cpu", "none"):
+        return "ram_only"
+    ngl = _num_or_none(n_gpu_layers)
+    if ngl is None:
+        return None
+    total = _num_or_none(total_layers)
+    if ngl == 0:
+        return "ram_only"
+    if ngl < 0 or (total is not None and ngl >= total):
+        return "gpu_only"
+    return "split" if total is not None else None
+
+
+def _keyed(mapping: Any, model_key: str) -> Any:
+    """``mapping[model_key]`` under any alias form (owner~name / bare name)."""
+    if not isinstance(mapping, dict):
+        return None
+    if model_key in mapping:
+        return mapping[model_key]
+    tail = str(model_key).split("~")[-1]
+    for k, v in mapping.items():
+        if str(k).split("~")[-1] == tail:
+            return v
+    return None
+
+
+def call_stamp(worker: Optional[dict], model_key: str, timings: Any) -> Dict[str, Any]:
+    """WHERE and HOW this call was served, for its call-ledger row:
+    ``{worker, quant, alloc_mode, stamp_source}`` (+ ``stamp_missing`` naming
+    what could not be determined). Never read from the request: the stamp is
+    what hugpy resolved, in order of authority —
+
+    1. ``timings.served`` — the serving seat's own report for THIS call (the
+       GGUF file it has open and its layer placement; base_runner);
+    2. the worker's heartbeat slot record for this model (model_path,
+       n_gpu_layers, total_layers, n_cpu_moe);
+    3. the placement decision (``model_alloc_modes`` + ``bnb_by_model``) — an
+       allocation only; the file still has to come from 1 or 2.
+
+    A non-GGUF model has no file choice: quant 'runtime default'. Pure."""
+    w = worker if isinstance(worker, dict) else {}
+    out: Dict[str, Any] = {"worker": w.get("name") or w.get("id")}
+    quant = alloc = None
+    src = []
+    served = timings.get("served") if isinstance(timings, dict) else None
+    if isinstance(served, dict):
+        quant = served.get("model_file") or None
+        alloc = _ledger_alloc(served.get("n_gpu_layers"), served.get("total_layers"),
+                              served.get("n_cpu_moe"))
+        if quant or alloc:
+            src.append("served:" + str(served.get("source") or "worker"))
+    if not quant or not alloc:
+        tail = str(model_key).split("~")[-1]
+        for slot in (w.get("slots") or []):
+            if not isinstance(slot, dict) or not slot.get("model_path"):
+                continue
+            if str(slot.get("model_key") or "").split("~")[-1] != tail:
+                continue
+            import os
+            if not quant:
+                quant = os.path.basename(str(slot["model_path"]))
+            if not alloc:
+                alloc = _ledger_alloc(slot.get("n_gpu_layers"), slot.get("total_layers"),
+                                      slot.get("n_cpu_moe"))
+            src.append("heartbeat-slot")
+            break
+    if not alloc:
+        mode = _keyed(w.get("model_alloc_modes"), model_key)
+        if mode:
+            base = str(mode).replace("-", "_")
+            alloc = f"4-bit:{base}" if _keyed(w.get("bnb_by_model"), model_key) else base
+            src.append("placement-decision")
+    if not quant:
+        fw = None
+        try:
+            from hugpy_engine.config.main import get_model_config
+            fw = str(getattr(get_model_config(model_key), "framework", "") or "").lower()
+        except Exception:  # noqa: BLE001
+            fw = None
+        if fw and "gguf" not in fw and "llama" not in fw:
+            quant = "runtime default"
+            src.append(f"framework:{fw}")
+    out["quant"] = quant or ""
+    out["alloc_mode"] = alloc or ""
+    out["stamp_source"] = "+".join(src) if src else None
+    missing = [k for k, v in (("quant", quant), ("alloc_mode", alloc)) if not v]
+    if missing:
+        why = {"quant": "no model file in the serving seat's report nor in a heartbeat slot",
+               "alloc_mode": "no layer placement in the seat's report, a heartbeat slot or "
+                             "the placement decision"}
+        out["stamp_missing"] = "; ".join(f"{k} unknown: {why[k]} for {model_key}" for k in missing)
+    return out
+
+
+def _stamp_done(worker: Optional[dict], model_key: str, request_id: Any,
+                timings: Any, usage: Any, *, elapsed_s: Optional[float] = None,
+                gen_s: Optional[float] = None) -> Tuple[Optional[dict], Optional[dict]]:
+    """(usage, timings) for a completed relay, ready for the caller.
+
+    usage: when the worker sent none but the engine's timings carry the
+    counts, the engine's own counts (prompt_n / predicted_n) — measured, not
+    estimated; the /v1 ``usage`` object is then real for every relayed call.
+    timings: the engine block plus ``call`` — this call's ledger stamp and
+    generation split ({request_id, worker, quant, alloc_mode, prompt_s,
+    generation_s, gen_tokens, gen_basis, tok_per_s}), so a caller (the
+    benchmark) can store the same numbers the ledger row holds. Never raises."""
+    try:
+        u = dict(usage) if isinstance(usage, dict) and usage else None
+        t = dict(timings) if isinstance(timings, dict) and timings else None
+        if u is None and t is not None:
+            pn, cn = t.get("prompt_n"), t.get("predicted_n")
+            if isinstance(pn, int) or isinstance(cn, int):
+                u = {"prompt_tokens": pn if isinstance(pn, int) else None,
+                     "completion_tokens": cn if isinstance(cn, int) else None,
+                     "source": "engine-timings"}
+                if isinstance(pn, int) and isinstance(cn, int):
+                    u["total_tokens"] = pn + cn
+        ct = (u or {}).get("completion_tokens")
+        split = generation_split(t, elapsed_s=elapsed_s, gen_s=gen_s, completion_tokens=ct)
+        stamp = call_stamp(worker, model_key, t)
+        call = {"request_id": request_id, **stamp, **split}
+        if elapsed_s is not None:
+            call["elapsed_s"] = round(float(elapsed_s), 4)
+        t = {**(t or {}), "call": {k: v for k, v in call.items() if v is not None}}
+        return u, t
+    except Exception:  # noqa: BLE001 — stamping must never fail a reply
+        logger.debug("done stamping skipped for %s", model_key, exc_info=True)
+        return (usage if isinstance(usage, dict) else None,
+                timings if isinstance(timings, dict) else None)
+
+
 def _record_model_metrics(worker: dict, model_key: str,
                           tok_s: Optional[float], meta: Dict[str, Any],
                           task: Optional[str] = None) -> None:
@@ -254,9 +549,20 @@ def _record_model_metrics(worker: dict, model_key: str,
         if completion_tokens:
             # elapsed_s is the call's total wall-clock (from _query_meta); it is
             # the per-(model, task) compute-time a time-aware allocator prices.
-            model_metrics_store.record_call(model_key, float(completion_tokens),
-                                            task=task,
-                                            compute_s=meta.get("elapsed_s"))
+            # ``call`` = THIS call's own numbers for its durable compute_actions
+            # row (tokens, wall duration, tokens/duration, the prompt/gen split,
+            # worker, quant, alloc, caller) — before 2026-09-23 the row carried
+            # only the token count, so every call read tok/s 0/None.
+            row = per_call_row(worker, model_key, tok_s, meta, task=task)
+            try:
+                model_metrics_store.record_call(model_key, float(completion_tokens),
+                                                task=task,
+                                                compute_s=meta.get("elapsed_s"),
+                                                call=row)
+            except TypeError:   # a store that predates ``call=`` (external PG store)
+                model_metrics_store.record_call(model_key, float(completion_tokens),
+                                                task=task,
+                                                compute_s=meta.get("elapsed_s"))
         if tok_s is None or meta.get("estimated"):
             return
         loaded_at = meta.get("loaded_at_pick")
@@ -309,8 +615,12 @@ def _record_serve_metrics(worker: Optional[dict], model_key: str,
         # record_call half only needs the token count, which _query_meta
         # extracts even when no rate was derivable.
         _record_model_metrics(worker, model_key, tok_s, meta, task=task)
-        if _serve_metrics_sink is None or tok_s is None:
+        if _serve_metrics_sink is None:
             return
+        # EVERY completed call reaches the sink (it appends the call-ledger
+        # row); ``tok_s`` None = no engine rate for this call — the sink then
+        # skips only its rate EMAs, never the ledger row.
+        meta["task"] = task
         _serve_metrics_sink(wid, model_key, tok_s, **meta)
     except Exception:  # noqa: BLE001 — recording must never fail a request
         logger.debug("serve-metrics recording skipped for %s", model_key,
@@ -520,6 +830,16 @@ def _resolve_requested_worker(want: str, model_key: str,
             raise RuntimeError(
                 f"requested worker '{want}' could not be resolved: {exc}") from exc
         if worker is not None:
+            # The override bypasses SELECTION, never feasibility: central must
+            # hold the weights it would send, and they must fit the box.
+            refusal = _pin_refusal(worker, model_key)
+            if refusal:
+                logger.warning(
+                    "explicit worker override REFUSED: %s -> %s for %s: %s",
+                    want, worker.get("name") or worker.get("id"), model_key,
+                    refusal)
+                raise RuntimeError(
+                    f"requested worker '{want}' refused for {model_key}: {refusal}")
             logger.warning(
                 "explicit worker override: %s -> %s for %s (automatic locality, "
                 "designation, pool and task filters bypassed)",
@@ -616,11 +936,14 @@ class WorkerBusyError(RuntimeError):
     names exactly what is saturated.
     """
 
-    def __init__(self, worker: Optional[dict], model_key: Optional[str], requests_in_flight: int):
+    def __init__(self, worker: Optional[dict], model_key: Optional[str], requests_in_flight: int,
+                 diagnostics: Optional[dict] = None):
         self.worker = worker or {}
         self.model_key = model_key
         self.requests_in_flight = int(requests_in_flight)
         self.worker_name = self.worker.get("name") or self.worker.get("id") or "worker"
+        # The structured record the message is rendered from (routing_diagnostics).
+        self.diagnostics = diagnostics
         super().__init__(self.stream_message())
 
     @property
@@ -628,9 +951,15 @@ class WorkerBusyError(RuntimeError):
         return self.requests_in_flight
 
     def stream_message(self) -> str:
-        return (f"worker_busy: {self.worker_name} is at its in-process concurrency "
-                f"limit for {self.model_key} ({self.requests_in_flight} in flight) and no "
-                f"other worker holding it is free — retry shortly")
+        # FACTS, not advice (operator 2026-09-23): the gate, the failed
+        # predicate, every worker's state and why it was skipped, the gate's
+        # own wait rule with its timer, and the log_ref of the stored record.
+        if self.diagnostics:
+            from hugpy_engine import routing_diagnostics as _rd
+            return _rd.render(self.diagnostics, code="worker_busy")
+        return (f"worker_busy: gate=relay_inflight_cap; predicate: in_flight_central("
+                f"{self.worker_name}, {self.model_key})={self.requests_in_flight} >= "
+                f"concurrency_limit and no other candidate admitted within the gate window")
 
     def as_error(self) -> Dict[str, Any]:
         return {"error": {
@@ -641,6 +970,7 @@ class WorkerBusyError(RuntimeError):
             "model": self.model_key,
             "requests_in_flight": self.requests_in_flight,
             "in_flight": self.requests_in_flight,
+            "diagnostics": self.diagnostics,
         }}
 
 
@@ -869,16 +1199,76 @@ def _reserve_once(model_key: str, pool: Optional[str], primary_worker: dict,
     return None
 
 
-def _busy(primary_worker: dict, model_key: str) -> "WorkerBusyError":
+def _all_workers() -> List[dict]:
+    try:
+        return list(_placement.get_worker_registry().list_workers(online_only=False) or [])
+    except Exception:  # noqa: BLE001 — diagnostics must never break a request
+        return []
+
+
+def _refusal_diag(model_key: str, req: Any, gate: str, predicate: str, *,
+                  rule: Optional[str] = None, candidate_ids=(),
+                  skips: Optional[dict] = None) -> dict:
+    """Build + STORE the structured record of one routing refusal
+    (routing_diagnostics); returns it with ``log_ref`` set. Never raises."""
+    from hugpy_engine import routing_diagnostics as _rd
+    try:
+        diag = _rd.build(
+            request_id=getattr(req, "request_id", None),
+            requested=getattr(req, "model", None) or getattr(req, "model_key", None),
+            resolved=model_key, gate=gate, predicate=predicate,
+            alloc=getattr(req, "alloc", None), rule=rule, workers=_all_workers(),
+            candidate_ids=candidate_ids,
+            in_flight=lambda wid: _inflight_count(wid, model_key),
+            slot_served=lambda w: _model_slot_served(w, model_key), skips=skips)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("refusal diagnostics failed for %s: %s", model_key, exc)
+        diag = {"request_id": getattr(req, "request_id", None),
+                "model": {"requested": model_key, "resolved": model_key},
+                "gate": gate, "worker": "unrouted", "predicate": predicate, "rule": rule,
+                "alloc": getattr(req, "alloc", None) if isinstance(getattr(req, "alloc", None), dict) else None,
+                "candidates": [], "log_ref": None,
+                "diagnostics_error": f"{type(exc).__name__}: {exc}"}
+    return _rd.record(diag)
+
+
+def _refusal_message(model_key: str, req: Any, gate: str, predicate: str, **kw) -> str:
+    """The refusal text rendered from its stored diagnostics record."""
+    from hugpy_engine import routing_diagnostics as _rd
+    return _rd.render(_refusal_diag(model_key, req, gate, predicate, **kw))
+
+
+def _busy(primary_worker: dict, model_key: str, *, req: Any = None,
+          pool: Optional[str] = None, task: Optional[str] = None) -> "WorkerBusyError":
+    primary_id = (primary_worker or {}).get("id") or ""
+    alts = _candidates(model_key, pool, task) if pool is not None or task is not None \
+        else _candidates(model_key)
+    cids = [primary_id] + [a.get("id") for a in alts if a.get("id") and a.get("id") != primary_id]
+    by_id = {primary_id: primary_worker or {}, **{a.get("id"): a for a in alts if a.get("id")}}
+    counts = []
+    for wid in cids:
+        w = by_id.get(wid) or {}
+        cap = _effective_cap(w, model_key)
+        counts.append(f"{w.get('name') or wid} {_inflight_count(wid, model_key)}/"
+                      f"{'slot-served' if cap is None else cap}")
+    wait = _gate_wait_s()
+    diag = _refusal_diag(
+        model_key, req, "worker_busy",
+        f"no candidate admitted within {wait:g}s: in_flight_central >= concurrency_limit on "
+        f"every candidate [{', '.join(counts)}]",
+        rule=(f"relay gate polls every 0.1s for up to HUGPY_CENTRAL_GATE_WAIT_S={wait:g}s, then "
+              f"refuses; nothing re-submits this request; in-flight counts are per central "
+              f"process (pid {os.getpid()}); a count stuck at its limit with no acquire for "
+              f"HUGPY_CENTRAL_GATE_STALE_S={_gate_stale_s():g}s is reset as a leaked release"),
+        candidate_ids=cids)
     return WorkerBusyError(primary_worker, model_key,
-                           _inflight_count((primary_worker or {}).get("id") or "",
-                                           model_key))
+                           _inflight_count(primary_id, model_key), diagnostics=diag)
 
 
 def _acquire_relay_slot(model_key: str, pool: Optional[str], primary_worker: dict,
                         primary_spill, *, viable: Optional[Callable[[dict], bool]] = None,
                         wait_s: Optional[float] = None,
-                        task: Optional[str] = None) -> _RelaySlot:
+                        task: Optional[str] = None, req: Any = None) -> _RelaySlot:
     """SYNC cap-aware admission (tests + any synchronous caller).
 
     Admit one relay under the cap, rerouting to another holder or WAITING briefly
@@ -897,7 +1287,7 @@ def _acquire_relay_slot(model_key: str, pool: Optional[str], primary_worker: dic
             return slot
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _busy(primary_worker, model_key)
+            raise _busy(primary_worker, model_key, req=req, pool=pool, task=task)
         time.sleep(min(0.1, remaining))
 
 
@@ -905,7 +1295,7 @@ async def _acquire_relay_slot_async(model_key: str, pool: Optional[str],
                                     primary_worker: dict, primary_spill, *,
                                     viable: Optional[Callable[[dict], bool]] = None,
                                     wait_s: Optional[float] = None,
-                                    task: Optional[str] = None) -> _RelaySlot:
+                                    task: Optional[str] = None, req: Any = None) -> _RelaySlot:
     """ASYNC cap-aware admission for DelegatingRunner.run/stream.
 
     Identical policy to the sync variant, but the bounded wait YIELDS the shared
@@ -925,7 +1315,7 @@ async def _acquire_relay_slot_async(model_key: str, pool: Optional[str],
             return slot
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _busy(primary_worker, model_key)
+            raise _busy(primary_worker, model_key, req=req, pool=pool, task=task)
         await asyncio.sleep(min(0.1, remaining))
 
 
@@ -1161,11 +1551,9 @@ class ColdHoldCapacityError(RuntimeError):
         return (f"cold_load_capacity: '{self.model_key}' {state} "
                 f"'{self.worker_name}', and central is already holding "
                 f"{self.held} concurrent model loads — its limit "
-                f"({self.cap} per server process). Nothing is broken and this "
-                f"request was not started: it is refused straight away rather "
-                f"than queued, so the console and health checks stay "
-                f"responsive. Retry in about {self.retry_after_s}s, or wait for "
-                f"a load already in flight to finish.")
+                f"({self.cap} per server process, pid {os.getpid()}). This "
+                f"request was refused before it started (not queued); "
+                f"Retry-After={self.retry_after_s}s (HUGPY_COLD_HOLD_RETRY_AFTER_S).")
 
     def as_error(self) -> Dict[str, Any]:
         return {"error": {
@@ -1269,6 +1657,12 @@ _PERMANENT_LOAD_MARKERS = (
     # Operator model BLOCK: a distinct, permanent operator refusal — never held
     # or retried (see comms.blocklist.BLOCKED_MARKER; this string mirrors it).
     "blocked from the serving pool",
+    # Post-download ADMISSION held the model (hugpy_fleet.central.admission_gate
+    # HELD_MARKER): a recorded verdict, not a transient — never held/retried.
+    "held from the serving pool by admission",
+    # Operator ARCHIVE mark (hugpy_storage.archive_mark ARCHIVE_MARKER): the
+    # operator's recorded intent to retire the model — permanent until unmarked.
+    "marked for archive",
     # Per-request worker pin that cannot bind (_resolve_requested_worker): the
     # named box is offline / not holding the model. Retrying cannot conjure it;
     # honest fast failure keeps A/B data truthful.
@@ -1388,6 +1782,12 @@ _STATE_DEPENDENT_LOAD_MARKERS = (
     "local serving disabled", "hugpy_no_local_serving",
     # operator BLOCK — unblocking must take effect immediately, never after a TTL
     "blocked from the serving pool",
+    # Post-download ADMISSION held the model (hugpy_fleet.central.admission_gate
+    # HELD_MARKER): a recorded verdict, not a transient — never held/retried.
+    "held from the serving pool by admission",
+    # Operator ARCHIVE mark (hugpy_storage.archive_mark ARCHIVE_MARKER): the
+    # operator's recorded intent to retire the model — permanent until unmarked.
+    "marked for archive",
     # AMBIGUOUS LOADER NULL-RETURN (k70, 2026-08-04). llama-cpp's bindings raise
     # the SAME generic "Failed to load model from file: <path>" for a
     # structurally-bad file AND for a load killed by exhausted/leaked VRAM or
@@ -1472,18 +1872,75 @@ def _request_shape_message(model_key: str, worker: Optional[dict],
             f"fail identically. Fix the message list and send again.")
 
 
-def _blocked_reason(model_key: Optional[str]) -> Optional[str]:
+def _blocked_reason(model_key: Optional[str], req: Any = None) -> Optional[str]:
     """Operator BLOCK gate: the honest refusal when ``model_key`` is blocked from
     the serving pool, else None. Block is an operator override that outranks BOTH
     routing selection AND pin — a blocked model is never resolved to a worker AND
     never served locally, so this sits at the TOP of run()/stream(), ahead of
     selection and the local-serving policy. Best-effort (the blocklist lives in
     the stdlib-only comms package); any failure ⇒ None so the gate can never take
-    serving down."""
+    serving down.
+
+    ADMISSION (2026-09-23): the same gate refuses a model the post-download
+    admission HELD (static audit failed, load failed, or no grade) — see
+    hugpy_fleet.central.admission_gate. ``pending`` is routable (the admission
+    benchmark must reach the model). An explicit ``alloc.force=true`` on the
+    request bypasses the admission half (never the operator block) for
+    diagnosis."""
     try:
-        return _placement.get_blocklist().block_reason(model_key)
+        blocked = _placement.get_blocklist().block_reason(model_key)
     except Exception:  # noqa: BLE001 — a block read must never break a request
+        blocked = None
+    if blocked:
+        return blocked
+    archived = _archive_refusal(model_key)
+    if archived:
+        return archived
+    return _admission_refusal(model_key, req)
+
+
+def _alloc_force(req: Any) -> bool:
+    a = getattr(req, "alloc", None)
+    return isinstance(a, dict) and str(a.get("force")).strip().lower() in ("true", "1", "yes")
+
+
+def _gate_of(reason: str) -> str:
+    """Which gate a _blocked_reason text came from."""
+    if "marked for archive" in (reason or ""):
+        return "archive_marked"
+    return "admission_held" if "held from the serving pool by admission" in (reason or "") \
+        else "operator_block"
+
+
+def _archive_refusal(model_key: Optional[str]) -> Optional[str]:
+    """The operator ARCHIVE mark's refusal (who marked it, when, why), else None.
+
+    Enforced like the operator block — ``alloc.force`` does NOT bypass it (the
+    admission bypass exists for diagnosing a machine verdict; an archive mark is
+    the operator's own decision). Fail-open on a read error."""
+    if not model_key:
         return None
+    try:
+        fn = getattr(_placement.get_blocklist(), "archive_reason", None)
+        return fn(model_key) if fn is not None else None
+    except Exception:  # noqa: BLE001 — a gate read must never break a request
+        return None
+
+
+def _admission_refusal(model_key: Optional[str], req: Any = None) -> Optional[str]:
+    """The admission gate's refusal for a HELD model, else None (fail-open)."""
+    if not model_key:
+        return None
+    try:
+        fn = getattr(_placement.get_blocklist(), "admission_reason", None)
+        reason = fn(model_key) if fn is not None else None
+    except Exception:  # noqa: BLE001 — a gate read must never break a request
+        return None
+    if reason and req is not None and _alloc_force(req):
+        logger.warning("admission gate BYPASSED by alloc.force for %s (request %s): %s",
+                       model_key, getattr(req, "request_id", None), reason)
+        return None
+    return reason
 
 
 class _ColdRetry(Exception):
@@ -1588,11 +2045,19 @@ def _active_load_verdict(worker_id, model_key: str) -> "Optional[str]":
 
 def _verdict_message(model_key: str, worker: "Optional[dict]", cached: str) -> str:
     wname = (worker or {}).get("name") or (worker or {}).get("id") or "worker"
-    return (f"'{model_key}' on '{wname}' failed to load moments ago and the "
-            f"failure is permanent (retrying cannot fix it): {cached} — "
-            f"answered from the load-verdict cache without re-attempting; "
-            f"the verdict expires {int(_load_verdict_ttl_s())}s after the "
-            f"failure, sooner if the model serves successfully elsewhere.")
+    with _LOAD_VERDICTS_LOCK:
+        entry = _LOAD_VERDICTS.get(((worker or {}).get("id") or "", model_key))
+    ttl = _load_verdict_ttl_s()
+    if entry:
+        now = time.time()
+        when = (f"{int(max(0.0, now - (entry[0] - ttl)))}s ago; this cached verdict "
+                f"expires in {int(max(0.0, entry[0] - now))}s")
+    else:
+        when = f"within the last {int(ttl)}s"
+    return (f"'{model_key}' on '{wname}' failed to load {when} and the loader "
+            f"classed the failure as permanent: {cached} — answered from the "
+            f"load-verdict cache without re-attempting the load (cleared early "
+            f"if the model serves successfully elsewhere).")
 
 
 def _retry_backoff_next(current_s: float) -> float:
@@ -1643,11 +2108,11 @@ def _cold_timeout_message(model_key: str, worker: Optional[dict],
         return _request_shape_message(model_key, worker, last_err)
     wname = (worker or {}).get("name") or (worker or {}).get("id") or "worker"
     if ceiling:
-        tail = f" (last: {last_err})" if last_err else ""
-        return (f"'{model_key}' did not finish loading on '{wname}' in time"
-                f"{tail} — the hold hit its hard ceiling — it kept reporting "
-                f"progress but never became ready; try again or assign it "
-                f"elsewhere.")
+        tail = f" (last error: {last_err})" if last_err else " (worker reported no error text)"
+        at = f"; last observed progress: {last_progress}" if last_progress else ""
+        dur = f" after {int(stalled_for)}s" if stalled_for is not None else ""
+        return (f"'{model_key}' did not finish loading on '{wname}'{dur}: the hold hit its "
+                f"hard ceiling while the worker kept reporting progress{at}{tail}")
     # SPECIFICITY DISCIPLINE (operator, 2026-07-29: "why is it unsure of what
     # the actual problem was? … this needs to be specific"). When the worker
     # NAMED an error, that error IS the diagnosis — repeating it inside a
@@ -1667,9 +2132,7 @@ def _cold_timeout_message(model_key: str, worker: Optional[dict],
     where = f" at {last_progress}" if last_progress else ""
     dur = f" for {int(stalled_for)}s" if stalled_for is not None else ""
     return (f"'{model_key}' made no forward progress{where}{dur} on '{wname}' "
-            f"and the worker reported no error — the load went silent. Check "
-            f"the worker's own logs for the cause (OOM kills and hung IO die "
-            f"without reporting); try again or assign it elsewhere.")
+            f"and the worker reported no error text for this load")
 
 
 # A worker answering "busy" is a worker that is DEMONSTRABLY ALIVE AND WORKING.
@@ -1914,10 +2377,27 @@ def _worker_payload(task: str, req, model_key: str, worker_id: Optional[str],
         payload["whisper_task"] = payload.pop("task")
     payload["task"] = task
     spill = spill_override if spill_override is not None else _spill_for(worker_id, model_key)
+    # ALLOCATION PROVENANCE (2026-09-23): tell the worker WHO asked for this
+    # placement, so the seat it loads records it and a later request that did
+    # not ask for a per-request override never reuses that seat. Rides the
+    # spill dict (the worker reads only the keys it knows; an older worker
+    # ignores it). Omitted when there is no spill at all (wire unchanged).
+    try:
+        from hugpy_engine.alloc_modes import derive_alloc_mode as _dam
+        if _req_alloc:
+            _src = {"kind": "per-request", "mode": _dam(_req_alloc),
+                    "request_id": payload.get("request_id"), "at": round(time.time(), 3),
+                    "designation_mode": _dam(spill or {})}
+        else:
+            _src = {"kind": "designation", "mode": _dam(spill or {})}
+    except Exception:  # noqa: BLE001 — provenance is advisory, never a failure
+        _src = None
     if _req_alloc:
         spill = {**(spill or {}), **_req_alloc}
         logger.info("per-request alloc override for %s on %s: %s",
                     model_key, worker_id, _req_alloc)
+    if spill and _src:
+        spill = {**spill, "alloc_source": _src}
     if _req_no_makeroom:
         # Version-gated like every polite emission: a worker that predates
         # no_evict would silently evict residents, so the flag is stripped
@@ -2002,6 +2482,40 @@ def _event_from_worker_line(d: dict, request_id: str):
     return StatusEvent(**{**d, "request_id": d.get("request_id", request_id)})
 
 
+def _record_relay_load_failure(worker: Optional[dict], model_key: Optional[str],
+                               body: Any, t0: Optional[float] = None) -> None:
+    """A worker that failed to LOAD the model ships a structured
+    ``load_failure`` ({class, loader_stderr, path}) beside its error text
+    (2026-09-23). Record it as ONE load/fail compute_actions row for this run
+    — model, worker card, the GGUF it opened, the attempt's duration, the
+    loader's own words. No ``load_failure`` (a generation error, an older
+    worker) -> nothing: the load_reports path is the catch-all. Fail-open."""
+    try:
+        if not isinstance(body, dict) or not model_key or not worker:
+            return
+        lf = body.get("load_failure")
+        if not isinstance(lf, dict) or not lf.get("class"):
+            return
+        mm = _placement.get_model_metrics()
+        rec = getattr(mm, "record_load_failure", None)
+        if rec is None:
+            return
+        err = body.get("error")
+        if isinstance(err, dict):
+            err = err.get("message")
+        err = err or body.get("message")
+        loaded = worker.get("loaded_models")
+        phase = None
+        if isinstance(loaded, (list, tuple, set)):
+            phase = "hot" if model_key in loaded else "cold"
+        rec(str(model_key), f"{worker.get('name') or worker.get('id')}:0",
+            load_failure=lf, message=str(err) if err else None,
+            duration_s=(time.monotonic() - t0) if t0 is not None else None,
+            phase=phase, source="relay")
+    except Exception:  # noqa: BLE001 — recording must never fail a request
+        logger.debug("load-fail recording skipped for %s", model_key, exc_info=True)
+
+
 async def _worker_stream(worker: dict, payload: dict, request_id: str):
     """Relay a worker's POST /infer/stream SSE as StreamEvents.
 
@@ -2017,6 +2531,8 @@ async def _worker_stream(worker: dict, payload: dict, request_id: str):
     another connect timeout per attempt.
     """
     worker_http = _placement.get_worker_transport()
+    _t0 = time.monotonic()
+    _mk = (payload or {}).get("model_key")
 
     key = worker_http.breaker_key(worker)
     worker_http.guard(key, url=worker_http.base_url(worker))
@@ -2045,6 +2561,7 @@ async def _worker_stream(worker: dict, payload: dict, request_id: str):
                         body = resp.json()
                     except Exception:  # noqa: BLE001 — a bodyless 5xx is still a 5xx
                         body = None
+                    _record_relay_load_failure(worker, _mk, body, _t0)
                     raise _WorkerHTTPError(resp.status_code, body, url)
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
@@ -2056,6 +2573,8 @@ async def _worker_stream(worker: dict, payload: dict, request_id: str):
                         d = json.loads(raw)
                     except ValueError:
                         continue
+                    if isinstance(d, dict) and d.get("type") == "error":
+                        _record_relay_load_failure(worker, _mk, d, _t0)
                     ev = _event_from_worker_line(d, request_id)
                     if ev is None:  # suppressed (worker's inner dispatch banner)
                         continue
@@ -2086,6 +2605,7 @@ async def _worker_run_once(worker: dict, payload: dict, result_type, request_id:
     worker_http = _placement.get_worker_transport()
 
     url = worker["url"].rstrip("/") + "/infer"
+    _t0 = time.monotonic()
     # Same discipline as _worker_stream: short connect, long read (call class
     # "relay_long" — the whole generation arrives as one body), breaker-gated.
     with worker_http.breaker_scope(worker):
@@ -2105,6 +2625,7 @@ async def _worker_run_once(worker: dict, payload: dict, result_type, request_id:
                     body = resp.json()
                 except ValueError:
                     body = None
+                _record_relay_load_failure(worker, model_key, body, _t0)
                 if body is not None or resp.status_code >= 500:
                     raise _WorkerHTTPError(resp.status_code, body, url)
                 resp.raise_for_status()
@@ -2289,6 +2810,41 @@ def _worker_comfy_id_lock_capable(worker: Optional[dict]) -> bool:
     return bool(comfy.get("id_lock"))
 
 
+def _worker_comfy_available(worker: Optional[dict]) -> bool:
+    """Whether the worker's adopted ComfyUI is answering (comfy.available). The
+    remote-side twin of workers._comfy_available — used to pick a live comfy box
+    for the connection-refused failover."""
+    comfy = (worker or {}).get("comfy")
+    return isinstance(comfy, dict) and bool(comfy.get("available"))
+
+
+def _is_comfy_backend_unreachable(error: object) -> bool:
+    """True when a relayed result's ``error`` names the worker's ComfyUI backend
+    refusing the connection (``ConnectError``/``[Errno 111]``/"connection
+    refused"). This is the FAILOVER trigger: the worker relay itself succeeded,
+    but its external comfy is down for this beat — a different box may serve it.
+    A comfy EXECUTION error (a real workflow fault) never matches, so it is not
+    rerouted (it would fail identically everywhere)."""
+    if not error:
+        return False
+    text = str(error).lower()
+    return ("connection refused" in text or "errno 111" in text
+            or "connecterror" in text)
+
+
+def _next_comfy_candidate(model_key: str, pool: Optional[str], task: Optional[str],
+                          tried: set) -> Optional[dict]:
+    """The next ranked candidate with a LIVE comfy backend that has not been
+    tried yet, or None when the pool is exhausted. Reads the same ranked
+    candidate list the cap-aware reroute uses (``_candidates`` ->
+    workers.workers_for_model, which already gates on comfy.available), then
+    skips the workers this call already found unreachable."""
+    for w in _candidates(model_key, pool, task):
+        if (w.get("id") not in tried) and _worker_comfy_available(w):
+            return w
+    return None
+
+
 def make_delegating_runner(framework: str, task: str):
     """Dynamic worker-pool offload with local fallback, decided per request.
 
@@ -2398,9 +2954,9 @@ def make_delegating_runner(framework: str, task: str):
             # the local-serving policy, so a blocked model refuses on EVERY box
             # (worker-pool central or a local-serving self-host) with the same
             # distinct reason. Not a load error → surfaced as a plain refusal.
-            _blk = _blocked_reason(self.model_key)
+            _blk = _blocked_reason(self.model_key, req)
             if _blk:
-                raise RuntimeError(_blk)
+                raise RuntimeError(_refusal_message(self.model_key, req, _gate_of(_blk), _blk))
             pool = getattr(req, "pool", None)
             # MODEL GROUPS: swap in the group's chosen iteration, if any. Returns
             # None — a no-op — whenever groups are off (the default), so this is
@@ -2460,9 +3016,22 @@ def make_delegating_runner(framework: str, task: str):
             permit = None
             admitted = False
             _want_worker = _requested_worker_name(req)
+            # COMFY-BACKEND failover (2026-09-23): a comfy-framework relay lands
+            # on a worker whose adopted ComfyUI answered central's heartbeat but
+            # refuses the connection at request time (a stale-by-one-beat state).
+            # The worker relay itself SUCCEEDS and returns ok=False with the
+            # connection-refused text; without failover the model goes pending.
+            # These carry the next-candidate worker to force and the set already
+            # tried, so an unreachable comfy backend fails over instead of failing
+            # the call. Untouched for every non-comfy / pinned request.
+            _forced_worker = None
+            _comfy_tried: set = set()
             try:
                 while True:
-                    if _want_worker:
+                    if _forced_worker is not None:
+                        worker, spill_override = _forced_worker, None
+                        _forced_worker = None
+                    elif _want_worker:
                         # Explicit per-request worker pin: binds routing, or
                         # fails naming why — never silently rerouted.
                         worker, spill_override = _resolve_requested_worker(
@@ -2485,7 +3054,15 @@ def make_delegating_runner(framework: str, task: str):
                             _verdict_message(self.model_key, worker, _cached))
                     if hold and not admitted:
                         admitted = True
-                        permit = _admit_cold_hold(self.model_key, worker, start)
+                        try:
+                            permit = _admit_cold_hold(self.model_key, worker, start)
+                        except ColdHoldCapacityError as full:
+                            # Same exception type (the routes classify it), with
+                            # the stored diagnostics record attached.
+                            full.diagnostics = _refusal_diag(
+                                self.model_key, req, "cold_load_capacity",
+                                full.stream_message(), candidate_ids=[worker.get("id")])
+                            raise
                     elif hold and permit is None:
                         # Admitted uncounted (the model read warm) but the call is
                         # holding anyway — top up opportunistically so the counter
@@ -2495,7 +3072,7 @@ def make_delegating_runner(framework: str, task: str):
                     # unchanged — concurrency saturation is not a cold load.
                     slot = await _acquire_relay_slot_async(self.model_key, pool, worker,
                                                            spill_override, viable=_viable,
-                                                           task=task)
+                                                           task=task, req=req)
                     worker, spill_override = slot.worker, slot.spill
                     payload = _worker_payload(task, req, self.model_key, worker.get("id"),
                                               spill_override=spill_override,
@@ -2510,6 +3087,18 @@ def make_delegating_runner(framework: str, task: str):
                             worker, payload, self.result_type,
                             request_id=req.request_id, model_key=self.model_key)
                         _t_done = time.time()
+                        # Same stamping as the streamed done (see _stamp_done).
+                        try:
+                            _u, _tm = _stamp_done(
+                                worker, self.model_key, req.request_id,
+                                getattr(_res, "timings", None), getattr(_res, "usage", None),
+                                elapsed_s=_t_done - _t_call)
+                            if _tm is not None:
+                                setattr(_res, "timings", _tm)
+                            if _u is not None and getattr(_res, "usage", None) is None:
+                                setattr(_res, "usage", _u)
+                        except Exception:  # noqa: BLE001 — never fail a reply
+                            pass
                         # ONE-SHOT tok/s. The result schema (TaskResult) is
                         # extra="allow", so a worker's `timings` survives validation
                         # as an extra attribute and needs no wire version bump in
@@ -2528,7 +3117,29 @@ def make_delegating_runner(framework: str, task: str):
                             streaming=False, ok=bool(getattr(_res, "ok", True)),
                             task=task)
                         _clear_load_verdict(worker.get("id"), self.model_key)
-                        return _res
+                        # COMFY-BACKEND failover: the relay succeeded but the box's
+                        # ComfyUI refused the connection (ok=False, connection-
+                        # refused text). The failed attempt is already recorded
+                        # (ok=False serve-metrics above); try the next candidate
+                        # whose comfy is live instead of returning the refusal.
+                        _next = (_next_comfy_candidate(self.model_key, pool, task,
+                                                       _comfy_tried | {worker.get("id")})
+                                 if (not _want_worker
+                                     and not bool(getattr(_res, "ok", True))
+                                     and _is_comfy_backend_unreachable(getattr(_res, "error", None)))
+                                 else None)
+                        if _next is not None:
+                            _comfy_tried.add(worker.get("id"))
+                            logger.warning(
+                                "comfy backend on %s is unreachable for %s (%s) — "
+                                "failing over to %s",
+                                worker.get("name") or worker.get("id"),
+                                self.model_key, getattr(_res, "error", None),
+                                _next.get("name") or _next.get("id"))
+                            _forced_worker = _next
+                            action = "reroute"
+                        else:
+                            return _res
                     except Exception as exc:
                         if _is_request_shape_error(exc) and not _local_fallback_allowed():
                             # Malformed for this model's chat template — fail FAST
@@ -2558,6 +3169,10 @@ def make_delegating_runner(framework: str, task: str):
                         slot.release()
                     if action == "local":
                         break
+                    if action == "reroute":
+                        # comfy-backend failover: loop again with the forced next
+                        # candidate (set above); no cold-hold accounting applies.
+                        continue
                     # action == "retry": transient hold. Honest-fail / stall / ceiling.
                     moved, _prog, _msg, honest = _cold_progress(self.model_key, worker, start)
                     if honest:
@@ -2602,9 +3217,12 @@ def make_delegating_runner(framework: str, task: str):
             # never set the flag. See managers.serve.policy.
             from hugpy_engine.serve.policy import no_local_serving, local_serving_error
             if no_local_serving():
-                raise RuntimeError(local_serving_error(
-                    self.model_key,
-                    detail=_no_worker_detail(self.model_key, pool, task)))
+                _nw = _no_worker_detail(self.model_key, pool, task)
+                raise RuntimeError(_refusal_message(
+                    self.model_key, req, "no_worker",
+                    "no worker selected or every selected worker failed before output, "
+                    "and HUGPY_NO_LOCAL_SERVING forbids serving on central"
+                    + (f" ({_nw})" if _nw else "")))
             result = self._local_runner().run(req=req)
             if inspect.isawaitable(result):
                 result = await result
@@ -2614,9 +3232,10 @@ def make_delegating_runner(framework: str, task: str):
             # Operator BLOCK gate — the streaming twin of run()'s: yield the
             # honest refusal as an ErrorEvent (the pre-token honest-fail idiom)
             # and stop, before any selection or local-serving fallback.
-            _blk = _blocked_reason(self.model_key)
+            _blk = _blocked_reason(self.model_key, req)
             if _blk:
-                yield ErrorEvent(request_id=req.request_id, message=_blk)
+                yield ErrorEvent(request_id=req.request_id,
+                                 message=_refusal_message(self.model_key, req, _gate_of(_blk), _blk))
                 return
             pool = getattr(req, "pool", None)
             # MODEL GROUPS — the streaming twin of run()'s consult. Same no-op
@@ -2700,6 +3319,21 @@ def make_delegating_runner(framework: str, task: str):
                                                      self.model_key, str(ev.message))
                                 raise _LoadFailed(_humanize_worker_error(wname, ev.message))
                             raise _ColdRetry(ev.message)   # transient — hold + retry
+                        if etype == "done":
+                            # Stamp the terminal done BEFORE it leaves: engine
+                            # counts as usage when the worker sent none, and
+                            # timings.call = this call's ledger stamp + split.
+                            try:
+                                _u, _tm = _stamp_done(
+                                    worker, self.model_key, req.request_id,
+                                    getattr(ev, "timings", None), getattr(ev, "usage", None),
+                                    elapsed_s=time.time() - _t_call,
+                                    gen_s=((_t_last - _t_first)
+                                           if (_t_first is not None and _t_last is not None
+                                               and _t_last > _t_first) else None))
+                                ev.usage, ev.timings = _u, _tm
+                            except Exception:  # noqa: BLE001
+                                pass
                         yield ev
                         if etype == "token":
                             produced_tokens = True
@@ -2830,7 +3464,10 @@ def make_delegating_runner(framework: str, task: str):
                             permit = _admit_cold_hold(self.model_key, worker, start)
                         except ColdHoldCapacityError as full:
                             yield ErrorEvent(request_id=req.request_id,
-                                             message=full.stream_message())
+                                             message=_refusal_message(
+                                                 self.model_key, req, "cold_load_capacity",
+                                                 full.stream_message(),
+                                                 candidate_ids=[worker.get("id")]))
                             return
                     elif hold and permit is None:
                         # Admitted uncounted (the model read warm) but this call is
@@ -2840,7 +3477,7 @@ def make_delegating_runner(framework: str, task: str):
                     try:
                         slot = await _acquire_relay_slot_async(self.model_key, pool, worker,
                                                                spill_override, viable=_viable,
-                                                               task=task)
+                                                               task=task, req=req)
                     except WorkerBusyError as busy:
                         # Concurrency saturation is its own honest signal (not a cold
                         # load) — surfaced as today, unchanged.
@@ -2975,10 +3612,13 @@ def make_delegating_runner(framework: str, task: str):
             # behavior; workers never set the flag. See managers.serve.policy.
             from hugpy_engine.serve.policy import no_local_serving, local_serving_error
             if no_local_serving():
+                _nw = _no_worker_detail(self.model_key, pool, task)
                 yield ErrorEvent(request_id=req.request_id,
-                                 message=local_serving_error(
-                                     self.model_key,
-                                     detail=_no_worker_detail(self.model_key, pool, task)))
+                                 message=_refusal_message(
+                                     self.model_key, req, "no_worker",
+                                     "no worker selected or every selected worker failed before "
+                                     "output, and HUGPY_NO_LOCAL_SERVING forbids serving on central"
+                                     + (f" ({_nw})" if _nw else "")))
                 return
             # Local fallback — reuse dispatch's shared stream-or-wrap primitive
             # (imported lazily to avoid a resolvers<->dispatch import cycle).

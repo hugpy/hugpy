@@ -85,7 +85,7 @@ def _error_path(job_id: str) -> str:
 def _write_error(job_id: str, msg: str) -> None:
     try:
         with open(_error_path(job_id), "w", encoding="utf-8") as fh:
-            fh.write(msg[:2000])
+            fh.write(msg)          # whole (2026-09-23: no cap)
     except OSError:
         pass
 
@@ -211,7 +211,8 @@ def _estimate_total_bytes(model: dict) -> Optional[int]:
     from hugpy_storage.model_metadata import fetch_repo_info
     try:
         payload = fetch_repo_info(repo_id, files_metadata=True,
-                                  api=getattr(_c, "hfApi", None))
+                                  api=getattr(_c, "hfApi", None),
+                                  purpose="download")
     except Exception as exc:
         logger.info("size estimate failed for %s: %s", hub_id, exc)
         return None
@@ -312,15 +313,7 @@ def _download_worker(job_id: str, model_key: str, model: dict) -> None:
         raise
 
 
-def _dir_bytes(path: str) -> int:
-    total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-    return total
+from hugpy_platform.filesystem import directory_bytes as _dir_bytes
 
 
 def _progress_bytes(dest: str) -> int:

@@ -9,7 +9,13 @@ from hugpy_platform.constants import DEFAULT_ROOT, MODELS_DISCOVERY_PATH, MODELS
 from hugpy_storage.catalog_source import catalog_get, catalog_rows
 from hugpy_storage.events import publish_catalog_changed
 from hugpy_storage.providers import serve_path
-from hugpy_storage.hugpy_marker import write_hugpy_marker
+from hugpy_storage.hugpy_marker import (
+    MANIFEST_KEY,
+    build_install_manifest,
+    merge_manifests,
+    read_hugpy_marker,
+    write_hugpy_marker,
+)
 from hugpy_storage.model_paths import (
     flat_destination,
     resolve_model_dir,
@@ -149,18 +155,7 @@ def _staging_pid_from_name(name: str) -> "int | None":
     return int(m.group(1)) if m else None
 
 
-def _pid_alive(pid: int) -> bool:
-    """Conservative liveness check: only a definite ProcessLookupError (ESRCH)
-    says dead. EPERM means it exists under another user; any other unexpected
-    OSError is treated as alive too — an ambiguous read must never lead to
-    deleting a live download's scratch."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+from hugpy_platform.procutil import pid_alive as _pid_alive
 
 
 def _staging_siblings(dest: str) -> "list[tuple[str, int | None, float]]":
@@ -341,9 +336,29 @@ def _clean_repo_id(hub_id: str) -> str:
             parts = parts[1:]                   # drop the task that followed
     return "/".join(parts)
 
-def _stamp(destination: str, key: str, model: dict[str, Any]) -> None:
+def _install_manifest(staged: str, prior_dir: "str | None" = None) -> "dict | None":
+    """The install manifest for a just-completed download in ``staged``: every
+    file the download chose, bytes from disk, sha256 + revision from the HF
+    download metadata already on disk (no extra Hub call, no hashing). When the
+    download landed INTO an existing model dir (``prior_dir``), that dir's
+    manifest entries for files this pull did not touch are carried over.
+    Never raises — a manifest failure must not fail a completed download."""
+    try:
+        manifest = build_install_manifest(staged, source="huggingface")
+        if prior_dir and os.path.isdir(prior_dir):
+            prior = (read_hugpy_marker(prior_dir) or {}).get(MANIFEST_KEY)
+            manifest = merge_manifests(prior, manifest)
+        return manifest
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warn] could not capture install manifest: {exc}")
+        return None
+
+
+def _stamp(destination: str, key: str, model: dict[str, Any],
+           prior_dir: "str | None" = None) -> None:
     """Write hugpy.json into the destination so the model self-describes for
-    discovery — identity no longer has to be inferred from the path later."""
+    discovery — identity no longer has to be inferred from the path later —
+    with the install manifest captured from what was just downloaded."""
     try:
         write_hugpy_marker(
             destination,
@@ -355,9 +370,21 @@ def _stamp(destination: str, key: str, model: dict[str, Any]) -> None:
             filename=model.get("filename"),
             include=model.get("include"),
             source="download",
+            manifest=_install_manifest(destination, prior_dir),
         )
     except OSError as exc:
         print(f"  [warn] could not write hugpy.json: {exc}")
+
+
+def _admit(destination: str, model_key: str) -> None:
+    """POST-DOWNLOAD ADMISSION HOOK (2026-09-23). Every path that stamps a
+    ``source: download`` marker calls this once the dir is PROMOTED (the
+    final path — the staged dir is gone by then): one admission job per
+    install on central's persistent queue, the model marked ``pending``.
+    The server's admission runner does the rest (static audit -> benchmark ->
+    admitted/held). Central only; never raises."""
+    from hugpy_storage.admission import on_install_complete
+    on_install_complete(destination, model_key, source="download")
 
 
 def _fetch_mmproj_sidecars(repo_id: str, destination: str) -> None:
@@ -499,7 +526,10 @@ def download_one(model: dict[str, Any],root: str=None,model_key=None, dry_run: b
                 local_dir=staged, local_dir_use_symlinks=False)
             print(f"  downloaded snapshot with pattern: {allow_patterns}"
                   if allow_patterns else "  downloaded full snapshot")
-        _stamp(staged, model_key, model)
+        # prior_dir: a quant fetched INTO an existing dir keeps that dir's
+        # manifest entries for the files already there.
+        _stamp(staged, model_key, model,
+               prior_dir=destination if os.path.isdir(destination) else None)
         try:
             _promote_staged(staged, destination)
         except OSError as exc:
@@ -516,6 +546,7 @@ def download_one(model: dict[str, Any],root: str=None,model_key=None, dry_run: b
         publish_catalog_changed("download_one promoted", model_key=model_key,
                                 hub_id=hub_id, destination=destination,
                                 change="promote")
+        _admit(destination, model_key)
     except BaseException:
         # A partial/aborted pull must never sit at a resolvable path — discard
         # the staging temp (exempt from never-delete) and re-raise.
@@ -591,7 +622,19 @@ def ensure_model(key: str, root: str = DEFAULT_ROOT) -> str:
 
     The row comes from the installed catalog source (the engine's registry);
     with no source installed this raises KeyError — a caller that only has a
-    routing dict should use :func:`download_one`."""
+    routing dict should use :func:`download_one`.
+
+    On a WORKER (``WORKER_CENTRAL_URL`` set) this never reaches Hugging Face:
+    it resolves local-or-central through
+    :func:`hugpy_storage.provision.ensure_serving_weights` and raises
+    ``CentralHoldsNoWeights`` when central cannot provide the weights
+    (computron 2026-09-23: a runner's ensure_model snapshot-downloaded a whole
+    134 GB GGUF repo). Central's own downloader stays the only HF path."""
+    from hugpy_storage.provision import worker_central_url
+    _central = worker_central_url()
+    if _central:
+        from hugpy_storage.provision import ensure_serving_weights
+        return ensure_serving_weights(key, _central)
     cfg = catalog_get(key)
     if cfg is None:
         raise KeyError(f"Unknown model {key!r} (no catalog source knows it)")
@@ -681,6 +724,7 @@ def ensure_model(key: str, root: str = DEFAULT_ROOT) -> str:
             filename=getattr(cfg, "filename", None),
             include=getattr(cfg, "include", None),
             source="download",
+            manifest=_install_manifest(staged, path if os.path.isdir(path) else None),
         )
         try:
             _promote_staged(staged, path)
@@ -692,6 +736,7 @@ def ensure_model(key: str, root: str = DEFAULT_ROOT) -> str:
                 f"download finalize failed for {path}: {exc}") from exc
         publish_catalog_changed("ensure_model promoted", model_key=key,
                                 hub_id=repo_id, destination=path, change="promote")
+        _admit(path, key)
         return path
     except BaseException as e:
         # A partial/aborted pull must never sit at a resolvable path — discard

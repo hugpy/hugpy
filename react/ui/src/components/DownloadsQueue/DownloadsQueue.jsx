@@ -1,6 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { fetchJson } from '../../api'
-import { useFeed } from '../../runtime/feeds'
+import { EMPTY_ARRAY, useFeed } from '../../runtime/feeds'
+import { WorkerPulls } from '../ModelTable/StatusCells'
+import { workerProvisioning } from '../ModelTable/modelStatus'
+import '../ModelTable/ModelStatus.css'
 import './DownloadsQueue.css'
 
 // Model DOWNLOADS — their OWN queue, kept strictly separate from the inference
@@ -96,13 +99,23 @@ export default function DownloadsQueue({ variant = 'tile' }) {
 
   const active = jobs.filter(j => ACTIVE.has(j.status))
   const done = jobs.filter(j => TERMINAL.has(j.status))
+  // Worker-side pulls from central (heartbeat provisioning/provision_progress):
+  // a worker copying weights is a download too, and the operator must see it.
+  const fWorkers = useFeed('workers', EMPTY_ARRAY)
+  const pulls = workerProvisioning(fWorkers)
 
-  const busy = active.length > 0
+  const busy = active.length > 0 || pulls.length > 0
   const failedN = done.filter(j => FAILED.has(j.status)).length
-  const hasPop = active.length > 0 || done.length > 0
+  const hasPop = active.length > 0 || done.length > 0 || pulls.length > 0
 
   const rows = (
     <>
+      {pulls.length > 0 && (
+        <>
+          <div className="dlq-head">Worker pulls from central · {pulls.length}</div>
+          <div className="dlq-row"><WorkerPulls workers={fWorkers} /></div>
+        </>
+      )}
       {active.length > 0 && (
         <>
           <div className="dlq-head">Downloading · {active.length}</div>
@@ -155,7 +168,7 @@ export default function DownloadsQueue({ variant = 'tile' }) {
           : 'Model downloads — separate from the inference queue'}
       >
         {busy
-          ? <span className="sb-v dlq-count">{active.length} downloading</span>
+          ? <span className="sb-v dlq-count">{[active.length && `${active.length} downloading`, pulls.length && `${pulls.length} pulling`].filter(Boolean).join(' · ')}</span>
           : failedN > 0
             ? <span className="sb-v dlq-count">{failedN} failed</span>
             : <span className="sb-v sb-zero">idle</span>}

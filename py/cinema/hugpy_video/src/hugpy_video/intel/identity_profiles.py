@@ -615,20 +615,10 @@ def _load() -> dict[str, Any]:
     return data
 
 
+from hugpy_platform.atomic_json import save_json as _atomic_save_json
+
 def _save(data: dict[str, Any]) -> None:
-    path = _store_path()
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    # Temp name UNIQUE PER WRITE (pid + token): several gunicorn processes may
-    # write here, and two writers sharing one "<path>.tmp" race between open()
-    # and os.replace() — the loser's replace() dies FileNotFoundError. pid+token
-    # keeps every write atomic AND collision-free; os.replace is the atomicity
-    # point. (Lifted from api_keys._save, which learned this the hard way.)
-    tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    _atomic_save_json(_store_path(), data)
 
 
 def slugify(name: str) -> str:

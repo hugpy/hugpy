@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { runErrorText } from '../MetricsPanel/RunError'
+import { GraderWorkbook } from '../MetricsPanel/MetricsPanel'
+import ModelLiveState from '../ModelLiveState/ModelLiveState'
 import { fetchJson } from '../../api'
 import './ReviewPanel.css'
 
@@ -39,12 +42,14 @@ const fmtAgo = ts => {
 }
 const fmtSecs = s => (s == null ? '—' : s < 1 ? `${(s * 1000).toFixed(0)} ms` : `${s.toFixed(1)} s`)
 const fmtScore = s => (s == null ? '—' : Number(s).toFixed(2))
+
+// Eligible = the exact predicate fleet_grading.eligible uses server-side:
+// online, reachable, admission approved, serving not turned off. The benchmark
+// grades every SELECTED eligible worker, defaulting to all of them.
+const workerEligible = w => w && w.status === 'online' && !w.unreachable &&
+  (w.admission === 'approved') && w.serve_mode !== 'off'
+const workerId = w => w.id || w.name
 const num = v => (v == null || v === '' || isNaN(Number(v)) ? null : Number(v))
-const benchmarkKey = r => [r.worker_id || r.worker, r.model, r.quant, r.config, r.alloc_mode].join('\u0000')
-const metric = (v, suffix = '') => {
-  const n = num(v)
-  return n == null ? 'N/A' : `${n.toFixed(1)}${suffix}`
-}
 
 // verdict -> css class. adopt is the win, trial is a maybe, reject is a no.
 const verdictClass = v => {
@@ -84,8 +89,20 @@ export default function ReviewPanel() {
   const [busy, setBusy]       = useState(false)
   const [benchmark, setBenchmark] = useState({ status: 'idle', results: [], events: [] })
   const [benchmarkModel, setBenchmarkModel] = useState('')
-  const [benchmarkWorker, setBenchmarkWorker] = useState('')
-  const [benchmarkPageModel, setBenchmarkPageModel] = useState('')
+  // Models ticked for grading in the workbook picker (multi-select). Empty = no
+  // explicit pick; the run then falls back to the model text box, and if that is
+  // blank too, to ALL central models (today's default, stated on the button).
+  const [gradeModels, setGradeModels] = useState([])
+  // The Fleet-capacity initiator (model input, worker selector, backup/restore
+  // status, run button, meta) is collapsed by default and auto-expands only
+  // while a run is active — see the run-collapse rule below.
+  const [fcOpen, setFcOpen] = useState(false)
+  // The fleet's workers (for the benchmark worker selector) and the operator's
+  // explicit selection. Default: every ELIGIBLE worker checked — the benchmark
+  // grades all selected eligible workers, never only designated seats.
+  const [workersList, setWorkersList] = useState([])
+  const [selectedWorkers, setSelectedWorkers] = useState(null) // null until first load = "all eligible"
+  const [workersNote, setWorkersNote] = useState(null)
 
   // dialogs
   const [screenOpen, setScreenOpen] = useState(false)
@@ -95,13 +112,28 @@ export default function ReviewPanel() {
   const loadCriteria = useCallback(() => {
     fetchJson('/api/llm/review/status')
       .then(d => { if (d && Array.isArray(d.criteria)) setCriteria(d.criteria) })
-      .catch(() => {})   // keep last good
+      .catch(e => setNote(`criteria refresh failed: ${e.message} (kept the last list)`))
   }, [])
 
   const loadBenchmark = useCallback(() => {
     fetchJson('/api/llm/benchmark/status')
       .then(d => { if (d && d.status) setBenchmark(d) })
-      .catch(() => {})
+      .catch(e => setNote(`benchmark status refresh failed: ${e.message} (kept the last status)`))
+  }, [])
+
+  const loadWorkers = useCallback(() => {
+    fetchJson('/api/llm/workers')
+      .then(d => {
+        if (!Array.isArray(d)) { setWorkersNote('worker list refresh failed: unexpected reply (kept the last list)'); return }
+        setWorkersList(d)
+        setWorkersNote(null)
+        // Seed the selection ONCE to every eligible worker; after that the
+        // operator's explicit choice is preserved across polls.
+        setSelectedWorkers(prev => prev == null
+          ? d.filter(workerEligible).map(workerId)
+          : prev.filter(id => d.some(w => workerId(w) === id)))
+      })
+      .catch(e => setWorkersNote(`worker list refresh failed: ${e.message} (kept the last list)`))
   }, [])
 
   const loadRuns = useCallback((crit) => {
@@ -116,7 +148,7 @@ export default function ReviewPanel() {
     // criteria whose files are gone. Union them so history stays viewable.
     fetchJson('/api/llm/review/runs?limit=200')
       .then(d => { if (Array.isArray(d)) setRunNames([...new Set(d.map(r => r.criteria).filter(Boolean))]) })
-      .catch(() => {})
+      .catch(e => setNote(`run history refresh failed: ${e.message} (kept the last list)`))
   }, [])
 
   const loadResults = useCallback((crit, m = mode, stg = stageFilter) => {
@@ -131,13 +163,28 @@ export default function ReviewPanel() {
   }, [mode, stageFilter])
 
   // first load
-  useEffect(() => { loadCriteria(); loadRunNames(); loadBenchmark() }, [loadCriteria, loadRunNames, loadBenchmark])
+  useEffect(() => { loadCriteria(); loadRunNames(); loadBenchmark(); loadWorkers() }, [loadCriteria, loadRunNames, loadBenchmark, loadWorkers])
 
   useEffect(() => {
     if (benchmark.status !== 'running') return undefined
     const t = setInterval(loadBenchmark, 2500)
     return () => clearInterval(t)
   }, [benchmark.status, loadBenchmark])
+
+  // Run-collapse rule (shared with the Live test output pane): a NEW run
+  // starting auto-expands the initiator and clears any prior manual collapse;
+  // once it finishes the block stays as the operator left it (open until they
+  // collapse or leave). A manual toggle mid-run is respected until the next run
+  // starts. Fresh load with nothing running → collapsed. Deriving off run_id
+  // means "another poll of the same finished run" never re-opens it.
+  const fcPrevRun = useRef(null)
+  useEffect(() => {
+    const running = benchmark.status === 'running'
+    if (running && benchmark.run_id && benchmark.run_id !== fcPrevRun.current) {
+      fcPrevRun.current = benchmark.run_id
+      setFcOpen(true)
+    }
+  }, [benchmark.status, benchmark.run_id])
 
   // pick a default criteria once names arrive
   useEffect(() => {
@@ -171,65 +218,9 @@ export default function ReviewPanel() {
   const selectedCrit = criteria.find(c => c.name === selected) || null
   const runnable = !!selectedCrit          // only a saved criteria file can Run
   const running  = !!selectedCrit?.running
-  const benchmarkRows = useMemo(() => {
-    const resultsByKey = new Map((benchmark.results || []).map(r => [benchmarkKey(r), r]))
-    const planned = (benchmark.plan?.rows || []).map(p => ({ ...p, ...(resultsByKey.get(benchmarkKey(p)) || {}) }))
-    const plannedKeys = new Set(planned.map(benchmarkKey))
-    return [...planned, ...(benchmark.results || []).filter(r => !plannedKeys.has(benchmarkKey(r)))]
-  }, [benchmark.plan, benchmark.results])
-  const benchmarkStats = useMemo(() => {
-    const calls = benchmark.calls || []
-    const tested = benchmarkRows.filter(r => r.grade && r.grade !== 'N/A')
-    const speeds = tested.map(r => num(r.tok_s_avg ?? r.tok_s)).filter(v => v != null)
-    return {
-      calls: calls.length,
-      passed: calls.filter(c => c.grade === 'PASS').length,
-      failed: calls.filter(c => c.grade === 'FAIL').length,
-      tested: tested.length,
-      avgSpeed: speeds.length ? speeds.reduce((a, b) => a + b, 0) / speeds.length : null,
-    }
-  }, [benchmark.calls, benchmarkRows])
-  const benchmarkModels = useMemo(() => [...new Set(benchmarkRows
-    .map(r => r.model).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [benchmarkRows])
-  useEffect(() => {
-    if (!benchmarkModels.length) {
-      if (benchmarkPageModel) setBenchmarkPageModel('')
-    } else if (!benchmarkModels.includes(benchmarkPageModel)) {
-      const active = benchmark.progress?.model
-      setBenchmarkPageModel(benchmarkModels.includes(active) ? active : benchmarkModels[0])
-    }
-  }, [benchmarkModels, benchmarkPageModel, benchmark.progress?.model])
-  const benchmarkPageRows = useMemo(() => benchmarkRows
-    .filter(r => r.model === benchmarkPageModel), [benchmarkRows, benchmarkPageModel])
-  const benchmarkPageIndex = Math.max(0, benchmarkModels.indexOf(benchmarkPageModel))
-  const benchmarkTasks = ['math', 'wordprob', 'factual', 'format_primes', 'logic',
-    'exact_instruction', 'coding', 'json', 'letters']
-  const benchmarkWorkers = useMemo(() => {
-    const found = new Map()
-    benchmarkPageRows.forEach(r => found.set(r.worker_id || r.worker,
-      { id: r.worker_id || r.worker, name: r.worker || r.worker_id }))
-    return [...found.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)))
-  }, [benchmarkPageRows])
-  const benchmarkQuants = useMemo(() => [...new Set(benchmarkPageRows
-    .map(r => r.quant).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [benchmarkPageRows])
-  const benchmarkSections = [
-    { label: 'moe', config: 'moe', modes: null },
-    { label: '4-bit:GPU', config: '4bit', modes: ['gpu_only'] },
-    { label: '4-bit:RAM', config: '4bit', modes: ['ram_only'] },
-    { label: '4-bit:SPLIT', config: '4bit', modes: ['max_gpu'] },
-    { label: 'GPU', config: 'full', modes: ['gpu_only'] },
-    { label: 'RAM', config: 'full', modes: ['ram_only'] },
-    { label: 'SPLIT', config: 'full', modes: ['max_gpu'] },
-  ]
-  const sectionRow = (section, quant, worker) => benchmarkPageRows.find(r =>
-    r.quant === quant && (r.worker_id || r.worker) === worker.id &&
-    r.config === section.config && (!section.modes || section.modes.includes(r.alloc_mode)))
-  const taskOutcome = (row, wanted) => {
-    const entries = Object.entries(row.detail || {})
-    const found = entries.find(([, value]) => Boolean(value) === wanted)
-    return found ? found[0] : '—'
-  }
-
+  // Live progress, pass/fail counts and avg tok/s for a run are owned by the
+  // single "Live test output" pane (GraderWorkbook / BenchmarkLiveOutput) below,
+  // so this control surface no longer computes or renders its own copies.
   // ── actions ─────────────────────────────────────────────────────────────
   const runNow = useCallback(() => {
     if (!runnable || running || busy) return
@@ -244,21 +235,34 @@ export default function ReviewPanel() {
       .finally(() => setBusy(false))
   }, [runnable, running, busy, selected, loadCriteria, loadRuns])
 
+  const eligibleWorkers = useMemo(() => workersList.filter(workerEligible), [workersList])
+  const chosenWorkers = selectedWorkers || []
+  const toggleWorker = useCallback(id => setSelectedWorkers(prev => {
+    const base = prev || eligibleWorkers.map(workerId)
+    return base.includes(id) ? base.filter(x => x !== id) : [...base, id]
+  }), [eligibleWorkers])
+
   const runBenchmark = useCallback(() => {
     if (benchmark.status === 'running') return
-    const scoped = benchmarkModel.trim() || benchmarkWorker.trim()
-    if (!confirm(scoped
-      ? `Run scoped capacity test?\n\nModel: ${benchmarkModel.trim() || 'all'}\nWorker: ${benchmarkWorker.trim() || 'all'}`
-      : 'Test every feasible model quant/config on every eligible worker?\n\nCold quants will be copied from central to worker drives. Central llm_storage is never deleted. Workers and independent model lanes run concurrently.')) return
+    // The benchmark runs on ALL SELECTED eligible workers. An empty selection is
+    // refused rather than silently meaning "all" — the operator picks the seats.
+    if (!chosenWorkers.length) { setNote('pick at least one worker to test on (default is every eligible worker)'); return }
+    const nameOf = id => (workersList.find(w => workerId(w) === id)?.name) || id
+    const wLabel = chosenWorkers.length === eligibleWorkers.length ? `all ${chosenWorkers.length} eligible workers` : `${chosenWorkers.length} worker(s): ${chosenWorkers.map(nameOf).join(', ')}`
+    // Model set: ticked models win; else the exact-key text box; else all central
+    // models. Never a silent default — the choice is spelled out in the prompt.
+    const models = gradeModels.length ? gradeModels : (benchmarkModel.trim() ? [benchmarkModel.trim()] : [])
+    const mLabel = gradeModels.length ? `${gradeModels.length} selected model(s): ${gradeModels.join(', ')}`
+      : (benchmarkModel.trim() || 'ALL central models')
+    if (!confirm(`Run the capacity test?\n\nModels: ${mLabel}\nWorkers: ${wLabel}\n\nBefore each involved worker is tested, its state (allocations/pins, per-model quant & levers, and which model files are on its drive) is backed up, and restored when the test ends. Cold quants may be copied from central to worker drives to measure cold loads; central llm_storage is never deleted.`)) return
     setNote('starting fleet capacity benchmark…')
+    setFcOpen(true)   // expand the initiator immediately on Run, before the first poll
     fetchJson('/api/llm/benchmark/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ executor: 'hugpy-agent', tokens: 128,
-        models: benchmarkModel.trim() ? [benchmarkModel.trim()] : [],
-        workers: benchmarkWorker.trim() ? [benchmarkWorker.trim()] : [] }),
+      body: JSON.stringify({ executor: 'hugpy-central', tokens: 128, models, workers: chosenWorkers }),
     }).then(d => { setBenchmark(d); setNote('fleet benchmark started') })
       .catch(e => setNote(`benchmark failed to start: ${e.message}`))
-  }, [benchmark.status, benchmarkModel, benchmarkWorker])
+  }, [benchmark.status, benchmarkModel, gradeModels, chosenWorkers, eligibleWorkers, workersList])
 
   const cancelBenchmark = useCallback((scope, row = {}) => {
     fetchJson('/api/llm/benchmark/cancel', {
@@ -282,8 +286,7 @@ export default function ReviewPanel() {
     <div className="rv-panel">
       {/* ── criteria bar ─────────────────────────────────────────────────── */}
       <div className="rv-head">
-        <strong>Grader</strong>
-        <span className="rv-dim">screen → smoke-load → judge · results persist in reviews.db</span>
+        <strong title="Discovery pipeline for a saved criteria: screen → smoke-load → judge. Every row persists in reviews.db and appears in the leaderboard below.">Grader</strong>
 
         <select className="rv-crit" value={selected || ''}
                 onChange={e => { setSelected(e.target.value); setExpanded({}); setDossiers({}) }}>
@@ -301,140 +304,84 @@ export default function ReviewPanel() {
         </button>
         <button onClick={() => setScreenOpen(true)}>🔍 Screen…</button>
         <button onClick={() => setEditorOpen(true)}>{runnable ? '✎ Edit' : '＋ New'} criteria</button>
-        <button onClick={() => { loadCriteria(); loadRunNames(); loadRuns(selected); loadResults(selected) }}>↻</button>
+        <button onClick={() => { loadCriteria(); loadRunNames(); loadRuns(selected); loadResults(selected); loadWorkers() }}>↻</button>
       </div>
       {note && <div className="rv-note">{note}</div>}
 
       <section className="rv-benchmark">
+       <details className="rv-benchmark-collapse" open={fcOpen}
+                onToggle={e => setFcOpen(e.currentTarget.open)}>
+        <summary className="rv-benchmark-summary">
+          <span className="rv-benchmark-title">Fleet capacity test</span>
+          <span className="rv-dim">{benchmark.status === 'running'
+            ? `● running ${benchmark.progress?.completed || 0}/${benchmark.progress?.total || benchmark.plan?.runnable || 0}`
+            : `${benchmark.status || 'idle'} · ${benchmark.results?.length || 0} config(s)${benchmark.finished ? ` · last run ${fmtAgo(benchmark.finished)}` : ''}`}</span>
+        </summary>
         <div className="rv-benchmark-head">
-          <div>
-            <strong>Fleet capacity test</strong>
-            <span className="rv-dim"> all central models · full quants, 4-bit and MoE · GPU / spill / RAM</span>
-          </div>
-          <button onClick={runBenchmark} disabled={benchmark.status === 'running'}>
-            {benchmark.status === 'running' ? '● testing…' : (benchmarkModel || benchmarkWorker) ? '▶ Test scope' : '▶ Test all models'}
+          <span className="rv-dim">all central models · full quants, 4-bit and MoE · GPU / spill / RAM</span>
+          <button onClick={runBenchmark} disabled={benchmark.status === 'running' || !chosenWorkers.length}>
+            {benchmark.status === 'running' ? '● testing…'
+              : gradeModels.length ? `▶ Grade ${gradeModels.length} model(s) on ${chosenWorkers.length} worker(s)`
+              : benchmarkModel.trim() ? `▶ Test ${benchmarkModel.trim()} on ${chosenWorkers.length} worker(s)`
+              : `▶ Grade ALL central models on ${chosenWorkers.length === eligibleWorkers.length ? 'all' : chosenWorkers.length} worker(s)`}
           </button>
           {benchmark.status === 'running' && <button onClick={() => cancelBenchmark('execution')}>■ Cancel execution</button>}
         </div>
         <div className="rv-benchmark-meta">
-          <label>model <input value={benchmarkModel} onChange={e => setBenchmarkModel(e.target.value)}
-            disabled={benchmark.status === 'running'} placeholder="all, or exact model key" /></label>
-          <label>worker <input value={benchmarkWorker} onChange={e => setBenchmarkWorker(e.target.value)}
-            disabled={benchmark.status === 'running'} placeholder="all, or worker name/id" /></label>
+          {gradeModels.length
+            ? <span><strong>{gradeModels.length}</strong> model(s) ticked for grading in the workbook below
+                <button type="button" className="rv-linkbtn" disabled={benchmark.status === 'running'}
+                  onClick={() => setGradeModels([])}>clear selection</button></span>
+            : <label>model <input value={benchmarkModel} onChange={e => setBenchmarkModel(e.target.value)}
+                disabled={benchmark.status === 'running'} placeholder="all central models, or an exact model key" /></label>}
+          <span className="rv-dim">tick models in the workbook to grade a chosen set; blank = all central models</span>
         </div>
+        <div className="rv-benchmark-workers">
+          <div className="rv-benchmark-workers-head">
+            <span>workers to test</span>
+            <span className="rv-dim">{chosenWorkers.length}/{eligibleWorkers.length} eligible selected</span>
+            <button type="button" className="rv-linkbtn" disabled={benchmark.status === 'running'}
+              onClick={() => setSelectedWorkers(eligibleWorkers.map(workerId))}>all</button>
+            <button type="button" className="rv-linkbtn" disabled={benchmark.status === 'running'}
+              onClick={() => setSelectedWorkers([])}>none</button>
+          </div>
+          <div className="rv-worker-checks">
+            {workersList.map(w => {
+              const id = workerId(w)
+              const elig = workerEligible(w)
+              const why = elig ? '' : [w.status !== 'online' && w.status, w.unreachable && 'unreachable',
+                w.admission !== 'approved' && `admission ${w.admission || 'unknown'}`,
+                w.serve_mode === 'off' && 'serving off'].filter(Boolean).join(', ')
+              return <label key={id} className={`rv-worker-check${elig ? '' : ' rv-worker-inelig'}`}
+                title={elig ? `${id} — eligible` : `${id} — not eligible: ${why}`}>
+                <input type="checkbox" checked={chosenWorkers.includes(id)} disabled={!elig || benchmark.status === 'running'}
+                  onChange={() => toggleWorker(id)} />
+                {w.name || id}{elig ? '' : <span className="rv-dim"> ({why})</span>}
+              </label>
+            })}
+            {!workersList.length && <span className="rv-dim">no workers reported by /llm/workers{workersNote ? ` — ${workersNote}` : ''}</span>}
+          </div>
+          {workersNote && !!workersList.length && <div className="rv-dim">{workersNote}</div>}
+        </div>
+        <BenchmarkStateStatus benchmark={benchmark} />
         <div className="rv-benchmark-meta">
           <span className={`rv-benchmark-status ${benchmark.status}`}>{benchmark.status || 'idle'}</span>
           {benchmark.executor && <span>executor: {benchmark.executor}</span>}
           <span>{benchmark.results?.length || 0} configurations recorded</span>
           {benchmark.report && <span title={benchmark.report}>report: {benchmark.report.split('/').pop()}</span>}
-          {benchmark.error && <span className="rv-run-err">{benchmark.error}</span>}
+          {benchmark.error && <span className="rv-run-err">{runErrorText(benchmark.error)}</span>}
         </div>
-        <div className="rv-benchmark-progress">
-          <progress max="100" value={benchmark.progress?.percent || 0} />
-          <span>{benchmark.progress?.completed || 0}/{benchmark.progress?.total || benchmark.plan?.runnable || 0} · {benchmark.progress?.percent || 0}%</span>
-        </div>
-        <div className="rv-benchmark-cards">
-          <span><b>{benchmarkStats.tested}</b><small>graded configs</small></span>
-          <span><b>{benchmarkStats.calls}</b><small>logged calls</small></span>
-          <span className="pass"><b>{benchmarkStats.passed}</b><small>passed calls</small></span>
-          <span className="fail"><b>{benchmarkStats.failed}</b><small>failed calls</small></span>
-          <span><b>{metric(benchmarkStats.avgSpeed)}</b><small>avg tok/s</small></span>
-        </div>
-        {!!benchmarkRows.length && <div className="rv-model-pager">
-          <button disabled={benchmarkPageIndex <= 0}
-            onClick={() => setBenchmarkPageModel(benchmarkModels[benchmarkPageIndex - 1])}>← Previous model</button>
-          <label>Metrics page
-            <select value={benchmarkPageModel} onChange={e => setBenchmarkPageModel(e.target.value)}>
-              {benchmarkModels.map(model => <option key={model} value={model}>{model}</option>)}
-            </select>
-          </label>
-          <span>{benchmarkPageIndex + 1} / {benchmarkModels.length}</span>
-          <button disabled={benchmarkPageIndex >= benchmarkModels.length - 1}
-            onClick={() => setBenchmarkPageModel(benchmarkModels[benchmarkPageIndex + 1])}>Next model →</button>
-          {benchmark.progress?.model === benchmarkPageModel && benchmark.status === 'running' &&
-            <span className="rv-benchmark-status running">● currently testing</span>}
-        </div>}
-        {!!benchmarkPageRows.length && <div className="rv-model-page-title">
-          <strong>{benchmarkPageModel}</strong>
-          <span>{benchmarkPageRows.length} worker / quant / configuration rows</span>
-        </div>}
-        {!!benchmarkPageRows.length && <div className="rv-benchmark-tablewrap">
-          <table className="rv-benchmark-table rv-metrics-sheet">
-            <thead>
-              <tr><th rowSpan="2">{benchmarkPageModel}</th>
-                {benchmarkWorkers.map(w => <th key={w.id} colSpan={benchmarkTasks.length + 7}>{w.name}</th>)}
-              </tr>
-              <tr>{benchmarkWorkers.flatMap(w => [
-                <th key={`${w.id}:cold`}>cold</th>, <th key={`${w.id}:hot`}>hot</th>,
-                <th key={`${w.id}:tps`}>tok_per_s</th>, <th key={`${w.id}:avg`}>tok_per_s_avg</th>,
-                ...benchmarkTasks.map(t => <th key={`${w.id}:${t}`}>{t}</th>),
-                <th key={`${w.id}:ideal`}>task_ideal</th>, <th key={`${w.id}:worst`}>task_worst</th>,
-                <th key={`${w.id}:overall`}>overall</th>,
-              ])}</tr>
-            </thead>
-            <tbody>{benchmarkSections.flatMap(section => [
-              <tr className="rv-sheet-band" key={`${section.label}:band`}>
-                <th>{section.label}</th>
-                <td colSpan={benchmarkWorkers.length * (benchmarkTasks.length + 7)}> </td>
-              </tr>,
-              ...benchmarkQuants.map(quant => <tr key={`${section.label}:${quant}`}>
-                <th>{quant}</th>
-                {benchmarkWorkers.flatMap(worker => {
-                  const r = sectionRow(section, quant, worker)
-                  if (!r) return Array.from({ length: benchmarkTasks.length + 7 }, (_, n) =>
-                    <td className="rv-sheet-na" key={`${worker.id}:${n}`}>N/A</td>)
-                  return [
-                    <td key={`${worker.id}:cold`}>{fmtSecs(num(r.cold_s))}</td>,
-                    <td key={`${worker.id}:hot`}>{fmtSecs(num(r.inference_s ?? r.hot_s))}</td>,
-                    <td key={`${worker.id}:tps`}>{metric(r.tok_s)}</td>,
-                    <td key={`${worker.id}:avg`}>{metric(r.tok_s_avg)}</td>,
-                    ...benchmarkTasks.map(task => <td className={r.detail?.[task] === 1 ? 'rv-sheet-pass' : r.detail?.[task] === 0 ? 'rv-sheet-fail' : ''}
-                      key={`${worker.id}:${task}`}>{r.detail?.[task] ?? 'N/A'}</td>),
-                    <td key={`${worker.id}:ideal`}>{taskOutcome(r, true)}</td>,
-                    <td key={`${worker.id}:worst`}>{taskOutcome(r, false)}</td>,
-                    <td className={r.ok ? 'rv-sheet-pass' : 'rv-sheet-fail'} key={`${worker.id}:overall`}>{r.grade || 'N/A'}</td>,
-                  ]
-                })}
-              </tr>),
-            ])}</tbody>
-          </table>
-        </div>}
-        {!!benchmarkPageRows.length && <div className="rv-benchmark-tablewrap rv-worker-card-wrap">
-          <table className="rv-benchmark-table">
-            <thead><tr><th>worker_card</th><th>temperature</th><th>upload_time_s</th><th>tok_per_s</th>
-              <th>n_samples</th><th>updated_at</th><th>task</th><th>media_bytes</th><th>analysis</th><th>runtime</th><th>disk</th><th>error</th></tr></thead>
-            <tbody>{benchmarkWorkers.map(worker => {
-              const rows = benchmarkPageRows.filter(r => (r.worker_id || r.worker) === worker.id)
-              const tested = rows.filter(r => r.grade && r.grade !== 'N/A')
-              const speeds = tested.map(r => num(r.tok_s_avg ?? r.tok_s)).filter(v => v != null)
-              const latest = tested.slice().sort((a, b) => num(b.finished) - num(a.finished))[0] || rows[0] || {}
-              return <tr key={worker.id}><th>{worker.name}</th><td>0</td>
-                <td>{fmtSecs(num(latest.cold_s))}</td>
-                <td>{speeds.length ? metric(speeds.reduce((a, b) => a + b, 0) / speeds.length) : 'N/A'}</td>
-                <td>{tested.reduce((n, r) => n + (r.calls?.length || 0), 0)}</td>
-                <td>{fmtClock(latest.finished)}</td><td>text-generation</td><td>N/A</td>
-                <td>{tested.filter(r => r.metrics_complete).length}/{tested.length}</td>
-                <td>{fmtBytes(latest.runtime_bytes)}</td><td>{fmtBytes(latest.disk_bytes)}</td>
-                <td>{latest.error || 'N/A'}</td></tr>
-            })}</tbody>
-          </table>
-        </div>}
-        {!!benchmark.calls?.length && <details className="rv-call-log">
-          <summary>Complete call log ({benchmark.calls.length})</summary>
-          {benchmark.calls.slice().reverse().map((c, i) => <details key={`${c.worker_id}:${c.model}:${c.quant}:${c.task}:${i}`}>
-            <summary>{c.grade} · {c.worker} · {c.model}/{c.quant} · {c.task} · {c.elapsed_s}s · {c.tok_s} tok/s ({c.tok_s_source || 'source N/A'}) · {c.finish_reason || 'finish N/A'}{c.truncated ? ' · truncated' : ''}</summary>
-            {benchmark.status === 'running' && <button onClick={() => cancelBenchmark('call', c)}>skip this call</button>}
-            <pre>{JSON.stringify(c, null, 2)}</pre>
-          </details>)}
-        </details>}
-        {!!benchmark.events?.length && <details className="rv-call-log" open={benchmark.status === 'running'}>
-          <summary>Live activity log ({benchmark.events.length})</summary>
-          <pre>{benchmark.events.slice().reverse().map(e => {
-            const stamp = e.at ? new Date(e.at * 1000).toLocaleTimeString() : '—'
-            const detail = e.message || (e.value == null ? '' : JSON.stringify(e.value))
-            return `${stamp}  ${e.kind || 'event'}  ${detail}`
-          }).join('\n')}</pre>
-        </details>}
+        {benchmarkModel.trim() && <div className="rv-benchmark-meta"><ModelLiveState modelKey={benchmarkModel.trim()} /></div>}
+       </details>
+        {/* Live progress, pass/fail counts, avg tok/s, the activity log and the
+            per-model grading matrix are all rendered ONCE by the workbook below:
+            its "Live test output" pane owns the run's live numbers so this
+            control surface (worker selector + run action) never competes with a
+            second copy of them. The Benchmark workbook matrix stays visible (it
+            is the results view); only the initiator above and the Live test
+            output pane inside collapse by default. */}
+        <GraderWorkbook benchmark={benchmark} benchmarkWorkers={chosenWorkers}
+          gradeModels={gradeModels} onGradeModelsChange={setGradeModels} />
         {!!Object.keys(benchmark.summary || {}).length && <details className="rv-call-log">
           <summary>Worker, model, quant and execution totals</summary>
           <pre>{JSON.stringify(benchmark.summary, null, 2)}</pre>
@@ -523,6 +470,54 @@ export default function ReviewPanel() {
         />
       )}
     </div>
+  )
+}
+
+// ── worker state snapshot / restore status ──────────────────────────────────
+// The benchmark backs up each involved worker's state before the test and
+// restores it after. Both halves ride the run's summary (summary.state) and its
+// events; this surfaces them per the metrics/grading contract — every restore
+// result, every failure with its reason, no truncation, absences explicit.
+function BenchmarkStateStatus({ benchmark }) {
+  const state = benchmark?.summary?.state || null
+  // Fall back to the live events so status shows DURING the run too.
+  const evSnap = (benchmark?.events || []).filter(e => e?.kind === 'state-snapshot').slice(-1)[0]?.value
+  const evRest = (benchmark?.events || []).filter(e => e?.kind === 'state-restore').map(e => e.value).filter(Boolean)
+  const snap = state?.snapshot || evSnap || null
+  const restore = state?.restore || (evRest.length ? { workers: evRest } : null)
+  if (!snap && !restore) return null
+  return (
+    <details className="rv-benchmark-state" open={!!restore}>
+      <summary>Worker state backup &amp; restore{restore ? ` · restored ${(restore.workers || []).length} worker(s)` : ' · snapshot taken'}</summary>
+      {snap && (
+        <div className="rv-state-block">
+          <b>Backed up</b> before the test:
+          <span className="rv-dim"> {(snap.workers || []).length} worker(s) [{(snap.workers || []).join(', ') || 'none'}]
+            {snap.models?.length ? ` · ${snap.models.length} model(s)` : ' · all central models'}
+            {snap.error ? ` · SNAPSHOT ERROR: ${snap.error}` : ''}</span>
+        </div>
+      )}
+      {restore && (
+        <div className="rv-state-block">
+          <b>Restored</b> after the test:
+          {!(restore.workers || []).length && <span className="rv-dim"> nothing to restore (no state changed)</span>}
+          <ul className="rv-state-list">
+            {(restore.workers || []).map((w, i) => (
+              <li key={w.worker_id || w.worker || i} className={(w.failures || []).length ? 'rv-state-fail' : ''}>
+                <b>{w.worker || w.worker_id}</b>
+                {' '}restored: {(w.restored || []).length ? w.restored.join('; ') : 'no changes needed'}
+                {(w.redownloaded || []).length ? ` · re-downloaded to disk: ${w.redownloaded.join(', ')}` : ''}
+                {(w.removed || []).length ? ` · removed to fit prior models: ${w.removed.join(', ')}` : ''}
+                {(w.failures || []).map((f, j) => (
+                  <div key={j} className="rv-state-failline">✗ {f.item ? `${f.item}: ` : ''}{f.error}</div>
+                ))}
+              </li>
+            ))}
+          </ul>
+          {restore.error && <div className="rv-state-failline">✗ restore error: {restore.error}</div>}
+        </div>
+      )}
+    </details>
   )
 }
 

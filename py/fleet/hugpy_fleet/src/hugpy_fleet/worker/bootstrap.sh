@@ -9,9 +9,9 @@
 # What it does (idempotent — safe to re-run to upgrade):
 #   1. checks python3 >= 3.10 with the venv module
 #   2. creates ~/hugpy-worker/venv if missing
-#   3. pip install --upgrade -c <central>/llm/workers/constraints.txt
-#        [--extra-index-url <central>/llm/pip/simple] 'hugpy[<profile>]==<version>'
-#      (when --version is omitted it asks <central>/llm/workers/required-version;
+#   3. pip install --upgrade -c <central>/api/llm/workers/constraints.txt
+#        [--extra-index-url <central>/api/llm/pip/simple] 'hugpy[<profile>]==<version>'
+#      (when --version is omitted it asks <central>/api/llm/workers/required-version;
 #       falls back to latest if central pins no version; when that reply names
 #       central's own pip index — the release is published there — it is added
 #       as an extra index so the hugpy-* wheels come from central, like model
@@ -69,6 +69,7 @@ done
 
 [ -n "$CENTRAL" ] || die "--central is required (e.g. --central https://dev.hugpy.ai)"
 CENTRAL="${CENTRAL%/}"   # strip a trailing slash so URL joins are clean
+CENTRAL="${CENTRAL%/api}" # --central is the origin; /api is appended where needed
 
 # 1. python3 >= 3.10 with the venv module ----------------------------------
 command -v python3 >/dev/null 2>&1 || die "python3 not found (need >= 3.10)"
@@ -85,23 +86,26 @@ fi
 PY_BIN="${VENV}/bin/python"
 PIP_BIN="${VENV}/bin/pip"
 
-# fetch_central <path>: GET ${CENTRAL}<path> to stdout; empty on failure.
+# fetch_central <path>: GET ${CENTRAL}/api<path> to stdout; empty on failure.
+# --central is the bare origin (what the worker agent takes; it appends /api
+# itself), so the API mount is added here — without it these lookups hit the
+# console SPA and silently fell back to an unpinned, unconstrained install.
 # LAN centrals often front a cert the box doesn't trust; these values only
 # pick which version pip pulls FROM THE INDEX, so an insecure retry is a
 # version-pin risk, not a code-injection one. Warn either way.
 fetch_central() {
   _out=""
   if command -v curl >/dev/null 2>&1; then
-    _out="$(curl -fsSL "${CENTRAL}$1" 2>/dev/null || true)"
+    _out="$(curl -fsSL "${CENTRAL}/api$1" 2>/dev/null || true)"
     if [ -z "$_out" ]; then
       say "WARNING: strict query of $1 failed; retrying with certificate checks off"
-      _out="$(curl -fskL "${CENTRAL}$1" 2>/dev/null || true)"
+      _out="$(curl -fskL "${CENTRAL}/api$1" 2>/dev/null || true)"
     fi
   else
-    _out="$(wget -qO- "${CENTRAL}$1" 2>/dev/null || true)"
+    _out="$(wget -qO- "${CENTRAL}/api$1" 2>/dev/null || true)"
     if [ -z "$_out" ]; then
       say "WARNING: strict query of $1 failed; retrying with certificate checks off"
-      _out="$(wget -qO- --no-check-certificate "${CENTRAL}$1" 2>/dev/null || true)"
+      _out="$(wget -qO- --no-check-certificate "${CENTRAL}/api$1" 2>/dev/null || true)"
     fi
   fi
   printf '%s' "$_out"
@@ -157,7 +161,7 @@ if [ -n "$VERSION" ]; then
     PIP_CONSTRAINT="-c ${CONSTRAINTS_FILE}"
     say "lockstep constraints from central: $(grep -c '==' "$CONSTRAINTS_FILE") pins -> ${CONSTRAINTS_FILE}"
   else
-    say "WARNING: no lockstep constraints from ${CENTRAL}/llm/workers/constraints.txt —"
+    say "WARNING: no lockstep constraints from ${CENTRAL}/api/llm/workers/constraints.txt —"
     say "         installing unconstrained; sibling hugpy-* distributions may end up"
     say "         at another version than ${VERSION} (fleet skew) until the agent converges."
   fi

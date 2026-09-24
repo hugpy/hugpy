@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 # Outcome vocabulary — closed, and rendered verbatim by the console.
 ST_CHOSEN = "chosen"          # first usable member, in the operator's order
 ST_BLOCKED = "blocked"        # operator block — never laundered
+ST_ARCHIVED = "archived"      # operator archive mark — never laundered either
 ST_MISSING = "missing"        # not in the model catalog
 ST_NO_WORKER = "no-worker"    # in the catalog, but nothing can serve it now
 ST_LOWER = "lower-priority"   # usable, but a higher-ranked member won
@@ -150,6 +151,18 @@ def _evaluate(name: str, pool: Optional[str], task: Optional[str],
     if not ck:
         row["status"] = ST_MISSING
         row["reason"] = "not in the model catalog"
+        return row
+    # ARCHIVE MARK (2026-09-23): a member the operator marked for archive is
+    # skipped like a block (never laundered through a group), with the
+    # recorded mark as the reason.
+    try:
+        from hugpy_fleet.central.archive_gate import archive_reason
+        _arch = archive_reason(ck)
+    except Exception:  # noqa: BLE001 — fail open
+        _arch = None
+    if _arch:
+        row["status"] = ST_ARCHIVED
+        row["reason"] = _arch
         return row
     boxes = _boxes_for(ck, pool, task)
     if not boxes:

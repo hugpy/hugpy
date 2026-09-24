@@ -102,3 +102,23 @@ def test_agent_self_update_converges_under_constraints_with_no_deps_fallback():
     assert agent_src.count("= _prepare_converge(args, ") == 2
     assert '"--upgrade-strategy", "only-if-needed", "-c"' in agent_src
     assert '"--no-deps"' in agent_src   # the fetch-failed fallback survives
+
+
+def test_route_renders_forwarded_https_origin_behind_proxy():
+    """Behind nginx the backend sees plain http; the script must default
+    --central to the PUBLIC https origin (port 80 does not answer)."""
+    app = Flask(__name__)
+    with app.test_request_context("/llm/workers/install.sh", base_url="http://dev.hugpy.ai",
+                                  headers={"X-Forwarded-Proto": "https",
+                                           "X-Forwarded-Host": "dev.hugpy.ai"}):
+        out = wr.workers_install_sh().get_data(as_text=True)
+    assert 'CENTRAL="https://dev.hugpy.ai"' in out
+
+
+def test_bootstrap_queries_central_through_the_api_mount():
+    """--central is the bare origin; the lookups must go through /api or they
+    hit the console SPA and fall back to an unpinned, unconstrained install."""
+    raw = (resources.files("hugpy_fleet.worker")
+           .joinpath("bootstrap.sh").read_text(encoding="utf-8"))
+    assert '"${CENTRAL}/api$1"' in raw and '"${CENTRAL}$1"' not in raw
+    assert 'CENTRAL="${CENTRAL%/api}"' in raw

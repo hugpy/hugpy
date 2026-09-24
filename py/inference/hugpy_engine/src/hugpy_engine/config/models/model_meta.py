@@ -123,9 +123,17 @@ def recommended_settings(*, size_bytes: Optional[int], ctx_max: Optional[int],
     return rec
 
 
-def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None) -> dict:
+def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None,
+               select_gguf: Optional[str] = None) -> dict:
     """The one metadata dict every picker renders. cfg = ModelConfig or its
-    to_dict()."""
+    to_dict().
+
+    ``select_gguf`` (2026-09-23, the per-worker quant dropdown): size + recommend for
+    THAT variant (basename or quant token) instead of the effective one, so the
+    console can show the fit of a quant on a worker before/after pinning it
+    (``select_gguf``).
+    Only a COMPLETE on-disk variant is accepted; otherwise ``selected_gguf_error``
+    says why and the effective sizing stands."""
     d = cfg if isinstance(cfg, dict) else cfg.to_dict()
     name = d.get("name") or ""
     hub_id = d.get("hub_id") or ""
@@ -150,6 +158,22 @@ def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None) -> dict:
         if gguf.get("effective_bytes"):
             size = gguf["effective_bytes"]
 
+    selected = selected_err = None
+    gguf_sel = str(select_gguf or "").strip()
+    if gguf_sel:
+        want = os.path.basename(gguf_sel).lower()
+        variants = [v for v in (gguf.get("variants") or [])
+                    if isinstance(v, dict) and v.get("complete") is not False]
+        hits = [v for v in variants if str(v.get("filename") or "").lower() == want] or \
+               [v for v in variants if want in str(v.get("filename") or "").lower()]
+        if len(hits) == 1:
+            selected = hits[0]
+            size = selected.get("bytes") or size
+        else:
+            selected_err = (f"{len(hits)} complete GGUF variants on central match {gguf_sel!r}"
+                            if hits else f"no complete GGUF variant on central matches {gguf_sel!r}"
+                            f" ({len(variants)} complete variant(s) listed)")
+
     out = {
         "model_key": d.get("model_key"),
         "size_bytes": size,                        # effective quant for GGUF
@@ -162,6 +186,11 @@ def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None) -> dict:
             size_bytes=size, ctx_max=ctx_max, framework=framework,
             vram_bytes=vram_bytes),
     }
+    if selected is not None:
+        out["selected_gguf"] = selected.get("filename")
+        out["selected_bytes"] = selected.get("bytes")
+    if selected_err:
+        out["selected_gguf_error"] = selected_err
     if gguf:
         out["effective_gguf"] = gguf.get("effective_gguf")
         out["gguf_variants"] = gguf.get("variants") or []

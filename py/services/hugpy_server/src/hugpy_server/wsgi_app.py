@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Video Intelligence worker daemon is started ONCE per process at app init
 # (guarded below). Module-level so re-entrant app creation can't spawn a second.
 _VIDEO_DAEMON_STARTED = False
+_ADMISSION_RUNNER_STARTED = False
 
 
 class ApiPrefixMiddleware:
@@ -555,6 +556,31 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
             _logging.getLogger(__name__).error(
                 "video_intel worker daemon start failed: %s", _exc
             )
+    # POST-DOWNLOAD ADMISSION runner (2026-09-23): claims the admission jobs
+    # every completed download enqueues (hugpy_storage.admission) and runs the
+    # static audit -> benchmark -> admitted/held gate (hugpy_ops.admission).
+    # One runner per host (flock-elected inside), so every gunicorn worker may
+    # call this. hugpy-ops is an optional extra of the server: without it the
+    # jobs stay queued and GET /llm/admission says so.
+    global _ADMISSION_RUNNER_STARTED
+    if not _ADMISSION_RUNNER_STARTED and _daemons_enabled(start_daemons):
+        try:
+            from hugpy_ops.admission import start_admission_runner
+            _ADMISSION_RUNNER_STARTED = bool(start_admission_runner())
+        except ImportError as _exc:
+            logger.info("admission runner not started (hugpy-ops not installed: %s)", _exc)
+        except Exception as _exc:  # noqa: BLE001 — must never break app creation
+            logger.error("admission runner start failed: %s", _exc)
+    # BENCHMARK RESUME (2026-09-23): a central restart (package promotion) no
+    # longer ends a running capacity benchmark as "interrupted" — once this
+    # server answers /health, the persisted run is continued with its remaining
+    # lanes (flock-elected: one gunicorn worker resumes it).
+    if _daemons_enabled(start_daemons):
+        try:
+            from hugpy_server.app.routes.review_routes import start_benchmark_resume
+            start_benchmark_resume()
+        except Exception as _exc:  # noqa: BLE001 — must never break app creation
+            logger.error("benchmark resume hook failed: %s", _exc)
     return app
 
 

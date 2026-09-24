@@ -62,7 +62,12 @@ class Harness:
 
     def __init__(self, monkeypatch):
         self.mp = monkeypatch
-        self.assign_calls: list = []      # (worker_id, model_key, spill)
+        # (worker_id, model_key, spill); the PINS round (2026-09-23) makes every
+        # assign_model caller pass a provenance `source` — recorded separately so
+        # the historical (worker_id, model_key, spill) assertions stay intact
+        # while the source is still checkable (see assign_sources).
+        self.assign_calls: list = []
+        self.assign_sources: list = []    # source= passed to each assign_model call
         self.warm_calls: list = []        # (models,) passed to _kick_warm
         self.relay_seen = {"n": 0}
         app = Flask(__name__)
@@ -79,8 +84,9 @@ class Harness:
                         lambda wid: dict(worker) if wid == "wid" else None)
         self.mp.setattr(wr, "_model_framework", lambda mk: frameworks.get(mk))
 
-    def fake_assign(self, worker_id, model_key, spill=None):
+    def fake_assign(self, worker_id, model_key, spill=None, source=None, retag=True):
         self.assign_calls.append((worker_id, model_key, spill))
+        self.assign_sources.append(source)
         return dict(WORKER)   # assign_model returns the public worker view
 
     def _fake_warm(self, worker, model_keys, source):
@@ -118,6 +124,8 @@ def test_max_gpu_subset_one_assign_per_key_same_spill_no_relay(h):
     assert r.status_code == 200
     assert len(h.assign_calls) == 2, "one assign_model per selected key"
     assert all(c[2] == {"n_gpu_layers": -1} for c in h.assign_calls)
+    # PINS round: every bulk-alloc write carries operator provenance.
+    assert h.assign_sources == ["operator", "operator"]
     assert h.relay_seen["n"] == 0, "NEVER relayed (no restart)"
     assert body["restarting"] is False
     assert body["alloc"] == "gpu-only", "k37 honest name"
@@ -163,7 +171,7 @@ def test_all_keys_off_worker_no_assign_honest_note(h):
 
 
 def test_one_bad_key_errors_that_key_only(h, monkeypatch):
-    def _assign_b_raises(worker_id, model_key, spill=None):
+    def _assign_b_raises(worker_id, model_key, spill=None, source=None, retag=True):
         h.assign_calls.append((worker_id, model_key, spill))
         if model_key == "b":
             raise RuntimeError("boom")

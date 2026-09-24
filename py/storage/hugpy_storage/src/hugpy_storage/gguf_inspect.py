@@ -441,9 +441,265 @@ def gguf_moe_detail(model_path) -> dict:
     return detail
 
 
+# ── Full header read + integrity facts (2026-09-23, hugpy-model-audit) ───────
+# The KV/tensor readers above stop at what placement needs. The integrity audit
+# needs the WHOLE header: every tensor's type + dims (so each tensor's byte
+# extent is computable) and the data-section start, to answer two questions
+# with no engine semantics — is the file TRUNCATED (a tensor's bytes run past
+# EOF) and is it SELF-CONSISTENT (the tensor shapes agree with the file's own
+# metadata, the llama.cpp ``check_tensor_dims`` rule). Array values are never
+# materialised: only their element count is kept (a 150k-token vocab is a
+# length, not a list), so reading a header costs one pass and O(1) memory.
+
+# ggml_type id -> (block elements, bytes per block). Mirrors ggml.h / ggml.c
+# ``type_traits``; a type missing here makes that tensor's size unknown (the
+# truncation check then skips it — never a false "broken").
+GGML_TYPE_SIZES = {
+    0: (1, 4),      # F32
+    1: (1, 2),      # F16
+    2: (32, 18),    # Q4_0
+    3: (32, 20),    # Q4_1
+    6: (32, 22),    # Q5_0
+    7: (32, 24),    # Q5_1
+    8: (32, 34),    # Q8_0
+    9: (32, 36),    # Q8_1
+    10: (256, 84),  # Q2_K
+    11: (256, 110), # Q3_K
+    12: (256, 144), # Q4_K
+    13: (256, 176), # Q5_K
+    14: (256, 210), # Q6_K
+    15: (256, 292), # Q8_K
+    16: (256, 66),  # IQ2_XXS
+    17: (256, 74),  # IQ2_XS
+    18: (256, 98),  # IQ3_XXS
+    19: (256, 50),  # IQ1_S
+    20: (32, 18),   # IQ4_NL
+    21: (256, 110), # IQ3_S
+    22: (256, 82),  # IQ2_S
+    23: (256, 136), # IQ4_XS
+    24: (1, 1),     # I8
+    25: (1, 2),     # I16
+    26: (1, 4),     # I32
+    27: (1, 8),     # I64
+    28: (1, 8),     # F64
+    29: (256, 56),  # IQ1_M
+    30: (1, 2),     # BF16
+    34: (256, 54),  # TQ1_0
+    35: (256, 66),  # TQ2_0
+    39: (32, 17),   # MXFP4
+}
+
+_GGUF_SCALAR = {0: "<b", 1: "<B", 2: "<h", 3: "<H", 4: "<i", 5: "<I",
+                6: "<f", 7: "<?", 10: "<q", 11: "<Q", 12: "<d"}
+
+
+class GGUFHeaderError(ValueError):
+    """The header itself is unreadable (bad magic/version, EOF mid-header)."""
+
+
+def gguf_tensor_nbytes(ggml_type: int, dims) -> Optional[int]:
+    """Bytes a tensor of ``ggml_type`` with ``dims`` occupies, or None when the
+    type is not in :data:`GGML_TYPE_SIZES` (or the row is not block-aligned)."""
+    ts = GGML_TYPE_SIZES.get(int(ggml_type))
+    if ts is None:
+        return None
+    blk, size = ts
+    n = 1
+    for d in dims:
+        n *= int(d)
+    if n % blk:
+        return None
+    return n // blk * size
+
+
+def gguf_read_header(model_path: str) -> dict:
+    """Parse a GGUF header completely. Returns::
+
+        {version, n_tensors, n_kv, alignment, kv: {key: scalar | str |
+         {"array_type": t, "len": n}}, tensors: [{name, dims, type, offset,
+         nbytes}], data_offset, file_size}
+
+    Raises :class:`GGUFHeaderError` on bad magic / unsupported version / a
+    header that runs past EOF (a file cut inside its own header)."""
+    import struct
+
+    file_size = os.path.getsize(model_path)
+    with open(model_path, "rb") as fh:
+        def need(n: int) -> bytes:
+            b = fh.read(n)
+            if len(b) != n:
+                raise GGUFHeaderError(f"EOF inside header at byte {fh.tell()}")
+            return b
+
+        def u32() -> int:
+            return struct.unpack("<I", need(4))[0]
+
+        def u64() -> int:
+            return struct.unpack("<Q", need(8))[0]
+
+        def read_str() -> str:
+            n = u64()
+            if n > file_size:
+                raise GGUFHeaderError(f"string length {n} exceeds file size")
+            return need(n).decode("utf-8", "replace")
+
+        def skip_val(t: int) -> None:
+            if t in _GGUF_SCALAR:
+                need(struct.calcsize(_GGUF_SCALAR[t]))
+            elif t == 8:
+                n = u64()
+                if n > file_size:
+                    raise GGUFHeaderError("string length exceeds file size")
+                fh.seek(n, 1)
+            elif t == 9:
+                et = u32()
+                n = u64()
+                if et in _GGUF_SCALAR:
+                    fh.seek(n * struct.calcsize(_GGUF_SCALAR[et]), 1)
+                else:
+                    for _ in range(n):
+                        skip_val(et)
+            else:
+                raise GGUFHeaderError(f"unknown gguf value type {t}")
+
+        def read_val(t: int):
+            if t in _GGUF_SCALAR:
+                fmt = _GGUF_SCALAR[t]
+                return struct.unpack(fmt, need(struct.calcsize(fmt)))[0]
+            if t == 8:
+                return read_str()
+            if t == 9:
+                et = u32()
+                n = u64()
+                start = fh.tell()
+                if et in _GGUF_SCALAR:
+                    fh.seek(n * struct.calcsize(_GGUF_SCALAR[et]), 1)
+                else:
+                    for _ in range(n):
+                        skip_val(et)
+                if fh.tell() > file_size:
+                    raise GGUFHeaderError("array runs past EOF")
+                del start
+                return {"array_type": et, "len": n}
+            raise GGUFHeaderError(f"unknown gguf value type {t}")
+
+        magic = fh.read(4)
+        if magic != b"GGUF":
+            raise GGUFHeaderError(f"bad magic {magic!r}")
+        version = u32()
+        if version not in (2, 3):
+            raise GGUFHeaderError(f"unsupported gguf version {version}")
+        n_tensors = u64()
+        n_kv = u64()
+        if n_tensors > 10_000_000 or n_kv > 10_000_000:
+            raise GGUFHeaderError(f"implausible counts n_tensors={n_tensors} n_kv={n_kv}")
+        kv: dict = {}
+        for _ in range(n_kv):
+            key = read_str()
+            kv[key] = read_val(u32())
+        tensors = []
+        for _ in range(n_tensors):
+            name = read_str()
+            nd = u32()
+            if nd > 8:
+                raise GGUFHeaderError(f"tensor {name!r} has {nd} dims")
+            dims = list(struct.unpack(f"<{nd}Q", need(8 * nd))) if nd else []
+            gt = u32()
+            off = u64()
+            tensors.append({"name": name, "dims": dims, "type": gt, "offset": off,
+                            "nbytes": gguf_tensor_nbytes(gt, dims)})
+        header_end = fh.tell()
+    try:
+        alignment = int(kv.get("general.alignment") or 32) or 32
+    except (TypeError, ValueError):
+        alignment = 32
+    data_offset = (header_end + alignment - 1) // alignment * alignment
+    return {"version": version, "n_tensors": n_tensors, "n_kv": n_kv,
+            "alignment": alignment, "kv": kv, "tensors": tensors,
+            "data_offset": data_offset, "file_size": file_size}
+
+
+def gguf_integrity(model_path: str, header: Optional[dict] = None,
+                   meta_from: Optional[dict] = None) -> dict:
+    """Structural facts about one GGUF file, no engine semantics::
+
+        {ok_header, error, arch, truncated, data_end, file_size,
+         unknown_type_tensors, inconsistencies: [str], expert_count,
+         embedding_length, vocab_size}
+
+    * ``truncated`` — the furthest tensor byte (data_offset + offset + nbytes,
+      over tensors with a known type) lies past EOF, or the header itself does.
+    * ``inconsistencies`` — the llama.cpp ``check_tensor_dims`` rule for the
+      embedding/output matrices: ``token_embd.weight`` / ``output.weight`` must
+      be ``[embedding_length, vocab_size]`` where vocab_size is
+      ``len(tokenizer.ggml.tokens)`` (as llama.cpp sizes it), else the
+      ``<arch>.vocab_size`` KV.
+      ``meta_from`` lets a later shard of a split model be checked against
+      shard 1's header (only shard 1 carries the metadata)."""
+    out = {"ok_header": False, "error": None, "arch": None, "truncated": False,
+           "data_end": None, "file_size": None, "unknown_type_tensors": 0,
+           "inconsistencies": [], "expert_count": None,
+           "embedding_length": None, "vocab_size": None, "n_tensors": None}
+    try:
+        h = header if header is not None else gguf_read_header(model_path)
+    except GGUFHeaderError as exc:
+        out["error"] = str(exc)
+        out["truncated"] = "EOF" in str(exc) or "past EOF" in str(exc)
+        return out
+    except OSError as exc:
+        out["error"] = f"unreadable: {exc}"
+        return out
+    out["ok_header"] = True
+    out["file_size"] = h["file_size"]
+    out["n_tensors"] = h["n_tensors"]
+    kv = h["kv"]
+    mkv = (meta_from or {}).get("kv") if meta_from else None
+    src = kv if kv.get("general.architecture") else (mkv or kv)
+    arch = src.get("general.architecture")
+    out["arch"] = arch if isinstance(arch, str) else None
+    end = h["data_offset"]
+    unknown = 0
+    for t in h["tensors"]:
+        if t["nbytes"] is None:
+            unknown += 1
+            continue
+        end = max(end, h["data_offset"] + t["offset"] + t["nbytes"])
+    out["data_end"] = end
+    out["unknown_type_tensors"] = unknown
+    out["truncated"] = end > h["file_size"]
+    if out["arch"]:
+        a = out["arch"]
+
+        def _int(v):
+            return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        n_embd = _int(src.get(f"{a}.embedding_length"))
+        # llama.cpp sizes the embedding by the TOKENIZER (n_tokens), not by
+        # the ``<arch>.vocab_size`` KV (Echo-Mini: KV 32000, tokens 32005 ->
+        # "expected 4096, 32005"); the KV is only the fallback.
+        toks = src.get("tokenizer.ggml.tokens")
+        vocab = _int(toks.get("len")) if isinstance(toks, dict) else None
+        if vocab is None:
+            vocab = _int(src.get(f"{a}.vocab_size"))
+        ec = _int(src.get(f"{a}.expert_count"))
+        out.update(embedding_length=n_embd, vocab_size=vocab, expert_count=ec)
+        if n_embd and vocab:
+            for t in h["tensors"]:
+                if t["name"] in ("token_embd.weight", "output.weight"):
+                    d = [int(x) for x in t["dims"]]
+                    got = d + [1] * (4 - len(d))
+                    if got[:2] != [n_embd, vocab] or any(x != 1 for x in got[2:]):
+                        out["inconsistencies"].append(
+                            f"tensor '{t['name']}' has wrong shape; expected "
+                            f"{n_embd}, {vocab}, got {', '.join(str(x) for x in got)}")
+    return out
+
+
 def gguf_metadata(model_path: str, want_suffixes: tuple) -> dict:
     """Public name for :func:`_gguf_metadata` (suffix-matched GGUF KV read)."""
     return _gguf_metadata(model_path, want_suffixes)
 
 
-__all__ = ["gguf_metadata", "gguf_moe_detail"]
+__all__ = ["gguf_metadata", "gguf_moe_detail", "gguf_read_header",
+           "gguf_integrity", "gguf_tensor_nbytes", "GGUFHeaderError",
+           "GGML_TYPE_SIZES"]

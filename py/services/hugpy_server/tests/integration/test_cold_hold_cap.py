@@ -135,10 +135,13 @@ def _message_checks(remote):
           "concurrent model loads" in low and "limit" in low)
     check("refusal says the model is still LOADING (not that it failed)",
           "is still loading into vram on" in low)
-    check("refusal states plainly that nothing is broken",
-          "nothing is broken" in low)
+    check("refusal states plainly that nothing is broken — the request never "
+          "started, so it is not a fault or a lost call (message-discipline "
+          "sweep 2026-09-23: named as 'refused before it started (not queued)' "
+          "rather than the editorial phrase)",
+          "refused before it started" in low and "not queued" in low)
     check("refusal is actionable (tells the caller when to come back)",
-          "retry in about 20s" in low)
+          "retry-after=20s" in low)
     # The recorded doctrine: a confidently wrong error is worse than a vague one.
     for lie in ("too large", "too big", "won't fit", "out of memory", "crash",
                 "unhealthy", "offline", "unreachable", "failed to load",

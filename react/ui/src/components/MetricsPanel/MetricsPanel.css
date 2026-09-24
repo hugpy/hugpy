@@ -19,6 +19,13 @@
 .metrics-live-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .metrics-live-head h3 { margin-bottom:2px; }
 .metrics-live-actions { display:flex; gap:8px; }
+/* Collapsed-by-default output pane: the head becomes a clickable summary row
+   with a chevron; auto-expanded only while a run is active. */
+.metrics-live-summary { cursor:pointer; list-style:none; }
+.metrics-live-summary::-webkit-details-marker { display:none; }
+.metrics-live-summary h3::before { content:'▸'; color:var(--muted); font-size:.8rem; margin-right:7px; }
+.metrics-live-collapse[open] > .metrics-live-summary h3::before { content:'▾'; }
+.metrics-live-collapse > .metrics-live-progress { margin-top:10px; }
 .metrics-live-actions button { background:var(--surface-1); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:5px 10px; cursor:pointer; }
 .metrics-live-actions .metrics-cancel { color:#ff7373; }
 .metrics-live-actions button:disabled { opacity:.45; cursor:not-allowed; }
@@ -31,7 +38,9 @@
 .metrics-live-counts b { color:var(--text); }
 .metrics-live-log { margin-top:10px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
 .metrics-live-log summary { padding:8px 10px; cursor:pointer; color:var(--text); font-size:12px; }
-.metrics-live-log pre { max-height:260px; overflow:auto; margin:0; padding:10px; border-top:1px solid var(--border); background:var(--surface-1); color:var(--muted); font-size:11px; line-height:1.55; white-space:pre-wrap; }
+/* Logs are collapsable (in a <details>), never truncated: when open they show
+   whole and the page scrolls — no inner scroll-box, no height cap. */
+.metrics-live-log pre { max-height:none; overflow:visible; margin:0; padding:10px; border-top:1px solid var(--border); background:var(--surface-1); color:var(--muted); font-size:12px; line-height:1.55; white-space:pre-wrap; }
 .metrics-toggle { cursor:pointer; background:var(--surface-1); border:1px solid var(--border); color:var(--text); border-radius:7px; padding:4px 10px; font-size:12px; }
 .metrics-toggle:hover { border-color:var(--border-strong); }
 
@@ -65,11 +74,13 @@
 .metrics-coverage button { margin-left:auto; background:var(--surface-2); color:var(--accent); border:1px solid var(--border); border-radius:7px; padding:5px 10px; font-weight:600; }
 .metrics-coverage button:disabled { opacity:.45; cursor:not-allowed; }
 .metrics-sheetwrap { width:100%; overflow:auto; border:1px solid var(--border); border-radius:8px; margin-top:10px; max-height:62vh; }
-.metrics-sheet { min-width:100%; border-collapse:collapse; font-size:11px; font-variant-numeric:tabular-nums; }
-.metrics-sheet th, .metrics-sheet td { padding:5px 7px; white-space:nowrap; border-right:1px solid var(--border); border-bottom:1px solid var(--border); text-align:left; }
+.metrics-sheet { min-width:100%; border-collapse:collapse; font-size:12.5px; font-variant-numeric:tabular-nums; }
+.metrics-sheet th, .metrics-sheet td { padding:8px 10px; white-space:nowrap; border-right:1px solid var(--border); border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
 .metrics-sheet thead th { position:sticky; top:0; z-index:3; background:var(--surface-2); color:var(--muted); }
 .metrics-sheet thead tr:first-child th { color:var(--text); text-align:center; border-left:2px solid var(--border-strong); }
-.metrics-sheet thead tr:nth-child(2) th { top:27px; writing-mode:vertical-rl; transform:rotate(180deg); height:112px; }
+/* Column headers read horizontally (the pre-overhaul look); the rotated
+   vertical-text headers were the single biggest source of visual thrash. */
+.metrics-sheet thead tr:nth-child(2) th { top:35px; }
 .metrics-sheet tbody th { position:sticky; left:0; z-index:2; max-width:260px; overflow:hidden; text-overflow:ellipsis; background:var(--surface-2); }
 .metrics-sheet .metrics-band th, .metrics-sheet .metrics-band td { background:color-mix(in srgb, var(--accent) 16%, var(--surface-2)); color:var(--text); font-weight:700; }
 .metrics-sheet td.na { color:var(--muted); opacity:.5; }
@@ -90,11 +101,12 @@
 .metrics-model-summary h3 { margin:0 0 12px; }
 .metrics-model-summary h3 small { color:var(--muted); font-weight:400; }
 .metrics-bars { display:grid; gap:9px; }
-.metrics-bar-row { display:grid; grid-template-columns:90px minmax(80px,1fr) 55px; align-items:center; gap:9px; font-size:11px; }
+.metrics-bar-row { display:grid; grid-template-columns:90px minmax(80px,1fr) auto; align-items:center; gap:4px 9px; font-size:11px; }
 .metrics-bar-row b { overflow:hidden; text-overflow:ellipsis; }
 .metrics-bar-row > span { height:14px; overflow:hidden; border-radius:4px; background:var(--surface-2); }
 .metrics-bar-row i { display:block; min-width:2px; height:100%; border-radius:4px; }
-.metrics-bar-row em { font-style:normal; font-variant-numeric:tabular-nums; }
+.metrics-bar-row em { font-style:normal; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.metrics-bar-row small { grid-column:2 / -1; color:var(--muted); font-size:10.5px; line-height:1.4; }
 .metrics-matrix-head,.metrics-call-section > div:first-child { display:flex; justify-content:space-between; align-items:flex-end; gap:12px; margin-top:16px; }
 .metrics-matrix-head h3,.metrics-call-section h3 { margin:0 0 3px; }
 .metrics-tier-legend { display:flex; gap:12px; color:var(--muted); font-size:11px; }
@@ -104,6 +116,8 @@
 .metrics-tier-legend .fail { background:#ff7373; border-color:#ff7373; }
 .metrics-grade-matrix td { vertical-align:top; }
 .metrics-grade-matrix .metrics-quant-cell { position:sticky; left:0; z-index:2; background:var(--surface-2); max-width:190px; overflow:hidden; text-overflow:ellipsis; }
+/* tok/s cells carry whole reasons when there is no mean: wrap, never a 1000px column */
+.metrics-sheet td.metrics-tp-cell { white-space:normal; min-width:180px; max-width:340px; overflow-wrap:anywhere; }
 .metrics-grade-matrix td small { display:block; margin-top:3px; color:var(--muted); }
 .metrics-grade-matrix .precision-start td { border-top:1px solid var(--border-strong); }
 .metrics-tier-tag { display:inline-block; padding:2px 6px; border-radius:4px; font-weight:700; }
@@ -111,10 +125,71 @@
 .metrics-tier-tag.bit4 { color:#f59a73; background:color-mix(in srgb,#d95926 20%,transparent); }
 .metrics-call-detail { margin-top:4px; max-width:280px; }
 .metrics-call-detail summary { cursor:pointer; color:var(--accent); font-size:10px; }
-.metrics-call-detail pre { white-space:pre-wrap; word-break:break-word; max-height:180px; overflow:auto; margin:4px 0; color:var(--text); font-size:10px; }
+.metrics-call-detail pre { white-space:pre-wrap; word-break:break-word; max-height:none; overflow:visible; margin:4px 0; color:var(--text); font-size:11.5px; }
 .metrics-call-section { margin-top:20px; }
-.metrics-call-log { max-height:400px; }
+.metrics-call-log { max-height:none; }
 .metrics-worker-cards { max-height:none; margin-top:14px; }
 @media (max-width:820px){ .metrics-workbook-head { align-items:stretch; flex-direction:column; } .metrics-model-nav { min-width:0; width:100%; } .metrics-model-summary { grid-template-columns:1fr; } }
 .pill-ae { background:color-mix(in srgb, var(--ae) 22%, transparent); color:var(--ae); }
 .pill-computron { background:color-mix(in srgb, var(--computron) 24%, transparent); color:var(--computron); }
+
+/* Model selector: the shared load-a-model popover (components/ModelPicker) — it
+   owns its own styling; here it just stretches to fill the workbook nav row. */
+.metrics-model-nav .mp-root { flex:1; min-width:0; }
+.metrics-chip { display:inline-block; padding:1px 7px; border-radius:20px; font-size:10.5px; font-weight:600; white-space:nowrap; border:1px solid transparent; }
+.metrics-chip.ok { color:#5fd69b; background:color-mix(in srgb,#5fd69b 14%,transparent); }
+.metrics-chip.bad { color:#ff7373; background:color-mix(in srgb,#ff7373 14%,transparent); }
+.metrics-chip.warn { color:#e0b04a; background:color-mix(in srgb,#e0b04a 14%,transparent); }
+.metrics-chip.muted { color:var(--muted); border-color:var(--border); }
+/* Filters collapse to a one-line summary by default (open when any filter is
+   active). Wrapper carries the border/background; the inner row is borderless. */
+.metrics-filters-wrap { border:1px solid var(--border); border-radius:8px; background:var(--surface-2); margin-bottom:12px; }
+.metrics-filters-summary { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 12px; cursor:pointer; color:var(--text); font-size:13px; font-weight:600; user-select:none; }
+.metrics-filters-summary:hover { color:var(--accent); }
+.metrics-filters-wrap[open] .metrics-filters-summary { border-bottom:1px solid var(--border); }
+.metrics-filters { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; padding:10px 12px; font-size:13px; color:var(--muted); }
+.metrics-filter { display:inline-flex; align-items:center; gap:6px; }
+.metrics-filter select { background:var(--surface-1); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:4px 7px; font-size:12.5px; }
+.metrics-filter-check input { accent-color:var(--accent); }
+.metrics-chipset { display:inline-flex; gap:4px; }
+.metrics-chipset button { padding:2px 9px; border:1px solid var(--border); border-radius:999px; background:var(--surface-1); color:var(--muted); cursor:pointer; font-size:11.5px; }
+.metrics-chipset button.active { color:var(--text); border-color:var(--accent); background:color-mix(in srgb,var(--accent) 16%,var(--surface-1)); }
+.metrics-model-header { margin:0 0 10px; }
+.metrics-model-title { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; font-size:13px; margin-bottom:4px; }
+.metrics-why { font-size:12px; margin:3px 0; color:var(--text); }
+.metrics-why-kind { color:#ff9a8a; font-weight:600; }
+.metrics-why-line { font-family:ui-monospace,monospace; font-size:11.5px; word-break:break-word; }
+.metrics-why-detail { max-width:none; }
+.metrics-why-detail pre { max-height:none; }
+.metrics-run-conflict { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; padding:8px 11px; margin:0 0 10px; border:1px solid color-mix(in srgb,#e0b04a 55%,var(--border)); border-radius:8px; background:color-mix(in srgb,#e0b04a 10%,var(--surface-1)); font-size:12px; }
+.metrics-run-conflict button { background:var(--surface-1); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:4px 10px; cursor:pointer; }
+.metrics-queue-item { margin-right:10px; }
+.metrics-model-nav .metrics-test-model.running { color:var(--text); }
+/* explicit graded items: prompt / expected / response, whole text */
+.graded-list { display:flex; flex-direction:column; gap:10px; margin-top:8px; }
+.graded-item { border:1px solid var(--border); border-left-width:4px; border-radius:6px; padding:8px 10px; background:color-mix(in srgb, var(--panel) 70%, transparent); }
+.graded-item-pass { border-left-color:var(--ok, #3fb950); }
+.graded-item-fail { border-left-color:var(--bad, #f85149); }
+.graded-item-head { display:flex; flex-wrap:wrap; gap:10px; align-items:baseline; font-size:11px; }
+.graded-verdict { font-weight:600; }
+.graded-sub { color:var(--muted); font-size:10px; }
+.graded-revised { color:var(--accent); }
+.graded-qa { display:grid; grid-template-columns:max-content 1fr; gap:4px 12px; margin:6px 0 0; font-size:11px; }
+.graded-qa dt { color:var(--muted); }
+.graded-qa dd { margin:0; }
+.graded-qa pre { white-space:pre-wrap; word-break:break-word; margin:0; font-size:11.5px; color:var(--text); max-height:none; }
+.run-error-list { margin:4px 0 0 16px; padding:0; font-size:11px; }
+.run-error-list li { margin:2px 0; }
+/* task/suite coverage is explicit: a model whose task has no suite is greyed and says so */
+.metrics-opt-nosuite { opacity: .55; }
+.metrics-nosuite { color: var(--muted); font-style: italic; }
+.metrics-suite-line { margin: 4px 0 8px; font-size: 11px; color: var(--text); }
+/* the call log relays every field, whole */
+.call-log { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 11.5px; max-height: none; max-width: 420px; }
+.call-record { max-width: none; }
+.call-record pre { max-height: none; }
+.call-record-row { display: contents; }
+/* an object-valued cell (a relayed nested state.* sub-object) rendered whole as
+   readable JSON instead of throwing React #31 */
+.call-cell-json { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 11.5px; max-height: none; overflow: visible; }
+.metrics-runpicker { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0; }

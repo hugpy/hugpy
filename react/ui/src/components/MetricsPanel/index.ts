@@ -1,1 +1,1 @@
-export { default } from './MetricsPanel';
+export { default, GraderWorkbook } from './MetricsPanel';

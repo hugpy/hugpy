@@ -107,11 +107,11 @@ def _use(store, monkeypatch):
 def test_miss_fetches_once_then_hits(monkeypatch):
     _use(_store(), monkeypatch)
     api = FakeApi()
-    first = fetch_repo_info("owner/repo", api=api)
+    first = fetch_repo_info("owner/repo", purpose="discovery", api=api)
     assert first is not None and first["id"] == "owner/repo"
     assert api.calls == 1
     for _ in range(5):
-        again = fetch_repo_info("owner/repo", api=api)
+        again = fetch_repo_info("owner/repo", purpose="discovery", api=api)
         assert again["id"] == "owner/repo"
         assert again["siblings"] == first["siblings"]
     assert api.calls == 1, "cache hit must cost ZERO live HF calls"
@@ -122,14 +122,14 @@ def test_miss_fetches_once_then_hits(monkeypatch):
 def test_force_refresh_hits_live_and_overwrites(monkeypatch):
     store = _use(_store(), monkeypatch)
     api = FakeApi()
-    fetch_repo_info("owner/repo", api=api)
+    fetch_repo_info("owner/repo", purpose="discovery", api=api)
     assert api.calls == 1
     api.info = FakeInfo(sizes=(("a.safetensors", 999),))
-    forced = fetch_repo_info("owner/repo", api=api, force=True)
+    forced = fetch_repo_info("owner/repo", purpose="discovery", api=api, force=True)
     assert api.calls == 2
     assert sum_sibling_sizes(forced) == 999
     # the overwrite persisted — a plain read now serves the NEW row, no live
-    cached = fetch_repo_info("owner/repo", api=api)
+    cached = fetch_repo_info("owner/repo", purpose="discovery", api=api)
     assert api.calls == 2
     assert sum_sibling_sizes(cached) == 999
     assert store.get_repo_info("owner/repo")["siblings"][0]["size"] == 999
@@ -145,11 +145,11 @@ def test_unwritable_db_degrades_to_live(monkeypatch):
     store = _use(ModelMetadataStore(os.path.join(bad_parent, "x", "meta.db")),
                  monkeypatch)
     api = FakeApi()
-    out = fetch_repo_info("owner/repo", api=api)
+    out = fetch_repo_info("owner/repo", purpose="discovery", api=api)
     assert out is not None and out["id"] == "owner/repo"
     assert api.calls == 1
     # every call goes live (no cache), but ALWAYS succeeds
-    out2 = fetch_repo_info("owner/repo", api=api)
+    out2 = fetch_repo_info("owner/repo", purpose="discovery", api=api)
     assert out2 is not None
     assert api.calls == 2
     # store surface itself stays inert, not raising
@@ -165,15 +165,15 @@ def test_unwritable_db_degrades_to_live(monkeypatch):
 def test_forget_rearms_live_fetch(monkeypatch):
     store = _use(_store(), monkeypatch)
     api = FakeApi()
-    fetch_repo_info("owner/repo", api=api)
+    fetch_repo_info("owner/repo", purpose="discovery", api=api)
     store.put_repo_files("owner/repo", ["a", "b"])
     assert api.calls == 1
     removed = store.forget("owner/repo")
     assert removed == 2, "forget drops BOTH repo_info and repo_files rows"
-    fetch_repo_info("owner/repo", api=api)
+    fetch_repo_info("owner/repo", purpose="discovery", api=api)
     assert api.calls == 2, "post-forget access re-fetches live"
     # other repos untouched
-    fetch_repo_info("other/repo", api=api)
+    fetch_repo_info("other/repo", purpose="discovery", api=api)
     assert store.forget("owner/repo") >= 1
     assert store.get_repo_info("other/repo") is not None
 

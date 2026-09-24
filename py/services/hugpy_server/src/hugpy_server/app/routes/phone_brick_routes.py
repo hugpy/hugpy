@@ -51,11 +51,7 @@ phone_brick_bp, logger = get_bp("phone_brick_bp", __name__)
 _UNREACHABLE_HOSTS = {"127.0.0.1", "127.0.1.1", "localhost", "0.0.0.0", "::1", ""}
 
 
-def _client_ip() -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.remote_addr or ""
+from hugpy_server.app.auth_common import client_ip as _client_ip
 
 
 def _resolve_host(advertised: str | None) -> str:

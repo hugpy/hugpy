@@ -12,7 +12,9 @@ from hugpy_engine.schemas.event_schemas import DoneEvent, ErrorEvent, TokenEvent
 from hugpy_engine.schemas.runner_schemas import StreamEvent
 from hugpy_platform.constants import DEFAULT_LOCAL_FILES_ONLY
 from hugpy_platform.module_imports import require
-from hugpy_storage.download_models import ensure_model
+# Serve path: weights are local-or-central on a worker, never Hugging Face
+# (hugpy_storage.provision.ensure_serving_weights; computron 2026-09-23).
+from hugpy_storage.provision import ensure_serving_weights
 logger = get_logFile("deepcoder")
 _SENTINEL = object()
 
@@ -110,14 +112,14 @@ def build_deepcoder_runtime(
     get_model_config(model_key)
 
     if auto_download:
-        model_dir = str(ensure_model(model_key))
+        model_dir = str(ensure_serving_weights(model_key))
     else:
         model_dir = resolve_model_source(model_key)
 
         if not osp.exists(model_dir):
             raise FileNotFoundError(
                 f"Model {model_key!r} is not on disk and auto_download=False; "
-                f"call ensure_model({model_key!r}) first."
+                f"call ensure_serving_weights({model_key!r}) first."
             )
 
     # PEFT / bare-adapter dirs. A LoRA dir has adapter_config.json and NO

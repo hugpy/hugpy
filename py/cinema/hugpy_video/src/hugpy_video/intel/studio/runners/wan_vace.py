@@ -120,12 +120,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # Source-clip resolution (pure, no heavy deps) — the v2v INPUT
 # --------------------------------------------------------------------------- #
-def _resolve_source(manifest: RenderManifest) -> str | None:
-    """The absolute path of the clip this v2v render enhances, or None if the
-    manifest carries none. ``source_video`` is part of the content_hash (B-2), so a
-    v2v render is deterministically keyed on the clip it restyles."""
-    src = getattr(manifest, "source_video", "") or ""
-    return src or None
+from hugpy_video.intel.studio.runners.source import resolve_source as _resolve_source
 
 
 # --------------------------------------------------------------------------- #
@@ -465,15 +460,8 @@ def run_wan_vace(
     # `pipe._interrupt=True` so the denoise loop breaks at the next step boundary.
     # We ALSO re-check should_cancel() around the call. BOX-ONLY (preflight
     # short-circuits the GPU-less VM above).
-    def _cancel_step_cb(pipe_ref, step_index, timestep, cb_kwargs):
-        if should_cancel is not None and should_cancel():
-            pipe_ref._interrupt = True   # diffusers checks self.interrupt each step
-        if on_step is not None:
-            try:
-                on_step(int(step_index) + 1, int(steps))
-            except Exception:  # noqa: BLE001 — telemetry never breaks a render
-                pass
-        return cb_kwargs
+    from hugpy_video.intel.studio.runners.cancel import cancel_step_callback
+    _cancel_step_cb = cancel_step_callback(should_cancel, on_step, steps)
 
     call_extra: dict = {}
     if should_cancel is not None or on_step is not None:

@@ -1,0 +1,72 @@
+/* "Worth my time" columns, summary and detail (ModelTable + StatusCells). */
+.ms-chip {
+  display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; line-height: 16px;
+  border: 1px solid var(--border); white-space: nowrap; background: var(--surface-2); color: var(--muted);
+}
+.ms-ok   { color: var(--green);  border-color: rgba(74, 222, 128, 0.35);  background: rgba(74, 222, 128, 0.08); }
+.ms-warn { color: var(--yellow); border-color: rgba(251, 191, 36, 0.35);  background: rgba(251, 191, 36, 0.08); }
+.ms-bad  { color: var(--red);    border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.08); }
+.ms-live { color: var(--blue);   border-color: rgba(96, 165, 250, 0.35);  background: rgba(96, 165, 250, 0.08); }
+.ms-muted { color: var(--muted); }
+.ms-worth { font-weight: 600; text-transform: uppercase; letter-spacing: .02em; }
+
+.ms-td { vertical-align: top; max-width: 240px; }
+.ms-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ms-why, .ms-sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 230px; }
+.ms-none { font-size: 11px; color: var(--muted); font-style: italic; }
+.ms-expand summary { cursor: pointer; list-style: none; }
+.ms-expand summary::-webkit-details-marker { display: none; }
+.ms-pop { font-size: 11px; white-space: pre-wrap; color: var(--text); margin-top: 3px; max-width: min(900px, 80vw); }
+.ms-fail-line { font-size: 11px; color: var(--red); display: inline-block; max-width: 230px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ms-wchips { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.ms-wchip { font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border); white-space: nowrap; }
+.ms-wchip b { font-weight: 600; }
+.ms-offline { opacity: .5; }
+
+.ms-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; }
+.ms-summary-sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+.ms-bucket { border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+  border-radius: 12px; padding: 2px 10px; cursor: pointer; }
+.ms-bucket b { margin-left: 4px; }
+.ms-bucket-ready b { color: var(--green); }
+.ms-bucket-waste b { color: var(--red); }
+.ms-bucket-unknown b { color: var(--yellow); }
+.ms-bucket.on, .ms-lab.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ms-lab { cursor: pointer; }
+.ms-note { font-size: 11px; color: var(--yellow); }
+
+.ms-verify { display: inline-flex; align-items: center; gap: 6px; }
+.ms-verify-msg { font-size: 11px; color: var(--muted); max-width: 360px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.ms-v-done { color: var(--green); }
+.ms-v-failed, .ms-v-error { color: var(--red); }
+.ms-diag { width: 100%; }
+
+.ms-detail { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.ms-detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ms-detail-why { font-size: 12px; }
+.ms-spacer { flex: 1; }
+.ms-sec { margin-top: 10px; }
+.ms-sec h4 { margin: 0 0 4px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+.ms-sec p { margin: 2px 0; font-size: 12px; }
+.ms-missing { color: var(--yellow); }
+.ms-fix { color: var(--text); }
+.ms-list { margin: 4px 0 0 16px; padding: 0; font-size: 12px; }
+.ms-pre { font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto;
+  background: var(--surface-1); border: 1px solid var(--border); padding: 6px; border-radius: 4px; }
+.ms-table { border-collapse: collapse; font-size: 11px; margin-top: 4px; }
+.ms-table th, .ms-table td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; vertical-align: top; }
+.ms-fit-gpu { color: var(--green); }
+.ms-fit-offload { color: var(--yellow); }
+.ms-fit-no { color: var(--red); }
+.ms-job summary { cursor: pointer; font-size: 12px; }
+
+/* Worker provisioning lines (Downloads / Activity). */
+.ms-prov { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 0; }
+.ms-prov-bar { flex: 0 0 80px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.ms-prov-bar i { display: block; height: 100%; background: var(--blue); }
+.ms-live { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ms-live-compact .ms-wchip { font-size: 10px; }

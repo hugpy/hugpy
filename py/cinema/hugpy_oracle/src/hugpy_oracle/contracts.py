@@ -240,10 +240,8 @@ def coerce_artifact_kind(value: "ArtifactKind | str") -> "ArtifactKind | str":
     for artifacts that do not exist yet is the fabrication the doc warns about,
     so a free string is legal and compared exactly, case-sensitively.
 
-    (``plan.coerce_artifact_kind`` is the same function, written first in k103.
-    It lives here too because ``contracts`` is the bottom of the import graph
-    and ``plan`` already imports it — k103 can re-base on this one whenever its
-    file is open; the two are proven identical by a test.)"""
+    ``plan.coerce_artifact_kind`` imports this function from the contract layer,
+    so the two entry points always use the same validation."""
     if isinstance(value, ArtifactKind):
         return value
     text = str(value).strip()

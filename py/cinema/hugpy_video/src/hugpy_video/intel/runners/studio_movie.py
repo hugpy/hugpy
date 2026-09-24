@@ -685,21 +685,7 @@ _REFRESH_DESC_TOKENS = 140
 _REFRESH_REWRITE_TOKENS = 260
 
 
-def _result_text(res) -> str:
-    """Best-effort reply text from an execute_prompt result (movie.py idiom)."""
-    txt = getattr(res, "text", None)
-    if txt:
-        return txt
-    for attr in ("model_dump", "to_dict", "dict"):
-        fn = getattr(res, attr, None)
-        if callable(fn):
-            try:
-                d = fn()
-            except TypeError:
-                continue
-            if isinstance(d, dict) and d.get("text"):
-                return d["text"]
-    return str(res)
+from hugpy_platform.results import vision_result_text as _result_text
 
 
 def _persisted_refresh(movie_root: str, segment_id: str) -> "str | None":

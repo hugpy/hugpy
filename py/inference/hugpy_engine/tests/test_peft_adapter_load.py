@@ -277,7 +277,7 @@ def test_peft_adapter_load():
     _dirs = {}
     cfgmod.require = lambda *a, **k: _FakeTorch
     cfgmod.get_model_config = lambda key: {"model_key": key}
-    cfgmod.ensure_model = lambda key: _dirs[key]
+    cfgmod.ensure_serving_weights = lambda key: _dirs[key]
     # config.py imported resolve_adapter_pair / standalone_load_refusal by name, and
     # both reach the base through peft_adapters.route_destination — already patched
     # above, so the REAL resolution logic runs against the tmp store.

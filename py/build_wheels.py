@@ -50,6 +50,29 @@ MANIFEST = WORKSPACE / "py" / "partition.toml"
 _TAG_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?)$")
 
 
+CONSOLE_TOOL = WORKSPACE / "py" / "services" / "hugpy_server" / "tools" / "build_console.py"
+CONSOLE_DIST = WORKSPACE / "py" / "services" / "hugpy_server" / "src" / "hugpy_server" / "console_dist"
+REACT_UI_SRC = WORKSPACE / "react" / "ui" / "src"
+
+
+def _console_tool():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hugpy_build_console", CONSOLE_TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def console_stale_reason(src: Path = REACT_UI_SRC, console_dist: Path = CONSOLE_DIST,
+                         *, mtime_fallback: bool = True) -> str | None:
+    """Why the tracked console bundle does not match react/ui/src (None = it
+    does, or there is no React tree to compare). The pipeline never runs npm, so
+    a UI edit without a rebuild must fail the wheel build, never ship silently."""
+    if not CONSOLE_TOOL.is_file():
+        return None
+    return _console_tool().console_staleness(src, console_dist, mtime_fallback=mtime_fallback)
+
+
 def packages(only: set[str] | None = None) -> list[dict]:
     manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
     out = []
@@ -185,6 +208,11 @@ def main(argv: list[str] | None = None) -> int:
     pkgs = packages(only)
     if not pkgs:
         ap.error("no packages selected")
+
+    if any(p["distribution"] == "hugpy-server" for p in pkgs):
+        stale = console_stale_reason()
+        if stale:
+            raise SystemExit(f"build_wheels: refusing to build hugpy-server: {stale}")
 
     out = Path(args.out).resolve()
     if out.exists():

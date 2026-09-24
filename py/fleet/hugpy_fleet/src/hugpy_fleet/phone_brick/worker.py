@@ -44,11 +44,7 @@ from hugpy_fleet.phone_brick.protocol import (
 from hugpy_fleet.phone_brick.schemas import DEFAULT_MODEL_PATH, DetectorConfig, WorkerConfig
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
+from hugpy_platform.env import env_flag as _env_flag
 
 
 def config_from_env() -> WorkerConfig:

@@ -25,7 +25,6 @@ pipeline (``runners/studio_i2v.py``, ``produce.py``, ``manifest.py``, …).
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -77,27 +76,7 @@ def editor_filename(title: Optional[str], job_id: str) -> str:
     return f"{slug}_{short}.mp4"
 
 
-def _ffprobe(path: str) -> dict:
-    """Probe a media file to JSON (format + streams). Same resolve_bin + flags as
-    ``media_store._ffprobe``; raises RuntimeError on a nonzero probe so the caller
-    turns it into a clean ``HandoffResult(ok=False)``."""
-    ffprobe = resolve_bin("ffprobe") or "ffprobe"
-    command = [
-        ffprobe,
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        path,
-    ]
-    result = subprocess.run(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            "ffprobe failed.\n\n"
-            f"Command:\n{' '.join(command)}\n\n"
-            f"stderr:\n{result.stderr}")
-    return json.loads(result.stdout or "{}")
+from hugpy_video.intel.ffprobe import ffprobe as _ffprobe
 
 
 def _is_filmora_native(probe: dict) -> bool:

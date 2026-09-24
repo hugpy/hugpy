@@ -297,7 +297,6 @@ def test_refused_pull_never_starts_the_download():
 
     orig_fetch = provision.fetch_from_central
     orig_arch = provision.fetch_archive_from_central
-    orig_hf = provision.fetch_from_hf
     orig_local = provision.model_is_local
     orig_reg = provision.ensure_model_registered
     orig_size = provision.central_total_bytes
@@ -305,7 +304,6 @@ def test_refused_pull_never_starts_the_download():
     try:
         provision.fetch_from_central = lambda *a, **k: calls.append("central")
         provision.fetch_archive_from_central = lambda *a, **k: calls.append("archive")
-        provision.fetch_from_hf = lambda *a, **k: calls.append("hf")
         provision.model_is_local = lambda mk: False
         provision.ensure_model_registered = lambda mk, url: mk
         provision.central_total_bytes = lambda url, mk: 30 * GIB
@@ -324,7 +322,6 @@ def test_refused_pull_never_starts_the_download():
     finally:
         provision.fetch_from_central = orig_fetch
         provision.fetch_archive_from_central = orig_arch
-        provision.fetch_from_hf = orig_hf
         provision.model_is_local = orig_local
         provision.ensure_model_registered = orig_reg
         provision.central_total_bytes = orig_size

@@ -1420,12 +1420,7 @@ _JUDGE_SOURCE_CHARS: int = 4000
 _JUDGE_OUTPUT_CHARS: int = 8000
 
 
-def _no_think(prompt: str) -> str:
-    try:
-        from hugpy_engine.utils.no_think import with_no_think
-        return with_no_think(prompt)
-    except Exception:  # noqa: BLE001 — a missing helper must not stop a run
-        return prompt
+from hugpy_platform.no_think import with_no_think as _no_think
 
 
 def _strip_think(text: str) -> str:

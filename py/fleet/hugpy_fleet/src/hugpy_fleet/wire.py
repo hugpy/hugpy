@@ -143,6 +143,9 @@ class WorkerHeartbeat(WireDTO):
     aggregate: Optional[Dict[str, Any]] = None
     environment_digest: Optional[Dict[str, Any]] = None
     doctrine_status: Optional[Dict[str, Any]] = None
+    # measured central->worker transfer rate, bytes/s (EMA over completed
+    # provisions); the benchmark's cold-load budget derives from it
+    load_bytes_per_s: Optional[float] = None
 
 
 @dataclass

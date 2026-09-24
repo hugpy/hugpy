@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { hugpyFetch } from '../../runtime/config'
-import { getServing, invalidateServing } from './servingCache'
+import { getServing, invalidateServing, getShardFlag, primeShardFlag } from './servingCache'
+import { LiveWorkerChip } from '../ModelLiveState/ModelLiveState'
+import { archiveText } from './archiveMark'
 
 // k56 — per-model PLACEMENT: the ordered worker preference + the polite load.
 //
@@ -35,7 +37,18 @@ import { getServing, invalidateServing } from './servingCache'
 // panel is a plain button/select, and a drag affordance nobody else here has
 // would read as a different kind of thing.
 
-export default function PlacementControl({ modelKey, workers = [] }) {
+// LIVE STATE per allocated worker — the shared relay (ModelLiveState). Module
+// level on purpose: declared inside PlacementControl it was a NEW component type
+// on every render, so each chip unmounted + remounted every poll.
+function LiveState({ modelKey, name, byName }) {
+  const w = byName(name)
+  return <LiveWorkerChip modelKey={modelKey} worker={w?.name || name} />
+}
+
+// `archived` — the catalog row's archive mark ({marked, at, by, reason}) or
+// null. A marked model's placement is read-only here (central 409s the writes);
+// every disabled control carries the recorded mark as its title.
+export default function PlacementControl({ modelKey, workers = [], archived = null }) {
   const [prefs, setPrefs] = useState(null)      // null until the GET lands
   const [polite, setPolite] = useState(false)   // the ALL-WORKERS default
   const [byWorker, setByWorker] = useState({})  // per-worker verdicts (k62)
@@ -71,12 +84,13 @@ export default function PlacementControl({ modelKey, workers = [] }) {
   // Multi-GPU shard-eligibility is a persisted per-model flag (settings_store
   // ns 'shard_models'); toggling it opts the model in/out of sharding with NO
   // restart. A truthy flag auto-sizes from the model's own bytes on the server.
+  // Fetched ONCE per model through the shared cache (servingCache.getShardFlag);
+  // a toggle below primes it. Never on a render/poll.
   useEffect(() => {
     let alive = true
-    hugpyFetch(`/settings/shard_models/${encodeURIComponent(modelKey)}`)
-      .then(r => r.json())
-      .then(d => { if (alive) setShardOn(!!(d && d.value)) })
-      .catch(() => { if (alive) setShardOn(false) })
+    getShardFlag(modelKey)
+      .then(on => { if (alive) setShardOn(on) })
+      .catch(e => { if (alive) { setShardOn(false); setMsg(`shard flag read failed: ${e.message || e}`) } })
     return () => { alive = false }
   }, [modelKey])
 
@@ -84,8 +98,10 @@ export default function PlacementControl({ modelKey, workers = [] }) {
   // tolerance the backend's _pref_index applies, so what the operator sees
   // matched here is what routing matches there.
   const byName = (n) => workers.find(w => w.name === n || w.id === n)
+  const archText = archived ? archiveText(archived) : ''
 
   const save = async () => {
+    if (archived) { setMsg(`✗ ${archText}`); return }
     setBusy(true); setMsg('saving…')
     try {
       // The list is an ORDER OVER DESIGNATIONS, not a second designation store:
@@ -98,11 +114,15 @@ export default function PlacementControl({ modelKey, workers = [] }) {
       for (const name of prefs) {
         const w = byName(name)
         if (!w || (w.models || []).includes(modelKey)) continue
-        await hugpyFetch(`/api/llm/workers/${encodeURIComponent(w.id)}/assign`, {
+        const ra = await hugpyFetch(`/api/llm/workers/${encodeURIComponent(w.id)}/assign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model_key: modelKey }),
         })
+        if (!ra.ok) {
+          const da = await ra.json().catch(() => ({}))
+          throw new Error(`assign to ${w.name || w.id}: ${da.error || `HTTP ${ra.status}`}`)
+        }
       }
       const r = await hugpyFetch(`/api/llm/serving/${encodeURIComponent(modelKey)}`, {
         method: 'POST',
@@ -115,6 +135,7 @@ export default function PlacementControl({ modelKey, workers = [] }) {
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
+      invalidateServing(modelKey)
       adopt(d.override || {})
       setMsg('✓ saved')
     } catch (e) {
@@ -223,6 +244,7 @@ export default function PlacementControl({ modelKey, workers = [] }) {
                            : `${name} is not a registered worker right now; it stays on the list and is skipped until it comes back`}>
               <span className="mt-place-rank">{i + 1}.</span>
               <span className={w && w.status === 'online' ? '' : 'mt-place-off'}>{name}</span>
+              <LiveState modelKey={modelKey} name={name} byName={byName} />
               {free != null && <span className="mt-place-free">{(free / 2 ** 30).toFixed(1)} GiB free</span>}
               <button disabled={i === 0} title="Try this worker earlier"
                       onClick={() => move(i, -1)}>↑</button>
@@ -238,7 +260,7 @@ export default function PlacementControl({ modelKey, workers = [] }) {
       {gridRows.length > 0 && (
         <table className="mt-place-grid">
           <thead>
-            <tr><th>worker</th><th>polite</th></tr>
+            <tr><th>worker</th><th>state (live)</th><th>polite</th></tr>
           </thead>
           <tbody>
             {gridRows.map(name => {
@@ -252,6 +274,7 @@ export default function PlacementControl({ modelKey, workers = [] }) {
                                : `${name} is not a registered worker right now`}>
                     {name}
                   </td>
+                  <td><LiveState modelKey={modelKey} name={name} byName={byName} /></td>
                   <td>
                     <button className={`mt-place-tick${on ? ' on' : ''}${e === null ? ' inherited' : ''}`}
                             onClick={() => cyclePolite(name)}
@@ -274,9 +297,10 @@ export default function PlacementControl({ modelKey, workers = [] }) {
       )}
 
       <div className="mt-place-actions">
-        <select value="" disabled={!unlisted.length}
-                title={unlisted.length ? 'Append a worker to the preference list'
-                                       : 'Every known worker is already on the list'}
+        <select value="" disabled={!!archived || !unlisted.length}
+                title={archived ? archText
+                  : unlisted.length ? 'Append a worker to the preference list'
+                                    : 'Every known worker is already on the list'}
                 onChange={e => { add(e.target.value); e.target.value = '' }}>
           <option value="">＋ add worker…</option>
           {unlisted.map(w => (
@@ -295,20 +319,21 @@ export default function PlacementControl({ modelKey, workers = [] }) {
 
         <label className="mt-place-toggle"
                title="Shard this model across multiple workers' GPUs (llama.cpp RPC) when it does not fit a single card. Evict-to-fit-aware; opts the model in with NO restart. Dense GGUF only — MoE models CPU-offload instead of using a remote GPU.">
-          <input type="checkbox" disabled={shardOn === null || shardBusy}
+          <input type="checkbox" disabled={!!archived || shardOn === null || shardBusy}
+                 title={archived ? archText : undefined}
                  checked={!!shardOn}
                  onChange={async (e) => {
                    const on = e.target.checked
                    setShardBusy(true); setMsg(on ? 'enabling shard…' : 'disabling shard…')
                    try {
                      const path = `/settings/shard_models/${encodeURIComponent(modelKey)}`
-                     if (on) {
-                       await hugpyFetch(path, { method: 'POST',
-                         headers: { 'Content-Type': 'application/json' },
-                         body: JSON.stringify({ value: true }) })
-                     } else {
-                       await hugpyFetch(path, { method: 'DELETE' })
-                     }
+                     const r = on
+                       ? await hugpyFetch(path, { method: 'POST',
+                           headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({ value: true }) })
+                       : await hugpyFetch(path, { method: 'DELETE' })
+                     if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`)
+                     primeShardFlag(modelKey, on)
                      setShardOn(on); setMsg(on ? '✓ shard-eligible' : '✓ shard off')
                    } catch (err) { setMsg(`✗ shard: ${err.message || err}`) }
                    finally { setShardBusy(false) }
@@ -316,7 +341,8 @@ export default function PlacementControl({ modelKey, workers = [] }) {
           shard across GPUs (multi-GPU){shardOn === null ? ' …' : ''}
         </label>
 
-        <button disabled={busy || !dirty} onClick={save}>Save placement</button>
+        <button disabled={!!archived || busy || !dirty} onClick={save}
+                title={archived ? archText : undefined}>Save placement</button>
         {msg && <span className="mt-serve-msg">{msg}</span>}
       </div>
 
@@ -329,7 +355,7 @@ export default function PlacementControl({ modelKey, workers = [] }) {
       )}
       {refusals.map(([w, rep]) => (
         <div className="mt-place-refusal" key={w.id} title={rep.error}>
-          ⚠ {w.name}: {String(rep.error).slice(0, 220)}
+          ⚠ {w.name}: <span className="mt-place-refusal-text" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{String(rep.error)}</span>
         </div>
       ))}
     </div>

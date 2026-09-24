@@ -22,6 +22,17 @@ from typing import Optional, Sequence
 from hugpy_platform.platform_facade import IS_WINDOWS
 
 
+def pid_alive(pid: int) -> bool:
+    """Treat only a definite missing process as dead."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except Exception:  # noqa: BLE001 — uncertainty must not reap live work
+        return True
+    return True
+
+
 def popen_detached(argv: Sequence[str], **kwargs) -> subprocess.Popen:
     """``subprocess.Popen`` that starts in its own session/process group.
 

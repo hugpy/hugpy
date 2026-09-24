@@ -4,6 +4,8 @@ import { modelTask, modelTasks } from '../ModelTable/ModelTable'
 import useSessionState from '../../hooks/useSessionState'
 import { fmtBytes } from './formatters'
 import { findCatalogRow } from './catalogRow'
+import { archiveMark, archiveText } from '../ModelTable/archiveMark'
+import { sizeView } from '../ModelTable/modelSize'
 
 // Per-worker "load a model" as a SORTABLE, MULTI-SELECT table. Columns assort
 // (click a header to sort); a checkbox column allocates a GROUP of models to
@@ -128,7 +130,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
       await fetchJson(`/api/models/${encodeURIComponent(key)}/download`, { method: 'POST' })
       await refetchJobs()
     } catch (e) {
-      if (aliveRef.current) setDlErr(prev => ({ ...prev, [key]: e.message || 'download failed' }))
+      if (aliveRef.current) setDlErr(prev => ({ ...prev, [key]: e.message || `POST /api/models/${key}/download threw ${e?.name || 'an error'} with no message` }))
     } finally {
       if (aliveRef.current) setDlBusy(prev => { const n = new Set(prev); n.delete(key); return n })
     }
@@ -174,7 +176,9 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
   // anti-duplicate breaker permits it. A not-ready model's checkbox is disabled;
   // its row offers a Download instead — so provisioning refusals disappear
   // before allocation ever happens.
-  const isEligible = useCallback((m) => provStateOf(m).state === 'ready' && (breaker || elsewhereOf(m).length === 0),
+  // A model the operator marked for archive is never selectable (central 409s it).
+  const isEligible = useCallback((m) => !archiveMark(m) && provStateOf(m).state === 'ready'
+    && (breaker || elsewhereOf(m).length === 0),
     [provStateOf, breaker, elsewhereOf])
   const eligibleKeys = useMemo(() => filtered.filter(isEligible).map(keyOf), [filtered, isEligible])
   const allSel = eligibleKeys.length > 0 && eligibleKeys.every(k => sel.has(k))
@@ -235,15 +239,18 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
               const elsewhere = elsewhereOf(m)
               const locked = elsewhere.length > 0 && !breaker
               const prov = provStateOf(m)
+              const arch = archiveMark(m)
               return (
-                // Only the anti-duplicate lock grays the row; not-ready rows stay
-                // legible so their Download button is usable.
-                <tr key={k} className={locked ? 'wp-lt-locked' : ''}>
+                // Only the anti-duplicate lock (and an archive mark) grays the
+                // row; not-ready rows stay legible so their Download button is usable.
+                <tr key={k} className={arch ? 'wp-lt-locked wp-lt-archived' : locked ? 'wp-lt-locked' : ''}
+                    title={arch ? archiveText(arch) : undefined}>
                   <td className="wp-lt-check">
                     <input type="checkbox" checked={sel.has(k)} disabled={!isEligible(m)}
+                           title={arch ? archiveText(arch) : undefined}
                            onChange={() => toggle(k)} />
                   </td>
-                  <td>{m.name || k}</td>
+                  <td>{m.name || k}{arch && <div className="wp-lt-archive-note">🗄 {archiveText(arch)}</div>}</td>
                   {/* Central-provisioning readiness pill (+ Download when the
                       model needs pulling; ⏳ progress while a pull runs). This is
                       what makes post-hoc "central doesn't have X on disk"
@@ -288,7 +295,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                     )}
                     {prov.state === 'error' && (
                       <span className="wp-state-pill wp-cprov-error"
-                            title={prov.reason || 'central could not resolve this model'}>⚠ error</span>
+                            title={prov.reason || `provisioning map row for ${k} has state=error and no reason field`}>⚠ error</span>
                     )}
                     {dlErr[k] && <span className="wp-cprov-err" title={dlErr[k]}>failed</span>}
                   </td>
@@ -299,11 +306,11 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                   </td>
                   <td className="wp-lt-muted">{m.framework || '—'}</td>
                   <td className="wp-lt-num wp-lt-size"
-                      title={sizeOf(m) == null ? 'size unknown — not on disk / not reported by the feed'
+                      title={sizeOf(m) == null ? sizeView(m, fmtBytes).title
                         : isGgufModel(m)
                           ? `effective quant${m.effective_gguf ? ` ${m.effective_gguf}` : ''} — ${fmtBytes(sizeOf(m))} (the ONE quant that serves, not the all-quants dir sum)`
                           : `${fmtBytes(sizeOf(m))} on disk`}>
-                    {sizeOf(m) == null ? '—' : fmtBytes(sizeOf(m))}
+                    {sizeOf(m) == null ? <em className="wp-lt-size-why">{sizeView(m, fmtBytes).text}</em> : fmtBytes(sizeOf(m))}
                   </td>
                   <td className="wp-lt-num">{m.model_max_length || '—'}</td>
                   <td className={elsewhere.length ? (breaker ? 'wp-lt-dup' : 'wp-lt-muted') : 'wp-lt-muted'}>

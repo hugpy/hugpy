@@ -50,9 +50,7 @@ from hugpy_video.intel.studio.schemas import RenderManifest
 _RIFE_MODULE = "hugpy_video.intel.studio.runners._vendor.practical_rife"
 
 
-def _resolve_source(manifest: RenderManifest) -> str | None:
-    src = getattr(manifest, "source_video", "") or ""
-    return src or None
+from hugpy_video.intel.studio.runners.source import resolve_source as _resolve_source
 
 
 def _rife_available() -> bool:

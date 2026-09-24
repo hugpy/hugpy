@@ -1,5 +1,6 @@
 from hugpy_engine.wire.install_schemas import InstallOption, InstallOptions
 from hugpy_platform.constants import GGUF_QUANT
+from hugpy_platform.utils import is_mmproj_file
 
 def _human(n):
     if not n: return ""
@@ -12,6 +13,14 @@ def _gguf_options(files, free_bytes):
     groups: dict[str, list] = {}
     for f in files:
         if not f.path.lower().endswith(".gguf"):
+            continue
+        # A vision projector is never a quant to install: it rides along as a
+        # sidecar of whatever quant is chosen (download_one fetches it). Its
+        # name often carries a quant tag (``mmproj/<model>-vision-Q6_K.gguf``),
+        # and offering it as "GGUF · Q6_K" is how central came to hold ONLY
+        # projectors for zerodigest/Qwen3.8-27B-Uncensored-YMQ-MTP-GGUF
+        # (2026-09-23).
+        if is_mmproj_file(f.path):
             continue
         m = GGUF_QUANT.search(f.path)
         groups.setdefault(m.group(0).upper() if m else f.path, []).append(f)

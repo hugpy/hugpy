@@ -253,11 +253,8 @@ class ModelMetadataStore:
     def _connect(self) -> sqlite3.Connection:
         # Retry the store-open past the restart-burst EMFILE (see
         # comms.shared.retry_on_emfile) before running the handle-local PRAGMAs.
-        conn = retry_on_emfile(lambda: sqlite3.connect(self.path, timeout=2.0))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=2000")
-        return conn
+        from hugpy_control.shared import connect_wal
+        return connect_wal(self.path, retry=retry_on_emfile)
 
     def _ensure(self) -> bool:
         if self._disabled:
@@ -461,9 +458,22 @@ class ModelMetadataStore:
 model_metadata_store = ModelMetadataStore()
 
 
+#: The code paths that may read THROUGH to the Hub: finding a model
+#: (search / spec / screen) and fetching it (the download's size estimate).
+#: Everything about an INSTALLED model reads hugpy.json or this store only.
+FETCH_PURPOSES = ("discovery", "download")
+
+
 def fetch_repo_info(hub_id: str, files_metadata: bool = True,
-                    force: bool = False, api: Any = None) -> "dict | None":
+                    force: bool = False, api: Any = None,
+                    purpose: "str | None" = None) -> "dict | None":
     """The single read-through funnel for repo metadata.
+
+    ``purpose`` GATES THE NETWORK (operator ruling 2026-09-23: "the only
+    Hugging Face API calls should be ones that obviously are needed"). Only a
+    caller that declares ``purpose`` in :data:`FETCH_PURPOSES` — discovery
+    (search/spec/screen) or download — may go live on a miss. Any other caller
+    gets the cached row or ``None`` with a logged reason; it never fetches.
 
     Cache hit -> the cached dict, zero network. Miss (or ``force=True``) ->
     ONE live ``model_info`` call, serialize, write-back, return. Per operator
@@ -480,6 +490,13 @@ def fetch_repo_info(hub_id: str, files_metadata: bool = True,
     would silently hide gated/404/network truths the callers report today."""
     if not hub_id:
         return None
+    if purpose not in FETCH_PURPOSES:
+        cached = model_metadata_store.get_repo_info(hub_id)
+        if cached is None:
+            logger.info("repo info for %r not cached and caller purpose=%r may not "
+                        "fetch (only %s may reach the Hub) — returning None",
+                        hub_id, purpose, "/".join(FETCH_PURPOSES))
+        return cached
     if not force:
         cached = model_metadata_store.get_repo_info(hub_id)
         if cached is not None:

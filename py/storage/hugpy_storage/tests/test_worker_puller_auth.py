@@ -218,8 +218,13 @@ def _drive_archive(cap, monkeypatch, tmp_path):
     the Request header. Stubs manifest + destination so no real registry/network
     is touched."""
     monkeypatch.setattr(prov, "_get_json",
-                        lambda url, timeout=30.0: {"files": [], "total_bytes": 0,
-                                                   "hub_id": "org/m"})
+                        lambda url, timeout=30.0: {
+                            # a real weight file: a weightless manifest is now
+                            # refused before /archive is ever requested.
+                            "files": [{"path": "model.safetensors",
+                                       "size": 8 * 1024 * 1024}],
+                            "total_bytes": 8 * 1024 * 1024,
+                            "hub_id": "org/m"})
     monkeypatch.setattr(prov, "_local_destination", lambda meta: str(tmp_path))
 
     def _capture_then_stop(req, timeout=None, **kw):

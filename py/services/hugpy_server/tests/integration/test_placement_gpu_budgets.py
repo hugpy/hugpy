@@ -16,7 +16,7 @@ def isolated_route():
     function.decorator_list = []
     module = types.ModuleType("isolated_placement")
     module.jsonify, module.abort = jsonify, abort
-    for name in ("_transfer_authorized", "_model_blocked", "_model_gguf_bytes", "list_workers", "_worker_already_has", "_disk_preflight_reason", "_worker_fit"):
+    for name in ("_transfer_authorized", "_model_blocked", "_archive_refusal", "_model_gguf_bytes", "list_workers", "_worker_already_has", "_disk_preflight_reason", "_worker_fit"):
         setattr(module, name, None)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), module.__dict__)
     return module
@@ -28,6 +28,7 @@ def test_preview_exposes_two_gpu_budgets(monkeypatch):
     worker = {"id": "w", "name": "gpu", "status": "online", "vram_free": 2, "vram_total": 24, "free_ram": 64}
     monkeypatch.setattr(wr, "_transfer_authorized", lambda: True)
     monkeypatch.setattr(wr, "_model_blocked", lambda key: False)
+    monkeypatch.setattr(wr, "_archive_refusal", lambda key: None)
     monkeypatch.setattr(wr, "_model_gguf_bytes", lambda key: 8)
     monkeypatch.setattr(wr, "list_workers", lambda: [worker])
     monkeypatch.setattr(wr, "_worker_already_has", lambda w, key: True)
@@ -48,6 +49,7 @@ def test_unknown_model_size_stays_unknown(monkeypatch):
     wr = isolated_route()
     monkeypatch.setattr(wr, "_transfer_authorized", lambda: True)
     monkeypatch.setattr(wr, "_model_blocked", lambda key: False)
+    monkeypatch.setattr(wr, "_archive_refusal", lambda key: None)
     monkeypatch.setattr(wr, "_model_gguf_bytes", lambda key: None)
     monkeypatch.setattr(wr, "list_workers", lambda: [{"id": "w", "vram_total": 24}])
     monkeypatch.setattr(wr, "_worker_already_has", lambda w, key: False)

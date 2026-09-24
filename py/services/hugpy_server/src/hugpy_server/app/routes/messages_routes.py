@@ -69,8 +69,16 @@ def _messages_token() -> "str | None":
 def _anthropic_error(message: str, status: int, err_type: str = "invalid_request_error",
                      retry_after: "int | None" = None):
     """The Anthropic-shaped error body. Never a 500 traceback to the client."""
-    body = jsonify({"type": "error",
-                    "error": {"type": err_type, "message": message}})
+    err = {"type": err_type, "message": message}
+    try:
+        from flask import g
+        from hugpy_engine.routing_diagnostics import lookup
+        diag = lookup(g.get("hugpy_request_id")) if g.get("hugpy_request_id") else None
+        if diag is not None:
+            err["diagnostics"] = diag   # the structured routing-refusal record
+    except Exception:  # noqa: BLE001 — an error body must never fail to render
+        pass
+    body = jsonify({"type": "error", "error": err})
     if retry_after is None:
         return body, status
     return body, status, {"Retry-After": str(int(retry_after))}
@@ -145,6 +153,11 @@ def _prepare(body: dict):
                                                      tools_preamble)
 
     prompt_kwargs = _completion_kwargs(payload)
+    try:
+        from flask import g
+        g.hugpy_request_id = prompt_kwargs.get("request_id")
+    except Exception:  # noqa: BLE001
+        pass
     # A tool call is one short bounded turn — never auto-continue it (same guard
     # as /v1). An explicit client max_chunks still wins.
     if tools_preamble and "max_chunks" not in prompt_kwargs:
