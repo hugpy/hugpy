@@ -28,6 +28,8 @@ installed. Allowed ecosystem imports: `hugpy_platform`, `hugpy_control`,
   `HUGPY_MEDIA_JOBS_DB`, `HUGPY_RESERVATIONS_DB`, platform storage roots).
 - `intel/plane.py` — the one seam onto the engine's `execute_prompt`.
 - `cli.py` — `hugpy-video --help | jobs list | jobs registry | selftest | state`.
+- `hugpy-video models audit [--json]` inventories every declared model's
+  runner gaps, weight pin and minimum VRAM without loading weights.
 - `config.py` — canonical `HUGPY_API_KEY` / `HUGPY_BASE` loader.
 
 Extras: `render` (numpy/Pillow/requests), `studio` (torch/diffusers zoo),
