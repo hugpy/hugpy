@@ -739,6 +739,58 @@ def video_generate_movie():
     return jsonify({"job_id": job_id}), 200
 
 
+@video_bp.route("/video/jobs/performance", methods=["POST"])
+def video_performance():
+    """Submit an Oracle performance through the same attributed media bus as Studio."""
+    from hugpy_oracle.relay.performance_relay import validate_performance_spec
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "performance body must be a JSON object"}), 400
+    private = body.get("private", False)
+    if not isinstance(private, bool):
+        return jsonify({"error": "private must be a boolean"}), 400
+    try:
+        spec = validate_performance_spec({k: v for k, v in body.items() if k != "private"})
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    job_id = _video_enqueue("video_performance", spec, private=private)
+    return jsonify({"job_id": job_id}), 200
+
+
+@video_bp.route("/video/performance/probe", methods=["GET"])
+def video_performance_probe():
+    """Show which Oracle stages this server can actually serve."""
+    from hugpy_oracle.relay.performance_relay import probe
+    return jsonify(probe()), 200
+
+
+@video_bp.route("/video/identity-render/probe", methods=["GET"])
+def video_identity_render_probe():
+    """Read the external identity service's readiness without exposing its secret."""
+    from hugpy_video.intel.runners.identity_render_client import service_config, auth_headers
+
+    url, token = service_config()
+    if not url or not token:
+        return jsonify({"configured": False, "reachable": False,
+                        "reason": "Set IDENTITY_RENDER_URL and IDENTITY_RENDER_TOKEN on the server."}), 200
+    try:
+        import requests
+        response = requests.get(f"{url}/health", headers=auth_headers(token), timeout=2)
+        if response.status_code != 200:
+            return jsonify({"configured": True, "reachable": False,
+                            "reason": f"identity service health returned HTTP {response.status_code}"}), 200
+        body = response.json()
+        if not isinstance(body, dict) or body.get("ok") is not True:
+            raise ValueError("invalid health response")
+        return jsonify({"configured": True, "reachable": True,
+                        "version": body.get("version"),
+                        "capabilities": body.get("capabilities") or {}}), 200
+    except (requests.RequestException, ValueError):
+        return jsonify({"configured": True, "reachable": False,
+                        "reason": "identity service health is unavailable"}), 200
+
+
 # --------------------------------------------------------------------------- #
 # 2d'') POST /video/studio/i2v — a studio image-to-video clip via the cinema
 #        studio spine (B2). Mirrors the movie/scene routes: parse body -> build
@@ -1082,7 +1134,8 @@ def video_studio_tester():
 
     Body:  {"category": "image"|"scene"|"clip"|"movie", "prompt": str,
             "models"?: [str], "start_image"?: str, "width"?, "height"?, "fps"?,
-            "seed"?, "include_synthetic"?: bool, "run_label"?: str}
+            "seed"?, "steps"?, "cfg"?, "requested_frames"?, "negative"?,
+            "include_synthetic"?: bool, "run_label"?: str}
     200 -> {"job_id", "battery_run_dir", "category", "kind", "poll"}
     400 -> {"error"} on a bad category / empty prompt / malformed field.
     """
@@ -1101,6 +1154,10 @@ def video_studio_tester():
             fps=body.get("fps", 16),
             seed=body.get("seed", 0),
             start_image=body.get("start_image"),
+            steps=body.get("steps"),
+            cfg=body.get("cfg"),
+            requested_frames=body.get("requested_frames"),
+            negative=body.get("negative"),
             include_synthetic=bool(body.get("include_synthetic", False)),
             run_label=body.get("run_label"),
         )

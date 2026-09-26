@@ -186,6 +186,20 @@ def performance_from_dict(payload: Mapping[str, Any]) -> PerformanceSpec:
     return make_performance(goal, dialogue, casting, ref, **data)
 
 
+def validate_performance_spec(payload: Mapping[str, Any]) -> PerformanceSpec:
+    """Validate both the bus envelope and its nested oracle contracts before enqueue.
+
+    The bus deserializer checks the envelope only. A malformed dialogue, voice or
+    goal would otherwise occupy a queued GPU job before failing in the runner.
+    """
+    spec = performance_from_dict(payload)
+    from hugpy_oracle.performance import STAGES
+    if spec.stop_after is not None and spec.stop_after not in STAGES:
+        raise PerformanceSpecError(f"stop_after must be one of {list(STAGES)}")
+    _rehydrate(spec)
+    return spec
+
+
 def _casting_pairs(casting: Any):
     if isinstance(casting, Mapping):
         return list(casting.items())
@@ -217,9 +231,9 @@ def probe() -> dict:
       ``importable``        the ORCHESTRATOR imports here (it is pure Python +
                             the oracle contracts, so this is about the tree,
                             not about hardware);
-      ``ready``             every seam the recipe actually needs is BOUND on
-                            this box. False today: no worker seats chatterbox,
-                            so a live job refuses at stage 3.
+      ``ready``             every seam the complete recipe needs is BOUND on
+                            this box. Staged runs may still be possible when
+                            a later visual seam is unavailable.
 
     ``unbound`` carries the operator step for each missing seam, so
     ``GET /oracle/capabilities`` (or an operator reading the probe directly)
@@ -248,7 +262,8 @@ def probe() -> dict:
                 "reason": (f"{ORACLE_MODULE} did not import "
                            f"({type(exc).__name__}: {exc})")}
 
-    required = ("synth", "transcribe", "gen_image", "gen_clip", "concat")
+    required = ("synth", "transcribe", "gen_image", "judge_image",
+                "gen_clip", "judge_clip", "concat")
     missing = [name for name in required if name not in bound]
     return {
         "importable": True,

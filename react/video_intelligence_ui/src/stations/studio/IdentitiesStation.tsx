@@ -34,7 +34,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { request, okValue, errorOf, describeAppError } from "../../transport/client";
-import { mediaBytesUrl, identityGenerateUrl, identityMeshStatusUrl, videoJobUrl } from "../../config";
+import { hugpyConfig, mediaBytesUrl, identityGenerateUrl, identityMeshStatusUrl, videoJobUrl } from "../../config";
 import { useMediaLibrary } from "../../video/mediaLibrary";
 import type { LibraryItem } from "../../video/mediaLibrary";
 import type { MediaRef, IdentityReconstruction, IdentityAngleView } from "../../video/contract";
@@ -2149,6 +2149,17 @@ type IdTab = "active" | "session" | "settings";
 
 export function IdentitiesStation({ spec }: { spec: StationSpec }) {
   void spec;
+  const [serviceProbe, setServiceProbe] = useState<{ configured: boolean; reachable: boolean; reason?: string; version?: string; capabilities?: Record<string, unknown> } | null>(null);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const result = await request<typeof serviceProbe>(`${hugpyConfig.apiBase}/video/identity-render/probe`, {
+        meta: { specKey: "identities", operation: "identity.render.probe" },
+      });
+      if (active && result.ok) setServiceProbe(okValue(result));
+    })();
+    return () => { active = false; };
+  }, []);
   const {
     profiles,
     loading,
@@ -2225,6 +2236,14 @@ export function IdentitiesStation({ spec }: { spec: StationSpec }) {
   return (
     <section className="station-wide vi-identities vi-identities-md" aria-label="Identities workspace"
       style={{ display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", gap: "1rem", alignItems: "start" }}>
+      <div role="status" style={{ gridColumn: "1 / -1", padding: "0.55rem 0.75rem", border: "1px solid var(--vi-border)", borderRadius: "0.5rem", fontSize: "0.8rem" }}>
+        <strong>Identity render service:</strong>{" "}
+        {!serviceProbe ? "checking…" : serviceProbe.reachable
+          ? `online${serviceProbe.version ? ` · ${serviceProbe.version}` : ""}`
+          : serviceProbe.reason || "unavailable"}
+        {serviceProbe?.reachable && serviceProbe.capabilities ?
+          <span> · {Object.entries(serviceProbe.capabilities).filter(([, value]) => Boolean(value)).map(([name]) => name).join(", ")}</span> : null}
+      </div>
       {/* ── SIDEBAR: tab filter + master list (wireframe b/c/d/f/e) ────────── */}
       <aside className="vi-id-sidebar" aria-label="Identity list"
         style={{ border: "1px solid var(--vi-border)", borderRadius: "0.5rem", padding: "0.5rem", position: "sticky", top: "0.5rem" }}>

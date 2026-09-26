@@ -28,10 +28,19 @@ installed. Allowed ecosystem imports: `hugpy_platform`, `hugpy_control`,
   `HUGPY_MEDIA_JOBS_DB`, `HUGPY_RESERVATIONS_DB`, platform storage roots).
 - `intel/plane.py` — the one seam onto the engine's `execute_prompt`.
 - `cli.py` — `hugpy-video --help | jobs list | jobs registry | selftest | state`.
+- `hugpy-video models audit [--json]` inventories every declared model's
+  runner gaps, weight pin and minimum VRAM without loading weights.
 - `config.py` — canonical `HUGPY_API_KEY` / `HUGPY_BASE` loader.
 
 Extras: `render` (numpy/Pillow/requests), `studio` (torch/diffusers zoo),
 `identity` (abstract-identity client), `test`.
+
+The `identity` extra installs the separate `abstract-identity` distribution.
+The central video runner relays mesh and char360 jobs to its service using
+`IDENTITY_RENDER_URL` and `IDENTITY_RENDER_TOKEN`; installing the extra alone
+does not start a GPU service. Studio model sweeps use
+`POST /video/studio/tester`; each attempt records its model, input image,
+sampler settings, frame count and negative prompt in the battery log.
 
 ## Rules (inherited from char360 / hugpy-agent)
 - Heavy imports lazy — must import on a CPU-only box.

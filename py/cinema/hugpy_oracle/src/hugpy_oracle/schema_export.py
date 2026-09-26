@@ -307,6 +307,11 @@ def export_all() -> dict[str, Any]:
     missing: dict[str, str] = {}
     for group in (PLATFORM_CONTRACTS, DOMAIN_ARTIFACTS):
         for title, module_name, attr in group:
+            if title == "ArtifactManifest":
+                # This contract belongs to the agent package. Its presence in
+                # the interpreter must not make the Oracle claim its schema.
+                missing[title] = "owned by hugpy_agent.mct.manifest"
+                continue
             target, why = _resolve(module_name, attr)
             if target is None:
                 missing[title] = why

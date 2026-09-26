@@ -4,6 +4,7 @@
     hugpy-video jobs list [--all] [--limit N] [--json]
     hugpy-video jobs registry
     hugpy-video selftest            # in-process checks, no GPU/service
+    hugpy-video models audit --json # declared model roster and readiness gates
 
 Everything heavy is imported inside the sub-command that needs it.
 """
@@ -56,6 +57,34 @@ def _cmd_state(args) -> int:
     return 0
 
 
+def _cmd_models_audit(args) -> int:
+    """Inventory every declared model without loading weights or allocating a GPU."""
+    from hugpy_video.intel.studio.registry import MODEL_REGISTRY, model_gate_reasons
+
+    rows = []
+    for model_id, cfg in sorted(MODEL_REGISTRY.items()):
+        precision_gb = {precision.value: gb for precision, gb in cfg.vram.per_precision}
+        rows.append({
+            "model_id": model_id,
+            "family": cfg.family.value,
+            "capabilities": sorted(cap.value for cap in cfg.capabilities),
+            "tasks": sorted(task.value for task in cfg.tasks),
+            "minimum_vram_gb": min(precision_gb.values()) if precision_gb else None,
+            "vram_by_precision_gb": precision_gb,
+            "weights_pinned": cfg.weight_hash is not None,
+            "runner_gaps": model_gate_reasons(model_id),
+        })
+    if args.json:
+        print(json.dumps({"models": rows}, indent=2, sort_keys=True))
+    else:
+        for row in rows:
+            status = ", ".join(row["runner_gaps"].values()) or "runner present"
+            pin = "pinned" if row["weights_pinned"] else "unpinned"
+            print(f"{row['model_id']:32} {row['minimum_vram_gb']!s:>6} GB  {pin:8}  {status}")
+        print(f"{len(rows)} declared models; audit does not prove installed weights or GPU readiness")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     from hugpy_video import __version__
 
@@ -79,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     state = sub.add_parser("state", help="print the resolved state roots")
     state.set_defaults(func=_cmd_state)
+    models = sub.add_parser("models", help="studio model inventory")
+    msub = models.add_subparsers(dest="models_cmd")
+    audit = msub.add_parser("audit", help="report runner, pin and VRAM requirements")
+    audit.add_argument("--json", action="store_true")
+    audit.set_defaults(func=_cmd_models_audit)
     return p
 
 

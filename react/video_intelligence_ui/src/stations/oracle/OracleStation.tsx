@@ -19,6 +19,7 @@ import { useState } from "react";
 
 import type { StationSpec } from "../types";
 import { DagPanel } from "./DagPanel";
+import { PerformanceComposer } from "./PerformanceComposer";
 import { SpatialTab } from "./SpatialTab";
 import { StewardPanel } from "./StewardPanel";
 import { GapNote, RawJson, StateChip, Tag, short, when } from "./oracleShared";
@@ -273,6 +274,7 @@ export function OracleStation({ spec }: { spec: StationSpec }) {
       <p className="station-blurb">{spec.blurb}</p>
 
       <StewardPanel api={steward} embedded={runs.manifest?.dag?.steward ?? null} />
+      <PerformanceComposer onEnqueued={(jobId) => runs.select(jobId)} />
       <RunPicker runs={runs} />
       <RunHeader runs={runs} />
 

@@ -416,6 +416,11 @@ export function StudioGenerateSurface({
       height?: number;
       fps?: number;
       seed?: number;
+      startImage?: string;
+      steps?: number;
+      cfg?: number;
+      requestedFrames?: number;
+      negative?: string;
     }) => {
       const p = prompt.trim();
       if (!p) {
@@ -430,6 +435,11 @@ export function StudioGenerateSurface({
         if (opts.height != null) body.height = opts.height;
         if (opts.fps != null) body.fps = opts.fps;
         if (opts.seed != null) body.seed = opts.seed;
+        if (opts.startImage) body.start_image = opts.startImage;
+        if (opts.steps != null) body.steps = opts.steps;
+        if (opts.cfg != null) body.cfg = opts.cfg;
+        if (opts.requestedFrames != null) body.requested_frames = opts.requestedFrames;
+        if (opts.negative) body.negative = opts.negative;
         if (opts.models.length > 0) body.models = opts.models;
         const res = await request<unknown>(hugpyConfig.studioTesterUrl, {
           method: "POST",
@@ -2813,10 +2823,13 @@ export function StudioGenerateSurface({
         </div>
         {clipTesterOpen && (
           <div className="vi-gen-tester-actions">
+            {!isT2V && !(isI2V && hasImage) && (
+              <span className="vi-knob-hint" role="note">The current sweep supports text-to-video and image-to-video with a start image. Choose one of those shapes to run it.</span>
+            )}
             <button
               type="button"
               className="vi-btn vi-btn-sm vi-btn-tester"
-              disabled={testerBusy || !prompt.trim()}
+              disabled={testerBusy || !prompt.trim() || (!isT2V && !(isI2V && hasImage))}
               onClick={() =>
                 void onTestAllModels({
                   category: surfaceMode,
@@ -2825,9 +2838,14 @@ export function StudioGenerateSurface({
                   height,
                   fps,
                   seed,
+                  startImage: isI2V ? startImages[0]?.uri : undefined,
+                  steps: steps.trim() ? Number(steps) : undefined,
+                  cfg: cfg.trim() ? Number(cfg) : undefined,
+                  requestedFrames: requestedFrames.trim() ? Number(requestedFrames) : undefined,
+                  negative: negative.trim() || undefined,
                 })
               }
-              title="Run this prompt across every model that FITS THE CURRENT FILTER (this surface's capability + geometry) — one row per model in the log below (a battery). Falls back to the whole roster when none match."
+              title={!isT2V && !(isI2V && hasImage) ? "This sweep currently supports text-to-video or image-to-video with a start image." : "Run this prompt across each model that fits the current filter; one battery row per model."}
             >
               {testerBusy ? "Starting…" : "🧪 Test all models"}
             </button>

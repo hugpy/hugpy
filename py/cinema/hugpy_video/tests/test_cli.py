@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 
 import pytest
 
@@ -47,3 +48,13 @@ def test_state_prints_roots(capsys, monkeypatch, tmp_path):
 def test_selftest_passes():
     from hugpy_video.selftest import run_selftest
     assert run_selftest() == []
+
+
+def test_model_audit_covers_entire_registry(capsys):
+    from hugpy_video.intel.studio.registry import MODEL_REGISTRY
+
+    assert cli.main(["models", "audit", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["models"]
+    assert {r["model_id"] for r in rows} == set(MODEL_REGISTRY)
+    assert all("runner_gaps" in r and "weights_pinned" in r and
+               "minimum_vram_gb" in r for r in rows)

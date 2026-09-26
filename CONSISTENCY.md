@@ -68,19 +68,26 @@ the installed metadata to say the new number.
    create the GitHub Release `vX.Y.Z` with the artifacts attached.
 4. Central adopts; workers converge (next section).
 
+If PyPI rejects the trusted-publisher exchange after CI has built and checked
+the archives, the release is not complete. An operator can download that run's
+`dist` artifact, upload the same files with an account-scoped PyPI token, and
+verify the wheel and sdist at every exact-version PyPI JSON endpoint. Only then
+attach those archives to the GitHub Release. Do not rebuild an already-published
+version from another commit or assume that a pushed tag was published.
+
 Nothing edits a version anywhere in that flow. The first partitioned release is
 `0.2.0`: PyPI `hugpy` already exists at 0.1.181 (the retired monolith) and
 0.2.0 sorts above it.
 
-A brand-new distribution name needs one bootstrap before its first tagged
-release: PyPI allows a given (owner, repository, workflow, environment)
-trusted publisher as a *pending* publisher for only one not-yet-existing
+A brand-new distribution name needs to exist on PyPI before its normal trusted
+publisher can be registered. PyPI allows a given (owner, repository, workflow,
+environment) trusted publisher as a *pending* publisher for only one not-yet-existing
 project, so the name is created once by hand (local-only tag `vX.Y.Za0`,
 `python -m build`, `twine upload` of the a0 placeholder with an account-scoped
 token, tag deleted), after which the ordinary publisher is added on the project
-page and the tag flow above takes over. The 12 partitioned names were
-bootstrapped this way as 0.2.0a0 on 2026-09-23 (see the header of
-`.github/workflows/pypi-publish.yml`).
+page and the tag flow above takes over. An operator can also create the name by
+uploading the first final release from CI's validated artifacts with the same
+account-scoped token, then register the publisher for later releases.
 
 ## How central adopts and workers converge
 
