@@ -197,12 +197,14 @@ def test_a_model_too_big_for_the_card_gets_an_honest_partial(tmp_path):
     """A split is priced against the FULLY STACKED budget — the credit only ever
     converts a spill into a whole seat, it never buys layers in a split."""
     g = flux2_like(tmp_path, size_bytes=int(20 * GIB))
-    n = spill.autofit_gpu_layers(g, free_vram=int(7.5 * GIB))
+    free = int(7.5 * GIB)
+    ctx = spill.served_ctx_for_fit(g, free_vram=free)
+    n = spill.autofit_gpu_layers(g, free_vram=free)
     assert 0 < n < 36, n
-    reserve, _, _ = spill.vram_ctx_reserve_bytes(g)
-    assert n == int((int(7.5 * GIB) - reserve) // (20 * GIB / 36))
+    reserve, _, _ = spill.vram_ctx_reserve_bytes(g, n_ctx=ctx)
+    assert n == int((free - reserve) // (20 * GIB / 36))
     # the split leaves the external floor genuinely untouched
-    assert int(7.5 * GIB) - int(n * (20 * GIB / 36)) >= reserve
+    assert free - int(n * (20 * GIB / 36)) >= reserve
 
 
 def test_no_budget_at_all_is_zero_layers(tmp_path):
@@ -324,9 +326,11 @@ def test_explicit_vram_reserve_env_still_governs_the_floor(tmp_path, monkeypatch
     g = flux2_like(tmp_path)
     monkeypatch.setenv("HUGPY_VRAM_RESERVE_GIB", "3.0")
     assert spill.vram_reserve_bytes() == int(3.0 * GIB)
-    reserve, _, _ = spill.vram_ctx_reserve_bytes(g)       # unchanged: 2.75 GiB
-    n = spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB))
-    # ctx need (2.75) < floor (3.0) -> the floor binds, nothing extra is charged
+    free = int(6.5 * GIB)
+    ctx = spill.served_ctx_for_fit(g, free_vram=free)
+    reserve, _, _ = spill.vram_ctx_reserve_bytes(g, n_ctx=ctx)
+    n = spill.autofit_gpu_layers(g, free_vram=free)
+    # The fit-bounded ctx need is below the explicit floor, so the floor binds.
     assert reserve < int(3.0 * GIB)
     assert n == -1
     monkeypatch.setenv("HUGPY_VRAM_RESERVE_GIB", "0")

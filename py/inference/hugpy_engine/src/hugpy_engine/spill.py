@@ -1083,7 +1083,7 @@ def autofit_gpu_layers(model_path: str,
                 return -1
         except Exception:
             pass
-            return 0
+        return 0
 
     # Resolve the same fit-bounded context the loader will launch before
     # pricing the cache.  Passing free_vram explicitly matters for callers that

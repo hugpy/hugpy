@@ -17,13 +17,14 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from hugpy_fleet.central import wg_join as wj
 
-REPO = "/srv/hugpy/src/hugpy"
-HELPER = os.path.join(REPO, "py/tooling/hugpy_wg_peer.py")
+REPO = Path(__file__).resolve().parents[4]
+HELPER = str(REPO / "py/tooling/hugpy_wg_peer.py")
 
 
 def _b64key() -> str:
