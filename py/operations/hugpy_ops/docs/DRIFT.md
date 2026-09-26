@@ -60,7 +60,7 @@ Proves: what is checked out is what the repository of record has.
 ### B `installed` — this interpreter vs the checkout
 
 For each workspace distribution installed in **this** interpreter
-(`buildinfo.WORKSPACE_DISTRIBUTIONS`, else the built-in list of 13):
+(`buildinfo.WORKSPACE_DISTRIBUTIONS`, else the built-in list of 14):
 
 - an editable install's source must be at the workspace HEAD, else `DRIFT`;
   if its recorded metadata was stamped at an older commit the row stays `ok`
@@ -137,7 +137,7 @@ A checkout   HEAD              info    952c2d8aa882 on consistency  (/home/u/hug
 A checkout   tree              ok      clean (no modified tracked files)
 A checkout   origin/consistency  ok    in sync at 952c2d8aa882 (vs last fetch)
 B installed  hugpy-platform    ok      0.0.1.dev11+unknown.g952c2d8aa: source at workspace HEAD
-B installed  lockstep          ok      13 distribution(s) at 0.0.1.dev11+unknown.g952c2d8aa
+B installed  lockstep          ok      14 distribution(s) at 0.0.1.dev11+unknown.g952c2d8aa
 C fleet      central           error   no build identity in /api/health — central predates buildinfo; …
 C fleet      worker aeb        DRIFT   monolith / no build identity (pkg_version=0.1.266) [online]
 

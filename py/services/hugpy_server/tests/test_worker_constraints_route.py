@@ -31,7 +31,7 @@ def test_constraints_route_lists_every_workspace_distribution(client, monkeypatc
     assert resp.mimetype == "text/plain"
     body = resp.get_data(as_text=True)
     lines = body.splitlines()
-    assert body.endswith("\n") and len(lines) == 13
+    assert body.endswith("\n") and len(lines) == 14
     assert lines == [f"{n}==0.2.0" for n in W.WORKSPACE_DISTRIBUTIONS_FALLBACK]
     assert "hugpy-fleet==0.2.0" in lines and "hugpy-platform==0.2.0" in lines
 

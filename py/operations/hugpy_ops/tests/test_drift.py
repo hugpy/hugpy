@@ -207,6 +207,7 @@ def test_tagged_release_without_sha_is_ok(monkeypatch):
 def test_buildinfo_absent_degrades_to_metadata(monkeypatch):
     monkeypatch.setattr(drift, "_buildinfo", lambda: None)
     assert drift.workspace_distributions() == drift.FALLBACK_DISTRIBUTIONS
+    assert "hugpy-tools" in drift.FALLBACK_DISTRIBUTIONS
     assert drift.local_build_identity() is None
     assert drift.distribution_record("definitely-not-a-distribution") is None
     rec = drift.distribution_record("hugpy-ops")

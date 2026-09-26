@@ -20,7 +20,7 @@ Covers:
   * ``_self_update_if_needed`` end to end (pip + restart faked): runs the
     constrained command, cleans up the temp file, records ``constrained`` in the
     update state and restarts with the WorkerState (not the update dict).
-  * ``lockstep_constraints()``: buildinfo import forced to fail → the 13-name
+  * ``lockstep_constraints()``: buildinfo import forced to fail → the 14-name
     fallback; forced to succeed → the platform's list; no required → [].
 """
 from __future__ import annotations
@@ -256,7 +256,7 @@ def test_self_update_backoff_skips_recent_same_target(monkeypatch, tmp_path):
 def test_lockstep_constraints_fallback_when_buildinfo_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "hugpy_platform.buildinfo", None)  # import fails
     lines = W.lockstep_constraints("0.2.0")
-    assert len(lines) == 13
+    assert len(lines) == 14
     assert lines == [f"{n}==0.2.0" for n in W.WORKSPACE_DISTRIBUTIONS_FALLBACK]
     assert "hugpy-fleet==0.2.0" in lines and "hugpy==0.2.0" in lines
 

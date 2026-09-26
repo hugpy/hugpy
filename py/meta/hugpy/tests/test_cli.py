@@ -177,6 +177,7 @@ def test_version_lists_distributions(capsys):
     # is installed; the "hugpy <version>" line is first otherwise
     assert any(line.startswith("hugpy ") for line in lines[:2])
     assert "hugpy-platform" in out
+    assert "hugpy-tools" in out
 
 
 def test_version_prints_identity_line_first_when_buildinfo_present(monkeypatch, capsys):

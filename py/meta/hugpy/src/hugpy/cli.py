@@ -508,7 +508,7 @@ def _install_deps(args: argparse.Namespace) -> int:
 
 
 ECOSYSTEM_DISTRIBUTIONS = (
-    "hugpy-platform", "hugpy-control", "hugpy-storage", "hugpy-engine",
+    "hugpy-platform", "hugpy-tools", "hugpy-control", "hugpy-storage", "hugpy-engine",
     "hugpy-media", "hugpy-video", "hugpy-oracle", "hugpy-fleet",
     "hugpy-curation", "hugpy-ops", "hugpy-discord", "hugpy-server",
 )
