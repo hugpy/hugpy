@@ -10,7 +10,7 @@
 # Then: git tag -a vX.Y.Z -m "hugpy X.Y.Z" && git push <remote> vX.Y.Z.
 #
 # Nothing else is edited: setuptools-scm turns the tag into the version of all
-# 13 distributions at build time, CI (.github/workflows/pypi-publish.yml)
+# 14 distributions at build time, CI (.github/workflows/pypi-publish.yml)
 # builds, verifies against the tag, publishes to PyPI and creates the GitHub
 # Release. --dry-run runs every gate, reports each, prints the plan, tags nothing.
 set -euo pipefail
@@ -118,7 +118,7 @@ echo "plan:"
 echo "  git tag -a $TAG -m \"hugpy $VERSION\"        (at ${LOCAL_SHA:0:12})"
 echo "  git push $REMOTE $TAG"
 echo "then, without any further edit:"
-echo "  1. CI pypi-publish.yml builds all 13 distributions at $VERSION, verifies each against the tag,"
+echo "  1. CI pypi-publish.yml builds all 14 distributions at $VERSION, verifies each against the tag,"
 echo "     publishes to PyPI (environment 'pypi', trusted publishing) and creates the GitHub Release $TAG."
 echo "  2. central adopts:  pip install -U \"hugpy[server]==$VERSION\"  && restart the hugpy service;"
 echo "     central then advertises required_pkg_version=$VERSION (its own installed version)."
