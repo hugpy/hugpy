@@ -99,10 +99,10 @@ test('ledger rows carry their verdict from state', () => {
 })
 
 test('throughput: avg of N calls or explicit none; never an EMA', () => {
-  assert.equal(throughputText({ n_calls: 20, mean_tok_s: 71.24, p50: 70, p90: 80 }), '71.2 tok/s · avg of 20 calls · p50 70.0 · p90 80.0')
+  assert.equal(throughputText({ n_calls: 20, mean_tok_s: 71.24, p50: 70, p90: 80 }), '71.2 tok/s · Σtokens/Σgeneration-s over 20 of 20 calls · p50 70.0 · p90 80.0')
   assert.equal(throughputText({ n_calls: 0 }), 'no calls recorded')
-  assert.equal(throughputText(null), 'no calls recorded')
+  assert.equal(throughputText(null), 'row carries no throughput block')
   const c = combineThroughput([{ n_calls: 2, tokens: 200, seconds: 4 }, { n_calls: 1, tokens: 100, seconds: 1 }])
-  assert.deepEqual([c.n_calls, c.mean_tok_s, c.label], [3, 60, 'avg of 3 calls'])
+  assert.deepEqual([c.n_calls, c.mean_tok_s, c.label], [3, 60, 'Σtok/Σgen-s over 3 of 3 calls'])
   assert.equal(combineThroughput([]).reason, 'no calls recorded')
 })

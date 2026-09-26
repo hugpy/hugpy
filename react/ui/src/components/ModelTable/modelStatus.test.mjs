@@ -179,7 +179,7 @@ test('verify + grade action state machine', () => {
   assert.equal(verifyReducer(s, { type: 'poll', data: { jobs: [{ id: 'j1', status: 'running' }] } }), s)
   assert.equal(verifyReducer(s, { type: 'reset' }).phase, 'idle')
   const failed = verifyReducer({ phase: 'running', jobId: 'j2' }, { type: 'poll', data: { jobs: [{ id: 'j2', status: 'failed', log: 'crash: X' }] } })
-  assert.deepEqual([failed.phase, failed.message], ['failed', 'crash: X'])
+  assert.deepEqual([failed.phase, failed.message], ['failed', 'job j2 failed: crash: X'])
 })
 
 test('worker provisioning line (aeb ← central)', () => {
