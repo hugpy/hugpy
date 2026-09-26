@@ -111,6 +111,9 @@ export function StudioPlane({ registerBridge = false, lockedSurfaceMode }: Studi
   const [pinned, setPinned] = useState(false);
 
   const topRef = useRef<HTMLDivElement | null>(null);
+  const monitorRef = useRef<HTMLDivElement | null>(null);
+  const binRef = useRef<HTMLDivElement | null>(null);
+  const renderRef = useRef<HTMLDivElement | null>(null);
 
   // Round 9: fold into the ONE shell sidebar — reveal its guarded Settings tab (knobs +
   // template dropdown portal there). registerSettings is stable, so this runs once per
@@ -275,10 +278,24 @@ export function StudioPlane({ registerBridge = false, lockedSurfaceMode }: Studi
 
   return (
     <div className="vi-studio-workbench" ref={topRef}>
+      <nav className="vi-studio-workflow" aria-label="Studio workflow">
+        <button type="button" onClick={() => monitorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+          <span className="vi-studio-workflow-step">01 · Monitor</span>
+          <span>Review the current take</span>
+        </button>
+        <button type="button" onClick={() => binRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+          <span className="vi-studio-workflow-step">02 · Shot bin</span>
+          <span>{items.length} staged {items.length === 1 ? "item" : "items"}</span>
+        </button>
+        <button type="button" onClick={() => renderRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+          <span className="vi-studio-workflow-step">03 · Render</span>
+          <span>Clip or cinema</span>
+        </button>
+      </nav>
       {/* CENTER, movie skeleton: viewer on top → generator below. Viewer header controls
           (Play from library / Clear / follow-newest toggle) are wired here so both
           plane mounts get them for free — see the `pinned` note above. */}
-      <StudioViewer
+      <div ref={monitorRef} className="vi-studio-workflow-target"><StudioViewer
         clips={clipsState.clips}
         library={libraryMedia}
         selected={selected}
@@ -286,7 +303,7 @@ export function StudioPlane({ registerBridge = false, lockedSurfaceMode }: Studi
         onPick={pickViewerClip}
         onClear={clearViewer}
         onToggleFollow={toggleFollowNewest}
-      />
+      /></div>
 
       {/* Slice 2b: the staged studio items as a strip of first-class cards with inline
           per-item ops. Additive — it sits ABOVE the generate surface and does not touch
@@ -294,7 +311,8 @@ export function StudioPlane({ registerBridge = false, lockedSurfaceMode }: Studi
           mounts identically (this is the one shared StudioPlane). Each card is wrapped in
           a keyed intrinsic <div> so the map key never lands on a component (which the
           bare-tsc env flags as a spurious prop). */}
-      {items.length > 0 && (
+      <div ref={binRef} className="vi-studio-workflow-target" aria-label="Shot bin">
+      {items.length > 0 ? (
         <div className="vi-studio-item-strip" aria-label="Studio items">
           {items.map((it) => (
             <div className="vi-studio-item-cell" key={it.key}>
@@ -308,8 +326,10 @@ export function StudioPlane({ registerBridge = false, lockedSurfaceMode }: Studi
             </div>
           ))}
         </div>
-      )}
+      ) : <p className="vi-studio-bin-empty">Staged media will appear here. Send a library item to Studio or add a source in the render desk.</p>}
+      </div>
 
+      <div ref={renderRef} className="vi-studio-workflow-target">
       <StudioGenerateSurface
         presets={presets}
         presetsLoading={presetsLoading}
@@ -322,6 +342,7 @@ export function StudioPlane({ registerBridge = false, lockedSurfaceMode }: Studi
         settingsHost={reg.settingsHost}
         lockedSurfaceMode={lockedSurfaceMode}
       />
+      </div>
       {/* STUDIO-ASSIST LIVE LOG → portaled into the sidebar's ACTIVE (Active
           Processes) tab via the registry's activeExtra host (operator correction
           2026-08-05: "active tab" = Active Processes). Single mount, shared stream. */}

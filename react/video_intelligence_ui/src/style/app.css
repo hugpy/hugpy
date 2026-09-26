@@ -3406,6 +3406,55 @@ button.vi-studio-src-thumb {
   min-width: 0;
 }
 
+.vi-studio-workflow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--vi-border);
+  padding-bottom: 0.7rem;
+}
+
+.vi-studio-workflow button {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--vi-border);
+  border-radius: 8px;
+  background: var(--vi-surface-raised);
+  color: var(--vi-text-dim);
+  cursor: pointer;
+}
+
+.vi-studio-workflow button:hover,
+.vi-studio-workflow button:focus-visible {
+  border-color: var(--vi-accent);
+  color: var(--vi-text);
+}
+
+.vi-studio-workflow-step {
+  color: var(--vi-text);
+  font-family: var(--vi-mono);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.vi-studio-workflow-target { scroll-margin-top: 1rem; min-width: 0; }
+.vi-studio-bin-empty {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  border: 1px dashed var(--vi-border);
+  border-radius: 8px;
+  color: var(--vi-text-dim);
+  font-size: 0.78rem;
+}
+
+@media (max-width: 35rem) {
+  .vi-studio-workflow { grid-template-columns: 1fr; }
+}
+
 /* Round 9: the studio no longer carries its OWN sidebar — it folds into the arm shell's
    ONE left sidebar (Settings / Active / Library, via the sidebar registry). So the
    workbench is a SINGLE centre column (viewer on top → generator below), the Movie

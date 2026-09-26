@@ -28,6 +28,10 @@ def test_valid_submission_and_probe(monkeypatch):
         assert result.status_code == 200 and result.json == {"job_id": "queued"}
         probe = client.get("/video/performance/probe")
         assert probe.status_code == 200 and "unbound" in probe.json
+        from hugpy_video.intel.runners import identity_render_client
+        monkeypatch.setattr(identity_render_client, "service_config", lambda: ("", ""))
+        identity = client.get("/video/identity-render/probe")
+        assert identity.status_code == 200 and identity.json["configured"] is False
         bad = _body()
         bad["stop_after"] = "unknown"
         refused = client.post("/video/jobs/performance", json=bad)

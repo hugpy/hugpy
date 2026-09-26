@@ -765,6 +765,32 @@ def video_performance_probe():
     return jsonify(probe()), 200
 
 
+@video_bp.route("/video/identity-render/probe", methods=["GET"])
+def video_identity_render_probe():
+    """Read the external identity service's readiness without exposing its secret."""
+    from hugpy_video.intel.runners.identity_render_client import service_config, auth_headers
+
+    url, token = service_config()
+    if not url or not token:
+        return jsonify({"configured": False, "reachable": False,
+                        "reason": "Set IDENTITY_RENDER_URL and IDENTITY_RENDER_TOKEN on the server."}), 200
+    try:
+        import requests
+        response = requests.get(f"{url}/health", headers=auth_headers(token), timeout=2)
+        if response.status_code != 200:
+            return jsonify({"configured": True, "reachable": False,
+                            "reason": f"identity service health returned HTTP {response.status_code}"}), 200
+        body = response.json()
+        if not isinstance(body, dict) or body.get("ok") is not True:
+            raise ValueError("invalid health response")
+        return jsonify({"configured": True, "reachable": True,
+                        "version": body.get("version"),
+                        "capabilities": body.get("capabilities") or {}}), 200
+    except (requests.RequestException, ValueError):
+        return jsonify({"configured": True, "reachable": False,
+                        "reason": "identity service health is unavailable"}), 200
+
+
 # --------------------------------------------------------------------------- #
 # 2d'') POST /video/studio/i2v — a studio image-to-video clip via the cinema
 #        studio spine (B2). Mirrors the movie/scene routes: parse body -> build
