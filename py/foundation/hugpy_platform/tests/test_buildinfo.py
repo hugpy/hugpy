@@ -17,11 +17,19 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from hugpy_platform import buildinfo
+
+
+def test_workspace_roster_matches_partition_manifest():
+    manifest = Path(__file__).resolve().parents[4] / "py" / "partition.toml"
+    expected = tuple(p["distribution"] for p in tomllib.loads(manifest.read_text())["package"])
+    assert buildinfo.WORKSPACE_DISTRIBUTIONS == expected
 
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
 

@@ -29,9 +29,10 @@ import subprocess
 import sys
 import time
 
-#: The 13 in-tree distributions, in partition order (PARTITION.md).
+#: The 14 in-tree distributions, in partition order (py/partition.toml).
 WORKSPACE_DISTRIBUTIONS: "tuple[str, ...]" = (
     "hugpy-platform",
+    "hugpy-tools",
     "hugpy-control",
     "hugpy-storage",
     "hugpy-engine",

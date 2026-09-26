@@ -341,6 +341,7 @@ def pkg_index_has(version: Optional[str], names: Optional[Iterable[str]] = None)
 # the fallback for a central whose installed hugpy-platform predates it.
 WORKSPACE_DISTRIBUTIONS_FALLBACK = (
     "hugpy-platform",
+    "hugpy-tools",
     "hugpy-control",
     "hugpy-storage",
     "hugpy-engine",

@@ -67,7 +67,7 @@ _SECTION_BY_NAME = {v: k for k, v in SECTIONS.items()}
 # Mirrors hugpy_platform.buildinfo.WORKSPACE_DISTRIBUTIONS; used only when
 # buildinfo is not importable (an older hugpy-platform, or none at all).
 FALLBACK_DISTRIBUTIONS = (
-    "hugpy-platform", "hugpy-control", "hugpy-storage", "hugpy-engine",
+    "hugpy-platform", "hugpy-tools", "hugpy-control", "hugpy-storage", "hugpy-engine",
     "hugpy-media", "hugpy-video", "hugpy-oracle", "hugpy-fleet",
     "hugpy-curation", "hugpy-ops", "hugpy-discord", "hugpy-server", "hugpy",
 )
