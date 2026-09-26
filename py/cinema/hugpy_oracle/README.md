@@ -28,3 +28,16 @@ Allowed Python dependencies inside the ecosystem: hugpy_platform, hugpy_control,
 steward pass (remote against a running central when `HUGPY_API` is set,
 otherwise in-process over the shared ledger); `deploy/hugpy-steward.{service,timer}`
 schedule it. `hugpy-oracle install-hooks` reports what the video hooks wired.
+
+## Performance in the video console
+
+The Oracle station submits `POST /video/jobs/performance` and reads
+`GET /video/performance/probe`. The submit route validates the nested goal,
+locked dialogue and casting before a job enters the media bus. It uses the same
+owner and visibility stamping as other `/video/jobs/*` routes. The station
+offers `stop_after` so an operator can inspect authority, audio, production
+lock and segment planning before attempting visual stages.
+
+The probe lists bound and unbound seams. A full performance is ready only when
+image generation and judging, clip generation and judging, audio, and assembly
+are all bound. An unbound clip seam is a capability gap, not a successful render.

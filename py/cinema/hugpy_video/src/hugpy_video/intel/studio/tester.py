@@ -151,6 +151,7 @@ def _generate_image_once(model: str, prompt: str, *, width=None, height=None,
 
 def _generate_video_once(model: str, prompt: str, *, width=None, height=None,
                          fps=None, seed=0, start_image=None, out_root=None,
+                         steps=None, cfg=None, requested_frames=None, negative=None,
                          **_ignored):
     """One clip render of ``prompt`` PINNED to ``model`` through the studio spine.
     Returns (ok, uri, error). A pin the router can't honor (unknown/incapable/
@@ -179,6 +180,10 @@ def _generate_video_once(model: str, prompt: str, *, width=None, height=None,
         start_image=start_image,
         prompt=prompt,
         model_id=model,                # the PIN — bind THIS model or Err-as-data
+        steps=steps,
+        cfg=cfg,
+        requested_frames=requested_frames,
+        negative=negative,
     )
     # UNIQUE per attempt: the worker keys renders idempotently by render_id (a
     # movie segment resume WANTS that), so a stable id here made every re-test of
@@ -294,6 +299,9 @@ def run_tester(category: str, prompt: str, models: Optional[list] = None, *,
                width: int = _DEFAULT_WIDTH, height: int = _DEFAULT_HEIGHT,
                fps: int = _DEFAULT_FPS, seed: int = 0,
                start_image: Optional[str] = None,
+               steps: Optional[int] = None, cfg: Optional[float] = None,
+               requested_frames: Optional[int] = None,
+               negative: Optional[str] = None,
                include_synthetic: bool = False,
                run_label: Optional[str] = None,
                run_id: Optional[str] = None,
@@ -316,11 +324,23 @@ def run_tester(category: str, prompt: str, models: Optional[list] = None, *,
         models = enumerate_models(category, start_image=start_image,
                                   include_synthetic=include_synthetic)
     models = [str(m) for m in models]
+    if not models:
+        raise ValueError(f"no servable models to test for {category!r}")
 
     out_root = out_root or _default_out_root()
     axis = run_label or f"tester:{category}"
     run_id = run_id or _new_run_id()
     battery = _open_battery(battery_dir, run_id)
+    settings = {"category": category, "models": models, "width": width,
+                "height": height, "fps": fps, "seed": seed,
+                "start_image": start_image, "steps": steps, "cfg": cfg,
+                "requested_frames": requested_frames, "negative": negative}
+    if battery is not None:
+        try:
+            import json
+            battery.log("sweep settings: " + json.dumps(settings, sort_keys=True))
+        except Exception:
+            logger.debug("tester: settings log failed (non-fatal)", exc_info=True)
 
     generate = image_generator if kind == "image" else video_generator
     if generate is None:
@@ -336,7 +356,9 @@ def run_tester(category: str, prompt: str, models: Optional[list] = None, *,
         try:
             ok, uri, error = generate(
                 model, prompt, width=width, height=height, fps=fps,
-                seed=seed, start_image=start_image, out_root=out_root)
+                seed=seed, start_image=start_image, out_root=out_root,
+                steps=steps, cfg=cfg, requested_frames=requested_frames,
+                negative=negative)
         except Exception as exc:  # HARD robustness: never abort the sweep
             ok, uri, error = False, "", f"{type(exc).__name__}: {exc}"
             logger.warning("tester: model %s raised (recorded, continuing): %s",
@@ -361,6 +383,7 @@ def run_tester(category: str, prompt: str, models: Optional[list] = None, *,
         "count": len(models),
         "ok_count": ok_count,
         "results": results,
+        "settings": settings,
     }
 
 
@@ -383,6 +406,10 @@ class StudioTesterSpec:
     fps: int = _DEFAULT_FPS
     seed: int = 0
     start_image: Optional[str] = None
+    steps: Optional[int] = None
+    cfg: Optional[float] = None
+    requested_frames: Optional[int] = None
+    negative: Optional[str] = None
     include_synthetic: bool = False
     run_label: Optional[str] = None
     # Pre-minted battery run-dir (so the enqueue response carries the exact path);
@@ -395,6 +422,9 @@ def make_studio_tester(*, category: str, prompt: str, models=None,
                        width: int = _DEFAULT_WIDTH, height: int = _DEFAULT_HEIGHT,
                        fps: int = _DEFAULT_FPS, seed: int = 0,
                        start_image: Optional[str] = None,
+                       steps: Optional[int] = None, cfg: Optional[float] = None,
+                       requested_frames: Optional[int] = None,
+                       negative: Optional[str] = None,
                        include_synthetic: bool = False,
                        run_label: Optional[str] = None,
                        battery_dir: Optional[str] = None) -> StudioTesterSpec:
@@ -414,6 +444,14 @@ def make_studio_tester(*, category: str, prompt: str, models=None,
         raise ValueError(f"seed must be an int; got {seed!r}")
     if start_image is not None and not (isinstance(start_image, str) and start_image.strip()):
         raise ValueError(f"start_image must be a non-empty string or None; got {start_image!r}")
+    if steps is not None and (isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 100):
+        raise ValueError("steps must be an int in [1, 100] or None")
+    if cfg is not None and (isinstance(cfg, bool) or not isinstance(cfg, (int, float)) or not 0 <= cfg <= 20):
+        raise ValueError("cfg must be a number in [0, 20] or None")
+    if requested_frames is not None and (isinstance(requested_frames, bool) or not isinstance(requested_frames, int) or not 1 <= requested_frames <= 10000):
+        raise ValueError("requested_frames must be an int in [1, 10000] or None")
+    if negative is not None and not isinstance(negative, str):
+        raise ValueError("negative must be a string or None")
     if run_label is not None and not isinstance(run_label, str):
         raise ValueError(f"run_label must be a string or None; got {run_label!r}")
     if out_root is not None and not (isinstance(out_root, str) and out_root.strip()):
@@ -437,6 +475,8 @@ def make_studio_tester(*, category: str, prompt: str, models=None,
         out_root=(out_root or None),
         width=int(width), height=int(height), fps=int(fps), seed=int(seed),
         start_image=start_image,
+        steps=steps, cfg=cfg, requested_frames=requested_frames,
+        negative=negative,
         include_synthetic=bool(include_synthetic),
         run_label=(run_label or None),
         battery_dir=(battery_dir or None),
@@ -457,6 +497,8 @@ def studio_tester_from_dict(d: dict) -> StudioTesterSpec:
         fps=d.get("fps", _DEFAULT_FPS),
         seed=d.get("seed", 0),
         start_image=d.get("start_image"),
+        steps=d.get("steps"), cfg=d.get("cfg"),
+        requested_frames=d.get("requested_frames"), negative=d.get("negative"),
         include_synthetic=d.get("include_synthetic", False),
         run_label=d.get("run_label"),
         battery_dir=d.get("battery_dir"),
@@ -477,6 +519,8 @@ def run_tester_from_spec(spec: "StudioTesterSpec", job_id: str):
             out_root=spec.out_root,
             width=spec.width, height=spec.height, fps=spec.fps, seed=spec.seed,
             start_image=spec.start_image,
+            steps=spec.steps, cfg=spec.cfg,
+            requested_frames=spec.requested_frames, negative=spec.negative,
             include_synthetic=spec.include_synthetic,
             run_label=spec.run_label,
             run_id=job_id,                      # correlate assist-log with the job

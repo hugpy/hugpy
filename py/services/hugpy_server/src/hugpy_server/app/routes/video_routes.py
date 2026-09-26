@@ -739,6 +739,32 @@ def video_generate_movie():
     return jsonify({"job_id": job_id}), 200
 
 
+@video_bp.route("/video/jobs/performance", methods=["POST"])
+def video_performance():
+    """Submit an Oracle performance through the same attributed media bus as Studio."""
+    from hugpy_oracle.relay.performance_relay import validate_performance_spec
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "performance body must be a JSON object"}), 400
+    private = body.get("private", False)
+    if not isinstance(private, bool):
+        return jsonify({"error": "private must be a boolean"}), 400
+    try:
+        spec = validate_performance_spec({k: v for k, v in body.items() if k != "private"})
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    job_id = _video_enqueue("video_performance", spec, private=private)
+    return jsonify({"job_id": job_id}), 200
+
+
+@video_bp.route("/video/performance/probe", methods=["GET"])
+def video_performance_probe():
+    """Show which Oracle stages this server can actually serve."""
+    from hugpy_oracle.relay.performance_relay import probe
+    return jsonify(probe()), 200
+
+
 # --------------------------------------------------------------------------- #
 # 2d'') POST /video/studio/i2v — a studio image-to-video clip via the cinema
 #        studio spine (B2). Mirrors the movie/scene routes: parse body -> build
@@ -1082,7 +1108,8 @@ def video_studio_tester():
 
     Body:  {"category": "image"|"scene"|"clip"|"movie", "prompt": str,
             "models"?: [str], "start_image"?: str, "width"?, "height"?, "fps"?,
-            "seed"?, "include_synthetic"?: bool, "run_label"?: str}
+            "seed"?, "steps"?, "cfg"?, "requested_frames"?, "negative"?,
+            "include_synthetic"?: bool, "run_label"?: str}
     200 -> {"job_id", "battery_run_dir", "category", "kind", "poll"}
     400 -> {"error"} on a bad category / empty prompt / malformed field.
     """
@@ -1101,6 +1128,10 @@ def video_studio_tester():
             fps=body.get("fps", 16),
             seed=body.get("seed", 0),
             start_image=body.get("start_image"),
+            steps=body.get("steps"),
+            cfg=body.get("cfg"),
+            requested_frames=body.get("requested_frames"),
+            negative=body.get("negative"),
             include_synthetic=bool(body.get("include_synthetic", False)),
             run_label=body.get("run_label"),
         )

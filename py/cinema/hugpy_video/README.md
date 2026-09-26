@@ -33,6 +33,13 @@ installed. Allowed ecosystem imports: `hugpy_platform`, `hugpy_control`,
 Extras: `render` (numpy/Pillow/requests), `studio` (torch/diffusers zoo),
 `identity` (abstract-identity client), `test`.
 
+The `identity` extra installs the separate `abstract-identity` distribution.
+The central video runner relays mesh and char360 jobs to its service using
+`IDENTITY_RENDER_URL` and `IDENTITY_RENDER_TOKEN`; installing the extra alone
+does not start a GPU service. Studio model sweeps use
+`POST /video/studio/tester`; each attempt records its model, input image,
+sampler settings, frame count and negative prompt in the battery log.
+
 ## Rules (inherited from char360 / hugpy-agent)
 - Heavy imports lazy — must import on a CPU-only box.
 - Version single-sourced from pyproject (importlib.metadata; no hardcoded `__version__`).
