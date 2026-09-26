@@ -253,6 +253,51 @@ def test_studio_reserve_no_template_is_a_noop(monkeypatch):
     release()                   # safe no-op
 
 
+def test_studio_reserve_note_pid_reattributes_hold_to_render_child(monkeypatch):
+    """The render runs in a spawned CHILD; the reserve must move its hold from the
+    worker pid to the child's real pid so the render is a MEASURED external
+    resident (attributed by reconcile, protected from the reaper), not a false
+    own-venv squatter. note_pid re-registers studio:<job_id> under the child pid,
+    keeping the non-evictable policy + vram target."""
+    calls = []
+
+    def _fake_post(path, payload, timeout=SR._HTTP_TIMEOUT_S):
+        calls.append((path, payload))
+        if path == "/ops/external/claim":
+            return {"reached": True, "free_after": 21 * GIB, "evicted": []}
+        return {"ok": True}
+
+    monkeypatch.setattr(SR, "_post", _fake_post)
+
+    handle = SR.acquire("jobRC", "wan2.1-i2v-14b")
+    # The initial register is under the WORKER pid (correct for the in-process
+    # legacy path); the subprocess path corrects it via note_pid.
+    first_reg = next(pl for p, pl in calls if p == "/ops/external/register")
+    assert first_reg["pid"] == os.getpid()
+
+    RENDER_PID = 4242042
+    handle.note_pid(RENDER_PID)
+    regs = [pl for p, pl in calls if p == "/ops/external/register"]
+    assert len(regs) == 2                     # re-registered under the child pid
+    assert regs[-1]["pid"] == RENDER_PID
+    assert regs[-1]["model_key"] == "studio:jobRC"
+    assert regs[-1]["evictable"] is False     # policy preserved
+    assert regs[-1]["vram_gib"] == 21.0       # target preserved
+
+    handle()                                  # callable release (back-compat)
+    assert ("/ops/external/unregister", {"model_key": "studio:jobRC"}) in calls
+
+
+def test_studio_reserve_no_template_note_pid_is_noop(monkeypatch):
+    calls = []
+    monkeypatch.setattr(SR, "_post",
+                        lambda path, payload, timeout=None: calls.append(path))
+    handle = SR.acquire("jobNT", "some-llm-with-no-template")
+    handle.note_pid(999999)     # nothing was reserved -> nothing to re-attribute
+    assert calls == []
+    handle()                    # safe no-op release
+
+
 # ── gpu_lease supervisor loop (fake child + fake worker) ─────────────────────
 @pytest.fixture
 def _restore_signals():

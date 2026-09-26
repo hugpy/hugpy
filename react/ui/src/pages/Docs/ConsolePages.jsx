@@ -227,6 +227,7 @@ export const WORKERS_TOC = [
   ['admit', 'Admit it', []],
   ['load', 'Load models onto one worker', []],
   ['group', 'Put one model on many workers', []],
+  ['distribution', 'Distribution: Feasible vs Designated', []],
   ['verify', 'Confirm it took', []],
   ['space', 'Take models off & free space', []],
 ]
@@ -290,9 +291,10 @@ export function ConsoleWorkersPage() {
         </ol>
         <p className="docs-note">
           Placing a model on a worker is called a <em>designation</em> in some messages: the model is
-          assigned to that box, its files are pulled over (that transfer is
-          <em> provisioning</em> — you&apos;ll see <strong>⏳ pulling</strong> with a percentage), and it
-          warms up ready to serve.
+          assigned to that box and its files are pulled over (that transfer is
+          <em> provisioning</em> — you&apos;ll see <strong>⏳ pulling</strong> with a percentage). It is
+          not loaded into VRAM by being assigned — it loads when a request for it arrives, or when you
+          explicitly Load it.
         </p>
       </section>
 
@@ -308,6 +310,50 @@ export function ConsoleWorkersPage() {
             <br /><em>You should see</em> a per-worker result list — ✓ or ✗ with the refusal reason.
             Re-running retries only the failures.</li>
         </ol>
+      </section>
+
+      <section id="distribution" className="docs-sec">
+        <h2>Distribution: Feasible vs Designated</h2>
+        <p>
+          In the <strong>Settings</strong> tab is one fleet-level switch,
+          <strong> Distribution</strong>, that decides how strictly a model is bound to the workers you
+          designated it to (the Compute panel shows a small read-only
+          <em> Distribution: Feasible</em> badge that points here):
+        </p>
+        <ul className="docs-routes">
+          <li><strong>Feasible (default)</strong> — any online worker where the model actually fits (VRAM,
+            RAM, task/engine gates, and the files present) is a routing candidate. Your designations still
+            come <em>first</em> as an ordered preference; when none of them can serve, routing falls back
+            to any feasible worker instead of refusing. This is the catch-all that softens hugpy&apos;s
+            default micro-placement.</li>
+          <li><strong>Designated</strong> — the legacy sealed scope: only designated / resident / granted
+            homes and per-worker <em>wildcard</em> opt-ins serve, and an unmet preference <em>refuses</em>
+            rather than spilling elsewhere.</li>
+        </ul>
+        <p className="docs-note">
+          The switch shows its current source beside the value — <em>default</em>, <em>set
+          here</em>, or <em>env HUGPY_DISTRIBUTION</em>. When the <code>HUGPY_DISTRIBUTION</code> environment
+          variable is set on central it <strong>pins</strong> the effective mode: the buttons go
+          read-only and a note explains that your stored preference won&apos;t take effect until the env
+          var is cleared. Writing the switch is operator-gated — a refused write surfaces the server&apos;s
+          message.
+        </p>
+        <h3>Per-worker Wildcard</h3>
+        <p>
+          Each worker row carries a <strong>🃏 wildcard</strong> chip. Turn it on to make that box
+          &ldquo;take all comers&rdquo;: undesignated models may route there and designated models overflow
+          there when their home boxes are refused. It is <em>routing only</em> — never a warm source, never
+          eviction protection. Under <strong>Feasible</strong> mode the chip is dimmed because it barely
+          matters (any fitting worker is already a candidate); it earns its keep under
+          <strong> Designated</strong> mode.
+        </p>
+        <h3>Per-model Strict</h3>
+        <p>
+          On a model&apos;s <strong>Placement</strong> editor (the Models tab) is a
+          <strong> strict</strong> checkbox: <em>keep designation as a hard fence even in Feasible mode</em>.
+          Tick it for a model that must never wander off its designated homes — its preference list stays a
+          sealed scope and an unmet preference refuses, regardless of the fleet-level default.
+        </p>
       </section>
 
       <section id="verify" className="docs-sec">
@@ -513,7 +559,7 @@ export function ConsoleServingPage() {
             <tr><td><strong>🔥 serving</strong></td><td>In a slot, healthy, routable — requests reach it instantly.</td></tr>
             <tr><td><strong>⚡ answering</strong></td><td>Its slot is processing a request <em>right now</em>.</td></tr>
             <tr><td><strong>📌 loaded</strong></td><td>Resident in the worker&apos;s own process (ready, but not in a slot).</td></tr>
-            <tr><td><strong>○ cold</strong></td><td>Assigned; loads on the first request or the next warm pass.</td></tr>
+            <tr><td><strong>○ cold</strong></td><td>Assigned; loads on the first request for it (or when you explicitly Load it).</td></tr>
             <tr><td><strong>⏳ pulling 42%</strong></td><td>Files transferring to the worker, with live progress.</td></tr>
             <tr><td><strong>🔶 heating</strong></td><td>Weights loading into memory right now.</td></tr>
             <tr><td><strong>✗ missing</strong></td><td>Assigned but files absent — the worker re-pulls on its own; if it never resolves, see <a className="docs-inline-link" href="#worker-troubleshooting/missing-files">the fix-it entry</a>.</td></tr>
@@ -923,7 +969,7 @@ export function ConsoleGlossaryPage() {
             <tr><td><strong>⚡ answering</strong></td><td>Processing a request at this very moment.</td></tr>
             <tr><td><strong>⏳ warming</strong></td><td>A slot occupant still loading — not healthy yet.</td></tr>
             <tr><td><strong>📌 loaded</strong></td><td>Resident in the worker&apos;s own process (ready, not in a slot).</td></tr>
-            <tr><td><strong>○ cold</strong></td><td>Assigned to the worker; loads on first request or the next warm pass.</td></tr>
+            <tr><td><strong>○ cold</strong></td><td>Assigned to the worker; loads on the first request for it (or when you explicitly Load it).</td></tr>
             <tr><td><strong>⏳ pulling 42%</strong></td><td>Files transferring to the worker, live percent.</td></tr>
             <tr><td><strong>🔶 heating</strong></td><td>Weights loading into VRAM/RAM right now.</td></tr>
             <tr><td><strong>🌡 hot</strong></td><td>Files on the worker’s own drive, not loaded — lifts into VRAM/RAM on first request.</td></tr>

@@ -70,15 +70,39 @@ def compact_chat_request(req):
 # through UNTOUCHED and today's honest refusal stands.
 # ---------------------------------------------------------------------------
 
+# The ADVERTISED-window resolver (2026-09-25). Central registers the same
+# function /v1/models uses for ``context_length`` (live served ctx from the
+# worker heartbeats, else the GGUF's trained ctx), so the guard trims against
+# the window the model is really served at. Before this the guard read the
+# manifest's model_max_length (32768 for coder-next) while the slot ran at
+# 262144, and dropped most of an agent's history for nothing. Reverse-injected
+# so the engine never imports the server layer.
+_CTX_MAX_RESOLVER = None
+
+
+def set_ctx_max_resolver(fn) -> None:
+    """Register ``fn(model_key) -> int|None`` as the authoritative window."""
+    global _CTX_MAX_RESOLVER
+    _CTX_MAX_RESOLVER = fn
+
+
 def _ctx_max_for_model(model_key: str) -> int:
-    """The model's context window — model meta ``model_max_length``, the SAME
-    figure /v1/models reports as ``context_length`` (model_meta calls it
-    ctx_max). Live registry first (a runtime-registered model isn't in the
-    import-time snapshot), snapshot dict second. 0 = unknown, and the guard
-    SKIPS an unknown window rather than guessing one: guessing small would
-    truncate a legitimate long-context request."""
+    """The model's context window: the registered resolver's figure (the SAME
+    one /v1/models reports as ``context_length``) when central registered one,
+    else model meta ``model_max_length`` — live registry first (a
+    runtime-registered model isn't in the import-time snapshot), snapshot dict
+    second. 0 = unknown, and the guard SKIPS an unknown window rather than
+    guessing one: guessing small would truncate a legitimate long-context
+    request."""
     if not model_key:
         return 0
+    if _CTX_MAX_RESOLVER is not None:
+        try:
+            v = _CTX_MAX_RESOLVER(model_key)
+            if v:
+                return int(v)
+        except Exception:  # noqa: BLE001 — fall back to the manifest figure
+            pass
     try:
         from hugpy_engine.config.models.models_config import get_models_dict
         cfg = get_models_dict().get(model_key)

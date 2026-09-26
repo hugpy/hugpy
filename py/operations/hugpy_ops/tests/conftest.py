@@ -20,6 +20,16 @@ if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
     sys.modules.setdefault("abstract_hugpy_dev", None)
 
 _SCRATCH = tempfile.mkdtemp(prefix="hugpy-ops-tests-")
+# FORCE (not setdefault) the storage roots to a private temp dir before
+# hugpy_platform.constants is imported, and arm the live-storage audit guard: an
+# inherited DEFAULT_ROOT=<live> used to WIN over the setdefaults below and route
+# the ecosystem's state into the operator's live storage (incident 2026-09-24).
+from hugpy_platform.test_isolation import (  # noqa: E402
+    install_live_storage_guard, isolate_storage_to_tmp,
+)
+
+isolate_storage_to_tmp(base=os.path.join(_SCRATCH, "llm_storage"))
+install_live_storage_guard()
 os.environ.setdefault("PROJECTS_HOME", os.path.join(_SCRATCH, "projects"))
 os.environ.setdefault("HUGPY_COMMS_DB", "off")
 os.environ.setdefault("HUGPY_HOME", os.path.join(_SCRATCH, "hugpy-home"))

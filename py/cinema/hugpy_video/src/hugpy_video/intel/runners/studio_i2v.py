@@ -399,29 +399,35 @@ def _payload_to_job_result(payload: dict, job_id: str) -> JobResult:
 # Delegation decision + HTTP loop (central side)
 # --------------------------------------------------------------------------- #
 def _studio_worker_base() -> str:
+    """The explicit operator OVERRIDE target (``HUGPY_STUDIO_WORKER``), or "" when unset.
+    Retained as a documented escape hatch; PLACEMENT is the default (see
+    ``resolve_studio_worker`` -> ``studio_placement.resolve_worker``)."""
     return (os.environ.get(_WORKER_ENV) or "").strip().rstrip("/")
 
 
+def resolve_studio_worker_verbose(spec):
+    """``(base_url, refusal)`` — the studio GPU worker THIS render should delegate to,
+    resolved by hugpy PLACEMENT, plus a ``StudioPlacementRefusal`` naming the exact miss
+    when nothing is feasible (else ``None``).
+
+    Operator ruling (2026-09-24): a studio render is placed LIKE AN LLM CALL — hugpy's
+    registry picks the GPU worker (online, advertises studio render, holds the bound
+    model's weights on disk, feasible VRAM); it must NOT require the central env var
+    ``HUGPY_STUDIO_WORKER`` to reach a GPU. That env var is RETAINED as an explicit
+    operator OVERRIDE (when set it wins), no longer the requirement. The whole decision
+    lives in the central-side helper so ``should_delegate``, ``render_clip`` and the
+    routes' capability probe share ONE answer."""
+    from hugpy_video.intel.runners import studio_placement
+    return studio_placement.resolve_worker(spec)
+
+
 def resolve_studio_worker(spec) -> str:
-    """PLUGGABLE worker-RESOLUTION seam: the base URL of the studio GPU worker THIS
-    render should delegate to (``""`` = none -> in-process). The single place the
-    "which worker" question is answered, so both ``should_delegate`` and ``render_clip``
-    agree, and a future resolver DROPS IN here without reshaping the delegation helper.
-
-    TODAY: returns the ``HUGPY_STUDIO_WORKER`` env target (one global studio worker).
-
-    OPERATOR-DIRECTED TARGET ARCHITECTURE (2026-07-12): delegation targeting is NOT a
-    studio-specific concern — it belongs to the STANDARD model-routing layer. Central
-    has no studio models ASSIGNED to it, so a render that binds a real studio model
-    (wan / vace / ltx) should route to the worker that OWNS that model, via the registry
-    (``workers_for_model(bound_model_id, capability)``, honoring the capability + the
-    workers' in-flight gates). Those studio models are not yet first-class registry
-    entries (a FOLLOW-UP slice registers them); once they are, the registry-based
-    resolver replaces the body HERE and ``HUGPY_STUDIO_WORKER`` DEMOTES to an override /
-    fallback (e.g. ``return _studio_worker_base() or _registry_worker(spec)``). Kept a
-    pure function OF THE SPEC so that resolver can read the bound model + capability off
-    it with no signature change to this seam or its callers."""
-    return _studio_worker_base()
+    """The base URL of the studio GPU worker this render delegates to (``""`` = none).
+    The single place the "which worker" question is answered, so ``should_delegate``,
+    ``render_clip`` and the routes' capability probe all agree. PLACEMENT-based with
+    ``HUGPY_STUDIO_WORKER`` as an explicit override (see ``resolve_studio_worker_verbose``
+    for the refusal reason behind an empty URL)."""
+    return resolve_studio_worker_verbose(spec)[0]
 
 
 from hugpy_video.intel.net import url_host as _url_host
@@ -465,19 +471,17 @@ def _autofit_from_worker(base: str) -> "tuple[float, str] | None":
         workers = list(get_worker_registry().list_workers(online_only=False) or ())
     except Exception:  # noqa: BLE001
         return None
+    from hugpy_video.intel.runners.studio_placement import worker_capacity_budget_gb
     for w in workers:
         if _url_host(w.get("url") or "") != host:
             continue
-        gpus = [g for g in (w.get("gpus") or []) if isinstance(g, dict)]
-        totals = [g.get("memory_total") for g in gpus
-                  if isinstance(g.get("memory_total"), (int, float)) and g.get("memory_total") > 0]
-        if not totals:
-            return None      # matched the box but it reports no VRAM -> caller refuses
-        total_gib = max(totals) / _BYTES_PER_GIB
-        margin = max(total_gib * _AUTOFIT_MARGIN_FRACTION, _AUTOFIT_MARGIN_FLOOR_GB)
-        effective = total_gib - margin
-        if effective <= 0:
-            return None      # a card smaller than the margin -> caller refuses
+        # SINGLE capacity source (studio_placement): the number a worker is judged
+        # FEASIBLE on and the number a render is SIZED to are the same, so a placed
+        # worker and its autofit budget can never disagree. None -> matched the box but
+        # no usable VRAM -> caller refuses.
+        effective = worker_capacity_budget_gb(w)
+        if effective is None:
+            return None
         return effective, str(w.get("name") or w.get("id") or "worker")
     return None              # no registry row for this worker URL -> caller refuses
 
@@ -1002,16 +1006,65 @@ def render_clip(spec, *, render_id: str, should_cancel=None, progress_sink=None,
                      f"or set {_ALLOW_SYNTHETIC_ENV}=1 if you actually want the prover."),
             retryable=False)))
 
-    # --- studio render offload (option a): resolve the worker ONCE, then decide. -----
-    base = resolve_studio_worker(spec)
-    if base and _wants_remote(spec):
-        outcome = _delegate_to_worker(
-            base, spec, render_id,
-            should_cancel=should_cancel, progress_sink=progress_sink)
-        if outcome is not None:
-            return _stamp(outcome)    # settled remotely (never fall back after 202)
-        logger.info("studio render %s: in-process fallback (worker kick-off failed)",
-                    render_id)
+    # --- studio render offload: resolve the worker ONCE via PLACEMENT, then decide. ----
+    # video is placed like an LLM (operator ruling 2026-09-24): hugpy's registry picks the
+    # GPU worker; the central env var is only an override. ``base``="" for a REAL model is
+    # NOT a licence to render on the GPU-less control plane — that is exactly the
+    # deps_missing incident this fix ends. A real-model render with no feasible worker is a
+    # NAMED refusal (the placement helper says WHY: no render-capable worker / weights on
+    # no worker / no feasible VRAM), never a silent in-process fall-through.
+    # is_real gates the "must NOT run in-process" guarantee to REAL models only. A
+    # SYNTHETIC render (in-process even under the test-only force-remote override) is cheap
+    # and correct on central, so it keeps the historical in-process path unchanged; only a
+    # real model — which on the GPU-less control plane can produce nothing but
+    # deps_missing — is refused when no worker takes it.
+    # DELEGATION / PLACEMENT applies ONLY to the REAL inline render (``produce is
+    # run_produce_clip``): a single-clip bus job (``produce`` defaulted) or a PRODUCTION
+    # movie segment (studio_movie passes the real ``run_produce_clip``). When a caller
+    # INJECTS a render seam — a test fake (``studio_movie.run_produce_clip`` monkeypatched),
+    # or any non-default runner — that injected runner IS the render and executes IN-PROCESS
+    # below; it is never delegated and never placement-refused, because it needs no GPU
+    # worker. Without this guard the placement gate would intercept a fake-seam movie
+    # segment before its injected runner ever ran (regression the offload suites caught).
+    if produce is run_produce_clip:
+        is_real = resolves_to_real_model(spec)
+        wants_remote = _wants_remote(spec)
+        base, refusal = resolve_studio_worker_verbose(spec)
+        if is_real and not base:
+            # placement.resolve_worker always names a refusal when it yields no URL; the
+            # ``or`` is a defensive floor so this branch can never build an empty message.
+            code = getattr(refusal, "code", None) or "no_studio_worker"
+            message = getattr(refusal, "message", None) or (
+                f"no studio GPU worker could take this real-model render "
+                f"(capability {spec.capability!r}, {spec.width}x{spec.height})")
+            retryable = getattr(refusal, "retryable", True)
+            return _stamp(ClipOutcome(ok=False, error=JobError(
+                code=code, message=message, retryable=retryable)))
+        if base and wants_remote:
+            outcome = _delegate_to_worker(
+                base, spec, render_id,
+                should_cancel=should_cancel, progress_sink=progress_sink)
+            if outcome is not None:
+                return _stamp(outcome)    # settled remotely (never fall back after 202)
+            if is_real:
+                # Kick-off failed for a REAL model on a worker that WAS feasible
+                # (unreachable at kick-off / post-restart socket window). We do NOT drop to
+                # central's GPU-less in-process path — that renders nothing but
+                # deps_missing. A retryable named JobError sends it back to the queue for
+                # the worker to recover.
+                logger.info("studio render %s: worker %s kick-off failed for a real model "
+                            "— retryable refusal (no GPU-less in-process fallback)",
+                            render_id, base)
+                return _stamp(ClipOutcome(ok=False, error=JobError(
+                    code="studio_worker_unreachable",
+                    message=(f"studio worker {base} was unreachable at kick-off for a "
+                             f"real-model render (capability {spec.capability!r}); not run "
+                             f"in-process on the GPU-less control plane — retry when the "
+                             f"worker is reachable"),
+                    retryable=True)))
+            # SYNTHETIC (force-remote) kick-off failure -> historical in-process fallback.
+            logger.info("studio render %s: in-process fallback (worker kick-off failed)",
+                        render_id)
 
     # --- in-process render (historical path; unchanged semantics) --------------
     # Cooperative mid-render cancel (Task 1): the studio never imports media_bus — only

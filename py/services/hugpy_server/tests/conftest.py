@@ -35,15 +35,27 @@ os.environ.setdefault("HUGPY_START_DAEMONS", "0")
 # wall. Tests of the external gates set HUGPY_AUTH_MODE explicitly.
 os.environ.setdefault("HUGPY_AUTH_MODE", "open")
 os.environ.setdefault("HUGPY_SERVER_STATE_DIR", os.path.join(_SESSION_TMP, "server_state"))
-os.environ.setdefault("HUGPY_HOME", os.path.join(_SESSION_TMP, "home"))
 # Storage roots: hugpy_platform.constants derives MODELS/UPLOADS/PROJECTS/... from
 # DEFAULT_ROOT at import time, and the control settings store (blocklist, model
 # groups, ...) from HUGPY_SETTINGS_PATH. Both go to the session temp dir so no
 # test can read or write an operator's live store. HUGPY_TEST_LIVE_ROOT=1 opts
 # out (manual runs against a real catalog).
-if not os.environ.get("HUGPY_TEST_LIVE_ROOT"):
-    _root = os.path.join(_SESSION_TMP, "llm_storage")
-    os.environ.setdefault("DEFAULT_ROOT", _root)
+#
+# FORCE (not setdefault) via test_isolation: an inherited DEFAULT_ROOT=<live> in
+# the process environment (or a .env in the CWD) used to WIN over setdefault and
+# silently route the reservation ledger, identity scratch and studio work trees
+# into the operator's LIVE storage (incident 2026-09-24). isolate_storage_to_tmp
+# forces DEFAULT_ROOT + every sibling root to the temp base BEFORE constants is
+# imported; install_live_storage_guard is the audit safety net.
+from hugpy_platform.test_isolation import (  # noqa: E402
+    install_live_storage_guard, isolate_storage_to_tmp,
+)
+
+_root = os.path.join(_SESSION_TMP, "llm_storage")
+_base = isolate_storage_to_tmp(base=_root)   # None when HUGPY_TEST_LIVE_ROOT=1
+install_live_storage_guard()
+os.environ.setdefault("HUGPY_HOME", os.path.join(_SESSION_TMP, "home"))
+if _base is not None:
     os.environ.setdefault("HUGPY_SETTINGS_PATH", os.path.join(_root, "projects", "settings.json"))
     for _sub in ("models", "uploads", "projects", "identities", "datasets",
                  os.path.join("video_intel", "_scratch"),

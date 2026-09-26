@@ -89,10 +89,21 @@ async def stream_query(
     # place /v1 (stream + non-stream, incl. the benchmark grader) and the
     # console chat relay all pass through.
     from .output_repair import repair_stream
-    async for event in repair_stream(
-            stream_chat_request(cancel_event=cancel_event, **payload),
-            payload.get("model_key")):
-        yield event
+    _it = repair_stream(
+        stream_chat_request(cancel_event=cancel_event, **payload),
+        payload.get("model_key"))
+    try:
+        async for event in _it:
+            yield event
+    finally:
+        # Cascade a client disconnect down the chain deterministically (repair_stream
+        # in turn acloses the runtime/dispatch/relay stream, releasing the slot).
+        _ac = getattr(_it, "aclose", None)
+        if _ac is not None:
+            try:
+                await _ac()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
 
 
 async def query_result(

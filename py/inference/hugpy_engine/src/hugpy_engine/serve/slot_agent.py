@@ -53,8 +53,94 @@ def _default_port() -> int:
 
 SLOT_PORT = int(os.environ.get("SLOT_PORT", str(_default_port())))
 SLOT_CHILD_PORT = int(os.environ.get("SLOT_CHILD_PORT", str(SLOT_PORT + 1000)))
+
+
+# ── child-port collision guard (2026-09-25) ─────────────────────────────────
+# The child (llama-server) port defaults to SLOT_PORT + 1000. With the shipped
+# SLOT_PORT_BASE (8101) slot 1's control port is 8101 and its child lands on
+# 9101 — exactly the worker's own port on a box whose unit sets --port 9101
+# (seen on a-brain: the first slot's child tried to bind 9101 == the worker
+# port → EADDRINUSE, no model ever loaded; the by-hand fix was SLOT_PORT_BASE=
+# 8201). The worker port is authoritative and known here — the worker unit
+# exports WORKER_PORT and the slot child runs on the SAME box — so the child
+# must never sit on it. Relocate a colliding child port UP to the next free
+# offset, loudly, and record it so the slot status shows the correction rather
+# than a silent EADDRINUSE crash-loop. The CONTROL port is NOT relocated: the
+# agent finds slots at slot_urls() == SLOT_PORT_BASE+i and must keep matching;
+# a control/worker collision (8101 vs 9100 territory) is a genuine misconfig and
+# is only logged.
+def _worker_port() -> "int | None":
+    raw = (os.environ.get("WORKER_PORT") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+# (from_port, to_port, reason) for every port this process moved off a collision.
+PORT_RELOCATIONS: list = []
+
+
+def _guard_child_port() -> None:
+    """Ensure SLOT_CHILD_PORT never equals the worker port or this slot's own
+    control port; relocate it upward and log loudly if it does. Idempotent."""
+    global SLOT_CHILD_PORT
+    wp = _worker_port()
+    # A caller who set SLOT_CHILD_PORT explicitly still gets the guard — an
+    # explicit collision is exactly the failure we exist to catch.
+    reserved = {SLOT_PORT}
+    reason_for = {SLOT_PORT: "slot control port"}
+    if wp is not None:
+        reserved.add(wp)
+        reason_for[wp] = f"WORKER_PORT ({wp})"
+    if SLOT_CHILD_PORT not in reserved:
+        return
+    clash = SLOT_CHILD_PORT
+    new = clash + 1
+    while new in reserved or new > 65535:
+        new += 1
+    logger.error("slot %s child port %d collides with %s — relocating llama-server "
+                 "child to %d (set SLOT_CHILD_PORT / SLOT_PORT_BASE to silence)",
+                 SLOT_ID, clash, reason_for.get(clash, "a reserved port"), new)
+    PORT_RELOCATIONS.append((clash, new, reason_for.get(clash, "reserved")))
+    SLOT_CHILD_PORT = new
+
+
+_guard_child_port()
+
 SLOT_ADVERTISE = os.environ.get("SLOT_ADVERTISE", "127.0.0.1")
 MAIN_GPU = os.environ.get("MAIN_GPU")
+
+
+def _as_int_or_none(v):
+    """Parse an int (a --main-gpu index) or None — never raise into a load."""
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_tensor_split(v):
+    """A central tensor-split as a list of floats, from a list or a comma string
+    (``HUGPY_TENSOR_SPLIT`` rides the wire as CSV). None when unset/unparseable —
+    a bad value NEVER breaks a load, it just falls back to non-split placement."""
+    if v in (None, ""):
+        return None
+    if isinstance(v, (list, tuple)):
+        items = v
+    else:
+        items = [p for p in str(v).split(",") if p.strip()]
+    out = []
+    for p in items:
+        try:
+            out.append(float(p))
+        except (TypeError, ValueError):
+            return None
+    return out or None
 # The FLOOR for the load hard-cap (back-compat: was the whole deadline). A cold
 # load gets at LEAST this long regardless of size.
 HEALTH_TIMEOUT = float(os.environ.get("SLOT_HEALTH_TIMEOUT", "180"))
@@ -74,11 +160,10 @@ _LOAD_THROUGHPUT_BPS = float(
 _HARD_CAP_MULT = float(os.environ.get("SLOT_LOAD_HARD_CAP_MULT", "3.0"))
 # Bytes-of-progress that count as "real" movement between samples (filter noise).
 _PROGRESS_EPSILON = 8 * 1024 * 1024   # 8 MiB
-# Repeated-failure backoff (slice 12): after N genuine load failures for a model,
-# refuse re-attempts for base × 2^(N-1), capped, so a doomed load doesn't re-page
-# 46G on every request. Success clears the counter.
-_LOAD_BACKOFF_BASE_S = float(os.environ.get("SLOT_LOAD_BACKOFF_BASE_S", "30"))
-_LOAD_BACKOFF_MAX_S = float(os.environ.get("SLOT_LOAD_BACKOFF_MAX_S", "600"))
+# A model's consecutive genuine load-failure count is kept for the console/logs
+# (the "attempt N" in the failure reason). It is informational ONLY — it never
+# blocks a re-attempt: every /load actually tries to seat the model and, if it
+# fails, fails with THAT attempt's real loader error. Success clears the count.
 
 
 # ── Agent heartbeat nudge (2026-09-08) ──────────────────────────────────────
@@ -649,7 +734,7 @@ def _slot_parallel(ctx=None, model_bytes=None):
 
 def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
                path=None, gpu_mem_gib=None, cpu_mem_gib=None, profile_bin=None,
-               n_cpu_moe=None):
+               n_cpu_moe=None, tensor_split=None, main_gpu=None):
     """argv for the child llama-server + the resolved (ngl, ctx, threads, cpus).
 
     ``n_cpu_moe`` (MoE expert split, 2026-07-24; DEFAULT since 2026-07-25):
@@ -785,6 +870,7 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
     # THIS CHILD will actually run with rather than a flat constant — see
     # spill.vram_ctx_reserve_bytes. Pure move of the line that was below; nothing
     # between here and the old position reads ctx.
+    _ctx_given = bool(ctx)                    # caller stated the served ctx
     ctx = int(ctx) if ctx else (_ctx_for(cfg, model_key) if cfg is not None else 4096)
     # The same context reserve autofit charges internally, made explicit here:
     # the MoE dense-first plan (below) must price the KV cache against the card
@@ -968,6 +1054,29 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
             moe_cpu_bytes = None
             moe_budget_priced = False
 
+    # An explicit MoE split fixes the weights that land on the card; size the
+    # served ctx to the VRAM LEFT after them, here in the launcher, so a planner
+    # with a different ctx view can never produce an impossible launch
+    # (2026-09-25: central planned coder-next's split for 32K, the slot then
+    # launched -c 262144 -> "failed to create context", SIGSEGV).
+    if eff_n_cpu_moe and moe_mode == "explicit" and not _ctx_given:
+        try:
+            from hugpy_engine.spill import (free_vram_bytes, gguf_moe_detail,
+                                            moe_split_need, served_ctx_for_fit)
+            _split = moe_split_need(gguf_moe_detail(path), int(eff_n_cpu_moe))
+            if _split and _split.get("gpu_bytes"):
+                _fit = served_ctx_for_fit(path, free_vram=free_vram_bytes(),
+                                          weights_on_gpu_bytes=int(_split["gpu_bytes"]),
+                                          extra_reserve_bytes=_mmproj_reserve)
+                if _fit and int(_fit) < int(ctx):
+                    logger.info("slot %s: %s ctx %s -> %s to fit beside %.1f GiB "
+                                "of split weights (--n-cpu-moe %s)", SLOT_ID,
+                                model_key, ctx, _fit,
+                                int(_split["gpu_bytes"]) / 2 ** 30, eff_n_cpu_moe)
+                    ctx = int(_fit)
+        except Exception:  # noqa: BLE001 — keep the resolved ctx
+            pass
+
     # Preflight: when nothing can offload to GPU (auto<=0 — e.g. no GPU on this
     # node) the weights are CPU-RAM-resident, so a model bigger than free RAM will
     # OOM mid-load. Sum ALL shards (the resolved path is only shard 1) and fail
@@ -984,13 +1093,20 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
                 # split actually spills, not a layer fraction (ngl=-1 would
                 # otherwise read as 0 CPU bytes). The auto path already priced
                 # its own plan (dense-first, experts of the first N blocks);
-                # an explicit n_cpu_moe has no plan, so price the whole set.
+                # an explicit n_cpu_moe is priced per layer at exactly that N
+                # (spill.moe_split_need) — only the experts of blocks < N land
+                # in RAM. Pricing the WHOLE expert set here refused central's
+                # card contract (--n-cpu-moe 28, 29.8 GiB RAM budget) for
+                # coder-next as "43.6 GiB CPU-resident" (2026-09-25).
                 if moe_cpu_bytes is not None:
                     need_cpu = moe_cpu_bytes
                 else:
                     try:
-                        from hugpy_engine.spill import gguf_moe_detail
-                        need_cpu = int(gguf_moe_detail(path).get("expert_bytes") or 0)
+                        from hugpy_engine.spill import gguf_moe_detail, moe_split_need
+                        _det = gguf_moe_detail(path)
+                        _split = moe_split_need(_det, int(eff_n_cpu_moe))
+                        need_cpu = int((_split or {}).get("cpu_bytes")
+                                       or _det.get("expert_bytes") or 0)
                     except Exception:  # noqa: BLE001
                         need_cpu = 0
             else:
@@ -1159,6 +1275,21 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
             "--host", "127.0.0.1", "--port", str(SLOT_CHILD_PORT),
             "--n-gpu-layers", _ngl_arg, "-c", str(c_val), "-t", str(threads),
         ]
+        # PER-GPU tensor split (2026-09-25): central decided this GGUF spans >= 2
+        # LOCAL cards. CUDA_VISIBLE_DEVICES is intentionally NOT restricted for a
+        # split (see Slot.load), so the proportions + --main-gpu are GLOBAL device
+        # indices. --tensor-split maps positionally over the visible GPUs; a 0
+        # share excludes a card. Only emitted when the server supports the flag,
+        # so an older binary degrades to its own auto placement (never a crash).
+        _ts = _parse_tensor_split(tensor_split)
+        if _ts and sum(1 for x in _ts if x and x > 0) >= 2 \
+                and _server_supports_flag(server_bin, "--tensor-split"):
+            argv += ["--tensor-split", ",".join(str(x) for x in _ts)]
+            _mg = _as_int_or_none(main_gpu)
+            if _mg is not None and _server_supports_flag(server_bin, "--main-gpu"):
+                argv += ["--main-gpu", str(_mg)]
+            logger.info("slot %s: %s multi-GPU tensor-split %s (main-gpu=%s)",
+                        SLOT_ID, model_key, _ts, _mg)
         if n_par > 1 and _server_supports_flag(server_bin, "--parallel"):
             argv += ["--parallel", str(n_par)]
             if _server_supports_flag(server_bin, "--cont-batching"):
@@ -1437,6 +1568,11 @@ class Slot:
         self.threads = None
         self.cpus = None
         self.gpu = None
+        # Per-GPU device pin (2026-09-25): a central tensor-split across local
+        # cards (list of proportions) + its --main-gpu; both None for a single
+        # card / auto placement.
+        self.tensor_split = None
+        self.main_gpu = None
         self.profile_bin = None      # env-profiles (stage 1): the profile venv
         # bin dir this model's child launches from (None = shared venv default).
         self.expected_bytes = None
@@ -1459,11 +1595,11 @@ class Slot:
         # Free VRAM sampled at the start of the CURRENT load (slice 12): the
         # baseline the stall-detector measures VRAM-consumed against.
         self._load_free_vram_at_start = None
-        # Repeated-failure backoff (slice 12): consecutive genuine load failures
-        # for a model_key + when the last one happened, so per-request re-attempts
-        # don't hammer a doomed 46G re-page. Plus the last honest failure reason.
+        # Consecutive genuine load failures for a model_key, for the console/logs
+        # (the "attempt N" in the failure reason). Informational ONLY — it never
+        # blocks a re-attempt; every /load actually tries to seat the model. Plus
+        # the last honest failure reason.
         self._load_failures: dict = {}          # model_key -> consecutive count
-        self._load_backoff_until: dict = {}      # model_key -> epoch (retry after)
         self.last_load_error: "str | None" = None
         # t140: the loader's last stderr excerpt behind last_load_error
         self.last_load_stderr: "str | None" = None
@@ -1595,6 +1731,7 @@ class Slot:
         drop) — every field that describes the occupant, in one place."""
         self.model_key = self.ngl = self.ctx = None
         self.threads = self.cpus = self.gpu = self.expected_bytes = None
+        self.tensor_split = self.main_gpu = None
         self.total_layers = None
         self.n_cpu_moe = None
         self.profile_bin = None
@@ -1663,6 +1800,10 @@ class Slot:
             "threads": self.threads,
             "cpus": self.cpus,
             "gpu": self.gpu,
+            # Per-GPU placement this seat was loaded with (None for a single
+            # card / auto): the console + central per-device residency read it.
+            "tensor_split": getattr(self, "tensor_split", None),
+            "main_gpu": getattr(self, "main_gpu", None),
             "profile_bin": self.profile_bin,   # env-profiles: child's venv, or None
             "allowed_cpus": _allowed_cpus(),   # kernel-enforced dedicated cores
             "loaded_at": self.loaded_at,
@@ -1682,9 +1823,9 @@ class Slot:
             "identity_ok": getattr(self, "_identity", {}).get("ok", True),
             "identity_note": getattr(self, "_identity", {}).get("note"),
             "expected_bytes": self.expected_bytes,
-            # The last honest load-failure reason + backoff (slice 12), so the
-            # console can show WHY a model's row is degraded/retrying instead of a
-            # silent tight loop. None once a load succeeds.
+            # The last honest load-failure reason, so the console can show WHY a
+            # model's row is degraded/retrying. Informational — it does not gate
+            # re-attempts. None once a load succeeds.
             "last_load_error": self.last_load_error,
             # t140: the loader's own last words behind that error (None when
             # the child never wrote any, or once a load succeeds).
@@ -1707,7 +1848,8 @@ class Slot:
              cpus=None, gpu=None, path=None, gpu_mem_gib=None,
              cpu_mem_gib=None, profile_bin=None, force=False,
              n_cpu_moe=None, alloc_mode=None, alloc_requested=None,
-             alloc_source=None, reload_reason=None) -> dict:
+             alloc_source=None, reload_reason=None,
+             tensor_split=None, main_gpu=None) -> dict:
         with self.lock:
             # k64: the ACTIVE allocation mode, as a per-load opt. The slot is a
             # separate process spawned at boot, so the agent's per-request
@@ -1745,31 +1887,41 @@ class Slot:
                 reload_reason = reload_reason or why
                 logger.info("slot %s: %s", SLOT_ID, why)
 
-            # BACKOFF (slice 12): after repeated GENUINE load failures for this
-            # model, refuse a re-attempt for a growing window instead of hammering
-            # a doomed 46G re-page on every incoming request. Cleared on success.
-            until = self._load_backoff_until.get(model_key, 0.0)
-            if time.time() < until:
-                raise self._load_failure_exc(
-                    f"slot {SLOT_ID}: {model_key} in load-backoff for "
-                    f"{until - time.time():.0f}s after "
-                    f"{self._load_failures.get(model_key, 0)} failed attempt(s)"
-                    + (f" — {self.last_load_error}" if self.last_load_error else ""),
-                    model_key)
+            # No post-failure latch: an earlier failed load of this model does not
+            # refuse this attempt. Every /load actually tries to seat the model and,
+            # if it fails, fails with THAT attempt's real loader error (recorded
+            # below as last_load_error for the console/logs).
 
+            # PER-GPU device pin (2026-09-25). Central chose the card(s):
+            #   * a TENSOR-SPLIT (a GGUF that central split across >= 2 local
+            #     cards) -> DON'T restrict CUDA_VISIBLE_DEVICES (all cards must
+            #     stay visible for the split), pass --tensor-split + --main-gpu
+            #     (global device indices) to llama-server.
+            #   * a SINGLE-card pin (``gpu``) -> CUDA_VISIBLE_DEVICES=that card,
+            #     exactly the historical mechanism.
+            # A split-plan carries the ``gpu`` pin too (both ride HUGPY_MAIN_GPU),
+            # so the split must WIN — pinning one card would defeat it.
+            ts = _parse_tensor_split(tensor_split)
+            is_split = ts is not None and sum(1 for x in ts if x and x > 0) >= 2
+            self.tensor_split = ts if is_split else None
+            self.main_gpu = _as_int_or_none(main_gpu) if is_split else None
             self._kill()
             self.profile_bin = profile_bin or None
             (argv, self.ngl, self.ctx, self.threads, self.cpus,
              self.child_kind, self.total_layers, self.n_cpu_moe) = _build_cmd(
                 model_key, n_gpu_layers, ctx, threads, cpus, path=path,
                 gpu_mem_gib=gpu_mem_gib, cpu_mem_gib=cpu_mem_gib,
-                profile_bin=self.profile_bin, n_cpu_moe=n_cpu_moe)
-            # per-load GPU pin overrides the slot's MAIN_GPU default
-            self.gpu = gpu if gpu not in (None, "") else MAIN_GPU
+                profile_bin=self.profile_bin, n_cpu_moe=n_cpu_moe,
+                tensor_split=self.tensor_split, main_gpu=self.main_gpu)
+            # per-load GPU pin overrides the slot's MAIN_GPU default; a split
+            # leaves the card unset so every visible GPU can hold its shard.
+            self.gpu = None if is_split else (gpu if gpu not in (None, "") else MAIN_GPU)
             self.expected_bytes = _model_expected_bytes(model_key)
-            logger.info("slot %s loading %s (ngl=%s ctx=%s threads=%s cpus=%s gpu=%s): %s",
+            logger.info("slot %s loading %s (ngl=%s ctx=%s threads=%s cpus=%s "
+                        "gpu=%s tensor_split=%s main_gpu=%s): %s",
                         SLOT_ID, model_key, self.ngl, self.ctx, self.threads,
-                        self.cpus, self.gpu, " ".join(argv))
+                        self.cpus, self.gpu, self.tensor_split, self.main_gpu,
+                        " ".join(argv))
 
             env = dict(os.environ)
             if self.gpu is not None:
@@ -1815,14 +1967,11 @@ class Slot:
             if not self._wait_healthy():
                 self._kill()
                 self.model_key = None
-                # Record the genuine failure and arm exponential backoff so
-                # per-request re-attempts don't thrash (slice 12). The message now
-                # names STALL vs hard-cap (the honest reason), not a flat clock.
+                # Record the genuine failure (count + reason) for the console/logs.
+                # It does NOT arm any backoff — the next /load re-attempts. The
+                # message names STALL vs hard-cap (the honest reason), not a clock.
                 n = self._load_failures.get(model_key, 0) + 1
                 self._load_failures[model_key] = n
-                backoff = min(_LOAD_BACKOFF_BASE_S * (2 ** (n - 1)),
-                              _LOAD_BACKOFF_MAX_S)
-                self._load_backoff_until[model_key] = time.time() + backoff
                 kind = getattr(self, "_load_fail_kind", None)
                 exit_code = getattr(self, "_load_exit_code", None)
                 # t140: quote the loader's own error. The child is dead (or
@@ -1846,7 +1995,7 @@ class Slot:
                         if self.last_load_stderr else
                         f"loader stderr was empty (read ring + log file "
                         f"{self.last_load_log_ref or '<none written>'}, bytes=0; fail kind={kind}, "
-                        f"exit_code={exit_code}, attempt {n}, backoff {backoff:.0f}s)")
+                        f"exit_code={exit_code}, attempt {n})")
                 self.last_load_class = "other"
                 if kind == "exit" and isinstance(exit_code, int) and exit_code < 0:
                     # The child was killed by a SIGNAL (Popen returncode -N):
@@ -1869,7 +2018,7 @@ class Slot:
                         f"{getattr(self, '_load_fail_after_s', 0.0):.1f}s without "
                         f"ever serving — likely exhausted VRAM/RAM or driver "
                         f"state, not a verdict on the model file. {_why} "
-                        f"Attempt {n}, backing off {backoff:.0f}s")
+                        f"Attempt {n}")
                 elif kind == "exit":
                     # The child EXITED cleanly-but-nonzero rather than hung: the
                     # loader rejected the model file. Permanent by construction —
@@ -1884,12 +2033,12 @@ class Slot:
                         f"{getattr(self, '_load_fail_after_s', 0.0):.1f}s without "
                         f"ever serving — the loader rejected the load, not "
                         f"stalled; retrying cannot fix it. {_why} "
-                        f"Attempt {n}, backing off {backoff:.0f}s")
+                        f"Attempt {n}")
                 else:
                     self.last_load_error = (
                         f"did not become healthy ({kind or 'stall/hard-cap'}); "
                         + (f"{_why} " if self.last_load_stderr else "")
-                        + f"attempt {n}, backing off {backoff:.0f}s")
+                        + f"attempt {n}")
                 raise self._load_failure_exc(
                     f"slot {SLOT_ID}: {model_key} {self.last_load_error}",
                     model_key)
@@ -1903,9 +2052,8 @@ class Slot:
             self.reload_reason = reload_reason or None
             if self.reload_reason:
                 logger.info("slot %s: %s", SLOT_ID, self.reload_reason)
-            # SUCCESS — clear the failure counters + backoff for this model.
+            # SUCCESS — clear the failure count + last-error for this model.
             self._load_failures.pop(model_key, None)
-            self._load_backoff_until.pop(model_key, None)
             self.last_load_error = None
             self.last_load_stderr = None
             self.last_load_stderr_raw = None
@@ -2052,11 +2200,9 @@ class Slot:
             raise RuntimeError(
                 f"slot {SLOT_ID}: no model loaded — nothing to relaunch")
         requested_ngl = n_gpu_layers
-        # A deliberate operator relaunch must not be refused by a stale load
-        # backoff armed by an earlier failure of this model — clear it so the
-        # forced re-seat actually runs.
+        # A deliberate operator relaunch is a fresh attempt: reset the informational
+        # consecutive-failure count so the reseat's "attempt N" starts clean.
         self._load_failures.pop(mk, None)
-        self._load_backoff_until.pop(mk, None)
         result = self.load(
             mk, n_gpu_layers=requested_ngl,
             ctx=ctx if ctx is not None else self.ctx,
@@ -2064,6 +2210,11 @@ class Slot:
             gpu_mem_gib=None, cpu_mem_gib=None,
             profile_bin=self.profile_bin, force=True,
             n_cpu_moe=n_cpu_moe,
+            # Preserve the seat's per-GPU placement across a relaunch (a swept
+            # ngl must keep the same card / split, not fall back to auto).
+            # getattr-guarded for a slot built without the newer fields.
+            tensor_split=getattr(self, "tensor_split", None),
+            main_gpu=getattr(self, "main_gpu", None),
             alloc_requested={"n_gpu_layers": requested_ngl, "alloc_mode": None},
             alloc_source={"kind": "operator", "via": "relaunch", "at": time.time()})
         # Surface the request alongside the honest launched value so the caller
@@ -2153,7 +2304,9 @@ def build_app():
                                      alloc_mode=body.get("alloc_mode"),
                                      alloc_requested=body.get("alloc_requested"),
                                      alloc_source=body.get("alloc_source"),
-                                     reload_reason=body.get("reload_reason")))
+                                     reload_reason=body.get("reload_reason"),
+                                     tensor_split=body.get("tensor_split"),
+                                     main_gpu=body.get("main_gpu")))
         except Exception as exc:  # noqa: BLE001
             out = {"error": f"{type(exc).__name__}: {exc}"}
             # Additive (2026-09-23): the structured verdict, so the pool client

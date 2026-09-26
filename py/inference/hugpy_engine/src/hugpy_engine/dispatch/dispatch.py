@@ -659,8 +659,19 @@ async def stream_runner(runner, req, cancel_event=None):
             accepts_cancel = False
         produced = stream(req, cancel_event=cancel_event) if (accepts_cancel and cancel_event is not None) else stream(req)
         if hasattr(produced, "__aiter__"):          # real streamer
-            async for event in produced:
-                yield event
+            # Deterministically close the runner's stream on a client disconnect
+            # (GeneratorExit) so its upstream HTTP/slot is released, rather than
+            # left to GC finalization (incident 2026-09-25).
+            try:
+                async for event in produced:
+                    yield event
+            finally:
+                _ac = getattr(produced, "aclose", None)
+                if _ac is not None:
+                    try:
+                        await _ac()
+                    except Exception:  # noqa: BLE001 — teardown must never raise
+                        pass
             return
         if inspect.isawaitable(produced):           # coroutine-shaped stream(); don't leak it
             produced.close()
@@ -707,14 +718,24 @@ async def execute_prompt_stream(*args, cancel_event=None, **kwargs):
     of evicting (see the module-level note)."""
     prompt_kwargs = normalize_prompt_kwargs(*args, **kwargs)
     token = _NO_MAKEROOM.set(bool(prompt_kwargs.get("no_makeroom")))
+    _runner_stream = None
     try:
         res = resolve(prompt_kwargs)
         req = res.builder(prompt_kwargs, res.model_key)
         runner = _get_or_build_runner(res)
         touch_model(res.model_key)   # residency idle clock
-        async for event in stream_runner(runner, req, cancel_event=cancel_event):
+        _runner_stream = stream_runner(runner, req, cancel_event=cancel_event)
+        async for event in _runner_stream:
             yield event
     finally:
+        # Cascade a client disconnect into the runner stream so its upstream is
+        # released deterministically (not left to GC).
+        _ac = getattr(_runner_stream, "aclose", None)
+        if _ac is not None:
+            try:
+                await _ac()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
         # The try body can resume in a DIFFERENT Context (async/greenlet hop),
         # where reset(token) raises "created in a different Context" and 500s
         # the whole request (live incident 2026-08-06, first cold load after
@@ -797,8 +818,20 @@ async def execute_chat_stream(*args, cancel_event=None, **kwargs):
     # Clamp the per-pass output budget before any pass (local or worker relay):
     # continuation below covers totals beyond one pass, and this keeps an
     # over-cap value from ever reaching a worker that would raise on it.
+    #
+    # SLOT-HOLD CEILING (2026-09-25): apply the ceiling UNCONDITIONALLY, not just
+    # when an explicit cap exceeds it. A caller that sends NO max_tokens (the
+    # OpenAI unbounded default — Hermes) left max_new_tokens unset here, so the
+    # runner fell back to DEFAULT_MAX_TOKENS (32768) and asked llama-server for an
+    # enormous single pass. A caller that then vanished held the slot for that
+    # whole pass. Bounding EVERY pass to _PER_PASS_MAX_TOKENS (HUGPY_PER_PASS_MAX_TOKENS,
+    # no new config) caps how long one pass can occupy a slot; auto-continuation
+    # below still delivers longer totals for callers that stay connected. An
+    # explicit smaller client cap is preserved (min).
     _mnt = base.get("max_new_tokens")
-    if isinstance(_mnt, int) and _mnt > _PER_PASS_MAX_TOKENS:
+    if isinstance(_mnt, int) and _mnt > 0:
+        base["max_new_tokens"] = min(_mnt, _PER_PASS_MAX_TOKENS)
+    else:
         base["max_new_tokens"] = _PER_PASS_MAX_TOKENS
 
     # Caller-supplied continuation budget (ChatRequest.max_chunks). This loop
@@ -861,60 +894,78 @@ async def execute_chat_stream(*args, cancel_event=None, **kwargs):
         finish = "stop"
         errored = False
 
-        async for event in execute_prompt_stream(messages=messages,
-                                                 cancel_event=cancel_event, **base):
-            etype = getattr(event, "type", None)
-            if etype == "token":
-                text = getattr(event, "text", "") or ""
-                seg_text += text
-                if buffering:
-                    head += text
-                    if len(head) < _SEAM_WINDOW:
-                        continue
-                    k = _overlap_len(prev_tail, head)
-                    emit, head, buffering = head[k:], "", False
-                    if emit:
-                        full_text += emit
-                        yield TokenEvent(request_id=rid, text=emit)
-                elif text:
-                    full_text += text
-                    yield TokenEvent(request_id=rid, text=text)
-            elif etype == "done":
-                finish = getattr(event, "finish_reason", None) or "stop"
-                _merge_usage(getattr(event, "usage", None))
-                _t = getattr(event, "timings", None)
-                if isinstance(_t, dict) and _t:
-                    timings_last = _t
-            elif etype == "error":
-                # A pass that dies after text already streamed shouldn't turn a
-                # partially-delivered answer into "[Error: ...]" in the chat.
-                # This happens for real: a rambling model (e.g. a text-encoder
-                # repack that never stops thinking) trips the engine mid-stream
-                # (context overrun, decode assert) and the server aborts the
-                # response body. End gracefully: an honest "truncated" status +
-                # a normal done, with the failure logged. Only an error with
-                # NOTHING delivered is surfaced as an error.
-                if full_text.strip():
-                    logger.warning(
-                        "pass %s failed (%s); ending %s gracefully with %d "
-                        "chars already streamed", attempt + 1,
-                        getattr(event, "message", None) or "run failed",
-                        rid, len(full_text))
-                    yield StatusEvent(type="status", request_id=rid,
-                                      stage="generate",
-                                      message="engine stream ended early — "
-                                              "answer truncated")
-                    yield DoneEvent(request_id=rid, input_tokens=0,
-                                    output_chunks=1, finish_reason="stop",
-                                    usage=usage_totals, timings=timings_last)
+        # Bind the per-pass stream so a client disconnect (GeneratorExit) closes
+        # it — and, through its own finally, the runner + relay + llama-server
+        # stream beneath it — deterministically. A bare `async for` left that to
+        # GC finalization, which is what kept slots is_processing after the
+        # caller had gone (incident 2026-09-25).
+        _pass = execute_prompt_stream(messages=messages,
+                                      cancel_event=cancel_event, **base)
+        try:
+            async for event in _pass:
+                etype = getattr(event, "type", None)
+                if etype == "token":
+                    text = getattr(event, "text", "") or ""
+                    seg_text += text
+                    if buffering:
+                        head += text
+                        if len(head) < _SEAM_WINDOW:
+                            continue
+                        k = _overlap_len(prev_tail, head)
+                        emit, head, buffering = head[k:], "", False
+                        if emit:
+                            full_text += emit
+                            yield TokenEvent(request_id=rid, text=emit)
+                    elif text:
+                        full_text += text
+                        yield TokenEvent(request_id=rid, text=text)
+                elif etype == "done":
+                    finish = getattr(event, "finish_reason", None) or "stop"
+                    _merge_usage(getattr(event, "usage", None))
+                    _t = getattr(event, "timings", None)
+                    if isinstance(_t, dict) and _t:
+                        timings_last = _t
+                elif etype == "error":
+                    # A pass that dies after text already streamed shouldn't turn a
+                    # partially-delivered answer into "[Error: ...]" in the chat.
+                    # This happens for real: a rambling model (e.g. a text-encoder
+                    # repack that never stops thinking) trips the engine mid-stream
+                    # (context overrun, decode assert) and the server aborts the
+                    # response body. End gracefully: an honest "truncated" status +
+                    # a normal done, with the failure logged. Only an error with
+                    # NOTHING delivered is surfaced as an error.
+                    if full_text.strip():
+                        logger.warning(
+                            "pass %s failed (%s); ending %s gracefully with %d "
+                            "chars already streamed", attempt + 1,
+                            getattr(event, "message", None) or "run failed",
+                            rid, len(full_text))
+                        yield StatusEvent(type="status", request_id=rid,
+                                          stage="generate",
+                                          message="engine stream ended early — "
+                                                  "answer truncated")
+                        yield DoneEvent(request_id=rid, input_tokens=0,
+                                        output_chunks=1, finish_reason="stop",
+                                        usage=usage_totals, timings=timings_last)
+                    else:
+                        yield ErrorEvent(request_id=rid,
+                                         message=getattr(event, "message", None) or "run failed")
+                    errored = True
+                    break
                 else:
-                    yield ErrorEvent(request_id=rid,
-                                     message=getattr(event, "message", None) or "run failed")
-                errored = True
-                break
-            else:
-                # status / provisioning passthrough (e.g. relayed from a worker)
-                yield event
+                    # status / provisioning passthrough (e.g. relayed from a worker)
+                    yield event
+        except GeneratorExit:
+            logger.info("execute_chat_stream client-disconnect: closing upstream "
+                        "pass req=%s model=%s", rid, base.get("model_key"))
+            raise
+        finally:
+            _ac = getattr(_pass, "aclose", None)
+            if _ac is not None:
+                try:
+                    await _ac()
+                except Exception:  # noqa: BLE001 — teardown must never raise
+                    pass
 
         if errored:
             return

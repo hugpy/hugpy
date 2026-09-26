@@ -212,6 +212,11 @@ class Job:
     slot: Optional[str] = None            # slot id on that worker
     model_name: Optional[str] = None      # display name (model_key is the key)
     message: str = ""
+    # Human-readable input attached to an in-flight inference job. This is
+    # available to the queue UI so operators can identify what is waiting.
+    prompt: str = ""
+    # Original incoming request body, shown by the Calls panel's row expander.
+    request: Optional[dict] = None
     error: Optional[JobError] = None
     # A TYPED failure code the console can branch on — "gated_repo" | "auth" |
     # "not_found" | "no_space" (downloader/engine.classify_download_error).
@@ -286,6 +291,7 @@ class Job:
             "slot": self.slot,
             "model": self.model_name or self.model_key or "?",
             "message": self.message,
+            "prompt": self.prompt,
             "error": self.error.to_dict() if self.error else None,
             "tokens": self.tokens,
             "elapsed": round(ended - self.started_ts, 1),
@@ -319,6 +325,8 @@ class Job:
             d["placement"] = self.placement
         if self.payload is not None:
             d["payload"] = self.payload
+        if self.request is not None:
+            d["request"] = self.request
         if self.error_reason:
             d["error_reason"] = self.error_reason
         return d
@@ -1052,3 +1060,25 @@ class JobStore:
 
 
 job_store = JobStore(mirror=_default_mirror())
+
+
+# FORK SAFETY (incident 2026-09-24). The store keeps no sqlite connection at
+# module scope (the mirror opens per-call), but it DOES lazily start an owner-
+# side cancel-watcher thread and the mirror caches an `_initialized` flag. A
+# thread does not survive fork, so a child that inherited a non-None `_watcher`
+# would never re-arm its own watcher; and the child must re-create the mirror
+# schema on its own handle. Reset both in a forked child. Belt-and-braces behind
+# the real fix (app built in the gunicorn worker). Registered once; never raises.
+def _reset_after_fork_in_child() -> None:
+    try:
+        job_store._watcher = None
+        if job_store.mirror is not None:
+            job_store.mirror._initialized = False
+    except Exception:  # noqa: BLE001 — an at-fork hook must never raise
+        pass
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_after_fork_in_child)
+except (AttributeError, ValueError):  # non-POSIX / interpreter without the hook
+    pass

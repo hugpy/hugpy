@@ -70,12 +70,21 @@ LLAMA_SWAP_CONFIG = get_env_value("LLAMA_SWAP_CONFIG") or "/etc/llama-swap/confi
 LLAMA_SWAP_UNIT = get_env_value("LLAMA_SWAP_UNIT") or "llama-swap.service"
 LLAMA_SWAP_TTL = int(get_env_value("LLAMA_SWAP_TTL") or 600)   # on-demand unload, seconds
 
-# Fallback context window for a served llama-server when neither the model
-# config nor DEFAULT_LLAMA_CTX (env) specifies one. Now matches the in-process
-# runner default DEFAULT_N_CTX (managers/llama/runners/src/imports/constants.py);
-# the previous 4096 silently truncated long outputs — the transcript overflowed,
-# the model lost its framing and looped with no stop. The env override wins.
-DEFAULT_LLAMA_CTX = int(get_env_value("DEFAULT_LLAMA_CTX") or 16384)
+# Context window policy (2026-09-25). The served llama.cpp context is the model's
+# TRAINED context (the GGUF n_ctx_train / manifest model_max_length), reduced only
+# as far as the VRAM fit requires (spill.served_ctx_for_fit), floored below. There
+# is NO hugpy-wide context ceiling: the cap is the model's own cap. A per-model
+# extra['llama_ctx'] and the worker's ctx_pct allocation are per-model operator
+# choices that still apply — they are not a global cap.
+#
+# The removed hard 16384 cap silently truncated long-context models: a native
+# 262144-ctx model (Qwen3-Coder-Next) was launched at -c 16384, overflowing on an
+# agent's first ~15k-token turn while /v1/models still advertised a larger window.
+#
+# Floor for a fit-bounded served ctx and the last-resort default when a trained
+# ctx cannot be read. Kept >= a coherent minimum so a slot never launches with a
+# 1-token window.
+DEFAULT_LLAMA_CTX_FLOOR = int(get_env_value("HUGPY_LLAMA_CTX_FLOOR") or 4096)
 DEFAULT_LLAMA_THREADS = int(get_env_value("DEFAULT_LLAMA_THREADS") or 6)
 
 # CONTEXT-as-allocation resolver (slice 11 / t27). The worker agent (which owns
@@ -168,14 +177,25 @@ def _effective_extra(model_key, cfg) -> dict:
 
 
 def _ctx_for(cfg, model_key, extra=None):
+    """The context a model is SERVED at (-c) and reported with.
+
+    Precedence: an explicit per-model ``extra['llama_ctx']`` wins outright; then
+    the worker's ctx_pct allocation (the resolver); then — for llama.cpp — the
+    fit-bounded native context (spill.served_ctx_for_fit: the GGUF's trained
+    ctx, reduced only as far as the VRAM fit needs); then the model's declared
+    trained ctx (config); then the floor. There is no hugpy-wide ceiling — the
+    cap is the model's own trained ctx.
+
+    This is the single source of truth: the same value the slot launches ``-c``
+    with (slot_agent._build_cmd) and the value reported by /llm/serving and
+    /v1/models when the model is not (yet) loaded."""
     extra = extra if extra is not None else _effective_extra(model_key, cfg)
     if extra.get("llama_ctx"):
         return int(extra["llama_ctx"])
     # CONTEXT allocation (slice 11): if the worker set a ctx_pct for this model,
     # SERVE the resolved value — the allocation is a contract, so the served -c
-    # equals what fit/admission reserved KV for. The resolver already clamps to
-    # DEFAULT_LLAMA_CTX (the 'capping' logic is now enforcement of the RESOLVED
-    # value). Unset resolver / no ctx_pct -> falls through to today's default.
+    # equals what fit/admission reserved KV for. The resolver enforces the fit;
+    # it is not clamped to any hugpy-wide ceiling.
     if _CTX_RESOLVER is not None:
         try:
             resolved = _CTX_RESOLVER(model_key, cfg)
@@ -185,12 +205,27 @@ def _ctx_for(cfg, model_key, extra=None):
                 return int(resolved)
         except Exception:  # noqa: BLE001 — a broken resolver never breaks serving
             pass
-    mml = getattr(cfg, "model_max_length", None) or DEFAULT_LLAMA_CTX
-    capped = min(int(mml), DEFAULT_LLAMA_CTX)
-    if capped < int(mml):
-        logger.debug("%s: capping -c %s -> %s (set extra['llama_ctx'] to override)",
-                    model_key, int(mml), capped)
-    return capped
+    framework = str(getattr(cfg, "framework", "") or "").lower()
+    if framework in ("gguf", "llama_cpp"):
+        try:
+            from hugpy_engine import spill
+            mf = _model_file_for(model_key, cfg)
+            if mf and os.path.isfile(mf):
+                ctx = spill.served_ctx_for_fit(mf)
+                if ctx:
+                    return int(ctx)
+        except Exception:  # noqa: BLE001 — a fit probe never breaks serving
+            pass
+    # Non-GGUF, or the file isn't resolvable here (e.g. central without the
+    # weights): the model's declared trained ctx. No hugpy-wide ceiling.
+    mml = getattr(cfg, "model_max_length", None)
+    try:
+        mml = int(mml) if mml else 0
+    except (TypeError, ValueError):
+        mml = 0
+    if mml > 0:
+        return mml
+    return DEFAULT_LLAMA_CTX_FLOOR
 
 
 def _model_file_for(model_key, cfg):
@@ -281,7 +316,9 @@ class ServeSpec:
     model_file: str = ""
     host: str = LLAMA_SWAP_HOST
     port: Optional[int] = None
-    ctx_size: int = DEFAULT_LLAMA_CTX
+    # Fill-in default only; serve_spec_for always sets this from _ctx_for. Uses
+    # the floor so __post_init__'s ctx_size>=1 check can't spuriously fire.
+    ctx_size: int = DEFAULT_LLAMA_CTX_FLOOR
     threads: int = DEFAULT_LLAMA_THREADS
     n_gpu_layers: int = DEFAULT_LLAMA_NGL
     # Was ``n_gpu_layers`` ACTUALLY SPECIFIED by someone (persisted override /

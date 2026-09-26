@@ -185,7 +185,7 @@ export function ArchitecturePage() {
 
             <h3 id="worker-fleet" className="docs-h3">C. Distributed worker fleet</h3>
             <ul className="docs-routes">
-              <li><code>worker_agent/</code> — full GPU worker: registers, heartbeats every ~15s (45s liveness window), GPU/CPU spill, central-first model provisioning (HTTP Range, HF fallback), <strong>self-update</strong> (<code>pip install -U</code> + re-exec, PyPI by default or central’s index), eager <strong>preload/warm</strong> on assignment (default ON when pooled, via <code>WORKER_PRELOAD</code>), and <code>role=rpc</code> mode running <code>rpc-server</code>. Serves <code>/health</code>, <code>/infer</code>, <code>/infer/stream</code>, <code>/infer/cancel/&lt;request_id&gt;</code>, <code>/probe</code>, <code>/models/unload</code>.</li>
+              <li><code>worker_agent/</code> — full GPU worker: registers, heartbeats every ~15s (45s liveness window), GPU/CPU spill, central-first model provisioning (HTTP Range, HF fallback), <strong>self-update</strong> (<code>pip install -U</code> + re-exec, PyPI by default or central’s index), lazy loading (a model loads into VRAM/RAM only when a request for it arrives — assignment, restart, and self-update never warm one), and <code>role=rpc</code> mode running <code>rpc-server</code>. Serves <code>/health</code>, <code>/infer</code>, <code>/infer/stream</code>, <code>/infer/cancel/&lt;request_id&gt;</code>, <code>/probe</code>, <code>/models/unload</code>.</li>
               <li><code>gguf_worker/</code> — slim, import-light, <strong>chat-only GGUF</strong> worker for Termux / ARM; returns HTTP 501 for unsupported tasks <em>before</em> SSE starts, so central’s <code>DelegatingRunner</code> falls back cleanly.</li>
               <li><code>phone_brick/</code> — two halves: (1) orchestrator-free ONNX YOLO PPE detection across cheap Android phones with <strong>plurality consensus</strong> (AGR / DIS / NOD); (2) an LLM contribution path — <code>rpc_backend.py</code> lets a phone join the GPU shard pool as a <code>role=rpc</code> llama.cpp backend advertising its RAM as pseudo-VRAM (gated by <code>PHONE_BRICK_RPC</code>), and <code>analyze.py</code> feeds phone detections into a chat model for natural-language scene/safety reasoning.</li>
               <li><code>engine/</code> — resolve / fetch / build of native llama.cpp binaries (<code>hugpy install-engine --cuda</code>); the source build always sets <code>-DGGML_RPC=ON</code> so <code>rpc-server</code> exists for the shard fleet.</li>
@@ -279,7 +279,7 @@ export function ArchitecturePage() {
 HUGPY_BASE_URL=http://127.0.0.1:7002   # this box's own address; workers/bot/keeper all dial this
 HUGPY_AUTH_MODE=open                   # no login wall — fine for a single-operator box on a private network
 DEFAULT_ROOT=/srv/hugpy-data           # SET THIS: storage root for models/uploads/identities/datasets — largest writable volume
-SLOT_COUNT=2                           # always-on local llama-server slots preloaded at boot (0 disables the pool)
+SLOT_COUNT=2                           # local llama-server slot children spawned at boot, EMPTY (each loads a model only on a request; 0 disables the pool)
 HUGPY_MAX_UPLOAD_MB=100                # cap on any single upload/POST body
 HUGPY_ALLOWED_ORIGINS=                 # leave unset while developing; set to your UI origin(s) before exposing this box publicly`} />
             <CopyBlock title=".env — WORKER (hugpy worker)" code={`# hugpy worker — .env / systemd Environment=
@@ -372,14 +372,13 @@ DEFAULT_SERVE_MODE=off                         # on-demand serving (not eager on
                 <tr><td><code>SLOT_HEALTH_TIMEOUT</code></td><td>180</td><td>Seconds to wait for a slot's child llama-server to report healthy.</td><td>float seconds</td></tr>
                 <tr><td><code>MAIN_GPU</code></td><td>none</td><td>Pins a slot's child llama-server to one GPU index (sets <code>CUDA_VISIBLE_DEVICES</code>).</td><td>int GPU index</td></tr>
                 <tr><td><code>LLAMA_SERVICE_USER</code> / <code>LLAMA_SERVICE_GROUP</code></td><td>current user (serve.py) or "solcatcher"/"web" (slot unit template)</td><td><code>User=</code>/<code>Group=</code> for generated per-model or per-slot systemd unit templates.</td><td>username / group string</td></tr>
-                <tr><td><code>HUGPY_WARM_COOLDOWN_S</code></td><td>600</td><td>Min seconds between background warm-probe attempts for the same (worker, model) pair.</td><td>float seconds</td></tr>
+                <tr><td><code>HUGPY_WARM_COOLDOWN_S</code></td><td>—</td><td>Retired: there are no background warm-probe attempts. A model loads only when a request for it arrives. This variable is ignored.</td><td>(ignored)</td></tr>
                 <tr><td><code>HUGPY_VRAM_HEADROOM</code></td><td>1.15</td><td>Multiplier over raw GGUF file size estimating real VRAM need (KV-cache/runtime overhead) for the worker-slot fit preflight.</td><td>float multiplier</td></tr>
                 <tr><td><code>HUGPY_CENTRAL_GATE</code></td><td>on</td><td>Per-(worker, model) in-flight concurrency gate. Kill-switch.</td><td>off/0/false/no disables</td></tr>
                 <tr><td><code>HUGPY_CENTRAL_GATE_WAIT_S</code></td><td>30</td><td>Bounded wait for a busy gate slot to free before returning a "busy" error.</td><td>float seconds, ≥0</td></tr>
                 <tr><td><code>HUGPY_LOCAL_FALLBACK</code></td><td>off</td><td>Whether central may run a worker-selected model locally after the worker path fails (default no, so a worker failure never silently burns central's CPU/RAM).</td><td>always/1/true/yes/on</td></tr>
                 <tr><td><code>HUGPY_WORKER_ROOT</code></td><td>none</td><td>Explicit override of a worker's local root dir (profile venvs live under <code>&lt;root&gt;/envs</code>).</td><td>filesystem path</td></tr>
                 <tr><td><code>DEFAULT_SERVE_MODE</code></td><td>auto (supervised off-Linux)</td><td>Which serve mode a freshly-served model gets.</td><td>"off" | "systemd" | "supervised" | "swap"</td></tr>
-                <tr><td><code>DEFAULT_LLAMA_CTX</code></td><td>16384</td><td>Default llama-server context window for systemd/supervised/swap-served models.</td><td>int tokens</td></tr>
                 <tr><td><code>DEFAULT_LLAMA_NGL</code></td><td>-1 (all layers)</td><td>Default GPU layer offload for systemd/supervised/swap-served models.</td><td>int (-1 = all)</td></tr>
                 <tr><td><code>DEFAULT_LLAMA_THREADS</code></td><td><code>cpu_count()</code>-1</td><td>Box-wide cap on llama.cpp generation threads.</td><td>int threads</td></tr>
                 <tr><td><code>LLAMA_PORT_BASE</code> / <code>LLAMA_PORT_SPAN</code></td><td>7001 / 4000</td><td>Base port and span reserved for per-model systemd/supervised llama-server unit allocation.</td><td>int / int</td></tr>
@@ -472,7 +471,7 @@ DEFAULT_SERVE_MODE=off                         # on-demand serving (not eager on
             <table className="docs-table docs-table--env">
               <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th><th>Values</th></tr></thead>
               <tbody>
-                <tr><td><code>DEFAULT_CHAT_MODEL</code></td><td>"Qwen2.5-3B-Instruct-GGUF"</td><td>Stock default chat model (also what local slots preload at boot, <code>SLOT_COUNT</code> of them).</td><td>model-key string</td></tr>
+                <tr><td><code>DEFAULT_CHAT_MODEL</code></td><td>"Qwen2.5-3B-Instruct-GGUF"</td><td>Stock default chat model (the model a local slot serves when a request arrives without naming one).</td><td>model-key string</td></tr>
                 <tr><td><code>DEFAULT_VISION_MODEL</code></td><td>"Qwen2.5-VL-3B-Instruct-GGUF"</td><td>Stock default vision (image-text-to-text) model.</td><td>model-key string</td></tr>
                 <tr><td><code>DEFAULT_WHISPER_MODEL</code></td><td>"whisper-large-v3-turbo"</td><td>Stock default speech-to-text model.</td><td>model-key string</td></tr>
                 <tr><td><code>DEFAULT_SUMMARIZE_MODEL</code></td><td>"flan-t5-large"</td><td>Stock default summarization model.</td><td>model-key string</td></tr>
@@ -547,7 +546,7 @@ DEFAULT_SERVE_MODE=off                         # on-demand serving (not eager on
                 <tr><td><code>HUGPY_ML_POOL</code></td><td>"" (disabled)</td><td>Reserved worker-pool tag <code>/ml/*</code> endpoints route to.</td><td>pool name/tag string</td></tr>
                 <tr><td><code>HUGPY_ML_GENERAL_ROUTE_TASKS</code></td><td>"image-text-to-text"</td><td>Tasks that use the general established worker route instead of the reserved ML pool.</td><td>comma-separated task-name list</td></tr>
                 <tr><td><code>WORKER_POOL</code></td><td>"" (general pool)</td><td>Dedicated pool label this worker registers/heartbeats under. A pooled worker serves only requests tagged for its pool; general traffic never lands on it.</td><td>free-text pool label</td></tr>
-                <tr><td><code>WORKER_PRELOAD</code></td><td>"1" if <code>WORKER_POOL</code> set, else "0"</td><td>Eagerly warms a newly-assigned on-demand model at assignment time instead of waiting for first request.</td><td>1/true/yes/on</td></tr>
+                <tr><td><code>WORKER_PRELOAD</code></td><td>—</td><td>Retired: the worker no longer warms a model at assignment time. A model loads into VRAM/RAM only when a request for it arrives. This variable is ignored.</td><td>(ignored)</td></tr>
               </tbody>
             </table>
             </EnvGroup>
@@ -770,7 +769,7 @@ DEFAULT_SERVE_MODE=off                         # on-demand serving (not eager on
                 <tr><td><code>VITE_HUGPY_GENERATE_URL</code></td><td><code>&lt;apiBase&gt;/video/jobs/generate_image</code></td><td>Enqueue a text/image → image generate job (Generate station).</td><td>URL</td></tr>
                 <tr><td><code>VITE_HUGPY_GENERATE_SCENE_URL</code></td><td><code>&lt;apiBase&gt;/video/jobs/generate_scene</code></td><td>Enqueue a text/image → scene generate job (Generate station, Scene mode) — one ordered multimodal prompt → N consecutive frames + an assembled mp4.</td><td>URL</td></tr>
                 <tr><td><code>VITE_HUGPY_GENERATE_MOVIE_URL</code></td><td><code>&lt;apiBase&gt;/video/jobs/generate_movie</code></td><td>Enqueue a goal-timeline → movie generate job (Generate station, Movie mode) — an ordered, contiguous goal list tiling [0,total) → an N-segment movie.</td><td>URL</td></tr>
-                <tr><td><code>VITE_HUGPY_PRESETS_URL</code></td><td><code>&lt;apiBase&gt;/video/presets</code></td><td>Curated "ideal default loads" for the Generate station — knobs + model per preset; picking one pre-warms that model on a GPU worker.</td><td>URL</td></tr>
+                <tr><td><code>VITE_HUGPY_PRESETS_URL</code></td><td><code>&lt;apiBase&gt;/video/presets</code></td><td>Curated default settings for the Generate station — knobs + model per preset; picking one selects that model and its knobs. It does not load the model — that happens when you generate.</td><td>URL</td></tr>
                 <tr><td><code>VITE_HUGPY_MOVIE_PRESETS_URL</code></td><td><code>&lt;apiBase&gt;/movie/presets</code></td><td>Curated MOVIE templates for the Generate-station Movie tab — each preset is a bare array item carrying a whole shot list (goal timeline + settings).</td><td>URL</td></tr>
                 <tr><td><code>VITE_HUGPY_STUDIO_I2V_URL</code></td><td><code>&lt;apiBase&gt;/video/studio/i2v</code></td><td>Enqueue a Studio image-to-video clip (Studio Clips viewer) — runs through the cinema-studio spine to a content-addressed clip.</td><td>URL</td></tr>
                 <tr><td><code>VITE_HUGPY_STUDIO_MOVIE_URL</code></td><td><code>&lt;apiBase&gt;/video/studio/movie</code></td><td>Enqueue a Studio MOVIE (Studio Movie composer) — an ordered goal timeline rendered into one NLE row (segment clips + an assembled movie.mp4 last).</td><td>URL</td></tr>

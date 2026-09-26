@@ -233,8 +233,14 @@ class StudioRenderManager:
                         {"step": step, "steps": steps}))
                 payload = artifact_result_to_payload(result)
             else:
+                # Re-attribute the VRAM reserve to the render CHILD's real pid
+                # once spawned: the worker process holds no torch VRAM, so
+                # without this the render's bytes are unattributed (a false
+                # own-venv squatter to the reaper/meter). note_pid makes it a
+                # first-class measured external resident in the eviction ledger.
                 payload = _studio_subproc.run_render_subprocess(
-                    job.spec, job.cancel, on_progress=_publish)
+                    job.spec, job.cancel, on_progress=_publish,
+                    on_child_pid=getattr(_release_reserve, "note_pid", None))
             with self._lock:
                 job.result = payload
                 job.status = "done"

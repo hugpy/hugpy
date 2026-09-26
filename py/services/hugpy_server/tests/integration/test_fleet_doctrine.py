@@ -53,7 +53,8 @@ def _report(**over):
                 "python_version": "3.13.12",
                 "error": None,
                 "packages": {
-                    "torch": "2.13.0", "diffusers": "0.39.0",
+                    "torch": "2.13.0", "torchvision": "0.28.0",
+                    "diffusers": "0.39.0",
                     "transformers": "5.14.1", "bitsandbytes": "0.50.0",
                     "accelerate": "1.14.0", "openai-whisper": "20250625",
                     "numba": "0.66.0", "numpy": "2.4.6",
@@ -63,6 +64,9 @@ def _report(**over):
                     "safetensors": "0.8.0", "huggingface-hub": "1.24.0",
                     "some-random-lib": "1.0.0",
                 },
+                # torchvision 0.28.0 declares Requires-Dist: torch==2.13.0, which
+                # the installed torch 2.13.0 satisfies — the healthy case.
+                "torch_companions": {"torchvision": "==2.13.0"},
             },
             "chatterbox-tts": {
                 "python": "/home/ref/hugpy-worker/envs/chatterbox-tts/bin/python",
@@ -70,6 +74,7 @@ def _report(**over):
                 "error": None,
                 "packages": {"chatterbox-tts": "0.1.7", "setuptools": "80.10.2",
                              "torch": "2.6.0", "torchaudio": "2.6.0"},
+                "torch_companions": {"torchaudio": "==2.6.0"},
             },
         },
         "binaries": {
@@ -477,6 +482,163 @@ def test_blockers_for_task_selects_only_that_task(doctrine):
     result = doctor.assess(report, doctrine)
     assert [f.dep for f in result.blockers_for_task("text-to-image")] == ["diffusers"]
     assert set(result.blocked_tasks()) == {"text-to-image", store.TASK_4BIT}
+
+
+# ---------------------------------------------------------------------------
+# 4b. torch COMPANION compatibility (torchvision / torchaudio).
+#
+# computron 2026-09-24: torch 2.12.1+cu130 with torchvision 0.28.0 (whose
+# metadata says Requires-Dist: torch==2.13.0) -> `import torchvision` raises
+# 'operator torchvision::nms does not exist', and every text-to-image job dies.
+# Presence + pin was not enough to see it; the companion's OWN declared torch
+# requirement, checked against the installed torch in the SAME venv, is.
+# ---------------------------------------------------------------------------
+
+
+def _computron(**over):
+    """computron's main venv: a mismatched torchvision on a cu130 torch."""
+    report = _report(worker="computron", **over)
+    main = report["venvs"]["main"]
+    main["packages"]["torch"] = "2.12.1+cu130"
+    main["packages"]["torchvision"] = "0.28.0"
+    # torchvision 0.28.0's metadata pins torch to the 2.13.0 build it was made for
+    main["torch_companions"] = {"torchvision": "==2.13.0"}
+    return report
+
+
+def test_report_collects_a_companions_declared_torch_requirement():
+    """The report producer parses Requires-Dist for torch out of the companion's
+    OWN metadata — the fact the doctor later joins against the installed torch."""
+    assert er.torch_requirement_of(["numpy (>=1.0)", "torch (==2.13.0)",
+                                    "pillow"]) == "==2.13.0"
+    assert er.torch_requirement_of(["torch==2.6.0; platform_system=='Linux'"]) \
+        == "==2.6.0"
+    # an extra-gated torch is NOT a hard requirement
+    assert er.torch_requirement_of(["torch==2.9.0; extra == 'cuda'"]) is None
+    # a companion that names no torch at all -> None (unknown, never a guess)
+    assert er.torch_requirement_of(["numpy", "pillow"]) is None
+    assert er.torch_requirement_of(None) is None
+
+
+def test_venvs_report_carries_torch_companions_for_this_interpreter():
+    """The main venv block carries a torch_companions map — only INSTALLED
+    companions are keyed, and each value is a torch specifier or None; an absent
+    companion is simply not keyed (never a fabricated entry)."""
+    block = er.venvs_report()["main"]
+    assert "torch_companions" in block
+    companions = block["torch_companions"]
+    assert isinstance(companions, dict)
+    for name, spec in companions.items():
+        assert name in er.TORCH_COMPANIONS
+        assert spec is None or isinstance(spec, str)
+
+
+def test_mismatched_torchvision_blocks_text_to_image(doctrine):
+    """The incident: torchvision present, pin-clean, but built for a torch this
+    box does not have. A blocker — the thing presence-only checking missed."""
+    result = doctor.assess(_computron(), doctrine)
+    finding = _find(result.blockers, "torchvision", "main")
+    assert finding.status == doctor.STATUS_COMPANION_MISMATCH
+    assert finding.tasks == ("text-to-image",)
+    assert "text-to-image" in result.blocked_tasks()
+    assert result.verdict == doctor.VERDICT_BLOCKED
+    # the detail names the real versions, not a canned phrase
+    assert "2.13.0" in finding.detail and "2.12.1" in finding.detail
+
+
+def test_mismatch_repair_pins_the_installed_torch_on_the_cuda_index(doctrine):
+    """The repair is built from facts: the installed torch's base version and its
+    +cu130 local tag choose the pytorch index that serves the matching build."""
+    finding = _find(doctor.assess(_computron(), doctrine).blockers,
+                    "torchvision", "main")
+    assert "https://download.pytorch.org/whl/cu130" in finding.repair
+    assert "torch==2.12.1" in finding.repair
+    assert "torchvision" in finding.repair
+    # aimed at the main venv interpreter
+    assert "/home/ref/hugpy-worker/venv/bin/python" in finding.repair
+
+
+def test_a_matched_torchvision_is_not_a_finding(reference, doctrine):
+    """The healthy reference: torch 2.13.0, torchvision requires ==2.13.0. OK."""
+    result = doctor.assess(reference, doctrine)
+    assert not [f for f in result.blockers + result.warnings + result.infos
+                if f.dep == "torchvision"]
+
+
+def test_a_cpu_local_tag_points_at_the_cpu_index(doctrine):
+    report = _computron()
+    report["venvs"]["main"]["packages"]["torch"] = "2.12.1+cpu"
+    finding = _find(doctor.assess(report, doctrine).blockers, "torchvision", "main")
+    assert "https://download.pytorch.org/whl/cpu" in finding.repair
+
+
+def test_a_plain_torch_version_repair_omits_the_index(doctrine):
+    """No +local tag (a generic PyPI torch) -> no --index-url invented."""
+    report = _computron()
+    report["venvs"]["main"]["packages"]["torch"] = "2.12.1"
+    finding = _find(doctor.assess(report, doctrine).blockers, "torchvision", "main")
+    assert "--index-url" not in finding.repair
+    assert "torch==2.12.1" in finding.repair
+
+
+def test_a_report_without_companion_metadata_is_unknown_not_a_blocker(doctrine):
+    """An older worker agent whose report has no torch_companions field cannot
+    prove a mismatch — UNKNOWN, which warns and never gates."""
+    report = _report()
+    report["venvs"]["main"]["packages"]["torch"] = "2.12.1+cu130"
+    report["venvs"]["main"].pop("torch_companions", None)
+    result = doctor.assess(report, doctrine)
+    assert not [f for f in result.blockers if f.dep == "torchvision"]
+    finding = _find(result.warnings, "torchvision", "main")
+    assert finding.status == doctor.STATUS_UNKNOWN
+    assert finding.repair == ""
+
+
+def test_torchvision_missing_with_torch_present_repairs_via_the_cuda_index(doctrine):
+    """Absent torchvision still blocks t2i (diffusers imports it); the repair
+    reaches the matching pytorch index because torch's local tag is known."""
+    report = _computron()
+    report["venvs"]["main"]["packages"].pop("torchvision")
+    report["venvs"]["main"]["torch_companions"] = {}
+    finding = _find(doctor.assess(report, doctrine).blockers, "torchvision", "main")
+    assert finding.status == doctor.STATUS_MISSING
+    assert "https://download.pytorch.org/whl/cu130" in finding.repair
+
+
+def test_mismatched_torchaudio_is_a_blocker_only_in_the_profile_venv(doctrine):
+    """torchaudio ABSENT is a warn (audio I/O degrades); torchaudio PRESENT but
+    mismatched fails to import and silently kills TTS -> companion_severity
+    makes that a blocker, and only inside the chatterbox seat."""
+    report = _report()
+    prof = report["venvs"]["chatterbox-tts"]
+    prof["packages"]["torch"] = "2.5.0"
+    prof["packages"]["torchaudio"] = "2.6.0"
+    prof["torch_companions"] = {"torchaudio": "==2.6.0"}
+    result = doctor.assess(report, doctrine)
+    finding = _find(result.blockers, "torchaudio", "profile:chatterbox-tts")
+    assert finding.status == doctor.STATUS_COMPANION_MISMATCH
+    assert finding.severity == "blocker"
+    assert finding.tasks == ("text-to-speech",)
+    assert "envs/chatterbox-tts/bin/python" in finding.repair
+
+
+def test_absent_torchaudio_stays_a_warning_not_a_blocker(doctrine):
+    report = _report()
+    _drop_pkg(report, "torchaudio", venv="chatterbox-tts")
+    report["venvs"]["chatterbox-tts"]["torch_companions"] = {}
+    result = doctor.assess(report, doctrine)
+    assert not [f for f in result.blockers if f.dep == "torchaudio"]
+    assert _find(result.warnings, "torchaudio").severity == "warn"
+
+
+def test_companion_of_survives_a_doctrine_roundtrip(doctrine):
+    """The classification fields ride the serialized doctrine, so a worker
+    self-assessing from a shipped JSON checks companions too."""
+    loaded = store.Doctrine.from_dict(doctrine.to_dict())
+    tv = loaded.entry("pip", "torchvision", "main")
+    assert tv.companion_of == "torch"
+    ta = loaded.entry("pip", "torchaudio", "profile:chatterbox-tts")
+    assert ta.companion_of == "torch" and ta.companion_severity == "blocker"
 
 
 # ---------------------------------------------------------------------------

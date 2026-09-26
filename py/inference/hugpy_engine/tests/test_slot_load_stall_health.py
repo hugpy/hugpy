@@ -154,11 +154,13 @@ def test_load_lock_serializes_same_slot(fast):
     s.lock.release()
 
 
-# ═══════════ backoff after repeated genuine failures ═══════════════════════
-def test_backoff_arms_and_refuses_immediate_reattempt(fast, monkeypatch):
-    """A load that fails records a failure and refuses a re-attempt inside the
-    backoff window — no thrash of 46G re-pages on every request."""
-    monkeypatch.setattr(sa, "_LOAD_BACKOFF_BASE_S", 30.0)
+# ═══════════ honest repeated attempts after genuine failures ═══════════════
+def test_failure_is_recorded_and_immediate_reattempt_is_real(fast, monkeypatch):
+    """A failed load is visible, but a new /load performs a real new attempt.
+
+    Admission/coalescing owns request pacing; a stale process-local timer must
+    not reject an operator retry without consulting the loader.
+    """
     s = _slot()
     import threading
     s.lock = threading.Lock()
@@ -175,51 +177,34 @@ def test_backoff_arms_and_refuses_immediate_reattempt(fast, monkeypatch):
     s._kill = lambda: None
     with pytest.raises(RuntimeError) as e1:
         s.load("big")
-    assert "backing off" in str(e1.value).lower() or "healthy" in str(e1.value).lower()
+    assert "healthy" in str(e1.value).lower()
     assert s._load_failures["big"] == 1
-    assert s._load_backoff_until["big"] > time.time()
-    # An immediate re-attempt is REFUSED by the backoff (no new child).
+    # An immediate retry reaches the loader and records that second failure.
     with pytest.raises(RuntimeError) as e2:
         s.load("big")
-    assert "backoff" in str(e2.value).lower()
-    assert s._load_failures["big"] == 1      # not re-incremented (never re-attempted)
+    assert "healthy" in str(e2.value).lower()
+    assert s._load_failures["big"] == 2
 
 
-def test_backoff_grows_exponentially(fast, monkeypatch):
-    monkeypatch.setattr(sa, "_LOAD_BACKOFF_BASE_S", 10.0)
-    monkeypatch.setattr(sa, "_LOAD_BACKOFF_MAX_S", 600.0)
-    s = _slot()
-    # simulate the failure-recording arithmetic directly.
-    for n in (1, 2, 3):
-        backoff = min(sa._LOAD_BACKOFF_BASE_S * (2 ** (n - 1)), sa._LOAD_BACKOFF_MAX_S)
-        assert backoff == 10.0 * (2 ** (n - 1))
-    # capped
-    assert min(10.0 * (2 ** 20), 600.0) == 600.0
-
-
-def test_success_clears_backoff(fast, monkeypatch):
-    """A successful load clears the failure counter + backoff for the model."""
+def test_success_clears_failure_record(fast, monkeypatch):
+    """A successful load clears the consecutive-failure record."""
     import threading
     s = _slot()
     s.lock = threading.Lock()
     s.proc = None
     s.profile_bin = None
     s._load_failures = {"big": 2}
-    s._load_backoff_until = {"big": time.time() + 5}
     monkeypatch.setattr(sa, "_build_cmd",
                         lambda *a, **k: (["true"], -1, 4096, 6, None, "cpp", 48, None))
     monkeypatch.setattr(sa, "_model_expected_bytes", lambda mk: 46 * GIB)
     monkeypatch.setattr(sa.subprocess, "Popen", lambda *a, **k: type(
         "P", (), {"pid": 1, "poll": lambda self: None})())
-    # backoff window has expired (set in the past) so the load proceeds.
-    s._load_backoff_until = {"big": time.time() - 1}
     s._wait_healthy = lambda: True           # comes up
     s._kill = lambda: None
     s.healthy = lambda: False                # force the load path, not the reuse
     s.status = lambda: {"ok": True}
     s.load("big")
     assert "big" not in s._load_failures     # cleared on success
-    assert "big" not in s._load_backoff_until
     assert s.last_load_error is None
 
 

@@ -35,10 +35,24 @@ _SERVICE_NAME = "hugpy-worker"
 _LAUNCHD_LABEL = "ai.hugpy.worker"
 
 
+def _fleet_default_serve_mode() -> str:
+    """The fleet's own default serve mode — the SAME value the engine falls back
+    to when DEFAULT_SERVE_MODE is unset (hugpy_engine.serve.serve, currently
+    'swap'). Read it from there so the installer never drifts from the fleet;
+    'swap' is the honest literal fallback if the engine isn't importable."""
+    try:
+        from hugpy_engine.serve.serve import _default_serve_mode
+        return _default_serve_mode()
+    except Exception:  # noqa: BLE001
+        return "swap"
+
+
 def _worker_argv(opts) -> List[str]:
     argv = [sys.executable, "-m", "hugpy_fleet.worker", "--central", opts.central]
     if opts.name:
         argv += ["--name", opts.name]
+    if getattr(opts, "advertise", None):
+        argv += ["--advertise", opts.advertise]
     if opts.port:
         argv += ["--port", str(opts.port)]
     if opts.models:
@@ -77,23 +91,16 @@ def _systemd_available() -> bool:
 # --------------------------------------------------------------------------- #
 # per-OS service registration                                                 #
 # --------------------------------------------------------------------------- #
-def _install_systemd_user(opts) -> str:
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
-    os.makedirs(unit_dir, exist_ok=True)
-    # Establish ~/.hugpy/{state,config,logs,run} at install time so the very
-    # first write lands in the right place — "dictated at install".
-    try:
-        from hugpy_platform import app_dirs as _hp
-        _hp.ensure_hugpy_home()
-    except Exception:  # noqa: BLE001 — never fail an install over the skeleton
-        pass
-    unit_path = os.path.join(unit_dir, _SERVICE_NAME + ".service")
+def _render_unit(opts) -> str:
+    """The canonical systemd user unit text for ``opts`` (pure — no I/O). Factored
+    out so drift detection can diff the existing unit against what we WOULD write
+    without touching the filesystem."""
     exec_start = " ".join(_worker_argv(opts))
     # Use systemd's %h home specifier for the engine-dir default so the unit is
     # portable across users (no baked-in /home/<user> path).
     env_lines = "\n".join(f'Environment="{k}={v}"'
                           for k, v in _env_for(opts, home="%h").items())
-    unit = (
+    return (
         "[Unit]\n"
         f"Description=hugpy worker ({opts.name})\n"
         "After=network-online.target\n"
@@ -110,6 +117,53 @@ def _install_systemd_user(opts) -> str:
         "[Install]\n"
         "WantedBy=default.target\n"
     )
+
+
+def _install_systemd_user(opts) -> str:
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+    unit_path = os.path.join(unit_dir, _SERVICE_NAME + ".service")
+    unit = _render_unit(opts)
+    dry_run = bool(getattr(opts, "dry_run", False))
+
+    # Report CONVERGENCE: what an existing (hand-built / drifted) unit had that the
+    # canonical unit corrects — so re-running the installer names the drift it
+    # fixed instead of silently overwriting (item 7: DEFAULT_SERVE_MODE=off + a
+    # retired central URL were both hiding in the a-brain unit).
+    existing = ""
+    if os.path.isfile(unit_path):
+        try:
+            with open(unit_path, "r", encoding="utf-8") as fh:
+                existing = fh.read()
+        except Exception:  # noqa: BLE001
+            existing = ""
+    if existing:
+        try:
+            from hugpy_fleet.worker.setup import unit_drift
+            drift = unit_drift(existing, unit)
+        except Exception:  # noqa: BLE001
+            drift = []
+        if drift:
+            print(f"  unit drift corrected in {unit_path}:")
+            for d in drift:
+                print(f"    {d}")
+        else:
+            print(f"  existing unit at {unit_path} already canonical")
+
+    if dry_run:
+        print(f"  DRY-RUN: would write {unit_path} and enable "
+              f"{_SERVICE_NAME}.service (--now). Rendered unit:")
+        for line in unit.splitlines():
+            print(f"    | {line}")
+        return f"DRY-RUN: systemd user unit NOT written ({unit_path})"
+
+    os.makedirs(unit_dir, exist_ok=True)
+    # Establish ~/.hugpy/{state,config,logs,run} at install time so the very
+    # first write lands in the right place — "dictated at install".
+    try:
+        from hugpy_platform import app_dirs as _hp
+        _hp.ensure_hugpy_home()
+    except Exception:  # noqa: BLE001 — never fail an install over the skeleton
+        pass
     with open(unit_path, "w", encoding="utf-8") as fh:
         fh.write(unit)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
@@ -184,6 +238,13 @@ def _env_for(opts, home: Optional[str] = None) -> dict:
     env["HUGPY_HOME"] = os.path.join(home, ".hugpy")
     if getattr(opts, "name", None):
         env["WORKER_NAME"] = opts.name
+    # Advertise URL (WORKER_URL): the callback address central dials. A
+    # WireGuard-joined worker sets this to its tunnel address (http://10.66.0.x:
+    # 9100) so central reaches it over the tunnel; baking it into the unit keeps
+    # that across restarts. Absent -> the agent derives the local IP toward
+    # central at runtime (unchanged behaviour).
+    if getattr(opts, "advertise", None):
+        env["WORKER_URL"] = opts.advertise
     if getattr(opts, "port", None):
         env["WORKER_PORT"] = str(opts.port)
     # Native llama.cpp engine location: llama-server (vision GGUFs) resolves here
@@ -204,6 +265,12 @@ def _env_for(opts, home: Optional[str] = None) -> dict:
     # points here and provisioning becomes a no-op file check.
     if opts.storage:
         env["DEFAULT_ROOT"] = opts.storage
+    # Extra unit env produced by the setup convergence (e.g. the ComfyUI launcher
+    # + shared-checkpoint wiring), baked in so the worker comes up owning comfy
+    # with no hand-written drop-in.
+    for k, v in (getattr(opts, "extra_env", None) or {}).items():
+        if v is not None and str(v) != "":
+            env[k] = str(v)
     return env
 
 
@@ -291,6 +358,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="central hugpy base URL (e.g. https://your-hugpy/); "
                         "env HUGPY_BASE_URL, legacy WORKER_CENTRAL_URL honoured")
     p.add_argument("--name", default=os.environ.get("WORKER_NAME") or socket.gethostname())
+    p.add_argument("--advertise", default=os.environ.get("WORKER_URL"),
+                   help="URL central should call back on (baked as WORKER_URL in "
+                        "the unit); default env WORKER_URL. A WireGuard worker "
+                        "sets this to http://10.66.0.x:9100.")
     p.add_argument("--port", type=int, default=int(os.environ.get("WORKER_PORT", "9100")))
     p.add_argument("--models", default=os.environ.get("WORKER_MODELS"))
     p.add_argument("--storage", default=os.environ.get("DEFAULT_ROOT"),
@@ -301,9 +372,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--engine-dir", default=os.environ.get("HUGPY_ENGINE_DIR"),
                    help="native llama.cpp engine dir where llama-server + slot-child "
                         "libs resolve (default: ~/hugpy-worker/engine, %%h in the unit)")
-    p.add_argument("--serve-mode", default=os.environ.get("DEFAULT_SERVE_MODE", "off"),
-                   choices=("off", "on"),
-                   help="DEFAULT_SERVE_MODE: register but don't auto-serve (off, default)")
+    p.add_argument("--serve-mode",
+                   default=os.environ.get("DEFAULT_SERVE_MODE") or _fleet_default_serve_mode(),
+                   choices=("off", "systemd", "supervised", "swap"),
+                   help="DEFAULT_SERVE_MODE (fleet default: swap = on-demand, "
+                        "slot-first). 'off' registers but never auto-serves. The "
+                        "engine's ServeMode enum is off|systemd|supervised|swap; "
+                        "the legacy 'on' is not a valid mode.")
     p.add_argument("--enroll-token", default=os.environ.get("WORKER_ENROLL_TOKEN"),
                    help="single-purpose enrollment token minted on central "
                         "(POST /llm/enroll-tokens)")
@@ -348,6 +423,42 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="skip the k118 environment-doctrine preflight")
     p.add_argument("--force", action="store_true",
                    help="install even when the preflight finds blockers")
+    # ── turnkey convergence + self-check (the by-hand steps, now in code) ──────
+    p.add_argument("--dry-run", action="store_true",
+                   help="inspect + report only: converge NOTHING, write no unit, "
+                        "start no service — every step prints the exact command it "
+                        "WOULD run")
+    p.add_argument("--self-check-only", action="store_true",
+                   help="run the self-check against this box and print the report "
+                        "without installing/converging anything (implies no unit write)")
+    p.add_argument("--no-verify", dest="verify", action="store_false", default=True,
+                   help="skip the reachability self-check (worker->central, "
+                        "central->worker)")
+    p.add_argument("--no-provision-engine", dest="provision_engine",
+                   action="store_false", default=True,
+                   help="do NOT build/install the CUDA llama engine when a GPU is "
+                        "present (only detect + report)")
+    p.add_argument("--no-retire-legacy", dest="retire_legacy",
+                   action="store_false", default=True,
+                   help="do NOT disable legacy hugpy/abstract_hugpy worker units on "
+                        "this box (only detect + report)")
+    p.add_argument("--no-open-firewall", dest="open_firewall",
+                   action="store_false", default=True,
+                   help="do NOT add a ufw rule opening the worker port to central "
+                        "(only report)")
+    p.add_argument("--install-comfy", dest="install_comfy", action="store_true",
+                   default=(os.environ.get("HUGPY_INSTALL_COMFY", "").lower()
+                            in ("1", "true", "yes")),
+                   help="install/converge ComfyUI (the worker owns its lifecycle) "
+                        "and wire it to the shared model store")
+    p.add_argument("--no-comfy", dest="install_comfy", action="store_false",
+                   help="skip ComfyUI install/convergence")
+    p.add_argument("--comfy-version", default=os.environ.get("HUGPY_COMFY_VERSION"),
+                   help="ComfyUI git tag/ref to pin (default: current default branch, "
+                        "recorded by commit)")
+    p.add_argument("--comfy-start-check", action="store_true",
+                   help="after install, actually START comfy and verify "
+                        "/system_stats + a checkpoint (slower)")
     opts = p.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     if not opts.central:
@@ -372,8 +483,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         if rc != 0:
             return rc
 
+    from hugpy_fleet.worker import setup as _setup
     service = _resolve_service(opts.service)
+    dry = bool(opts.dry_run or opts.self_check_only)
+
+    # ── pre-service convergence + checks (the by-hand steps, now in code) ──────
+    checks, comfy_env = _turnkey_converge(opts, _setup)
+    opts.extra_env = comfy_env  # baked into the unit by _env_for
+
+    # --self-check-only: report the box's state and stop (write no unit).
+    if opts.self_check_only:
+        print(_setup.render(checks))
+        return _setup.overall_rc(checks)
+
+    # ── write + enable the service (dry-run writes nothing) ───────────────────
     if service in ("foreground", "none"):
+        print(_setup.render(checks))
+        rc = _setup.overall_rc(checks)
+        if rc != 0:
+            print("self-check found required failures; NOT starting the worker.",
+                  file=sys.stderr)
+            return rc
         if service == "none":
             print("worker command:", " ".join(_worker_argv(opts)))
             return 0
@@ -383,14 +513,93 @@ def main(argv: Optional[List[str]] = None) -> int:
         if service == "systemd":
             print(_install_systemd_user(opts))
         elif service == "launchd":
-            print(_install_launchd(opts))
+            if dry:
+                print(f"  DRY-RUN: would install launchd agent for {opts.name}")
+            else:
+                print(_install_launchd(opts))
         elif service == "schtasks":
-            print(_install_schtasks(opts))
+            if dry:
+                print(f"  DRY-RUN: would create scheduled task for {opts.name}")
+            else:
+                print(_install_schtasks(opts))
     except Exception as exc:
         print(f"service registration failed ({exc}); run the worker manually:\n  "
               + " ".join(_worker_argv(opts)), file=sys.stderr)
         return 1
-    return 0
+
+    # ── post-service checks (only when the worker was actually started) ────────
+    if not dry and service == "systemd" and opts.verify:
+        home = os.path.expanduser("~")
+        hugpy_home = os.environ.get("HUGPY_HOME") or os.path.join(home, ".hugpy")
+        worker_id = _setup.wait_for_worker_id(hugpy_home, timeout=30.0)
+        if worker_id:
+            checks.append(_setup.Check("registered", _setup.OK,
+                                       f"worker registered with central; id={worker_id}",
+                                       required=False))
+        else:
+            checks.append(_setup.Check("registered", _setup.WARN,
+                                       "worker did not persist a registered id within "
+                                       "30s — check `journalctl --user -u "
+                                       f"{_SERVICE_NAME} -f`", required=False))
+        checks.append(_setup.check_central_can_reach_worker(
+            opts.central, worker_id, getattr(opts, "enroll_token", None)))
+
+    if opts.install_comfy:
+        checks.append(_setup.comfy_self_check(
+            comfy_env, do_start=bool(opts.comfy_start_check), dry_run=dry))
+
+    print(_setup.render(checks))
+    return _setup.overall_rc(checks)
+
+
+def _turnkey_converge(opts, _setup):
+    """Run every convergence + inspection step and return (checks, comfy_env).
+
+    Each step is gated by its own flag AND the global dry-run/self-check-only:
+    ``dry`` means inspect + record the exact command, change nothing on the box.
+    """
+    dry = bool(opts.dry_run or opts.self_check_only)
+    checks = []
+    # item 1 — worker -> central reachability.
+    if opts.verify:
+        checks.append(_setup.check_central_reachable(opts.central))
+    # item 1 / 10 — advertise URL (explicit wins, else derived; report clearly).
+    checks.append(_setup.check_advertise(opts.central, opts.port,
+                                         getattr(opts, "advertise", None)))
+    # item 2 — slot port clearance (defense-in-depth atop slot_agent's guard).
+    try:
+        from hugpy_engine.serve.slots import _slot_count, _slot_port_base
+        sc, spb = _slot_count(), _slot_port_base()
+    except Exception:  # noqa: BLE001
+        sc = int(os.environ.get("SLOT_COUNT", "2") or 2)
+        spb = int(os.environ.get("SLOT_PORT_BASE", "8101") or 8101)
+    checks.append(_setup.check_slot_ports(opts.port, sc, spb))
+    # item 6 — legacy worker units on this box.
+    checks.append(_setup.retire_legacy_workers(dry_run=dry or not opts.retire_legacy))
+    # item 4 — CUDA engine (native llama-server + llama-cpp-python offload).
+    checks.append(_setup.provision_cuda_engine(
+        dry_run=dry or not opts.provision_engine))
+    # item 5 — torch + torchvision matched set, importable.
+    checks.append(_setup.check_torch_companions())
+    # item 11 — ComfyUI (worker owns its lifecycle).
+    comfy_env = {}
+    if opts.install_comfy:
+        c, comfy_env = _setup.provision_comfy(
+            storage_root=opts.storage, worker_port=opts.port,
+            slot_port_base=spb, slot_count=sc,
+            version=opts.comfy_version, dry_run=dry)
+        checks.append(c)
+    else:
+        checks.append(_setup.Check(
+            "comfyui", _setup.SKIP,
+            "ComfyUI install not requested (--install-comfy / HUGPY_INSTALL_COMFY=1 "
+            "to enable)", required=False))
+    # item 8 — firewall: open the worker port to central.
+    checks.append(_setup.open_firewall_to_central(
+        opts.central, opts.port, dry_run=dry or not opts.open_firewall))
+    # item 9 — stale central record (central-side; recorded, not changed here).
+    checks.append(_setup.note_stale_record())
+    return checks, comfy_env
 
 
 if __name__ == "__main__":

@@ -7,7 +7,6 @@ shim re-exports it so any lingering import path keeps working while there is
 exactly one implementation.
 """
 from hugpy_engine.serve.serve import (  # noqa: F401
-    DEFAULT_LLAMA_CTX,
     DEFAULT_LLAMA_NGL,
     DEFAULT_LLAMA_THREADS,
     DEFAULT_SERVE_MODE,

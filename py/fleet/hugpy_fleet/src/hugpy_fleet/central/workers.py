@@ -142,6 +142,15 @@ def _default_workers_path() -> str:
 # A worker that hasn't checked in within this window is considered offline.
 HEARTBEAT_TIMEOUT_SECONDS = 45.0
 
+# A same-NAME record must be stale by MORE than this before a new registration
+# (new worker_id + new url) is allowed to supersede it (operator follow-up
+# 2026-09-25: a-brain re-registered on a new id/url and the old offline row
+# lingered as a console duplicate). Comfortably longer than the offline threshold
+# so a box merely between heartbeats — or one that will re-register with the SAME
+# id after a brief blip — is never retired out from under itself; only a genuine
+# ghost (a different id that has been dark for minutes) is superseded.
+STALE_SUPERSEDE_SECONDS = max(HEARTBEAT_TIMEOUT_SECONDS * 6, 300.0)
+
 
 def _provision_stall_seconds() -> float:
     """Forward-progress silence (seconds) after which a provisioning entry stops
@@ -405,16 +414,21 @@ def _now() -> float:
 # model) in ``worker["designation_meta"]`` beside ``worker["models"]`` (the
 # plain designation list stays exactly as it was, for every old reader):
 #
-#   * PIN — operator intent: "I want this resident on this worker". Only an
-#     operator action sets/clears it (POST /llm/workers/<id>/pin, pin-all,
-#     unpin-all). Pinned models are what central (re)loads onto the worker
-#     after a WORKER boot or a CENTRAL restart (worker_routes._pin_restore_warm),
-#     from the files already on that worker's disk. Pinning never evicts and
-#     never forces placement.
+#   * PIN — operator intent: "this model is ALLOCATED to this worker" (its
+#     routing lives here), durably. Only an operator action sets/clears it
+#     (POST /llm/workers/<id>/pin, pin-all, unpin-all). What a pin DOES: the
+#     allocation survives restarts, re-registers and designation prunes, and
+#     central refuses unassign while pinned (409). What a pin does NOT do:
+#     load anything into VRAM/RAM, pre-fetch files, protect from eviction, or
+#     give eviction precedence. A pinned model loads when something CALLS it,
+#     like any other. Canonical statement: worker/agent.py ``_pinned``
+#     (operator ruling 2026-07-17). "Allocate" above means the designation
+#     list, never loading — the 2026-09-23 pin-restore misread it as "load on
+#     boot" and was removed 2026-09-25.
 #   * DESIGNATION SOURCE — who wrote the designation ("operator", or one of the
 #     automated sources below) and when. Automated designations are TRANSIENT:
-#     never restored on a row-loss re-register, never reloaded on restart, and
-#     pruned (prune_designations) once the model is not loaded and has not been
+#     never restored on a row-loss re-register, and pruned
+#     (prune_designations) once the model is not loaded and has not been
 #     called on that worker for N hours.
 #
 # A record's ``pinned`` key is TRI-STATE: absent = no central decision yet, so
@@ -1320,6 +1334,123 @@ def _comfy_available(worker: Dict[str, Any]) -> bool:
     return isinstance(comfy, dict) and bool(comfy.get("available"))
 
 
+def _model_comfy_filename(model_key: str) -> Optional[str]:
+    """The checkpoint filename a comfy model loads (its ``cfg.filename`` — the
+    ckpt_name a ComfyRunner puts in the graph), or None when unresolvable. This is
+    the name that must appear in a worker's advertised ``comfy.checkpoints`` for
+    the box to be able to serve it. None -> caller treats presence as unknown
+    (never guessed)."""
+    if not model_key:
+        return None
+    try:
+        from hugpy_engine.config.main import get_model_config
+        cfg = get_model_config(model_key)
+        fn = getattr(cfg, "filename", None)
+        return str(fn) if fn else None
+    except Exception:  # noqa: BLE001 — unknown filename: caller degrades
+        return None
+
+
+def _comfy_ckpt_stem(name: Any) -> str:
+    """The synthesis-normalized stem of a checkpoint filename — the SAME transform
+    the comfy sweep uses to mint a ``comfy-<stem>`` key from an on-disk checkpoint
+    (models_config: drop the extension, fold every run of non-alphanumerics to a
+    single ``-``, strip leading/trailing ``-``, lowercase). Reused so central can
+    match a worker's ADVERTISED checkpoint to a worker-synthesized comfy key it
+    cannot itself resolve (central holds no comfy files). ``sd_turbo.safetensors``
+    -> ``sd-turbo``."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    if "." in base:
+        base = base.rsplit(".", 1)[0]
+    return re.sub(r"[^A-Za-z0-9]+", "-", base).strip("-").lower()
+
+
+def _comfy_key_stem(model_key: Any) -> str:
+    """The checkpoint stem carried by a ``comfy-<stem>`` model key (the reverse of
+    the sweep's mint), or ``""`` when the key is not a comfy-prefixed key. This is
+    the fallback central uses when it cannot resolve a worker-synthesized comfy
+    row to its ``cfg.filename``: ``comfy-sd-turbo`` -> ``sd-turbo``."""
+    mk = str(model_key or "").strip().lower()
+    if not mk.startswith("comfy-"):
+        return ""
+    return mk[len("comfy-"):].strip("-")
+
+
+def _is_comfy_model(model_key: str) -> bool:
+    """Whether ``model_key`` names a ComfyUI-framework model.
+
+    Primary signal is the registry framework (``== "comfy"``). FALLBACK to the
+    fleet-wide ``comfy-<name>`` key convention: central often cannot resolve a
+    WORKER-SYNTHESIZED comfy row (``comfy-<stem>``, minted from a checkpoint file
+    that lives only on the worker's disk — central holds no comfy files), so
+    ``get_model_config`` raises and ``_model_engine`` returns None. In that case
+    the explicit ``comfy-`` prefix (used by the comfy sweep, the curated staples,
+    and every video preset) is the honest marker. This never guesses a non-comfy
+    model INTO comfy — only a resolved framework or the explicit prefix qualifies."""
+    if _model_engine(model_key) == "comfy":
+        return True
+    return str(model_key or "").strip().lower().startswith("comfy-")
+
+
+def _comfy_has_checkpoint(worker: Dict[str, Any], model_key: str,
+                          _want: Optional[str] = None,
+                          _want_stem: Optional[str] = None) -> bool:
+    """Whether ``worker``'s ComfyUI advertises the checkpoint ``model_key`` loads
+    as INSTALLED and loadable (``comfy.checkpoints`` — the CheckpointLoaderSimple
+    object_info list the agent probes).
+
+    This is the comfy twin of "the model is on this box's disk": a comfy-framework
+    model is served by the external ComfyUI, so a box whose comfy can load the
+    checkpoint can serve it just-in-time (comfy cold-loads it; the worker's
+    evict-to-fit clears the card) — exactly the way a designated LLM cold-loads.
+    It is what lets image/video generation follow the standard resolve -> place ->
+    cold-load flow WITHOUT an explicit operator designation. Matched by basename,
+    case-insensitively, tolerant of comfy's recursive sub-folder names. Absent
+    list or unknown filename -> False (never claim a presence we cannot prove).
+
+    ``_want`` lets a hot caller (workers_for_model) resolve the model's checkpoint
+    filename ONCE per call and pass it in, instead of paying a get_model_config
+    lookup per worker; ``None`` resolves it here (the cold explain_no_worker path),
+    an EMPTY string means "central could not resolve the filename — use the stem
+    fallback". ``_want_stem`` is the same one-per-call hoist for the stem fallback.
+
+    STEM FALLBACK (2026-09-24, comfy-sd-turbo x computron): central often cannot
+    resolve a WORKER-SYNTHESIZED comfy row (``comfy-<stem>``) to its exact
+    ``cfg.filename`` because it holds no comfy files, so ``_want`` is empty. It then
+    matches the advertised checkpoint by the SAME normalization the comfy sweep
+    used to mint the key (``_comfy_ckpt_stem``), so an advertised
+    ``sd_turbo.safetensors`` satisfies ``comfy-sd-turbo``. When the exact filename
+    IS known (curated staples), the authoritative basename match is used and the
+    stem guess is never reached — staple routing is byte-identical."""
+    comfy = worker.get("comfy")
+    if not isinstance(comfy, dict):
+        return False
+    names = comfy.get("checkpoints")
+    if not isinstance(names, (list, tuple)) or not names:
+        return False
+    want = _want if _want is not None else _model_comfy_filename(model_key)
+    if want:
+        want = want.replace("\\", "/").strip()
+        want_l = want.lower()
+        want_base = os.path.basename(want).lower()
+        if not want_base:
+            return False
+        for n in names:
+            s = str(n).replace("\\", "/").strip()
+            if s.lower() == want_l or os.path.basename(s).lower() == want_base:
+                return True
+        return False
+    # Exact filename unknown -> stem fallback (see docstring). Only a comfy-<stem>
+    # key yields a stem; anything else stays "unknown -> not proven present".
+    stem = _want_stem if _want_stem is not None else _comfy_key_stem(model_key)
+    if not stem:
+        return False
+    for n in names:
+        if _comfy_ckpt_stem(n) == stem:
+            return True
+    return False
+
+
 def _has_usable_gpu(worker: Dict[str, Any]) -> bool:
     """Whether the worker advertises a GPU with free VRAM (for efficiency ranking).
 
@@ -1917,6 +2048,54 @@ def _worker_gpu_total_bytes(worker: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _engine_splittable(engine: Any) -> bool:
+    """Can this engine split ONE model across the box's GPUs?
+
+    llama.cpp GGUF can (tensor_split across local cards), so its GPU ceiling is
+    the box SUM. diffusers/transformers/comfy load a whole pipeline onto ONE
+    device, so their GPU ceiling is the LARGEST SINGLE card — the box sum
+    over-promises a multi-GPU box (a 30 GiB pipeline does NOT fit 4x24 GiB even
+    though the box has 96 GiB free). Degrades to True (box-sum, today's
+    behavior) on any read error — never manufacture a tighter refusal."""
+    try:
+        from hugpy_engine.alloc_modes import is_gguf_engine
+        return bool(is_gguf_engine(engine))
+    except Exception:  # noqa: BLE001 — never break a fit read over an import
+        return True
+
+
+def _worker_gpu_capacity_for_engine(worker: Dict[str, Any], engine: Any,
+                                    *, use: str = "total") -> Optional[int]:
+    """The GPU-side capacity a WHOLE model of ``engine`` may claim on this box.
+
+    Per-DEVICE aware (2026-09-25): a non-splittable engine gets the LARGEST SINGLE
+    card (a pipeline lives on one device), a splittable one gets the box SUM
+    (llama.cpp tensor-splits). ``use='total'`` for the static fit/feasibility
+    gates; ``use='free'`` for live admission.
+
+    BYTE-IDENTICAL to the old pooled path on a single-GPU box, and DEGRADES to it
+    whenever central lacks live per-device data (a fresh worker before its first
+    probe) — never manufacture a smaller GPU limit from missing data."""
+    devs = []
+    try:
+        from hugpy_engine.resolvers.device_placement import (
+            devices_from_gpus, whole_pipeline_gpu_capacity)
+        devs = devices_from_gpus(worker.get("gpus"))
+        if len(devs) > 1 and any(d.total_b for d in devs):
+            cap = whole_pipeline_gpu_capacity(
+                devs, _engine_splittable(engine), use=use)
+            if cap is not None:
+                return int(cap)
+    except Exception:  # noqa: BLE001 — degrade to the pooled figure below
+        logger.debug("per-device GPU capacity read failed for %s",
+                     worker.get("id"), exc_info=True)
+    # Single-GPU box, no per-device data, or a splittable engine: the pooled
+    # figure (== the box sum) is the correct and historical answer.
+    if use == "total":
+        return _worker_gpu_total_bytes(worker)
+    return _free_headroom_bytes(worker)
+
+
 def _worker_ram_total_bytes(worker: Dict[str, Any]) -> Optional[int]:
     """The box's RAW installed memory (bytes) — the ``ram_total`` field
     _ram_summary reads, falling back to the DURABLE last-known RAM total when the
@@ -2061,12 +2240,27 @@ def moe_override(worker: Dict[str, Any], model_key: str) -> Optional[bool]:
 
 def moe_effective(worker: Dict[str, Any], model_key: str) -> bool:
     """Whether a split IS in force for this (worker, model) — what the checkbox
-    renders. The override when the operator set one, else what the derivation
-    actually produced (n_cpu_moe present in the derived spill)."""
+    renders. The override when the operator set one, else what the EFFECTIVE
+    placement carries.
+
+    AUTO reads the PERSISTED spill resolved exactly as the emission seam resolves
+    it (the MoE overlay + the gpu-only suppression), NOT the blank derivation.
+    That is what keeps this box and the Alloc cell from disagreeing: a persisted
+    gpu-only pin suppresses the split (n_cpu_moe 0), so it reads OFF here just as
+    it reads 'gpu-only' there — instead of the box lighting off the blank
+    derivation while the cell shows the pinned mode. A model with NOTHING
+    persisted falls back to the derivation (unchanged)."""
     ov = moe_override(worker, model_key)
     if ov is not None:
         return ov
     try:
+        persisted = (worker.get("spill_by_model") or {}).get(str(model_key))
+        if persisted:
+            spill = _strip_wire_inert_mode(dict(persisted))
+            apply_moe_override_to_spill(worker, model_key, spill)  # no-op for auto
+            suppress_moe_split_for_gpu_only(worker, model_key, spill)
+            ncm = spill.get("n_cpu_moe")
+            return ncm is not None and int(ncm) != 0
         spill = (derived_default_allocation(worker, model_key) or {}).get("spill") or {}
         return spill.get("n_cpu_moe") is not None
     except Exception:  # noqa: BLE001
@@ -2126,13 +2320,16 @@ def apply_moe_override_to_spill(worker: Dict[str, Any], model_key: str,
         for k in ("gpu_mem_gib", "cpu_mem_gib"):
             if derived.get(k) is not None:
                 spill.setdefault(k, derived[k])
-        # t143: the split IS the allocation — carry the derived mode too (only
-        # when the pin carries none, e.g. a stripped max-gpu), so the wire is
-        # byte-identical to a blank MoE's derived default and the console's
-        # Alloc cell (model_alloc_modes -> derive_alloc_mode) reads "explicit"
-        # instead of the pinned label the toggle just overrode.
+        # t143: the split IS the allocation, so forcing it ON also OWNS the mode.
+        # ASSIGN (not setdefault) the derived mode so a conflicting pinned label
+        # cannot survive alongside MoE-on: a stale gpu-only stamp, an explicit
+        # max-gpu/max-ram pick — all become "explicit". The wire is then
+        # byte-identical to a blank MoE's derived default and the console's Alloc
+        # cell (model_alloc_modes -> derive_alloc_mode) reads "explicit", never
+        # gpu-only/max-gpu/max-ram while the split is on (operator, 2026-09-25:
+        # one source of truth — MoE-on IS the explicit allocation).
         if derived.get("alloc_mode"):
-            spill.setdefault("alloc_mode", derived["alloc_mode"])
+            spill["alloc_mode"] = derived["alloc_mode"]
         return spill
     except Exception:  # noqa: BLE001 — the MoE overlay must never break the relay
         logger.debug("moe override overlay skipped for %s on %s", model_key,
@@ -2192,6 +2389,57 @@ def suppress_moe_split_for_gpu_only(worker: Dict[str, Any], model_key: str,
         logger.debug("gpu-only MoE suppression skipped for %s on %s", model_key,
                      (worker or {}).get("name"), exc_info=True)
         return spill
+
+
+def _drop_stale_alloc_stamp(worker: Dict[str, Any], model_key: str) -> bool:
+    """Drop a BARE, STALE placement stamp for (worker, model) IN PLACE so the
+    model tracks its derivation again. Returns True if a stamp was dropped.
+
+    A BARE stamp is a persisted spill that carries a mode but no REAL split
+    (n_cpu_moe) and no custom budgets — e.g. the routine ``{"n_gpu_layers": -1}``
+    gpu-only stamp central writes for a model that "fits the card". It is STALE
+    when its resolved mode disagrees with the model's OWN non-MoE derived mode
+    (feasibility-derived, ``moe_force=False``): a coder-next stamped gpu-only on a
+    24 GiB card whose 48 GiB does not fit whole would derive max-ram, so the
+    gpu-only stamp is the stale artifact. A DELIBERATE, FEASIBLE pin is never
+    touched: a gpu-only pin on a model that fits the card whole matches its own
+    non-MoE derivation and stays; a real explicit split or a custom-budget pin is
+    an operator contract and stays.
+
+    Used by ``set_moe``: toggling the MoE lever must not leave the alloc mode
+    contradicting it (operator, 2026-09-25: one source of truth). Dropping the
+    stale stamp lets the derivation govern under the new MoE force — ON derives
+    the explicit split, OFF falls back to the non-MoE mode, ⟲ follows the
+    derivation."""
+    try:
+        by = worker.get("spill_by_model") or {}
+        spill = by.get(model_key)
+        if not isinstance(spill, dict) or not spill:
+            return False
+        # A real split or an explicit-budget pin is a deliberate contract — keep.
+        if spill.get("n_cpu_moe") is not None:
+            return False
+        if any(spill.get(k) is not None for k in ("gpu_mem_gib", "cpu_mem_gib",
+                                                  "leniency_pct", "priority")):
+            return False
+        from hugpy_engine.alloc_modes import derive_alloc_mode, feasible_default_mode
+        current = derive_alloc_mode(_strip_wire_inert_mode(dict(spill)))
+        non_moe = feasible_default_mode(
+            _model_engine(model_key),
+            _model_size_bytes(model_key),
+            _worker_gpu_total_bytes(worker),
+            _worker_ram_total_bytes(worker),
+            moe=_model_moe_detail(model_key),
+            bnb=bnb_enabled(worker, model_key),
+            moe_force=False)
+        if non_moe and current != non_moe:
+            by.pop(model_key, None)
+            return True
+        return False
+    except Exception:  # noqa: BLE001 — never break a toggle over the reconcile
+        logger.debug("stale alloc stamp reconcile skipped for %s on %s",
+                     model_key, (worker or {}).get("name"), exc_info=True)
+        return False
 
 
 def bnb_enabled(worker: Dict[str, Any], model_key: str) -> bool:
@@ -2282,10 +2530,48 @@ def derived_default_allocation(worker: Dict[str, Any],
             _worker_ram_total_bytes(worker),
             moe=_model_moe_detail(model_key),
             bnb=bnb_enabled(worker, model_key),
-            moe_force=moe_override(worker, model_key))
+            moe_force=moe_override(worker, model_key),
+            gpu_reserve_bytes=_model_moe_gpu_reserve(model_key))
     except Exception:  # noqa: BLE001 — a derivation must never break a read/relay
         return {"mode": "max-gpu", "spill": {},
                 "why": "derivation unavailable — kept the max-gpu default"}
+
+
+_MOE_RESERVE_CACHE: Dict[str, Any] = {}   # gguf path -> ((mtime_ns, size), bytes)
+
+
+def _model_moe_gpu_reserve(model_key: str) -> Optional[int]:
+    """VRAM a MoE GGUF needs on the card BESIDE its weights at its served
+    context: KV at the trained ctx + the compute allowance + the mmproj
+    projector (no hugpy-wide ceiling). Input to the MoE card
+    contract in default_allocation. Computed once per file and re-read only
+    when the file changes (model facts are computed when models change, never
+    per request). None for dense / unresolvable -> backbone-only split."""
+    if not _model_moe_detail(model_key):
+        return None
+    try:
+        import os
+        from hugpy_engine import spill
+        from hugpy_engine.config.main import get_model_config
+        from hugpy_engine.serve.serve import _model_file_for
+        gguf = _model_file_for(model_key, get_model_config(model_key))
+        if not gguf:
+            return None
+        st = os.stat(gguf)
+        sig = (st.st_mtime_ns, st.st_size)
+        hit = _MOE_RESERVE_CACHE.get(gguf)
+        if hit and hit[0] == sig:
+            return hit[1]
+        geo = spill._gguf_kv_geometry(gguf) or {}
+        ctx = int(geo.get("ctx_train") or 0) or None
+        reserve, source, _ = spill.vram_ctx_reserve_bytes(gguf, n_ctx=ctx)
+        val = None
+        if source in ("computed", "env") and reserve:
+            val = int(reserve) + int(_model_physical(model_key).get("mmproj_bytes") or 0)
+        _MOE_RESERVE_CACHE[gguf] = (sig, val)
+        return val
+    except Exception:  # noqa: BLE001 — unknown reserve degrades to backbone-only
+        return None
 
 
 def allocated_totals(worker: Dict[str, Any]) -> Dict[str, Any]:
@@ -3148,6 +3434,20 @@ def _worker_forms(worker: Dict[str, Any]) -> set:
             str(worker.get("name") or "").strip().lower()} - {""}
 
 
+def _worker_forms_hist(worker: Dict[str, Any]) -> set:
+    """:func:`_worker_forms` PLUS every FORMER name (operator incident
+    2026-09-25): a preference/designation stored under a name the worker used to
+    carry ("aeb" before it was renamed "ae-worker", same id) still resolves to
+    this worker. Used only by :func:`_pref_index`; politeness stays on the
+    current-forms set so a stale name can never silently flip eviction manners."""
+    forms = _worker_forms(worker)
+    for h in (worker.get("prev_names") or []):
+        h = str(h or "").strip().lower()
+        if h:
+            forms.add(h)
+    return forms
+
+
 def _polite_on(worker: Dict[str, Any], polite: bool, by_worker: dict) -> bool:
     """k62: is the model polite ON THIS WORKER? ``map[W]`` when the operator
     named W, else the model-wide default. Politeness is per (model × worker)
@@ -3165,8 +3465,13 @@ def _pref_index(worker: Dict[str, Any], prefs: List[str]) -> Optional[int]:
     OFF the list. Matched on id OR name, case-insensitively: the console posts
     ids, an operator editing the file by hand writes names, and a designation
     that silently failed to match would land the model somewhere it was never
-    designated — the exact failure the hardness rule forbids."""
-    forms = _worker_forms(worker)
+    designated — the exact failure the hardness rule forbids.
+
+    History-tolerant (operator incident 2026-09-25): a token matching a FORMER
+    name of the worker resolves too, so a stale "aeb" written before the rename
+    still finds "ae-worker". The startup migration rewrites such tokens to the
+    worker id; this is the belt for any it could not resolve at migrate time."""
+    forms = _worker_forms_hist(worker)
     for i, want in enumerate(prefs):
         if str(want).strip().lower() in forms:
             return i
@@ -3182,10 +3487,13 @@ def _prefs_scope(candidates: List[Dict[str, Any]], prefs: List[str],
     nowhere" must never be a silent scope decision."""
     kept = [w for w in candidates if _pref_index(w, prefs) is not None]
     if not kept:
+        # State the FACT only; the OUTCOME (refuse under strict/designated, else
+        # fall back to the feasible set) is the caller's decision and it logs that
+        # itself — this used to assert "refusing", contradicting the very next
+        # "falling back to the FEASIBLE set" line under the default feasible mode.
         logger.warning(
-            "model %s has an ordered worker preference %s and NONE of them is "
-            "an eligible candidate right now — refusing rather than landing "
-            "off-list (designation is hard per candidate)", model_key, prefs)
+            "model %s has an ordered worker preference %s but NONE of them is an "
+            "eligible candidate right now", model_key, prefs)
     return kept
 
 
@@ -3228,6 +3536,99 @@ def _polite_admits(worker: Dict[str, Any], model_key: str) -> tuple:
                    or "does not fit free VRAM without evicting a resident")
 
 
+# ── CAPACITY OUTRANKS RESIDENCY (operator incident 2026-09-25) ───────────────
+# A studio movie job (sd-turbo, text-to-image) was routed to computron — an
+# 8 GB 4060 Laptop with 0 GB free — because sd-turbo was tier=resident there,
+# while ae-worker (a 3090 with 14 GB free, online, idle) sat unused. The pick
+# then CUDA-OOM'd. Residency ("tier=resident") was trumping capacity: the rank
+# gave computron term ② == 0 and never asked whether it could actually LAND the
+# model on GPU right now.
+#
+# Ruling: residency is a TIE-BREAKER among workers that can serve at comparable
+# quality, NOT an override. A worker where the model is resident/allocated but
+# which central can PROVE cannot place it on GPU now (derived ram-only /
+# insufficient free VRAM / a degraded non-GPU-resident landing) must lose to an
+# eligible worker that CAN place it on GPU — even at the cost of a cold load.
+# Designation (term ①) is unaffected: a HARD designation still outranks this,
+# because a designated box is a scope, not a preference (see the block comment
+# above _resident_on and test_designation_is_hard_and_outranks_everything).
+#
+# HONEST-NEGATIVE-ONLY, exactly like _polite_admits: central can only ever PROVE
+# the model does NOT fit free VRAM. An unregistered probe, an unsizable model, a
+# worker reporting no VRAM figure, a fits-outright verdict, or a band-floor-
+# admissible landing all read as penalty 0 (central knows nothing that would
+# demote this box), so ranking degrades to exactly the pre-feature order and the
+# worker's own admission makes the real call. The penalty only ever DISCRIMINATES
+# when some eligible worker can place on GPU and another provably cannot.
+def _gpu_placeable_penalty(worker: Dict[str, Any],
+                           model_key: str) -> tuple:
+    """``(penalty, reason)`` — 1 when central can PROVE ``worker`` cannot land
+    ``model_key`` GPU-resident right now, else 0. See the block comment above.
+
+    Uses the SAME registered free-room probe (worker_routes._worker_fit) the
+    polite-load path uses, so the demotion and the polite gate speak one fit
+    verdict rather than two drifting copies of the math."""
+    probe = _free_room_probe
+    if probe is None:
+        return 0, None
+    try:
+        verdict = probe(model_key, worker) or {}
+    except Exception:  # noqa: BLE001 — a preflight miss never demotes a box
+        return 0, None
+    # Fits free VRAM outright, or fits at its VRAM band floor under contention:
+    # a genuine GPU landing — no penalty.
+    if verdict.get("gpu_resident") or verdict.get("band_floor_admissible"):
+        return 0, None
+    # Central knows nothing it can act on (unsizable model / unmeasured VRAM):
+    # degrade to neutral so the worker's own admission decides.
+    if verdict.get("need") is None or verdict.get("vram_free") is None:
+        return 0, None
+    # Proven negative: the model would NOT be GPU-resident here (ram-only /
+    # partial-offload / won't fit) while another worker might take it on GPU.
+    reason = verdict.get("reason") or "would not land GPU-resident on this worker"
+    return 1, reason
+
+
+def _hard_designated(worker: Dict[str, Any], model_key: str, wanted: set) -> bool:
+    """A HARD placement scope for this model: the worker carries it as an operator
+    DESIGNATION (``models``) or a system placement GRANT. This is the subset of
+    "home" that survives the capacity demotion — residency alone (``loaded_models``)
+    is NOT hard, which is the whole point of the 2026-09-25 ruling: a warm copy on
+    a box that can no longer run it on GPU must not scope-lock the model there."""
+    des = list(worker.get("models") or []) + list((worker.get("grants") or {}).keys())
+    return _serveable_match(model_key, wanted, des)
+
+
+def _stamp_gpu_placement(candidates: List[Dict[str, Any]],
+                         model_key: str) -> None:
+    """Stamp each candidate's GPU-placement penalty ONCE (term ① of the rank),
+    before the sort — computing it inside the sort key would call the probe
+    O(n log n) times. Transient response-copy field, exactly like
+    ``_wildcard_catch`` (``w`` is a _public_view copy; see workers_for_model).
+    No-op when no probe is registered, so standalone/bare central and the fleet
+    unit tests keep the pre-feature ranking byte-for-byte.
+
+    A HARD-designated worker is NEVER penalized (its scope is a fence, not a
+    quality signal) — so the demotion only ever reorders residency/allocation/
+    wildcard candidates, exactly the residency-vs-capacity conflict of the ruling."""
+    if _free_room_probe is None:
+        return
+    wanted = _match_keys(model_key)
+    for w in candidates:
+        if not isinstance(w, dict):
+            continue
+        if _hard_designated(w, model_key, wanted):
+            w["_gpu_place_penalty"] = 0
+            w.pop("_gpu_place_reason", None)
+            continue
+        pen, why = _gpu_placeable_penalty(w, model_key)
+        w["_gpu_place_penalty"] = pen
+        if why:
+            w["_gpu_place_reason"] = why
+        elif "_gpu_place_reason" in w:
+            w.pop("_gpu_place_reason", None)
+
+
 def _emit_route_refuse(model_key: str, reason: str,
                        considered: List[Dict[str, Any]]) -> None:
     """Telemetry: WHY nothing was picked. Rides the same eviction feed as
@@ -3249,7 +3650,8 @@ def _emit_route_refuse(model_key: str, reason: str,
 
 
 def _routing_rank(worker: Dict[str, Any], model_key: str, wanted: set,
-                  starred: bool, pref_index: int = 0) -> tuple:
+                  starred: bool, pref_index: int = 0,
+                  feasible_ordering: bool = False) -> tuple:
     """The shared sort key for every routing decision (primary pick + reroute).
 
     ONE function so ``pick_for_model`` and ``candidates_for_model`` can never
@@ -3261,19 +3663,45 @@ def _routing_rank(worker: Dict[str, Any], model_key: str, wanted: set,
     a stated decision and a derived ordering that could outvote it would not be
     an order. Defaults to 0 for every worker when no list is set, so the tuple
     is a constant prefix and the ranking is byte-identical to pre-k56.
+
+    ``feasible_ordering`` (k-dist 2026-09-24) is set ONLY when ranking a feasible
+    fallback set: it appends the operator's stated fallback order — already
+    loaded, then on-disk, then most free headroom — AFTER the existing terms, so
+    it can only break ties the pre-feature key left to ``last_picked``/``id`` and
+    the sealed "designated" mode (which never passes it) stays byte-identical.
     """
-    return (
+    base = (
         # ⓪ the operator's stated candidate order (k56); 0 for all when unset.
         pref_index,
-        # ① designation is a HARD scope: home before any wildcard catch.
-        1 if worker.get("_wildcard_catch") else 0,
-        # ② measured-resident now — no reload, no cold provision.
+        # ① CAPACITY OUTRANKS RESIDENCY (operator incident 2026-09-25): a box
+        # central can PROVE cannot land the model GPU-resident now loses to one
+        # that can, even a cold one — ABOVE the home/residency terms so a warm-but-
+        # OOM box no longer wins on residency alone. HARD-designated workers are
+        # never penalized (_stamp_gpu_placement forces 0), so a designation fence
+        # still outranks a placeable wildcard. 0 for all unless _stamp_gpu_placement
+        # ran with a registered probe AND positively proved the negative — a
+        # constant-0 prefix (byte-identical) everywhere central knows nothing.
+        int(worker.get("_gpu_place_penalty") or 0),
+        # ② designation is a HARD scope: home before any wildcard/feasible catch.
+        1 if (worker.get("_wildcard_catch") or worker.get("_feasible_catch")) else 0,
+        # ③ measured-resident now — no reload, no cold provision.
         0 if _resident_on(worker, model_key, wanted) else 1,
-        # ③ holds an approved allocation for this model.
+        # ④ holds an approved allocation for this model.
         0 if _allocated_on(worker, model_key, wanted) else 1,
-        # ④..⑦ capability rank, unchanged.
+        # ⑤..⑥ capability rank, unchanged.
         0 if starred else 1,
         0 if _has_usable_gpu(worker) else 1,
+    )
+    if feasible_ordering:
+        # Fallback order among FEASIBLE catches: loaded (② already 0) > on-disk >
+        # most free headroom. On-disk is a 0/1 term; headroom sorts DESCENDING
+        # (negative bytes -> larger free first). Placed before last_picked/id so
+        # it decides genuine feasible ties without disturbing the terms above.
+        base = base + (
+            0 if _on_disk_match(worker, model_key, wanted) else 1,
+            -_free_headroom_bytes(worker),
+        )
+    return base + (
         worker.get("last_picked", 0),
         worker.get("id", ""),
     )
@@ -3290,9 +3718,26 @@ def _emit_route_select(model_key: str, chosen: Dict[str, Any],
     """
     try:
         from hugpy_fleet.central.evictions import emit_eviction_event
-        alts = [{"worker": (w.get("name") or w.get("id") or ""),
-                 "tier": _route_tier(w, model_key, wanted)}
-                for w in ordered if w.get("id") != chosen.get("id")][:6]
+        # Each runner-up carries WHY it lost when central can say so — the
+        # operator rule that routing diagnostics must name why each worker was
+        # skipped/lost. Today that reason is the GPU-placement demotion (a box
+        # that is resident/allocated but provably cannot land the model on GPU
+        # now); absent when the loss was ordinary rank order.
+        def _lost_reason(w: Dict[str, Any]) -> Optional[str]:
+            if int(w.get("_gpu_place_penalty") or 0) and w.get("_gpu_place_reason"):
+                return f"lost on capacity: {w.get('_gpu_place_reason')}"
+            return None
+        alts = []
+        for w in ordered:
+            if w.get("id") == chosen.get("id"):
+                continue
+            row = {"worker": (w.get("name") or w.get("id") or ""),
+                   "tier": _route_tier(w, model_key, wanted)}
+            why = _lost_reason(w)
+            if why:
+                row["reason"] = why
+            alts.append(row)
+        alts = alts[:6]
         emit_eviction_event(
             "route.select",
             model_key=model_key,
@@ -3325,16 +3770,67 @@ def _wildcard_map() -> Dict[str, bool]:
         return {}
 
 
-def _star_map() -> Dict[str, Any]:
-    """The per-worker ⭐ BOOT-LOAD STAR map {worker_id: model_key} (or {}).
+def _distribution_feasible() -> bool:
+    """Is the fleet in the "feasible" distribution mode (the 2026-09-24 default)?
 
-    The star's ONLY routing effect (operator RULING 2026-07-23, post-incident:
-    "it shouldn't effect anything but priority for ambiguous model calls") is a
+    Guarded re-export of models_config.fleet_distribution_mode so routing never
+    imports the config layer directly and a missing/unreadable store degrades to
+    the default (feasible == True), never to a surprise sealed-scope refusal."""
+    try:
+        from hugpy_engine.config.models.models_config import fleet_distribution_mode
+        return fleet_distribution_mode() == "feasible"
+    except Exception:  # noqa: BLE001 — never let the mode store break selection
+        return True
+
+
+def _model_strict(model_key: str) -> bool:
+    """Does this model keep the HARD designation fence under "feasible" mode?
+    Guarded re-export of overrides.model_strict; a read miss degrades to False
+    (the new-default fallback behaviour), never a surprise refusal."""
+    try:
+        from hugpy_engine.serve.overrides import model_strict
+        return bool(model_strict(model_key))
+    except Exception:  # noqa: BLE001 — placement must never break over a read
+        return False
+
+
+def _on_disk_match(worker: Dict[str, Any], model_key: str, wanted: set) -> bool:
+    """Is ``model_key`` present on the worker's HOT DRIVE (models_local — the
+    disk-truth signal, UTIL-08)? Alias-tolerant, blocked-sibling-guarded via
+    _serveable_match — the same membership test routing uses everywhere. This is
+    the presence gate for a FEASIBLE catch: routing can only offer a non-holding
+    worker a model whose files it can actually load; provisioning files to a box
+    that lacks them is hugpy's separate (budgeted, operator/placement-driven)
+    transfer protocol, never a synchronous side effect of a chat route."""
+    return _serveable_match(model_key, wanted, list(worker.get("models_local") or []))
+
+
+def _free_headroom_bytes(worker: Dict[str, Any]) -> int:
+    """Best-effort free VRAM headroom (bytes) for feasible-fallback ordering —
+    box-wide ``vram_free`` when reported, else summed per-GPU memory_free, else 0
+    (an unmeasured box sorts last on headroom, never crashes the sort)."""
+    v = worker.get("vram_free")
+    try:
+        if v is not None:
+            return int(v)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return sum(int(g.get("memory_free") or 0) for g in (worker.get("gpus") or []))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _star_map() -> Dict[str, Any]:
+    """The per-worker ⭐ STAR map {worker_id: model_key} (or {}).
+
+    The star's ONLY effect (operator RULING 2026-07-23, post-incident: "it
+    shouldn't effect anything but priority for ambiguous model calls") is a
     tie-break in worker ranking: when nothing is warm, prefer the worker whose
-    boot star == the requested model — that box would boot-load it anyway, so a
-    no-warm call lands where the model is (or will soon be) resident. The star is
-    NOT keep-warm and has NO reconcile/eviction effect (see agent boot-once +
-    worker_routes._reconcile_warm_set). Stored in models_config
+    star == the requested model, so a no-warm call lands on the box the operator
+    designated for it. The star LOADS NOTHING: it is not keep-warm, does not
+    pre-load or boot-load, and has no reconcile/eviction effect — a starred model
+    becomes resident only when a request for it arrives. Stored in models_config
     (worker_boot_prewarm.json — same store family as the wildcard flag). Read ONCE
     per pick call (never per candidate). Fully guarded: a store miss must never
     break selection — {} (no star anywhere) is the safe degradation and leaves
@@ -3503,6 +3999,7 @@ class WorkerStore:
         slot_capable: Optional[bool] = None,
         slot_incapable_reason: Optional[str] = None,
         task_capabilities: Optional[Dict[str, bool]] = None,
+        studio: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Add a worker (or re-register an existing one by id/url).
 
@@ -3526,6 +4023,21 @@ class WorkerStore:
                 # blocked worker (the route refuses it, but don't let a re-register
                 # flip it back to serving).
                 existing.setdefault("admission", "approved")
+                # RENAME HISTORY (operator incident 2026-09-25): preferences and
+                # designations stored by NAME go stale when a worker is renamed
+                # (live: unix user "aeb" -> "ae-worker", same id). Record every
+                # former name so _pref_index / the placement-name migration can
+                # still resolve a stale token to THIS worker by history. Capped;
+                # the current name is never in the history list.
+                _old = existing.get("name")
+                if name and _old and str(name) != str(_old):
+                    _hist = [h for h in (existing.get("prev_names") or [])
+                             if isinstance(h, str) and h and h != name]
+                    if _old not in _hist:
+                        _hist.append(_old)
+                    existing["prev_names"] = _hist[-8:]
+                    logger.info("worker %s renamed %r -> %r; recorded prev_names=%s",
+                                existing.get("id"), _old, name, existing["prev_names"])
                 existing.update(
                     name=name or existing.get("name"),
                     url=url or existing.get("url"),
@@ -3533,9 +4045,8 @@ class WorkerStore:
                     role=role or existing.get("role", "worker"),
                     last_seen=_now(),
                 )
-                # A register IS an agent (re)boot: stamp it so central's pin-
-                # restore (worker_routes._pin_restore_warm) reloads this worker's
-                # PINNED models once for the new agent process.
+                # A register IS an agent (re)boot: stamp when this agent process
+                # started (roster/diagnostics). Nothing is loaded because of it.
                 existing["agent_boot_at"] = _now()
                 if models is not None:
                     existing["models"] = sorted(set(models))
@@ -3568,6 +4079,13 @@ class WorkerStore:
                 # value untouched. Central's workers_for_model gate reads it.
                 if task_capabilities is not None:
                     existing["task_capabilities"] = task_capabilities
+                # STUDIO (video) placement signal (2026-09-24): what this box can do for
+                # a studio render + which real studio models it holds on disk. Stored
+                # verbatim (same legacy-safe idiom); central's studio placement reads it
+                # off the raw record (studio_placement.resolve_worker). None from an older
+                # agent leaves any prior value untouched.
+                if studio is not None:
+                    existing["studio"] = studio
                 # Only a NON-EMPTY declared pool re-asserts on re-register, so an
                 # operator-set pool isn't wiped by a worker that doesn't declare
                 # WORKER_POOL (which sends ""). Declaring workers still win.
@@ -3585,6 +4103,72 @@ class WorkerStore:
                 return _public_view(existing)
 
             wid = worker_id or uuid.uuid4().hex
+            # SUPERSEDE A STALE SAME-NAME GHOST (operator follow-up 2026-09-25).
+            # This registration matched NO existing row by id or url — a brand-new
+            # id AND url. If a record with the SAME name is still on file but has
+            # been dark past STALE_SUPERSEDE_SECONDS, it is the previous incarnation
+            # of this box (a-brain came back on a new id/url) and would otherwise
+            # linger forever as a console duplicate. Retire it here and carry the
+            # operator state that follows the BOX: its admission gate (so an already
+            # approved — or blocked — box is not silently reset) and its designations
+            # (worker-lifetime intent). NAME/old-id placement references are rewritten
+            # to the new id AFTER the transaction via the rename-migration helpers.
+            # A still-ONLINE (or not-yet-stale) same-name record is a GENUINE name
+            # collision, never superseded — we log it loudly and leave both rows.
+            superseded_forms: set = set()
+            carry_admission: Optional[str] = None
+            carry_models: List[str] = []
+            carry_spill: Dict[str, Any] = {}
+            carry_meta: Dict[str, Any] = {}
+            _want_name = str(name or "").strip().lower()
+            if _want_name:
+                for _oid, _ow in list(workers.items()):
+                    if _oid == wid or not isinstance(_ow, dict):
+                        continue
+                    if str(_ow.get("name") or "").strip().lower() != _want_name:
+                        continue
+                    _stale_for = _now() - (_ow.get("last_seen") or 0)
+                    if _is_online(_ow) or _stale_for < STALE_SUPERSEDE_SECONDS:
+                        logger.warning(
+                            "register: NEW worker %r (id %s, url %r) shares the "
+                            "name of an existing %s record (id %s, url %r, stale "
+                            "%.0fs) — NOT superseding a live/recent box; this is a "
+                            "name collision, both rows kept",
+                            name, wid, url,
+                            "ONLINE" if _is_online(_ow) else "recently-seen",
+                            _oid, _ow.get("url"), _stale_for)
+                        continue
+                    # Stale ghost: retire it, carry its operator state forward.
+                    superseded_forms |= _worker_forms_hist(_ow)
+                    if carry_admission is None:
+                        carry_admission = _ow.get("admission")
+                    carry_models = sorted(set(carry_models)
+                                          | set(_ow.get("models") or []))
+                    for _mk, _sp in (_ow.get("spill_by_model") or {}).items():
+                        carry_spill.setdefault(_mk, _sp)
+                    for _mk, _m in (_ow.get("designation_meta") or {}).items():
+                        carry_meta.setdefault(_mk, _m)
+                    workers.pop(_oid, None)
+                    logger.warning(
+                        "register: superseded stale offline worker id %s (name "
+                        "%r, url %r, dark %.0fs) with new id %s @ %r; carried "
+                        "admission=%r, %d designation(s)",
+                        _oid, _ow.get("name"), _ow.get("url"), _stale_for, wid,
+                        url, carry_admission, len(carry_models))
+            if carry_models:
+                # Automated non-pinned designations are TRANSIENT (pin-vs-designation
+                # doctrine): a superseding box inherits only operator intent, never a
+                # benchmark/autoplace designation nobody pinned.
+                _transient = {
+                    mk for mk in carry_models
+                    if isinstance(carry_meta.get(mk), dict)
+                    and carry_meta[mk].get("source") in AUTOMATED_DESIGNATION_SOURCES
+                    and not carry_meta[mk].get("pinned")}
+                if _transient:
+                    carry_models = [mk for mk in carry_models if mk not in _transient]
+                    for _mk in _transient:
+                        carry_spill.pop(_mk, None)
+                        carry_meta.pop(_mk, None)
             # 4b: a fresh row for a KNOWN worker id (its old row was swept /
             # the registry was lost) restores the operator's designations from
             # the assignment memory — designations are worker-lifetime.
@@ -3647,9 +4231,12 @@ class WorkerStore:
                 "url": url,
                 "role": role or "worker",
                 "gpus": gpus or [],
-                "models": sorted(set(models or []) | set(restored_models)),
-                "spill_by_model": restored_spill,
-                "designation_meta": restored_meta,
+                # Designations follow the box: this register's own + memory-restored
+                # + any carried from a superseded stale same-name ghost.
+                "models": sorted(set(models or []) | set(restored_models)
+                                 | set(carry_models)),
+                "spill_by_model": {**carry_spill, **restored_spill},
+                "designation_meta": {**carry_meta, **restored_meta},
                 "pkg_version": pkg_version,
                 "engine_build": engine_build,   # item L (k65) — native engine commit
                 "rpc_endpoint": rpc_endpoint,
@@ -3669,6 +4256,10 @@ class WorkerStore:
                 # import). None on a pre-feature agent -> central assumes capable so
                 # a legacy fleet routes unchanged. See workers_for_model / _task_capable.
                 "task_capabilities": task_capabilities,
+                # STUDIO (video) placement signal (2026-09-24): {"render": bool,
+                # "models":[id...], "weights_root": str|None}. None on a pre-feature /
+                # no-GPU agent. Central's studio placement reads it off the raw record.
+                "studio": studio,
                 # Runtime-env capability: {"tier": "stable"|"edge"|..., versions}.
                 # Read from the worker's own venv, so it's truth not config claim.
                 "env": env,
@@ -3678,10 +4269,15 @@ class WorkerStore:
                 "pool": (pool or "").strip(),
                 # New workers land pending: they appear in the console but do not
                 # serve traffic until an operator admits them (approval-required).
-                "admission": "pending",
+                # EXCEPT a box that SUPERSEDES a stale same-name record inherits that
+                # record's admission gate — an already-approved box is not silently
+                # reset to pending, and a BLOCKED one is never revived under a new id.
+                "admission": (carry_admission
+                              if carry_admission in self._ADMISSION_STATES
+                              else "pending"),
                 "created_at": _now(),
                 "last_seen": _now(),
-                "agent_boot_at": _now(),   # pin-restore epoch (see above)
+                "agent_boot_at": _now(),   # when this agent process started
             }
             # Inherit durable hardware facts remembered for this id (a returning
             # worker whose live row was lost keeps its totals immediately), then
@@ -3691,8 +4287,37 @@ class WorkerStore:
             if restored_ram_known:
                 worker[_RAM_TOTAL_DURABLE_KEY] = restored_ram_known
             _remember_hw_totals(worker)
+            if carry_models:
+                # Carried designations are worker-lifetime intent — make them durable
+                # in the assignment memory under the NEW id, exactly as an explicit
+                # assign would, so a later row loss restores them for this id too.
+                _remember_assignments(worker)
             workers[wid] = worker
-            return _public_view(worker)
+            result = _public_view(worker)
+        # ── after the transaction (never hold the workers flock across the
+        # cross-store placement rewrite) ──────────────────────────────────────
+        if superseded_forms:
+            # Rewrite NAME/old-id placement references (serve-overrides worker_prefs
+            # + priority-group workers) to the NEW id, via the same rename-migration
+            # helpers, so a designation written under the superseded box follows it
+            # to the new id and stops resolving by a name that now aliases a fresh id.
+            def _resolve_super(token: Any) -> Optional[str]:
+                t = str(token or "").strip().lower()
+                return wid if (t and t in superseded_forms and t != wid) else None
+            try:
+                from hugpy_engine.serve.overrides import migrate_worker_tokens as _ov_mig
+                _ov_mig(_resolve_super)
+            except Exception:  # noqa: BLE001 — a pref rewrite must never break register
+                logger.warning("supersede: overrides token rewrite failed for %s",
+                               wid, exc_info=True)
+            try:
+                from hugpy_fleet.central.priority_groups import (
+                    migrate_worker_tokens as _pg_mig)
+                _pg_mig(_resolve_super)
+            except Exception:  # noqa: BLE001 — a pref rewrite must never break register
+                logger.warning("supersede: priority-group token rewrite failed for "
+                               "%s", wid, exc_info=True)
+        return result
 
     def heartbeat(
         self,
@@ -3734,6 +4359,7 @@ class WorkerStore:
         slot_capable: Optional[bool] = None,
         slot_incapable_reason: Optional[str] = None,
         task_capabilities: Optional[Dict[str, bool]] = None,
+        studio: Optional[Dict[str, Any]] = None,
         vram_evictions: Optional[Dict[str, Any]] = None,
         vram_holders: Optional[Dict[str, Any]] = None,
         aggregate: Optional[Dict[str, Any]] = None,
@@ -3848,6 +4474,13 @@ class WorkerStore:
                 worker["config"] = config   # effective serving-config + source
             if comfy is not None:
                 worker["comfy"] = comfy     # ComfyUI presence (slice A)
+            if studio is not None:
+                # STUDIO (video) placement signal (2026-09-24): render capability + real
+                # studio models on disk. Stored verbatim; studio_placement.resolve_worker
+                # reads it off the raw record to place a video render LIKE AN LLM. None on
+                # a no-GPU / no-spine box -> the key stays unset (honest "not a studio
+                # worker"), and central's placement refuses to route a real render there.
+                worker["studio"] = studio
             if loaded_detail is not None:
                 worker["loaded_detail"] = loaded_detail
             if slots is not None:
@@ -4039,6 +4672,34 @@ class WorkerStore:
             worker["admission"] = state
             return _public_view(worker)
 
+    def seed_prev_names(self, mapping: Dict[str, List[str]]) -> int:
+        """Backfill FORMER names onto workers (operator incident 2026-09-25).
+
+        A worker renamed BEFORE rename-history tracking existed never recorded
+        its old name, so a preference/designation written under it cannot be
+        resolved by history. ``mapping`` is ``{worker_id: [former_name, ...]}`` —
+        a one-time data fact — merged into each present worker's ``prev_names``
+        (never the current name, deduped). Returns the number of workers touched.
+        Idempotent: a name already present is not re-added."""
+        touched = 0
+        with self._transaction() as workers:
+            for wid, olds in (mapping or {}).items():
+                w = workers.get(wid)
+                if w is None:
+                    continue
+                cur = str(w.get("name") or "")
+                hist = list(w.get("prev_names") or [])
+                added = False
+                for old in olds:
+                    old = str(old or "").strip()
+                    if old and old != cur and old not in hist:
+                        hist.append(old)
+                        added = True
+                if added:
+                    w["prev_names"] = hist[-8:]
+                    touched += 1
+        return touched
+
     # -- model assignment ---------------------------------------------------
     def assign_model(
         self,
@@ -4094,6 +4755,23 @@ class WorkerStore:
                 else:
                     by_model.pop(model_key, None)
             src = _norm_source(source)
+            # R3 (operator, 2026-09-25): an operator's explicit NON-SPLIT
+            # placement pick (gpu-only / max-gpu / max-ram / ram-only) for a MoE
+            # model means "all experts on GPU / no split" — it must not sit under a
+            # force-ON MoE override that would relabel it "explicit". Whichever the
+            # operator set LAST wins; this pick is last, so drop a force-ON
+            # override back to AUTO, which then follows this pinned mode. A picked
+            # "explicit" split IS a split, so it is left alone.
+            if spill and src == "operator" \
+                    and (worker.get("moe_by_model") or {}).get(model_key) is True:
+                try:
+                    from hugpy_engine.alloc_modes import derive_alloc_mode
+                    if derive_alloc_mode(spill) != "explicit" and moe_capable(model_key):
+                        worker.get("moe_by_model", {}).pop(model_key, None)
+                except Exception:  # noqa: BLE001 — never break assign over this
+                    logger.debug("moe-vs-alloc reconcile skipped for %s on %s",
+                                 model_key, worker.get("name") or worker_id,
+                                 exc_info=True)
             meta_all = worker.setdefault("designation_meta", {})
             meta = dict(meta_all.get(model_key) or {})
             prior = meta.get("source")
@@ -4115,7 +4793,18 @@ class WorkerStore:
         None (AUTO — follow the derivation, the default).
 
         None REMOVES the key rather than storing null, so the map holds only real
-        operator decisions and an absent entry unambiguously means auto."""
+        operator decisions and an absent entry unambiguously means auto.
+
+        RECONCILES the placement so the MoE lever and the alloc mode cannot
+        contradict (operator, 2026-09-25: MoE-on IS the explicit split, one source
+        of truth): a BARE, STALE placement stamp (a mode with no real split or
+        budgets whose mode disagrees with the model's own non-MoE derivation —
+        e.g. the routine ``{"n_gpu_layers": -1}`` gpu-only stamp on a model too big
+        to fit the card whole) is dropped, so the model tracks the derivation
+        under the new force: ON derives the explicit split (replacing the stale
+        stamp), OFF falls back to the non-MoE mode, ⟲ follows the derivation. A
+        real split / custom-budget / feasible pin is left untouched
+        (_drop_stale_alloc_stamp)."""
         with self._transaction() as workers:
             worker = workers.get(worker_id)
             if worker is None:
@@ -4125,6 +4814,7 @@ class WorkerStore:
                 by_model.pop(str(model_key), None)
             else:
                 by_model[str(model_key)] = bool(value)
+            _drop_stale_alloc_stamp(worker, str(model_key))
             return _public_view(worker)
 
     def set_bnb(self, worker_id: str, model_key: str,
@@ -4267,6 +4957,89 @@ class WorkerStore:
             worker.get("grants", {}).pop(model_key, None)
             return _public_view(worker)
 
+    def _resident_device_index(self, worker: Dict[str, Any],
+                               model_key: str) -> Optional[int]:
+        """The GPU INDEX this model is CURRENTLY resident on, from the worker's
+        per-device heartbeat residents (``allocations[].gpu_index``), or None if
+        it is not resident / the worker doesn't report a device index yet.
+
+        Anchoring the per-request device pin to where the model already lives is
+        what keeps the pin STABLE across requests — main_gpu is a load-contract
+        term, so a pin that flip-flopped with momentary free VRAM would evict and
+        reload the resident every call. Alias-tolerant on the key (central may
+        spell it owner~name; the worker rows carry its own canonical key)."""
+        def _norm(k: Any) -> str:
+            s = str(k or "")
+            return s.split("~")[-1].split("/")[-1].strip().lower()
+        want = _norm(model_key)
+        for row in (worker.get("allocations") or []):
+            if not isinstance(row, dict):
+                continue
+            if _norm(row.get("model_key")) != want:
+                continue
+            gi = row.get("gpu_index")
+            try:
+                return int(gi) if gi is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _device_spill_for(self, worker_id: str, model_key: str) -> Dict[str, Any]:
+        """Per-request device pin for a MULTI-GPU box: {} , {"main_gpu": N}, or
+        {"main_gpu": N, "tensor_split": [...]} — the local card(s) this model
+        should load on, engine-aware (a diffusers/comfy/transformers pipeline
+        needs ONE card that fits; a GGUF may tensor-split across several).
+
+        Emits NOTHING (byte-identical to today) when:
+          * the box has <= 1 measured GPU (single-GPU behavior unchanged),
+          * the worker does not advertise the ``device_pin`` capability (no dead
+            knob — an older worker keeps llama.cpp's own auto-split / device 0),
+          * central can't size the model, or
+          * no single card fits a non-splittable model (``none``) — the mode
+            derivation's RAM/CPU answer stands; central never forces a GPU.
+
+        Best-effort: any failure returns {} and the request proceeds exactly as
+        it does today."""
+        try:
+            worker = self._load().get(worker_id) or {}
+            if not (worker.get("caps") or {}).get("device_pin"):
+                return {}
+            from hugpy_engine.resolvers.device_placement import (
+                devices_from_gpus, plan_device_placement)
+            devs = devices_from_gpus(worker.get("gpus"))
+            if len(devs) <= 1:
+                return {}
+            need = _model_size_bytes(model_key)
+            if not need:
+                return {}
+            engine = _model_engine(model_key)
+            splittable = _engine_splittable(engine)
+            # Stay where it already lives (no reload churn) when we can see it.
+            anchored = self._resident_device_index(worker, model_key)
+            if anchored is not None and any(d.index == anchored for d in devs):
+                logger.debug("device pin for %s on %s anchored to resident card %s",
+                             model_key, worker_id, anchored)
+                return {"main_gpu": anchored}
+            plan = plan_device_placement(int(need), devs, splittable=splittable)
+            if plan.kind == "single":
+                logger.info("device pin: %s on %s -> card %s (%s)",
+                            model_key, worker.get("name") or worker_id,
+                            plan.main_gpu, plan.reason)
+                return {"main_gpu": plan.main_gpu}
+            if plan.kind == "split":
+                logger.info("device split: %s on %s -> cards %s (%s)",
+                            model_key, worker.get("name") or worker_id,
+                            list(plan.devices), plan.reason)
+                return {"main_gpu": plan.main_gpu,
+                        "tensor_split": list(plan.tensor_split)}
+            logger.debug("device pin: %s on %s -> none (%s)",
+                         model_key, worker_id, plan.reason)
+            return {}
+        except Exception:  # noqa: BLE001 — a device pin must never break the relay
+            logger.debug("device pin skipped for %s on %s", model_key, worker_id,
+                         exc_info=True)
+            return {}
+
     def spill_for(self, worker_id: str, model_key: str) -> Dict[str, Any]:
         """THE emitted spill for (worker, model) — the placement contract below
         plus the MODEL-scoped polite-load flag (k56).
@@ -4287,6 +5060,15 @@ class WorkerStore:
         marked polite THERE.
         """
         out = self._placement_spill_for(worker_id, model_key)
+        # Per-GPU device pin (2026-09-25): on a MULTI-GPU box, decide WHICH local
+        # card (or cards) this model loads on and ride it on the spill wire the
+        # worker already honors (main_gpu -> HUGPY_MAIN_GPU; tensor_split ->
+        # HUGPY_TENSOR_SPLIT). {} on a single-GPU box or a worker that doesn't
+        # advertise the capability, so behavior there is byte-identical.
+        dev = self._device_spill_for(worker_id, model_key)
+        if dev:
+            out = dict(out)
+            out.update(dev)
         try:
             from hugpy_engine.serve.overrides import placement_policy, resolve_polite
             from hugpy_engine.alloc_modes import (
@@ -4516,15 +5298,40 @@ class WorkerStore:
         # a connection-refused at request time (comfy-dreamshaper-8 × computron,
         # 2026-09-23), so such a box is gated out below on the affirmative
         # comfy.available signal — never the legacy-permissive task default.
-        _comfy_model = (_model_engine(model_key) == "comfy")
+        # _is_comfy_model, not a bare framework read: central often cannot resolve
+        # a worker-synthesized comfy-<stem> row (it holds no comfy files), so the
+        # comfy-key convention is the fallback marker — otherwise the whole comfy
+        # branch collapses and a stale designation routes to a box without the
+        # checkpoint (comfy-sd-turbo × computron, 2026-09-24).
+        _comfy_model = _is_comfy_model(model_key)
+        # The checkpoint this comfy model loads, resolved ONCE per call (a comfy
+        # box that advertises it installed can serve it JIT — see the cold
+        # admission branch below). Empty ("") when the exact filename is unknown
+        # (a synthesized row central can't resolve): _comfy_has_checkpoint then
+        # uses the stem fallback (_comfy_stem_want), also resolved ONCE per call.
+        _comfy_ckpt_want = (_model_comfy_filename(model_key) or "") if _comfy_model else None
+        _comfy_stem_want = _comfy_key_stem(model_key) if _comfy_model else ""
         tier_skipped = 0
         task_skipped = 0
         id_lock_skipped = 0
         comfy_down_skipped = 0
+        comfy_missing_ckpt_skipped = 0
+        comfy_ckpt_absent_skipped = 0
         infeasible_skipped = 0
         engine_skipped = 0
         wildcard_engine_skipped = 0
         alloc_scope_skipped = 0
+        presence_skipped = 0
+        # k-dist (2026-09-24): the fleet DISTRIBUTION MODE, read ONCE per call.
+        # "feasible" (default) admits any online worker where the model feasibly
+        # FITS and whose disk holds the files, as an automatic catch (the fit +
+        # capability gates below still decide) — designations/prefs become an
+        # ordered preference with a feasible-set fallback (pick_for_model). A
+        # model marked ``strict`` keeps the sealed pre-2026-09-24 scope even here,
+        # and the "designated" mode is byte-identical to before this feature.
+        _dist_feasible = _distribution_feasible()
+        _strict = _model_strict(model_key)
+        _feasible_open = _dist_feasible and not _strict
         rows = self.all()
         # ALLOCATION IS HARD SCOPE (operator ruling 2026-08-28, coder-next/
         # computron): a model that HAS designation rows anywhere (operator
@@ -4605,24 +5412,75 @@ class WorkerStore:
             # model is ALWAYS a "home" match here — never route-refused —
             # wildcard flag or not.
             home = _serveable_match(model_key, wanted, serveable)
+            # COMFY PRESENCE = DE-FACTO PLACEMENT (2026-09-24). A comfy-framework
+            # model is served by the box's EXTERNAL ComfyUI, so a box whose comfy
+            # ADVERTISES the checkpoint installed (comfy.checkpoints) can serve it
+            # just-in-time — comfy cold-loads it and the worker's own evict-to-fit
+            # clears the card — exactly the way a designated LLM cold-loads. That
+            # presence therefore admits the box like a wildcard catch, WITHOUT
+            # requiring an explicit operator designation. This is what lets
+            # image/video generation follow the standard resolve -> place ->
+            # evict-to-fit -> cold-load flow the same way /v1 chat does, instead
+            # of refusing every cold comfy checkpoint. Off (False) for every
+            # non-comfy model, so LLM routing is byte-identical.
+            _comfy_installed = (_comfy_model
+                                and _comfy_has_checkpoint(
+                                    w, model_key, _want=_comfy_ckpt_want,
+                                    _want_stem=_comfy_stem_want))
             if not home:
                 # WILDCARD PLACEMENT (operator doctrine 2026-07-23):
                 # designations are a HARD routing scope — an unmatched worker
                 # is out UNLESS it explicitly opted in as a wildcard ("a worker
                 # can be designated to take all comers ... or it can not be
                 # selected as a wildcard and adhere only to its own allocated
-                # models"). A wildcard catch relaxes ONLY this
+                # models"), OR — for a comfy model — its ComfyUI actually holds
+                # the checkpoint installed (capability + presence placement, the
+                # comfy twin of an on-disk model). A catch relaxes ONLY this
                 # designation-membership gate: every hard gate around it still
                 # applies — admission/engine/pool above, liveness/env-tier/
                 # task-capability/id-lock below, and the requested key's BLOCK
                 # gate already returned [] before the loop. Default False for
                 # every worker (absent key = not a wildcard), so a fleet with
                 # no flags set routes exactly as before this feature existed.
-                if not wildcards.get(w.get("id") or ""):
+                # k-dist FEASIBLE catch (2026-09-24): under the "feasible"
+                # distribution default (and unless the model is ``strict``), a
+                # non-home worker that holds the model's files ON DISK is admitted
+                # as an automatic catch — the fit gate below (worker_can_hold,
+                # incl. evict-to-fit) then decides whether it truly fits. Presence
+                # is required because routing offers only workers that can load
+                # from their own disk; files reach a new box through hugpy's own
+                # (budgeted, operator/placement-driven) transfer protocol, never a
+                # synchronous side effect of a chat route. Off in "designated"
+                # mode / for a strict model, so that path is byte-identical.
+                _feasible_catch = (_feasible_open
+                                   and not _comfy_model
+                                   and _on_disk_match(w, model_key, wanted))
+                if not (wildcards.get(w.get("id") or "") or _comfy_installed
+                        or _feasible_catch):
+                    if (_comfy_model and _comfy_available(w)
+                            and not _comfy_installed):
+                        # Say-why: a comfy-capable, live box exists but does NOT
+                        # advertise this checkpoint — the honest "not installed
+                        # here" reason, distinct from comfy-down and no-worker.
+                        comfy_missing_ckpt_skipped += 1
+                    elif (_feasible_open and not _comfy_model
+                          and not wildcards.get(w.get("id") or "")):
+                        # Say-why (feasible mode): a non-home box that could have
+                        # caught this model does NOT hold the files on disk, so
+                        # routing can't offer it (no synchronous transfer). Named
+                        # apart from the alloc-scope skip so the log is honest.
+                        presence_skipped += 1
                     continue
                 if _alloc_ids and (w.get("id") or "") not in _alloc_ids:
-                    # An ALLOCATED model never falls to a wildcard box off its
-                    # allocation (hard scope — see the block comment above).
+                    # An ALLOCATED model never falls to a wildcard / comfy-present /
+                    # feasible-catch box off its allocation (hard scope — see the
+                    # block comment above). ALLOCATIONS KEEP THEIR CURRENT MEANING
+                    # even under "feasible" distribution (operator ruling
+                    # 2026-09-24, point 3): an EXPLICIT models-list assignment stays
+                    # a sealed scope. Feasible distribution only spreads models that
+                    # carry NO assignment anywhere (empty _alloc_ids); designation
+                    # ORDER (worker_prefs/k56) is what softens to a preference, in
+                    # pick_for_model. Designation still outranks bare presence.
                     alloc_scope_skipped += 1
                     continue
             if online_only and w["status"] != "online":
@@ -4654,6 +5512,31 @@ class WorkerStore:
             if _comfy_model and not _comfy_available(w):
                 comfy_down_skipped += 1
                 continue
+            # COMFY CHECKPOINT-PRESENCE gate (2026-09-24, comfy-sd-turbo ×
+            # computron): a comfy model is served by the box's ComfyUI, which
+            # rejects a graph naming a checkpoint it does not have ("ckpt_name
+            # '<f>' not in [...]"). A worker whose advertised checkpoint list is
+            # KNOWN and does NOT contain this model's checkpoint therefore cannot
+            # serve it — and unlike the non-home admission check above, this gate
+            # applies to a DESIGNATED / home box too: a stale worker_assignments
+            # row must never route to a box that provably lacks the file. That was
+            # the live defect — computron carried a stale designation for
+            # comfy-sd-turbo, advertised 10 other checkpoints (list KNOWN, sd_turbo
+            # absent), and was picked over ae-worker which actually holds it.
+            # AFFIRMATIVE-only, like every capability gate: gate solely when the
+            # box advertises a checkpoint list (comfy.checkpoints present) that
+            # omits it; an ABSENT list is unknown and never gates (degrade-not-
+            # guess). The comfy-down gate above already excluded a dead comfy box,
+            # so a box reaching here whose list is absent is a live comfy box that
+            # simply doesn't advertise its checkpoints — left as unknown.
+            if _comfy_model:
+                _adv = (w.get("comfy") or {}).get("checkpoints")
+                if (isinstance(_adv, (list, tuple)) and _adv
+                        and not _comfy_has_checkpoint(
+                            w, model_key, _want=_comfy_ckpt_want,
+                            _want_stem=_comfy_stem_want)):
+                    comfy_ckpt_absent_skipped += 1
+                    continue
             # ID-LOCK routing gate (identity-locked STILLs): an id_lock image
             # request must land on a box whose ComfyUI PROVABLY has the IPAdapter
             # nodes (comfy.id_lock). Affirmative-only — never route id_lock to a
@@ -4724,6 +5607,15 @@ class WorkerStore:
                 # say-why readers can tell a candidate is here by wildcard, not
                 # designation.
                 w["_wildcard_catch"] = True
+                # k-dist: a catch admitted by FEASIBLE distribution (not an
+                # explicit wildcard opt-in, not a comfy-present catch) is tagged
+                # distinctly so ranking applies the loaded>on-disk>headroom
+                # fallback order and diagnostics can say "feasible catch" vs
+                # "wildcard". Both still sort after home (term ① covers both).
+                if (_feasible_open and not _comfy_model
+                        and not wildcards.get(w.get("id") or "")
+                        and _on_disk_match(w, model_key, wanted)):
+                    w["_feasible_catch"] = True
             out.append(w)
         if not out and engine_skipped:
             # The model HAS designated servers — every one was excluded because it
@@ -4787,6 +5679,34 @@ class WorkerStore:
                 "backend is not answering (comfy.available false/absent); start "
                 "ComfyUI on those boxes or assign one whose comfy is live",
                 model_key, comfy_down_skipped)
+        if not out and comfy_missing_ckpt_skipped:
+            # The comfy model has live comfy box(es), but NONE advertise this
+            # checkpoint installed (comfy.checkpoints). That is the honest "model
+            # not installed on any comfy-capable worker" reason — distinct from a
+            # dead comfy backend (comfy_down) and from a total absence of comfy
+            # boxes. Name it so the operator installs the checkpoint (or designates
+            # a box that has it) instead of seeing a bare no-worker error.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "comfy model %s: %d comfy-capable worker(s) skipped — none "
+                "advertise this checkpoint installed (comfy.checkpoints). Install "
+                "the checkpoint on a comfy box or designate one that already has "
+                "it.", model_key, comfy_missing_ckpt_skipped)
+        if not out and comfy_ckpt_absent_skipped:
+            # Live comfy box(es) — INCLUDING a designated/home box — were skipped
+            # because their advertised checkpoint list is KNOWN and does not carry
+            # this model's checkpoint (they would 500 with "ckpt_name not in
+            # [...]"). This is the stale-designation case (comfy-sd-turbo ×
+            # computron): name it so the operator points the model at a comfy box
+            # that actually advertises the checkpoint instead of chasing the bare
+            # no-worker error or the worker's ComfyUI rejection.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "comfy model %s: %d live comfy worker(s) skipped — checkpoint not "
+                "on any comfy worker (advertised checkpoints known and this one "
+                "absent, incl. any stale designation). Route it to a comfy box "
+                "that advertises the checkpoint installed.",
+                model_key, comfy_ckpt_absent_skipped)
         if not out and infeasible_skipped:
             # The model HAS servers — every one was excluded because the model
             # does not fit that box's GPU+RAM combined (statically infeasible).
@@ -4807,6 +5727,18 @@ class WorkerStore:
                 "outside its allocation were skipped by hard scope — its own "
                 "workers are unavailable/busy right now", model_key,
                 len(_alloc_ids), alloc_scope_skipped)
+        if not out and presence_skipped:
+            # Say-why (feasible mode): boxes could have caught this model by
+            # feasibility, but none holds its files on disk — routing offers only
+            # workers that can load locally (no synchronous transfer). Name it so
+            # the operator provisions the files (hugpy transfer) or designates a
+            # box that already has them, instead of a bare no-worker error.
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "model %s (feasible mode): %d non-home worker(s) skipped — none "
+                "holds the model's files on disk (no home has it either); "
+                "provision it via hugpy transfer or designate a box that has it",
+                model_key, presence_skipped)
         return out
 
     def pick_for_model(self, model_key: str, pool: Optional[str] = None,
@@ -4891,19 +5823,41 @@ class WorkerStore:
             if matched:
                 candidates = matched
 
-        # k56 — the operator's ORDERED worker preference. A HARD scope (a model
-        # with a list never lands off it), applied after the eligibility gates
-        # so a listed-but-blocked/incapable worker is skipped rather than
-        # bypassing them. Absent list ⇒ untouched.
+        # k56 — the operator's ORDERED worker preference, resolved against the
+        # fleet distribution mode (k-dist 2026-09-24):
+        #
+        #   "designated" mode, or a model marked ``strict``: the list is a HARD
+        #       scope exactly as before — a model with a list never lands off it,
+        #       and no listed worker being eligible REFUSES. Byte-identical.
+        #   "feasible" mode (default) + not strict: the list is an ORDERED
+        #       PREFERENCE — preferred+eligible workers are tried first, but when
+        #       NONE of them is eligible routing FALLS BACK to the feasible set
+        #       (the full eligible candidate list) rather than refusing. This is
+        #       what turns a stale/mis-spelled preference token (e.g. the unix
+        #       user "aeb" written where the worker name "ae-worker" belongs) from
+        #       a total outage into a correct fallback onto the loaded home.
         prefs, polite, polite_by_worker = placement_policy(model_key)
+        strict = _model_strict(model_key)
+        feasible_fallback = False
         if prefs:
-            candidates = _prefs_scope(candidates, prefs, model_key)
-            if not candidates:
+            preferred = _prefs_scope(candidates, prefs, model_key)
+            if preferred:
+                candidates = preferred
+            elif strict or not _distribution_feasible():
                 _emit_route_refuse(
                     model_key,
                     f"no worker on the preference list {prefs} is an eligible "
-                    f"candidate right now", [])
+                    f"candidate right now"
+                    + (" (model is strict)" if strict else ""), [])
                 return None
+            else:
+                # FEASIBLE FALLBACK: preference unmet, keep the wider eligible set.
+                feasible_fallback = True
+                logger.warning(
+                    "model %s: no worker on the ordered preference %s is eligible "
+                    "— falling back to the FEASIBLE set (%d candidate(s)); set "
+                    "strict:true or distribution:designated to keep the hard fence",
+                    model_key, prefs, len(candidates))
 
         # Ranking (capability already filtered above) — the shared _routing_rank
         # key: designation, then MEASURED-RESIDENT, then ALLOCATED, then the
@@ -4922,9 +5876,25 @@ class WorkerStore:
             s = star_map.get(w.get("id"))
             return bool(s) and bool(wanted_forms & _match_keys(str(s)))
 
+        # k-dist: apply the feasible FALLBACK ORDER (loaded>on-disk>headroom) only
+        # when this pick is actually ranking a feasible set — a preference-unmet
+        # fallback, or a no-preference feasible-mode pick that admitted feasible
+        # catches. The sealed "designated"/preference-matched paths never pass it,
+        # so their ranking stays byte-identical.
+        _feasible_order = feasible_fallback or (
+            _distribution_feasible() and not strict and not prefs
+            and any(w.get("_feasible_catch") for w in candidates))
+
+        # CAPACITY OUTRANKS RESIDENCY (operator incident 2026-09-25): stamp the
+        # per-candidate GPU-placement penalty ONCE before ranking, so a box that
+        # provably cannot land the model on GPU now loses to one that can. No-op
+        # without a registered probe (bare central / unit tests keep the old key).
+        _stamp_gpu_placement(candidates, model_key)
+
         def _rank(w: Dict[str, Any]):
             return _routing_rank(w, model_key, wanted_forms, _starred(w),
-                                 (_pref_index(w, prefs) or 0) if prefs else 0)
+                                 (_pref_index(w, prefs) or 0) if prefs else 0,
+                                 feasible_ordering=_feasible_order)
         candidates.sort(key=_rank)
         chosen = candidates[0]
 
@@ -5222,8 +6192,18 @@ class WorkerStore:
         # preference list, or on a box that must evict to take a polite model,
         # would be a re-decision the operator never made.
         prefs, polite, polite_by_worker = placement_policy(model_key)
+        strict = _model_strict(model_key)
+        feasible_fallback = False
         if prefs:
-            candidates = _prefs_scope(candidates, prefs, model_key)
+            preferred = _prefs_scope(candidates, prefs, model_key)
+            if preferred or strict or not _distribution_feasible():
+                # Hard scope in designated/strict mode (an empty result stays a
+                # refusal); the pick made the same call, so the reroute agrees.
+                candidates = preferred
+            else:
+                # k-dist FEASIBLE fallback — same rule the pick uses: preference
+                # unmet, keep the wider feasible set so the reroute walk agrees.
+                feasible_fallback = True
         if polite or polite_by_worker:
             # Per-candidate, exactly as the pick resolves it: a worker the model
             # is not polite on stays a reroute target under the ordinary rule.
@@ -5242,14 +6222,100 @@ class WorkerStore:
             s = star_map.get(w.get("id"))
             return bool(s) and bool(wanted_forms & _match_keys(str(s)))
 
+        _feasible_order = feasible_fallback or (
+            _distribution_feasible() and not strict and not prefs
+            and any(w.get("_feasible_catch") for w in candidates))
+
+        # Same GPU-placement demotion as the primary pick — the reroute walk
+        # must rank identically or a "reroute" becomes a re-decision.
+        _stamp_gpu_placement(candidates, model_key)
+
         def _rank(w: Dict[str, Any]):
             return _routing_rank(w, model_key, wanted_forms, _starred(w),
-                                 (_pref_index(w, prefs) or 0) if prefs else 0)
+                                 (_pref_index(w, prefs) or 0) if prefs else 0,
+                                 feasible_ordering=_feasible_order)
 
         return sorted(candidates, key=_rank)
 
 
 worker_store = WorkerStore()
+
+
+# ── stale worker-name references migration (operator incident 2026-09-25) ─────
+# Placement is stored by NAME in serve_overrides.json (worker_prefs,
+# no_evict_by_worker, gguf_file_by_worker) and in the priority-group ``workers``
+# order (settings.json). A worker rename strands every token written under the
+# old name — live: central logs "ordered worker preference ['aeb'] but NONE of
+# them is an eligible candidate" every few minutes because unix user "aeb" was
+# renamed to "ae-worker" (same id) on 2026-09-24, after these tokens were
+# written. register() now records rename history automatically; this map is the
+# one-time backfill for the rename that happened BEFORE that tracking existed, so
+# the migration below can resolve the token exactly as a future rename would be.
+# It is data (a stable worker_id ↔ former name), run once; not a user message.
+KNOWN_WORKER_RENAMES: Dict[str, List[str]] = {
+    "688ca48f0e5445f2aa2594f54bafb6be": ["aeb"],   # aeb -> ae-worker, 2026-09-24
+}
+
+
+def migrate_worker_name_references() -> Dict[str, Any]:
+    """Rewrite STALE worker-name tokens in placement stores to stable worker ids.
+
+    Run once on central startup (wsgi_app). Steps:
+      1. Backfill KNOWN_WORKER_RENAMES onto the registry's ``prev_names``.
+      2. Build a resolver token -> worker_id that fires ONLY for a token that does
+         NOT already resolve to a live worker (by id/current name) but DOES match
+         a worker's former name — so working tokens (ids, current names) are left
+         untouched and only genuine stragglers are healed.
+      3. Rewrite the serve-overrides placement fields and the priority-group
+         ``workers`` orders through each store's own validated write path.
+
+    Fully guarded and idempotent (a rewritten token is an id, which never matches
+    a former name). Returns a summary dict; a failure in any step is logged and
+    never breaks app creation."""
+    summary: Dict[str, Any] = {"seeded": 0, "overrides": {}, "groups": {}}
+    try:
+        summary["seeded"] = worker_store.seed_prev_names(KNOWN_WORKER_RENAMES)
+    except Exception:  # noqa: BLE001 — a seed failure must not block the migration
+        logger.warning("worker rename backfill failed", exc_info=True)
+    try:
+        workers = worker_store.all()
+    except Exception:  # noqa: BLE001
+        logger.warning("worker-name migration: registry read failed", exc_info=True)
+        return summary
+    current: Dict[str, str] = {}     # id/current-name (lower) -> id
+    hist: Dict[str, str] = {}        # former-name (lower)      -> id
+    for w in workers:
+        wid = str(w.get("id") or "")
+        if not wid:
+            continue
+        for f in _worker_forms(w):
+            current[f] = wid
+        for h in (w.get("prev_names") or []):
+            hf = str(h or "").strip().lower()
+            if hf:
+                hist.setdefault(hf, wid)
+
+    def _resolve(token: Any) -> Optional[str]:
+        t = str(token or "").strip().lower()
+        if not t or t in current:
+            return None              # already resolves (or empty) — leave it
+        return hist.get(t)           # stale straggler -> the worker's stable id
+
+    try:
+        from hugpy_engine.serve.overrides import migrate_worker_tokens as _ov_mig
+        summary["overrides"] = _ov_mig(_resolve)
+    except Exception:  # noqa: BLE001 — overrides half must never break startup
+        logger.warning("worker-name migration: overrides pass failed", exc_info=True)
+    try:
+        from hugpy_fleet.central.priority_groups import migrate_worker_tokens as _pg_mig
+        summary["groups"] = _pg_mig(_resolve)
+    except Exception:  # noqa: BLE001 — group half must never break startup
+        logger.warning("worker-name migration: priority-group pass failed", exc_info=True)
+    if summary["overrides"] or summary["groups"] or summary["seeded"]:
+        logger.info("worker-name migration: seeded %s prev_names, healed "
+                    "%d override model(s), %d group(s)", summary["seeded"],
+                    len(summary["overrides"]), len(summary["groups"]))
+    return summary
 
 
 # Module-level convenience wrappers (mirrors the manifest.py / peers.py style of
@@ -5436,7 +6502,11 @@ def fleet_fit_for_model(model_key: str,
                 "name": w.get("name") or w.get("id"),
                 "engine": engine,
                 "model_bytes": size,
-                "gpu_total_bytes": _worker_gpu_total_bytes(w),
+                # Per-device GPU ceiling: a non-splittable engine cannot pool a
+                # multi-GPU box for one pipeline, so its largest single card is
+                # the honest ceiling for the auto-block decision.
+                "gpu_total_bytes": _worker_gpu_capacity_for_engine(
+                    w, engine, use="total"),
                 "ram_total_bytes": _worker_ram_total_bytes(w),
             })
         return fleet_fit_verdict(boxes)
@@ -5513,14 +6583,19 @@ def feasible_modes_for(worker_id: str, model_key: str) -> Optional[tuple]:
         return None
     try:
         from hugpy_engine.alloc_modes import feasible_modes
+        engine = _model_engine(model_key)
         size = _model_size_bytes(model_key)
-        gpu_total = _worker_gpu_total_bytes(worker)
+        # Per-device (2026-09-25): the gpu-only feasibility gate must price the
+        # LARGEST SINGLE card for a non-splittable engine, not the box sum — else
+        # a 30 GiB diffusers model is offered gpu-only on a 4x24 GiB box where no
+        # single card holds it. A splittable (GGUF) engine keeps the box sum.
+        gpu_total = _worker_gpu_capacity_for_engine(worker, engine, use="total")
         ram_total = _worker_ram_total_bytes(worker)
         _warn_feasibility_failopen(worker, model_key, size, gpu_total, ram_total)
         # bnb (2026-07-29): the 4-bit lever re-prices the model, so the FEASIBLE
         # SET must move with it — otherwise the gate refuses a mode the
         # allocator has already planned at the smaller size.
-        return feasible_modes(_model_engine(model_key), size, gpu_total, ram_total,
+        return feasible_modes(engine, size, gpu_total, ram_total,
                               moe_split_gpu_bytes=_model_moe_gpu_bytes(model_key),
                               bnb=bnb_enabled(worker, model_key))
     except Exception:  # noqa: BLE001 — a derivation must never break a read/relay
@@ -5545,10 +6620,15 @@ def worker_can_hold(worker: Dict[str, Any], model_key: str) -> Optional[bool]:
     offload) and so never catches an oversized model that overflows RAM too."""
     try:
         from hugpy_engine.alloc_modes import worker_fit_verdict
+        engine = _model_engine(model_key)
         return worker_fit_verdict(
-            _model_engine(model_key),
+            engine,
             _model_size_bytes(model_key),
-            _worker_gpu_total_bytes(worker),
+            # Per-device (2026-09-25): a non-splittable engine's GPU ceiling is
+            # its LARGEST single card, not the box sum — a multi-GPU box cannot
+            # pool VRAM for one pipeline. RAM offload still rides the combined
+            # ceiling, so this only tightens the GPU term.
+            _worker_gpu_capacity_for_engine(worker, engine, use="total"),
             _worker_ram_total_bytes(worker),
             # MoE: the split's GPU-resident share is the honest static ceiling
             # (experts stream via mmap) — same term feasible_modes prices.
@@ -5564,10 +6644,16 @@ def feasibility_context(worker_id: str, model_key: str) -> Dict[str, Any]:
     worker = worker_store._load().get(worker_id)
     if worker is None:
         return {}
+    _engine = _model_engine(model_key)
     return {
-        "engine": _model_engine(model_key),
+        "engine": _engine,
         "model_bytes": _model_size_bytes(model_key),
-        "gpu_total_bytes": _worker_gpu_total_bytes(worker),
+        # Per-device GPU ceiling (largest single card for a non-splittable
+        # engine), the same figure the feasibility gate now prices.
+        "gpu_total_bytes": _worker_gpu_capacity_for_engine(worker, _engine,
+                                                           use="total"),
+        # The naive box-wide sum stays visible so an honest 409 can name both.
+        "gpu_box_total_bytes": _worker_gpu_total_bytes(worker),
         "ram_total_bytes": _worker_ram_total_bytes(worker),
         # MoE (2026-07-24): the expert-split GPU need (non-expert + mmproj) a
         # feasibility decision priced GPU-fit with; None for dense models.
@@ -5619,6 +6705,49 @@ def candidates_for_model(model_key: str, pool: Optional[str] = None,
     """Ranked online workers holding ``model_key`` — the relay gate's reroute
     list (see WorkerStore.candidates_for_model). No routing side effects."""
     return worker_store.candidates_for_model(model_key, pool=pool, task=task)
+
+
+def live_served_ctx(model_key: str) -> Optional[int]:
+    """The context a model is CURRENTLY served at, read from the live worker
+    heartbeats. Each loaded slot reports its launched ``-c`` as ``ctx`` (both in
+    the raw ``slots`` list and the derived ``allocations`` rows). Returns the ctx
+    of a HEALTHY slot serving ``model_key`` (the max across replicas), or None
+    when the model is not loaded anywhere.
+
+    Fit-bounded ctx can differ per load (it depends on co-resident models), so
+    this LIVE value is what /v1/models + /llm/serving report while the model is
+    loaded; callers fall back to the PREDICTED ctx otherwise. Never raises —
+    reporting degrades to the predicted value on any store hiccup."""
+    if not model_key:
+        return None
+    live = live_served_ctx_map()
+    want = str(model_key)
+    return live.get(want) or live.get(want.rsplit("/", 1)[-1])
+
+
+def live_served_ctx_map() -> dict:
+    """{model_key (and its bare tail): max live served ctx} from ONE read of the
+    worker heartbeats — a model listing calls this once, not once per model."""
+    out: dict = {}
+    try:
+        for w in worker_store.all():
+            rows = list(w.get("allocations") or []) + list(w.get("slots") or [])
+            for r in rows:
+                if not isinstance(r, dict) or r.get("healthy") is False:
+                    continue
+                mk = r.get("model_key")
+                try:
+                    c = int(r.get("ctx")) if r.get("ctx") else None
+                except (TypeError, ValueError):
+                    c = None
+                if not mk or not c:
+                    continue
+                for k in (str(mk), str(mk).rsplit("/", 1)[-1]):
+                    if c > out.get(k, 0):
+                        out[k] = c
+    except Exception:  # noqa: BLE001 — reporting must never 500 on a store hiccup
+        return {}
+    return out
 
 
 def record_serve_metrics(worker_id: str, model_key: str,
@@ -5951,11 +7080,54 @@ def explain_no_worker(model_key: str, pool: Optional[str] = None,
             _blk = None
         if _blk:
             return _blk
+        # COMFY presence-based placement (2026-09-24): a comfy model routes to any
+        # LIVE comfy box that advertises the checkpoint installed (comfy.checkpoints)
+        # — capability + presence, not operator designation — so its no-worker
+        # reason is about comfy liveness and checkpoint presence, NOT the
+        # designation walk below. Ordered before that walk so a cold comfy
+        # checkpoint gets a precise reason instead of "" (which used to leave the
+        # guard/relay showing only the generic no-worker / local-serving refusal).
+        if _is_comfy_model(model_key):
+            live_present = live_missing = comfy_down = 0
+            for w in worker_store.all():
+                if w.get("admission") != "approved":
+                    continue
+                comfy = w.get("comfy")
+                if not isinstance(comfy, dict):
+                    continue                      # not a comfy box at all
+                if not comfy.get("available"):
+                    comfy_down += 1
+                    continue
+                # PRESENCE is checkpoint-based, NOT designation-based: a stale
+                # worker_assignments row (home) on a box that does NOT advertise
+                # the checkpoint cannot serve it — counting it "present" is exactly
+                # the comfy-sd-turbo × computron miss. Only an advertised checkpoint
+                # (comfy.checkpoints, incl. the synthesized-key stem fallback)
+                # counts as a live server.
+                if _comfy_has_checkpoint(w, model_key):
+                    live_present += 1
+                else:
+                    live_missing += 1
+            if live_present:
+                return ""                         # capable+present box exists -> transient miss
+            if live_missing:
+                return (f"{model_key} is a ComfyUI model but no live comfy worker "
+                        f"advertises its checkpoint installed ({live_missing} comfy "
+                        f"box(es) online without it). Install the checkpoint on a "
+                        f"comfy box or designate one that already has it.")
+            if comfy_down:
+                return (f"{model_key} is a ComfyUI model but every comfy worker's "
+                        f"ComfyUI backend is not answering ({comfy_down} box(es)); "
+                        f"start ComfyUI on a worker.")
+            return (f"{model_key} is a ComfyUI model but no worker advertises a "
+                    f"ComfyUI backend (comfy.available); bring a comfy-capable "
+                    f"worker online.")
         wanted = _match_keys(model_key)
         want_pool = (pool or "").strip()
         need_tier = env_tier_for_model(model_key)
         wildcards = _wildcard_map()   # read once; guarded (miss -> {})
         reasons: List[str] = []
+        eligible: List[Dict[str, Any]] = []   # passed every hard static gate
         for w in worker_store.all():
             serveable = list(w.get("models", [])) + list(w.get("loaded_models", []))
             # Same membership predicate as workers_for_model (alias-tolerant,
@@ -6000,6 +7172,30 @@ def explain_no_worker(model_key: str, pool: Optional[str] = None,
                 continue
             # Passed every HARD static gate — its miss was runtime/transient, not a
             # designation problem; don't manufacture a reason for it.
+            eligible.append(w)
+        # k56 ORDERED-PREFERENCE gate (k-dist 2026-09-24): a designation/preference
+        # that no eligible worker satisfies is a REFUSAL only under "designated"
+        # mode or a ``strict`` model — under the "feasible" default it FALLS BACK
+        # to the feasible set and this is not a refusal reason. Naming it here is
+        # the BUG-2 fix: the comfy-sd-turbo case ("ordered preference [computron,
+        # a-brain] and none eligible") must reach the job's error, not just the log.
+        try:
+            prefs, _pol, _bw = placement_policy(model_key)
+        except Exception:  # noqa: BLE001
+            prefs = []
+        if prefs and eligible:
+            preferred_ok = any(_pref_index(w, prefs) is not None for w in eligible)
+            if not preferred_ok and (_model_strict(model_key)
+                                     or not _distribution_feasible()):
+                elig_names = ", ".join(w.get("name") or w.get("id") or "worker"
+                                       for w in eligible[:4])
+                return (f"{model_key} has an ordered worker preference {prefs} and "
+                        f"NONE of them is an eligible candidate right now"
+                        + (" (model is strict)" if _model_strict(model_key)
+                           else " (distribution=designated)")
+                        + f"; eligible off-list worker(s): {elig_names}. Add an "
+                        f"eligible worker to the preference, clear strict/switch "
+                        f"distribution to feasible, or fix the listed workers.")
         if not reasons:
             return ""
         return (f"{model_key} is assigned but no worker could serve it — "
@@ -6008,6 +7204,134 @@ def explain_no_worker(model_key: str, pool: Optional[str] = None,
                   "llama-cpp-python) or assign the model to a healthy worker.")
     except Exception:  # noqa: BLE001 — advisory only; never raise into a request
         return ""
+
+
+def _gate_reason(w: Dict[str, Any], model_key: str, wanted: set, *,
+                 want_pool: str, need_tier: str, wildcards: Dict[str, bool],
+                 alloc_ids: set, comfy_model: bool, comfy_ckpt: Optional[str],
+                 feasible_open: bool, task: Optional[str],
+                 require_comfy_id_lock: bool,
+                 comfy_stem: Optional[str] = None) -> Optional[str]:
+    """The SPECIFIC gate that excludes ``w`` from serving ``model_key`` right now,
+    in the SAME order ``workers_for_model`` applies them — or ``None`` when the
+    worker is an eligible candidate. The per-worker half of BUG 2: the structured
+    refusal names WHY each worker was skipped instead of a bare "not a candidate".
+    """
+    if w.get("admission") != "approved":
+        return f"worker admission={w.get('admission')!r} (not approved)"
+    serveable = (list(w.get("models", [])) + list(w.get("loaded_models", []))
+                 + list(w.get("grants", {}).keys()))
+    home = _serveable_match(model_key, wanted, serveable)
+    comfy_installed = (comfy_model
+                       and _comfy_has_checkpoint(w, model_key, _want=comfy_ckpt,
+                                                 _want_stem=comfy_stem))
+    if _engine_unusable(w):
+        return "inference engine unusable (llama-cpp not loadable AND no native binary)"
+    if (w.get("pool") or "").strip() != want_pool:
+        return (f"reserved for pool {w.get('pool')!r} (request pool {want_pool!r})")
+    if not home:
+        feasible_catch = (feasible_open and not comfy_model
+                          and _on_disk_match(w, model_key, wanted))
+        if not (wildcards.get(w.get("id") or "") or comfy_installed or feasible_catch):
+            if comfy_model and _comfy_available(w) and not comfy_installed:
+                return "comfy backend live but this checkpoint is NOT installed here"
+            if comfy_model:
+                return "not designated and its ComfyUI backend is not answering"
+            if feasible_open:
+                return ("not designated/wildcard and the model's files are NOT on "
+                        "this box's disk (feasible mode needs on-disk presence)")
+            return ("not a designated home and not a wildcard (distribution="
+                    "designated: undesignated boxes are sealed out)")
+        if alloc_ids and (w.get("id") or "") not in alloc_ids:
+            return ("outside the model's explicit allocation (hard alloc scope — "
+                    "allocations stay sealed even under feasible mode)")
+    if w.get("status") != "online":
+        return f"status={w.get('status')!r} (offline at decision time)"
+    if _worker_env_tier(w) != need_tier:
+        return f"env tier {_worker_env_tier(w)!r} != required {need_tier!r}"
+    if not _task_capable(w, task):
+        return f"cannot run task {task!r} (missing optional dependency)"
+    if comfy_model and not _comfy_available(w):
+        return "ComfyUI backend not answering (comfy.available false/absent)"
+    # Checkpoint-presence gate — applies to a designated/home box too (the
+    # comfy-sd-turbo × computron stale-designation case). Affirmative-only: only
+    # a KNOWN advertised list that omits the checkpoint refuses; an absent list
+    # is unknown and never gates.
+    if comfy_model and not comfy_installed:
+        _adv = (w.get("comfy") or {}).get("checkpoints")
+        if isinstance(_adv, (list, tuple)) and _adv:
+            return ("comfy backend live but this checkpoint is NOT among the "
+                    "worker's advertised checkpoints (ComfyUI would reject "
+                    "ckpt_name; incl. any stale designation)")
+    if require_comfy_id_lock and not _comfy_id_lock_capable(w):
+        return "no comfy.id_lock capability (IPAdapter nodes absent)"
+    resident = home and _serveable_match(model_key, wanted,
+                                         list(w.get("loaded_models", [])))
+    if not resident and worker_can_hold(w, model_key) is False:
+        return ("model does not fit this box's GPU+RAM combined "
+                "(statically infeasible)")
+    return None
+
+
+def no_worker_skips(model_key: str, pool: Optional[str] = None,
+                    task: Optional[str] = None,
+                    require_comfy_id_lock: bool = False) -> Dict[str, str]:
+    """``{worker_id: specific-gate-reason}`` for every registered worker — the
+    structured-diagnostic half of BUG 2 (routing_diagnostics ``skips``). A worker
+    that IS eligible but was refused only by the k56 ORDERED-PREFERENCE gate gets
+    that named reason (strict/designated) or the feasible-fallback note; every
+    other worker gets the first hard gate that excludes it. Never raises."""
+    out: Dict[str, str] = {}
+    try:
+        wanted = _match_keys(model_key)
+        want_pool = (pool or "").strip()
+        need_tier = env_tier_for_model(model_key)
+        wildcards = _wildcard_map()
+        comfy_model = _is_comfy_model(model_key)
+        comfy_ckpt = (_model_comfy_filename(model_key) or "") if comfy_model else None
+        comfy_stem = _comfy_key_stem(model_key) if comfy_model else ""
+        feasible_open = _distribution_feasible() and not _model_strict(model_key)
+        try:
+            prefs, _pol, _bw = placement_policy(model_key)
+        except Exception:  # noqa: BLE001
+            prefs = []
+        alloc_ids: set = set()
+        for w0 in worker_store.all():
+            des = list(w0.get("models", [])) + list(w0.get("grants", {}).keys())
+            if des and _serveable_match(model_key, wanted, des):
+                alloc_ids.add(w0.get("id") or "")
+        eligible: List[Dict[str, Any]] = []
+        pending: Dict[str, str] = {}
+        for w in worker_store.all():
+            wid = w.get("id") or ""
+            reason = _gate_reason(
+                w, model_key, wanted, want_pool=want_pool, need_tier=need_tier,
+                wildcards=wildcards, alloc_ids=alloc_ids, comfy_model=comfy_model,
+                comfy_ckpt=comfy_ckpt, feasible_open=feasible_open, task=task,
+                require_comfy_id_lock=require_comfy_id_lock, comfy_stem=comfy_stem)
+            if reason is None:
+                eligible.append(w)
+            else:
+                pending[wid] = reason
+        out.update(pending)
+        # An eligible worker excluded ONLY by the ordered-preference gate: name it.
+        if prefs and eligible:
+            preferred_ok = any(_pref_index(w, prefs) is not None for w in eligible)
+            if not preferred_ok:
+                strict = _model_strict(model_key)
+                if strict or not _distribution_feasible():
+                    note = (f"eligible, but excluded by the ordered worker "
+                            f"preference {prefs} (off-list; "
+                            + ("model is strict" if strict
+                               else "distribution=designated") + ")")
+                else:
+                    note = (f"eligible; off the ordered preference {prefs} — under "
+                            f"feasible mode this falls back and should route")
+                for w in eligible:
+                    out[w.get("id") or ""] = note
+    except Exception:  # noqa: BLE001 — diagnostics must never break a request
+        return out
+    return out
 
 
 def _reserved_vram_bytes(worker_id: str) -> int:

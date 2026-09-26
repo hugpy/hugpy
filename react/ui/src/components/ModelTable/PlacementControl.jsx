@@ -52,7 +52,8 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
   const [prefs, setPrefs] = useState(null)      // null until the GET lands
   const [polite, setPolite] = useState(false)   // the ALL-WORKERS default
   const [byWorker, setByWorker] = useState({})  // per-worker verdicts (k62)
-  const [saved, setSaved] = useState({ prefs: [], polite: false, byWorker: {} })
+  const [strict, setStrict] = useState(false)   // k-dist: hard-fence this model
+  const [saved, setSaved] = useState({ prefs: [], polite: false, byWorker: {}, strict: false })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [shardOn, setShardOn] = useState(null)   // multi-GPU shard-eligible (persisted setting)
@@ -64,8 +65,8 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
     const list = Array.isArray(ov.worker_prefs) ? ov.worker_prefs : []
     const map = (ov.no_evict_by_worker && typeof ov.no_evict_by_worker === 'object')
       ? { ...ov.no_evict_by_worker } : {}
-    setPrefs(list); setPolite(!!ov.no_evict); setByWorker(map)
-    setSaved({ prefs: list, polite: !!ov.no_evict, byWorker: map })
+    setPrefs(list); setPolite(!!ov.no_evict); setByWorker(map); setStrict(!!ov.strict)
+    setSaved({ prefs: list, polite: !!ov.no_evict, byWorker: map, strict: !!ov.strict })
   }
 
   const load = useCallback(async () => {
@@ -131,7 +132,7 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
         // map are how the operator CLEARS them, and omitting a key would
         // silently keep the old value (the overrides layer merges).
         body: JSON.stringify({ worker_prefs: prefs, no_evict: polite,
-                               no_evict_by_worker: byWorker }),
+                               no_evict_by_worker: byWorker, strict }),
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
@@ -160,6 +161,7 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
   const unlisted = workers.filter(w => !prefs.includes(w.name) && !prefs.includes(w.id))
   const dirty = (JSON.stringify(prefs) !== JSON.stringify(saved.prefs)
                  || polite !== saved.polite
+                 || strict !== saved.strict
                  || JSON.stringify(byWorker) !== JSON.stringify(saved.byWorker))
 
   // ── k62: the worker × polite grid ────────────────────────────────────────
@@ -315,6 +317,14 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
           <input type="checkbox" checked={polite}
                  onChange={e => setPolite(e.target.checked)} />
           all workers: load only into free room (never evict)
+        </label>
+
+        <label className="mt-place-toggle"
+               title="Strict designation fence: keep this model's designations / preference list a HARD scope even under the fleet's Feasible distribution default. On -> an unmet preference REFUSES (the pre-2026-09-24 sealed-scope behaviour); off -> the preference is an ORDER that falls back to any worker where the model feasibly fits.">
+          <input type="checkbox" disabled={!!archived} checked={strict}
+                 title={archived ? archText : undefined}
+                 onChange={e => setStrict(e.target.checked)} />
+          strict: keep designation as a hard fence (even in Feasible mode)
         </label>
 
         <label className="mt-place-toggle"

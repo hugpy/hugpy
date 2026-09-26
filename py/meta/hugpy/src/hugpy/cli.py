@@ -201,13 +201,31 @@ def _serve(args: argparse.Namespace, raw: list[str]) -> int:
         return int(fn(raw) or 0)
 
     origins = [o.strip() for o in (args.origins or "").split(",") if o.strip()] or None
-    flask_app = fn(name="hugpy", allowed_origins=origins, debug=args.debug)
-    return _run_wsgi(flask_app, args.host, args.port, args.threads, args.debug)
+
+    # Pass the app factory as a zero-arg THUNK — never call it here, in the
+    # process that becomes the gunicorn arbiter (master). The factory opens the
+    # media_jobs.db / comms / reservation sqlite stores (each with its WAL/SHM
+    # sidecars) and starts background threads (the media-bus runner pool, the
+    # admission runner, the benchmark-resume hook). All of that is fork-hostile:
+    # POSIX advisory locks are NOT inherited across fork, sqlite handles are not
+    # fork-safe, and threads do not survive fork. gunicorn calls this thunk from
+    # load() — i.e. INSIDE the forked worker — so every connection and thread is
+    # born in the process that actually serves. (Incident 2026-09-24: a
+    # master-built app left the single worker holding media_jobs.db-wal/-shm fds
+    # marked "(deleted)", yielding "database is locked" / "disk I/O error".)
+    def _build_app():
+        return fn(name="hugpy", allowed_origins=origins, debug=args.debug)
+
+    return _run_wsgi(_build_app, args.host, args.port, args.threads, args.debug)
 
 
-def _run_wsgi(flask_app, host: str, port: int, threads: int, debug: bool) -> int:
+def _run_wsgi(build_app, host: str, port: int, threads: int, debug: bool) -> int:
     """Serve a WSGI app: gunicorn on POSIX, waitress elsewhere, Flask dev
-    server as the last resort. Server-agnostic glue, no routes live here."""
+    server as the last resort. ``build_app`` is a zero-arg factory thunk; for
+    gunicorn it is called from load(), INSIDE the forked worker, so the app's
+    sqlite connections and background threads are created post-fork (incident
+    2026-09-24). waitress and the Flask dev server do not fork, so they build the
+    app in-process. Server-agnostic glue, no routes live here."""
     bind = f"{host}:{port}"
     try:
         from gunicorn.app.base import BaseApplication
@@ -217,11 +235,11 @@ def _run_wsgi(flask_app, host: str, port: int, threads: int, debug: bool) -> int
         except ImportError:
             print(f"hugpy: gunicorn/waitress not installed; using the Flask dev server on {bind}",
                   file=sys.stderr)
-            flask_app.run(host=host, port=port, debug=debug)
+            build_app().run(host=host, port=port, debug=debug)
             return 0
         print(f"hugpy serving on http://{bind}  (console at /, API at /api/v1)  [waitress]")
         print(f"  first run? finish setup at  http://{bind}/welcome")
-        _waitress_serve(flask_app, host=host, port=port, threads=threads)
+        _waitress_serve(build_app(), host=host, port=port, threads=threads)
         return 0
 
     class _App(BaseApplication):
@@ -232,7 +250,10 @@ def _run_wsgi(flask_app, host: str, port: int, threads: int, debug: bool) -> int
             self.cfg.set("timeout", 300)
 
         def load(self):
-            return flask_app
+            # gunicorn calls this in the WORKER (after fork). Building the app
+            # here — not in the arbiter — is the fix: the media_jobs.db handles
+            # and the runner/admission threads belong to the serving process.
+            return build_app()
 
     print(f"hugpy serving on http://{bind}  (console at /, API at /api/v1)")
     print(f"  first run? finish setup at  http://{bind}/welcome")

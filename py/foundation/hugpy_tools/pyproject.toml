@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugpy-tools"
+dynamic = ["version"]
+description = "Hugpy tools: a slim, stdlib-only capability suite for autonomous agents (safe file/path ops, text chunking and diffing, hashing, structured-data read/write, and urllib+html.parser webpage assessment)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "putkoff", email = "support@hugpy.ai" }]
+keywords = [
+    "hugpy",
+    "agent",
+    "tools",
+    "filesystem",
+    "webpage",
+    "assessment",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries",
+]
+# Deliberately dependency-free: stdlib only, so a machine with just Python can
+# use it and no other hugpy_* package is imported (foundation layer).
+dependencies = []
+
+[project.urls]
+Homepage = "https://hugpy.ai"
+Documentation = "https://github.com/hugpy/hugpy/blob/main/py/foundation/hugpy_tools/README.md"
+Repository = "https://github.com/hugpy/hugpy"
+Source = "https://github.com/hugpy/hugpy/tree/main/py/foundation/hugpy_tools"
+Issues = "https://github.com/hugpy/hugpy/issues"
+Changelog = "https://github.com/hugpy/hugpy/releases"
+Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
+
+[project.optional-dependencies]
+# TOML reading uses stdlib tomllib on 3.11+; on 3.10 install the backport.
+toml = ["tomli; python_version < '3.11'"]
+# YAML reading is opt-in; the default never imports it.
+yaml = ["PyYAML"]
+# assess_webpage(force_render=True) can drive a headless browser if present.
+render = ["playwright"]
+test = ["pytest>=8", "pytest-timeout"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hugpy_tools = ["py.typed", "**/*.json", "**/*.md", "**/*.txt"]
+
+# ---------------------------------------------------------------------------
+# Lockstep workspace version (2026-09-22): every in-tree hugpy-* distribution
+# takes ONE version from the workspace git tag (vX.Y.Z at the repo root). A
+# checkout without git metadata builds as 0.0.0+unknown, which central refuses
+# to advertise to workers. (Identical policy to every sibling package.)
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+unknown"

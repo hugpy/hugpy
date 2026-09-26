@@ -1,6 +1,6 @@
 # Consistency: one version, three surfaces
 
-How the thirteen `hugpy-*` distributions stay the same code on PyPI, in every
+How the fourteen `hugpy-*` distributions stay the same code on PyPI, in every
 developer checkout and on every fleet worker, and how that is checked.
 
 ## The rule
@@ -20,7 +20,7 @@ live hotfix is allowed; shipping while one is outstanding is not.
 | Dev checkouts | `./local_install.sh` editable installs of this tree | the same tag, or `X.Y.Z.devN+gSHA` between tags |
 | Fleet workers | `hugpy-fleet` on every box central manages | central's own installed version (`required_pkg_version`) |
 
-There is exactly one version number for all 13 distributions at any commit.
+There is exactly one version number for all 14 distributions at any commit.
 Nobody types it: `py/validate_partition.py --versions` fails any pyproject that
 carries a static `version =` or any `__init__.py` that spells one out.
 
@@ -54,7 +54,7 @@ the installed metadata to say the new number.
 
 1. Merge to `main`. CI (`.github/workflows/ci.yml`) is green: manifest, import
    edges, `--versions`, the per-package matrix, `local-install`, and `lockstep`
-   (all 13 editable-installed distributions report one identical version that
+   (all 14 editable-installed distributions report one identical version that
    is not `0.0.0+unknown`).
 2. On a clean, up-to-date `main`: `./release.sh X.Y.Z --dry-run`, then
    `./release.sh X.Y.Z`. The script refuses on a dirty tree, a non-default or
@@ -194,7 +194,7 @@ captured output.
 | Section | Compares | Where it runs |
 |---|---|---|
 | A | the git checkout: clean tracked tree, no unpushed commits, HEAD level with the remote | dev box, before a release (`release.sh`) |
-| B | the installed distributions vs. the checkout: all 13 present, one identical version, editable paths resolve here | CI `lockstep` job, dev box |
+| B | the installed distributions vs. the checkout: all 14 present, one identical version, editable paths resolve here | CI `lockstep` job, dev box |
 | C | the fleet vs. central: central's `/api/health` build identity, then every worker's heartbeat build (version + sha) against it; a worker still on the monolith, or without a build identity, is drift; an offline worker is info (not part of the running fleet); `version_ok = null` (central pins nothing) is info | central |
 | D | the newest git tag vs. PyPI: a tag newer than PyPI is an unpublished release unless central's index serves it, PyPI newer than the tag is a checkout behind a release, not on PyPI at all is info (ok when central's index serves the tag) | dev box, central |
 
@@ -220,12 +220,12 @@ pins a box to a release and central's heartbeat keeps it there afterwards.
 
 ## FAQ
 
-**Why lockstep instead of per-package versions?** The 13 packages are one
+**Why lockstep instead of per-package versions?** The 14 packages are one
 acyclic graph with seams that change on both sides at once
 (`hugpy_engine.placement`, `hugpy_video.hooks`, the wire schemas). One tag per
 release means one number to compare across PyPI, checkouts and workers, and
 `pip install "hugpy[server]==X.Y.Z"` names a complete, tested set. Per-package
-tags would make "is this fleet consistent?" a 13-way question.
+tags would make "is this fleet consistent?" a 14-way question.
 
 **What about the external packages?** `[[external_package]]` entries in
 `py/partition.toml` (`hugpy-agent`, `hugpy-station`, `abstract-identity`,

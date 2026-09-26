@@ -32,7 +32,7 @@ def sse_event(payload: dict) -> bytes:
 # (the cold-load HOLD, t36, and the worker's own provisioning). Any of them
 # moves the job to `processing`/`awaiting-load` so it reads honestly and its
 # progressed_at is fed (never orphan-expired mid-load).
-_LOADING_STAGES = ("awaiting-load", "loading", "provision")
+_LOADING_STAGES = ("awaiting-load", "awaiting-capacity", "loading", "provision")
 
 
 def _feed_job_from_status(rid, event) -> None:
@@ -215,11 +215,16 @@ async def stream_events(body: ChatBody):
             _name = body.model_key
         _existing = job_store.get(rid)
         if _existing is None or _existing.terminal:
+            from hugpy_engine.dispatch.activity import format_prompt
             job_store.create(body.model_key or "", id=rid, kind="chat",
                              transport=body.transport or "web",
                              channel=body.channel,
                              principal=body.principal,
-                             model_name=_name)
+                             model_name=_name,
+                             prompt=format_prompt(
+                                 prompt_kwargs.get("messages"),
+                                 prompt_kwargs.get("prompt")),
+                             request=prompt_kwargs)
     except Exception:
         pass
 
@@ -236,9 +241,12 @@ async def stream_events(body: ChatBody):
 
     import time as _time
     _t0 = _time.monotonic()
+    # Bind so a client disconnect (GeneratorExit) acloses the engine stream
+    # deterministically in the finally — cascades to the worker relay /
+    # llama-server slot rather than leaving it to GC (incident 2026-09-25).
+    _sq = stream_query(cancel_event=cancel_event, **prompt_kwargs)
     try:
-        async for event in stream_query(cancel_event=cancel_event,
-                                        **prompt_kwargs):
+        async for event in _sq:
             etype = getattr(event, "type", None)
             if etype == "token":
                 job_store.on_output(rid)
@@ -277,12 +285,26 @@ async def stream_events(body: ChatBody):
                          "error_class": type(exc).__name__, "request_id": rid,
                          "model": body.model_key, "load_failure": _lf})
     finally:
-        # Resolves to done, or cancelled if a cancel was requested; no-op when
-        # the except above already marked it failed.
+        # FINALIZE THE ROW FIRST (incident 2026-09-25). finish() resolves to done,
+        # or cancelled if a cancel was requested; no-op when the except above
+        # already marked it failed. It is a cheap in-store transition and cannot
+        # block — whereas the aclose cascade below CAN hang when a relay whose
+        # model is failing to load never releases its httpx stream. Ordering
+        # finish() ahead of aclose guarantees the job row closes on every exit
+        # path (disconnect, error, normal end) even if the resource teardown
+        # wedges, so nothing stays `pending` after its request is gone.
         try:
             job_store.finish(rid)
         except Exception:
             pass
+        # Then cascade the disconnect into the engine stream (releases the relay /
+        # runner / llama-server stream beneath it) — best-effort resource cleanup.
+        _ac = getattr(_sq, "aclose", None)
+        if _ac is not None:
+            try:
+                await _ac()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
 
 
 def _friendly_stream_error(exc: Exception, *, model_key=None, request_id=None,

@@ -84,6 +84,7 @@ worker can all share ONE vocabulary without import weight.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,52 @@ _GPU_FIT_HEADROOM = 0.98
 # Bytes per GiB, as a float, for the human-readable ``why`` lines and the
 # gpu_mem_gib/cpu_mem_gib budget conversion in default_allocation.
 _GIB_F = float(1 << 30)
+
+# The share of a card a MoE's derived CONTRACT may claim in total (dense
+# backbone + KV/context reserve + the expert layers that fit). Kept well under
+# the worker's 90% VRAM ceiling so the model never rides it and gets idle-swept
+# (the k64 failure), with room left for other residents. HUGPY_MOE_CARD_SHARE
+# overrides (0 < share <= 0.9).
+_DEFAULT_MOE_CARD_SHARE = 0.70
+
+
+def _gib_ceil(n_bytes: int) -> float:
+    """Bytes -> GiB rounded UP to 3 decimals. The MoE budgets are hard limits
+    the slot checks the real byte counts against, so rounding them DOWN refused
+    the very split they describe ("29.8 GiB exceeds budget 29.8 GiB")."""
+    import math
+    return math.ceil(int(n_bytes) / _GIB_F * 1000) / 1000
+
+
+def moe_card_share() -> float:
+    import os
+    try:
+        v = float(os.environ.get("HUGPY_MOE_CARD_SHARE") or 0)
+    except ValueError:
+        v = 0.0
+    return v if 0.0 < v <= 0.9 else _DEFAULT_MOE_CARD_SHARE
+
+
+def _moe_card_contract(moe: "Optional[dict]", gpu_total: int,
+                       gpu_reserve_bytes: "Optional[int]") -> "Optional[dict]":
+    """Dense-first plan (spill.moe_dense_first_plan) against a STATED share of
+    the card, after the context reserve. Returns the plan with ``gpu_bytes``
+    widened to include the reserve (what the load really holds on the card),
+    or None when it can't be priced or buys no expert layers (the caller then
+    keeps the backbone-only split)."""
+    if not moe or not moe.get("expert_bytes_by_layer") or not gpu_reserve_bytes:
+        return None
+    try:
+        from hugpy_engine.spill import moe_dense_first_plan
+        budget = int(moe_card_share() * gpu_total)
+        plan = moe_dense_first_plan(moe, budget,
+                                    extra_reserve_bytes=int(gpu_reserve_bytes))
+    except Exception:  # noqa: BLE001 — unpriceable -> backbone-only split
+        return None
+    if not plan or not plan.get("dense_fits") \
+            or int(plan.get("expert_layers_on_gpu") or 0) <= 0:
+        return None
+    return dict(plan, gpu_bytes=int(plan["gpu_bytes"]) + int(gpu_reserve_bytes))
 
 # n_cpu_moe value meaning "ALL expert layers on CPU". MIRRORS
 # ``managers.spill.MOE_ALL_LAYERS`` (999 — llama-server caps it to the model's
@@ -541,7 +588,8 @@ def default_allocation(engine: Any,
                        *,
                        moe: "Optional[dict]" = None,
                        bnb: bool = False,
-                       moe_force: "Optional[bool]" = None) -> dict:
+                       moe_force: "Optional[bool]" = None,
+                       gpu_reserve_bytes: "Optional[int]" = None) -> dict:
     """THE full operator decision tree (2026-07-25) for a model's INITIAL
     DEFAULT allocation, DERIVED from its own structure instead of a blanket
     stamp. Returns ``{"mode": <one of ALLOC_MODES>, "spill": {...}, "why": str}``
@@ -783,10 +831,41 @@ def default_allocation(engine: Any,
     # the card ever holds under the split. This is the whole derivation.
     if non_expert <= _GPU_FIT_HEADROOM * gpu_total:
         if ram_total is not None and experts <= ram_total:
+            # THE CARD CONTRACT (operator, 2026-09-25): a MoE gets a STATED
+            # share of the card — dense backbone + KV/context reserve + as many
+            # expert layers as fit inside moe_card_share() of it — instead of
+            # the backbone alone with every expert on the CPU (which left ~12
+            # GiB of a 3090 idle under coder-next). It is a contract, not a
+            # momentary free-VRAM reading, so k64's objection (a remainder
+            # fill riding the 90% ceiling and getting idle-swept) does not
+            # apply: the share sits well under the ceiling by construction.
+            # Unknown reserve / no per-layer table -> the backbone-only split
+            # below (degrade-not-guess).
+            contract = _moe_card_contract(detail, gpu_total, gpu_reserve_bytes)
+            if contract is not None:
+                spill = mode_to_spill(
+                    "explicit",
+                    gpu_mem_gib=_gib_ceil(contract["gpu_bytes"]),
+                    cpu_mem_gib=_gib_ceil(contract["cpu_bytes"]))
+                spill["n_cpu_moe"] = int(contract["n_cpu_moe"])
+                spill["n_gpu_layers"] = -1
+                return {
+                    "mode": "explicit", "spill": spill,
+                    "why": (f"MoE card contract: {moe_card_share():.0%} of the "
+                            f"{gpu_total / _GIB_F:.2f} GiB GPU = "
+                            f"{non_expert / _GIB_F:.2f} GiB dense + "
+                            f"{int(gpu_reserve_bytes) / _GIB_F:.2f} GiB "
+                            f"context reserve + "
+                            f"{contract['expert_layers_on_gpu']} expert layers "
+                            f"({(contract['gpu_bytes'] - non_expert - int(gpu_reserve_bytes)) / _GIB_F:.2f} GiB); "
+                            f"{contract['cpu_bytes'] / _GIB_F:.2f} GiB of "
+                            f"experts in RAM (--n-cpu-moe "
+                            f"{contract['n_cpu_moe']}) -> explicit"),
+                }
             spill = mode_to_spill(
                 "explicit",
-                gpu_mem_gib=round(non_expert / _GIB_F, 3),
-                cpu_mem_gib=round(experts / _GIB_F, 3))
+                gpu_mem_gib=_gib_ceil(non_expert),
+                cpu_mem_gib=_gib_ceil(experts))
             # The two keys that make this a SPLIT rather than a label. See the
             # docstring: n_cpu_moe re-supplies the auto policy that alloc_mode
             # suppresses; the -1 is what the slot path actually forwards, and
@@ -1151,12 +1230,21 @@ def normalize_spill(spill: "Optional[dict]") -> "tuple[dict, Optional[str]]":
     return out, note
 
 
+_VER_RELEASE_RE = re.compile(r"^\s*v?(\d+(?:\.\d+)*)")
+
+
 def _ver_tuple(v: Any) -> "Optional[tuple]":
-    try:
-        parts = str(v).strip().split(".")
-        return tuple(int(p) for p in parts) if parts else None
-    except (TypeError, ValueError):
+    """The numeric RELEASE segment of a PEP 440 version as a tuple.
+
+    Only the leading dotted integers count: ``0.2.1.post31`` -> (0, 2, 1),
+    ``0.2.2.dev3`` / ``0.2.2rc1`` -> (0, 2, 2). Before 2026-09-25 this did
+    int() on every dot-part, so any ``.postN`` worker parsed as None and every
+    version gate failed SAFE — central stripped the MoE/explicit spill keys
+    (and no_evict, chat extras) from every 0.2.x worker on every request."""
+    m = _VER_RELEASE_RE.match(str(v or ""))
+    if not m:
         return None
+    return tuple(int(p) for p in m.group(1).split("."))
 
 
 def worker_honors_mode_keys(pkg_version: Any) -> bool:

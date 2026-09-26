@@ -4,7 +4,18 @@
 # Usage:
 #   bootstrap.sh --central https://dev.hugpy.ai --name box-1 --token <enroll-token> \
 #                [--port 9100] [--version 0.1.162] [--storage-root /mnt/llm_storage] \
-#                [--venv ~/hugpy-worker/venv] [--force]
+#                [--venv ~/hugpy-worker/venv] [--force] [--dry-run] \
+#                [--advertise http://<addr>:9100] [--install-comfy] [--self-check-only]
+#
+#   --dry-run          inspect + print every venv/pip/install step; change NOTHING.
+#   --advertise URL    the address CENTRAL reaches this box on (baked as WORKER_URL);
+#                      needed when central dials a tunnel/hub address, not the
+#                      worker's outbound IP. Forwarded to the canonical installer.
+#   --install-comfy    install/converge ComfyUI (the worker owns its lifecycle).
+#   --self-check-only  run the installer self-check + report only (no unit written).
+#   Any of --serve-mode/--comfy-version/--comfy-start-check/--no-verify/
+#   --no-provision-engine/--no-retire-legacy/--no-open-firewall/--no-comfy are
+#   forwarded verbatim to `python -m hugpy_fleet.worker.install`.
 #
 # What it does (idempotent — safe to re-run to upgrade):
 #   1. checks python3 >= 3.10 with the venv module
@@ -47,9 +58,20 @@ STORAGE_ROOT=""
 VENV="${HOME}/hugpy-worker/venv"
 FORCE=""
 PROFILE="${WORKER_PROFILE:-gpu-worker}"
+DRY=""
+PASSTHRU=""   # extra args forwarded verbatim to the python installer
 
 die() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }
 say() { printf 'bootstrap: %s\n' "$*"; }
+# run: execute a mutating command, or (under --dry-run) print exactly what would
+# run and change nothing. Every venv/pip/installer side effect goes through this.
+run() {
+  if [ -n "$DRY" ]; then
+    printf 'bootstrap: DRY-RUN: would run: %s\n' "$*"
+  else
+    "$@"
+  fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -62,10 +84,19 @@ while [ $# -gt 0 ]; do
     --venv)         VENV="${2:-}"; shift 2 ;;
     --profile)      PROFILE="${2:-}"; shift 2 ;;
     --force)        FORCE="1"; shift 1 ;;
-    -h|--help)      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --dry-run)      DRY="1"; shift 1 ;;
+    # forward turnkey flags straight to `hugpy_fleet.worker.install` (advertise
+    # URL, comfy, self-check-only, etc.) so bootstrap stays the single entry point.
+    --advertise|--serve-mode|--comfy-version)
+                    PASSTHRU="$PASSTHRU $1 ${2:-}"; shift 2 ;;
+    --install-comfy|--no-comfy|--comfy-start-check|--self-check-only|\
+    --no-verify|--no-provision-engine|--no-retire-legacy|--no-open-firewall)
+                    PASSTHRU="$PASSTHRU $1"; shift 1 ;;
+    -h|--help)      sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              die "unknown argument: $1" ;;
   esac
 done
+[ -n "$DRY" ] && say "DRY-RUN: no venv/pip/service changes will be made"
 
 [ -n "$CENTRAL" ] || die "--central is required (e.g. --central https://dev.hugpy.ai)"
 CENTRAL="${CENTRAL%/}"   # strip a trailing slash so URL joins are clean
@@ -81,7 +112,7 @@ python3 -c 'import venv' 2>/dev/null \
 # 2. venv ------------------------------------------------------------------
 if [ ! -x "${VENV}/bin/python" ]; then
   say "creating venv at ${VENV}"
-  python3 -m venv "$VENV"
+  run python3 -m venv "$VENV"
 fi
 PY_BIN="${VENV}/bin/python"
 PIP_BIN="${VENV}/bin/pip"
@@ -176,7 +207,7 @@ else
 fi
 say "pip install --upgrade ${PIP_CONSTRAINT} ${PIP_EXTRA_INDEX} '${SPEC}'"
 # shellcheck disable=SC2086  # PIP_CONSTRAINT / PIP_EXTRA_INDEX are intentionally two words or empty
-"$PIP_BIN" install --upgrade $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"
+run "$PIP_BIN" install --upgrade $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"
 if [ -n "$CONSTRAINTS_FILE" ]; then rm -f "$CONSTRAINTS_FILE"; fi
 
 # 4b. optional media-intelligence deps the canonical [engine] venv omits -----
@@ -192,7 +223,7 @@ if [ -n "$CONSTRAINTS_FILE" ]; then rm -f "$CONSTRAINTS_FILE"; fi
 # these — they persist across every version converge. (Its no-constraints
 # fallback is `pip install -U --no-deps`, which touches even less.)
 say "installing media-intelligence deps (sentence-transformers, openai-whisper, keybert; numpy<2.5 for numba)"
-"$PIP_BIN" install --upgrade sentence-transformers openai-whisper keybert "numpy<2.5"
+run "$PIP_BIN" install --upgrade sentence-transformers openai-whisper keybert "numpy<2.5"
 
 # 5. write + enable the systemd unit via the canonical installer -----------
 # COMPAT: when central pins a version older than 0.1.164 the installed
@@ -201,7 +232,11 @@ say "installing media-intelligence deps (sentence-transformers, openai-whisper, 
 # defaults already read (DEFAULT_ROOT / WORKER_ENROLL_TOKEN), so probe --help
 # for the new flags and use the env route when they're absent.
 set -- --central "$CENTRAL" --name "$NAME" --port "$PORT"
-HELP="$("$PY_BIN" -m hugpy_fleet.worker.install --help 2>&1 || true)"
+if [ -x "$PY_BIN" ]; then
+  HELP="$("$PY_BIN" -m hugpy_fleet.worker.install --help 2>&1 || true)"
+else
+  HELP=""   # dry-run on a bare box (no venv yet): forward flags unconditionally
+fi
 if [ -n "$FORCE" ]; then
   case "$HELP" in *--force*) set -- "$@" --force;;
                   *) say "NOTE: this installer predates --force; ignoring";; esac
@@ -213,6 +248,20 @@ fi
 if [ -n "$STORAGE_ROOT" ]; then
   case "$HELP" in *--storage-root*) set -- "$@" --storage-root "$STORAGE_ROOT";;
                   *) set -- "$@" --storage "$STORAGE_ROOT";; esac
+fi
+# Forward turnkey passthrough flags (advertise/comfy/self-check/etc) verbatim.
+# shellcheck disable=SC2086  # PASSTHRU is intentionally word-split
+set -- "$@" $PASSTHRU
+if [ -n "$DRY" ]; then
+  # Under dry-run: let the canonical installer run its own inspection/report
+  # (which changes nothing) when the venv exists, else print the exact command.
+  case "$HELP" in *--dry-run*) set -- "$@" --dry-run;; esac
+  if [ -x "$PY_BIN" ]; then
+    say "DRY-RUN: running installer self-check (no changes): $PY_BIN -m hugpy_fleet.worker.install $*"
+    exec "$PY_BIN" -m hugpy_fleet.worker.install "$@"
+  fi
+  say "DRY-RUN: would run: $PY_BIN -m hugpy_fleet.worker.install $* --dry-run"
+  exit 0
 fi
 say "registering worker service (hugpy-worker.service)"
 exec "$PY_BIN" -m hugpy_fleet.worker.install "$@"

@@ -280,6 +280,28 @@ All flags after `worker` are passed straight to the worker agent's own parser
   across cheap Android phones, and a phone can join the shard pool as a
   `role=rpc` llama.cpp backend (`PHONE_BRICK_RPC=1`).
 
+### Joining a remote box over WireGuard (one step)
+
+A GPU box outside the hub's LAN joins the fleet over a WireGuard tunnel. On the
+**hub**, the operator generates a self-contained join script:
+
+```bash
+hugpy-fleet join-code a-brain > a-brain.join.sh   # allocates 10.66.0.x, mints a token
+```
+
+Copy that one file to the box and run it as root:
+
+```bash
+sudo bash a-brain.join.sh
+```
+
+It installs `wireguard-tools`, brings up the tunnel (hub-only route — never a full
+tunnel), opens the worker port to the hub, checks it can reach central, then runs
+the normal worker installer. Two operator one-time steps on the hub are required
+first (install the wg-peer helper + allow the tunnel to central). See
+[docs/WORKER-WIREGUARD.md](https://github.com/hugpy/hugpy/blob/main/py/fleet/hugpy_fleet/docs/WORKER-WIREGUARD.md)
+for the full flow and revocation.
+
 ---
 
 ## Discord bot

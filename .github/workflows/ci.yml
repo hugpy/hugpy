@@ -19,6 +19,7 @@ jobs:
       matrix:
         pkg:
           - py/foundation/hugpy_platform
+          - py/foundation/hugpy_tools
           - py/foundation/hugpy_control
           - py/storage/hugpy_storage
           - py/inference/hugpy_engine

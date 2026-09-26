@@ -4,6 +4,7 @@ central resumes it — remaining lanes only, the in-flight lane restarted with a
 recorded reason — unless the operator cancelled it first."""
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import threading
@@ -41,6 +42,24 @@ class FakeLoop:
         self.finished.set()
 
 
+class FakeJudge:
+    """Stands in for fleet_grading.judge_collected (PHASE 2): records the
+    collected rows it was handed and reports a judge summary, so the tests can
+    assert the phase split without a real judge."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, client, results, report, tokens=None, stop=None,
+                 rounds=None, sleep=None, backoff_s=None):
+        self.calls.append(list(results))
+        report("judge-progress", {"phase": "judging", "total": len(results),
+                                  "judged": len(results), "pending": 0})
+        report("judge-summary", {"phase": "judging", "total": len(results),
+                                 "judged": len(results), "pending": 0, "revised": 0})
+        return {"total": len(results), "pending": 0}
+
+
 class FakeClient:
     def __init__(self, *a, **k):
         pass
@@ -56,6 +75,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "_BENCHMARK_LEGACY_STATE", str(tmp_path / "legacy.json"))
     monkeypatch.setattr(rr, "_persist_benchmark_result", lambda row: True)
     monkeypatch.setattr(rr, "_persist_benchmark_call", lambda row: True)
+    monkeypatch.setattr(rr, "_persist_benchmark_grade", lambda row: True)
     monkeypatch.setattr(fg, "Client", FakeClient)
     saved = dict(rr._BENCHMARK)
     rr._BENCHMARK.clear()
@@ -177,3 +197,122 @@ def test_live_run_is_not_resumed_and_cancel_is_persisted(env):
     assert json.loads(state.read_text())["cancel_requested"] is True
     gate.set(); loop.finished.wait(10)
     assert _wait(lambda: rr._BENCHMARK.get("status") not in rr._BENCHMARK_ACTIVE)
+
+
+# ── two-phase split (operator ruling 2026-09-24): collect, then judge ────────
+def test_phase2_judging_is_scheduled_after_the_collection_lot(env):
+    state, client, mp = env
+    loop = FakeLoop(); mp.setattr(fg, "run_capacity_benchmark", loop)
+    judge = FakeJudge(); mp.setattr(fg, "judge_collected", judge)
+    r = client.post("/llm/benchmark/run", json={"models": ["org/m"]})
+    assert r.status_code == 202
+    assert loop.finished.wait(10)
+    assert _wait(lambda: rr._BENCHMARK.get("status") == "complete")
+    # PHASE 1 deferred the judge; PHASE 2 was handed every collected row.
+    assert loop.calls and loop.calls[0].get("defer_judge") is True
+    assert judge.calls and len(judge.calls[0]) == 3
+    body = client.get("/llm/benchmark/status").get_json()
+    assert body["judge_summary"]["judged"] == 3 and body["status"] == "complete"
+
+
+def test_judge_now_reschedules_phase2_for_a_finished_run(env):
+    state, client, mp = env
+    loop = FakeLoop(); mp.setattr(fg, "run_capacity_benchmark", loop)
+    judge = FakeJudge(); mp.setattr(fg, "judge_collected", judge)
+    client.post("/llm/benchmark/run", json={"models": ["org/m"]})
+    assert loop.finished.wait(10)
+    assert _wait(lambda: rr._BENCHMARK.get("status") == "complete")
+    n = len(judge.calls)
+    r = client.post("/llm/benchmark/judge", json={})
+    assert r.status_code == 202
+    assert _wait(lambda: len(judge.calls) > n and rr._BENCHMARK.get("status") == "complete")
+    assert loop.calls == loop.calls  # collection was NOT re-run for judge-now
+    assert any(e.get("kind") == "judge-now" for e in rr._BENCHMARK.get("events") or [])
+
+
+def test_judge_now_refused_when_nothing_collected(env):
+    state, client, mp = env
+    r = client.post("/llm/benchmark/judge", json={})
+    assert r.status_code == 409 and "no collected run" in r.get_json()["reason"]
+
+
+def test_judging_orphan_resumes_phase2_only(env):
+    state, client, mp = env
+    loop = FakeLoop(); mp.setattr(fg, "run_capacity_benchmark", loop)
+    judge = FakeJudge(); mp.setattr(fg, "judge_collected", judge)
+    body = {"run_id": "rj", "status": "judging", "executor": "hugpy-central",
+            "owner": {"host": socket.gethostname(), "pid": 2**22 + 9, "start": 1},
+            "heartbeat": 1000.0, "updated": 1000.0, "started": 900.0, "tokens": 64,
+            "params": {"tokens": 64, "models": ["org/m"], "workers": []},
+            "plan": {"rows": LANES, "total": 3, "runnable": 3},
+            "results": [{**lane, "status": "complete", "grade": "10/15"} for lane in LANES],
+            "calls": [], "events": [], "summary": {}}
+    state.write_text(json.dumps(body))
+    rr._BENCHMARK.clear(); rr._BENCHMARK.update({"status": "idle"})
+    assert rr.benchmark_resume_orphaned() == "resumed"
+    assert _wait(lambda: rr._BENCHMARK.get("status") == "complete")
+    assert loop.calls == []                          # collection is never re-run
+    assert judge.calls and len(judge.calls[0]) == 3  # phase 2 re-judged the collected rows
+    out = client.get("/llm/benchmark/status").get_json()
+    assert out["resumed_from"]["phase"] == "judge" and out["run_id"] == "rj"
+
+
+class _Cur:
+    def __init__(self, log):
+        self.log = log
+
+    def execute(self, sql, params):
+        self.log.append((sql, params))
+
+    def fetchall(self):
+        return []
+
+
+class _DB:
+    def __init__(self):
+        self.log = []
+
+    @contextlib.contextmanager
+    def cursor(self):
+        yield _Cur(self.log)
+
+
+def test_phase1_persists_outputs_but_defers_grade_and_phase2_stamps_it(monkeypatch):
+    from hugpy_server.app.routes import metrics_routes
+    db = _DB()
+    monkeypatch.setattr(metrics_routes, "_live_db", lambda: db)
+    row = {"model": "org/m", "worker": "aeb", "quant": "q", "config": "standard",
+           "alloc_mode": "gpu_only", "status": "complete", "error": "N/A",
+           "score": 9, "max": 27, "cold_measured": False,
+           "detail": {"math": {"tier": 3, "max": 3, "history": [{"pass": True}]}},
+           "judge": {"status": "pending"}}
+    # PHASE 1: the row (raw outputs = grade_detail) lands, but grade/graded_at are
+    # NULL while the judge is pending — the grade appears only once judged.
+    assert rr._persist_benchmark_result(row) is True
+    _sql, params = db.log[-1]
+    grade_in, detail_in = params[10], params[12]
+    assert grade_in is None and detail_in is not None and "math" in detail_in
+
+    # PHASE 2: the judge revised the outputs -> the grade is stamped in place.
+    row["judge"] = {"status": "judged"}
+    row["score"] = 27
+    assert rr._persist_benchmark_grade(row) is True
+    upd_sql, upd_params = db.log[-1]
+    assert upd_sql.startswith("UPDATE model_metrics SET grade")
+    assert upd_params[0] == 100.0 and "org/m" in upd_params[2:]
+
+
+def test_phase1_keeps_grade_when_no_judge_is_pending(monkeypatch):
+    # The historical inline path / an exhausted ladder / a non-judged suite: no
+    # pending judge, so the deterministic grade is written in phase 1 as before.
+    from hugpy_server.app.routes import metrics_routes
+    db = _DB()
+    monkeypatch.setattr(metrics_routes, "_live_db", lambda: db)
+    row = {"model": "org/m", "worker": "aeb", "quant": "q", "config": "standard",
+           "alloc_mode": "gpu_only", "status": "complete", "error": "N/A",
+           "score": 18, "max": 27, "cold_measured": False,
+           "detail": {"math": {"tier": 3, "max": 3, "history": []}},
+           "judge": {"status": "judged"}}
+    assert rr._persist_benchmark_result(row) is True
+    _sql, params = db.log[-1]
+    assert params[10] == 100.0 * 18 / 27

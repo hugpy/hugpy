@@ -135,14 +135,17 @@ def test_resolved_ctx_is_pct_of_max(ctx_env):
     assert (ctx, pct, mx) == (16384, 50, 32768)
 
 
-def test_resolved_ctx_clamps_to_engine_cap(ctx_env, monkeypatch):
-    # 100% of 32768 for a GGUF is capped to DEFAULT_LLAMA_CTX (16384 by default).
-    from hugpy_engine.serve import serve
-    monkeypatch.setattr(serve, "DEFAULT_LLAMA_CTX", 16384)
+def test_resolved_ctx_has_no_legacy_global_ceiling(ctx_env):
     A._RUNTIME_SETTINGS.update({"ctx_pct": {"m": 100}})
     ctx, pct, mx = A._resolved_ctx("m", {"framework": "gguf"})
-    assert ctx == 16384                   # capped, not 32768
+    assert ctx == 32768
     assert mx == 32768
+
+
+def test_resolved_ctx_uses_native_context(ctx_env):
+    A._RUNTIME_SETTINGS.update({"ctx_pct": {"m": 100}})
+    ctx, pct, mx = A._resolved_ctx("m", {"framework": "gguf"})
+    assert ctx == 32768
 
 
 def test_unset_ctx_pct_yields_no_resolution(ctx_env):
@@ -279,14 +282,13 @@ def test_ctx_resolver_wires_resolved_ctx_into_serving(monkeypatch):
         serve.set_ctx_resolver(None)
 
 
-def test_ctx_resolver_unset_is_todays_default(monkeypatch):
-    """No resolver -> the historical capping path, byte-identical."""
+def test_ctx_resolver_unset_serves_native_context(monkeypatch):
+    """No resolver serves the model's trained context, without a global cap."""
     from hugpy_engine.serve import serve
     monkeypatch.setattr(serve, "_effective_extra", lambda mk, cfg: {})
-    monkeypatch.setattr(serve, "DEFAULT_LLAMA_CTX", 16384)
     serve.set_ctx_resolver(None)
     cfg = type("C", (), {"model_max_length": 32768})()
-    assert serve._ctx_for(cfg, "m") == 16384          # min(32768, 16384) as before
+    assert serve._ctx_for(cfg, "m") == 32768
 
 
 def test_explicit_llama_ctx_override_still_wins(monkeypatch):

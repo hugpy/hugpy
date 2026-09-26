@@ -1109,36 +1109,30 @@ def set_media_default(model_key, enabled):
 
 
 # ---------------------------------------------------------------------------
-# Per-worker KEEP-WARM STAR (boot_prewarm) — the ONE model a given worker keeps
-# warm. Mirrors the media_default store above (same mechanism: a plain JSON file
-# next to the discovery report), but is a DIFFERENT thing and MUST NOT be
-# conflated with it — and is DIFFERENT from 🔒static too. The three levers:
+# Per-worker ⭐ STAR (boot_prewarm) — a per-worker ROUTING DESIGNATION that loads
+# nothing. Mirrors the media_default store above (same mechanism: a plain JSON
+# file next to the discovery report), but is a DIFFERENT thing and MUST NOT be
+# conflated with it — and is DIFFERENT from 🔒static too. The levers:
 #
 #   * media_default (the /media star) = "first in the list + default-selected"
 #     — a routing/UI PREFERENCE only. It does NOT load anything.
-#   * ⭐ boot_prewarm (this per-worker star) = the operator's KEEP-WARM
-#     designation: reconcile keeps it warm every beat, so a star evicted under
-#     pressure returns next cycle. Evictable, NOT eviction-protected.
-#   * 🔒 static = warm AND eviction-protected (a different, heavier tier).
-#   * 📌 pin = routing persistence only, never warms.
+#   * ⭐ boot_prewarm (this per-worker star) = a routing tie-break designation:
+#     for an ambiguous no-warm call, central prefers the worker whose star is the
+#     requested model (see central.workers._star_map). It LOADS NOTHING.
+#   * 🔒 static = eviction-protected residency (a different, heavier tier); it is
+#     eager-PULLED to disk but still loads into VRAM only when called.
+#   * 📌 pin = routing/attribution persistence only, never loads.
 #
 # Scoped PER WORKER and many-valued: one star per worker id, keyed worker_id ->
 # model_key. Shape on disk: {"prewarm": {"<worker_id>": "<model_key>", ...}}.
 #
-# SEMANTICS (operator RULINGS 2026-07-23):
-#   RULING 1 — "the star is the ONLY warm source. nothing warms until starred
-#               (or static)."
-#   RULING 2 — "star = reconcile-kept-warm" (NOT boot-once): a starred model
-#               evicted under load COMES BACK on the next reconcile beat. The
-#               star IS the keep-warm designation.
-# So the star is loaded once and then RECONCILE keeps it warm every beat — if a
-# busy box evicts it, the next reconcile beat reloads it. It is a NORMALLY
-# EVICTABLE (FIFO) on-demand resident: NOT eviction-protected (it just doesn't
-# STAY cold). This is NOT the static tier (which IS eviction-protected +
-# operator-doctrine); do NOT conflate. For "start here AND stay here" with
-# eviction protection, the operator promotes the model to 🔒static themselves.
-# The identifier stays ``boot_prewarm``/``prewarm`` (rename churn isn't worth it)
-# but the meaning is keep-warm, not boot-once.
+# SEMANTICS: the star affects ROUTING PRIORITY only. It is NOT keep-warm, does
+# NOT pre-load, boot-load or reconcile-reload, and does NOT protect from eviction.
+# A starred model becomes resident ONLY when a request for it arrives (the same
+# evict-to-fit demand path every other model uses). For eviction-protected
+# residency the operator promotes the model to 🔒static instead. The identifier
+# stays ``boot_prewarm``/``prewarm`` (rename churn isn't worth it) but the meaning
+# is a routing designation, not any kind of warm.
 #
 # Kept in its OWN file (worker_boot_prewarm.json) so the whole-file rewrites of
 # the other stores (_save_media / _save_media_default) never clobber it.
@@ -1147,9 +1141,9 @@ def _worker_boot_prewarm_path():
 
 
 def worker_boot_prewarm_state():
-    """The current per-worker keep-warm star map: {worker_id: model_key}.
-    Empty dict when unset/cleared. Tolerates a legacy/bare shape (a top-level
-    {wid: key} dict written without the wrapper)."""
+    """The current per-worker ⭐ star map: {worker_id: model_key} (routing
+    designation only — loads nothing). Empty dict when unset/cleared. Tolerates a
+    legacy/bare shape (a top-level {wid: key} dict written without the wrapper)."""
     p = _worker_boot_prewarm_path()
     if os.path.isfile(p):
         data = safe_load_from_json(p)
@@ -1164,22 +1158,22 @@ def worker_boot_prewarm_state():
 
 
 def set_worker_boot_prewarm(worker_id, model_key, enabled):
-    """Set or clear a worker's single KEEP-WARM STAR (one-star-per-worker).
+    """Set or clear a worker's single ⭐ STAR (one-star-per-worker).
 
-    enabled True  -> make ``model_key`` this worker's keep-warm star,
+    enabled True  -> make ``model_key`` this worker's star,
                      REPLACING any previous star for that worker.
     enabled False -> clear this worker's star IFF ``model_key`` is the worker's
                      current star (clearing a non-current key is a no-op, so a
                      stale clear never disturbs the standing star). Passing
                      model_key=None with enabled False clears unconditionally.
 
-    NOTE: the star = the operator's keep-warm designation (operator RULINGS
-    2026-07-23; NOT the media_default preference, NOT the 🔒static tier) —
-    reconcile keeps it warm every beat, so a star evicted under pressure returns
-    next cycle. It does NOT mark the model static, does NOT protect it from
-    eviction (evictable, but returns next reconcile beat), and does NOT require
-    the model to be present/allocated. Returns the resulting state for that
-    worker."""
+    NOTE: the star is a per-worker ROUTING designation (NOT the media_default
+    preference, NOT the 🔒static tier). It LOADS NOTHING — it does not warm,
+    pre-load, boot-load or reconcile-reload, does not mark the model static, does
+    not protect it from eviction, and does not require the model to be
+    present/allocated. Its only effect is a routing tie-break for ambiguous
+    no-warm calls (central.workers._star_map). Returns the resulting state for
+    that worker."""
     enabled = bool(enabled)
     worker_id = str(worker_id)
     state = worker_boot_prewarm_state()
@@ -1251,6 +1245,95 @@ def worker_wildcard_state():
     return {}
 
 
+def _load_wildcard_file() -> dict:
+    """The whole ``worker_wildcard.json`` object (wrapper + siblings), or ``{}``.
+
+    Read WHOLE so the sibling ``distribution`` key (the fleet distribution mode,
+    below) rides in the same file as the per-worker wildcard map and neither
+    writer clobbers the other."""
+    p = _worker_wildcard_path()
+    if os.path.isfile(p):
+        data = safe_load_from_json(p)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+# ── FLEET DISTRIBUTION MODE (operator ruling 2026-09-24) ────────────────────
+# The DEFAULT placement mechanism. Two values, stored beside the per-worker
+# wildcard map in the SAME file (worker_wildcard.json) because they are the same
+# family of decision (WHO may serve a model that isn't hard-pinned to them):
+#
+#   "feasible"   (DEFAULT ON) — any online worker where the model FEASIBLY FITS
+#                (static VRAM+RAM incl. evict-to-fit, task/engine/tier/pool/
+#                id_lock gates, and the files present on that worker) is a
+#                routing candidate, evaluated live at decision time. Designations
+#                and worker_prefs become an ORDERED PREFERENCE (tried first);
+#                when none of them is eligible, routing FALLS BACK to the feasible
+#                set instead of refusing. A per-model ``strict: true`` keeps the
+#                hard designation fence for that model.
+#   "designated" — the legacy sealed scope: byte-identical to pre-2026-09-24.
+#                Only designated / resident / granted homes and the per-worker
+#                wildcard opt-ins serve; an unmet preference REFUSES.
+#
+# Absent key reads "feasible" (the new default). An unreadable file degrades to
+# "feasible" too — the default IS the promise. The env override
+# HUGPY_DISTRIBUTION (feasible|designated) wins when set, for a box that wants a
+# different default without editing the store.
+_DISTRIBUTION_MODES = ("feasible", "designated")
+
+
+def fleet_distribution_mode() -> str:
+    """The current fleet distribution mode: ``"feasible"`` (default) or
+    ``"designated"``. Env HUGPY_DISTRIBUTION overrides the store; an unknown
+    value (env or store) degrades to the default so routing never stalls on a
+    typo."""
+    env = str(os.environ.get("HUGPY_DISTRIBUTION") or "").strip().lower()
+    if env in _DISTRIBUTION_MODES:
+        return env
+    val = str(_load_wildcard_file().get("distribution") or "").strip().lower()
+    return val if val in _DISTRIBUTION_MODES else "feasible"
+
+
+def set_fleet_distribution(mode):
+    """Set the fleet distribution mode. Preserves the sibling wildcard map in the
+    same file. Returns the resulting mode."""
+    mode = str(mode or "").strip().lower()
+    if mode not in _DISTRIBUTION_MODES:
+        raise ValueError(f"distribution must be one of {_DISTRIBUTION_MODES}, got {mode!r}")
+    data = _load_wildcard_file()
+    # Normalize the wildcard wrapper (tolerate the legacy bare shape on write).
+    data["wildcard"] = worker_wildcard_state()
+    data["distribution"] = mode
+    safe_dump_to_file(data=data, file_path=_worker_wildcard_path())
+    return {"distribution": mode}
+
+
+def fleet_distribution_status() -> dict:
+    """The effective mode PLUS where it came from — the console read.
+
+    ``mode`` is the effective value (:func:`fleet_distribution_mode`).
+    ``source`` names WHICH layer supplied it: ``"env"`` when HUGPY_DISTRIBUTION
+    holds a valid mode (env wins over the store), ``"store"`` when the persisted
+    ``distribution`` key is a valid mode, else ``"default"`` (absent/typo reads
+    the "feasible" default). ``env_override`` is True whenever the env var is a
+    valid mode, so the console can warn that a store write will NOT change the
+    effective mode. ``stored`` is the persisted value (or None), so the console
+    shows what a write would toggle even while env pins the effective mode."""
+    env = str(os.environ.get("HUGPY_DISTRIBUTION") or "").strip().lower()
+    env_valid = env in _DISTRIBUTION_MODES
+    stored = str(_load_wildcard_file().get("distribution") or "").strip().lower()
+    stored = stored if stored in _DISTRIBUTION_MODES else None
+    if env_valid:
+        source = "env"
+    elif stored:
+        source = "store"
+    else:
+        source = "default"
+    return {"mode": fleet_distribution_mode(), "source": source,
+            "env_override": env_valid, "stored": stored}
+
+
 def set_worker_wildcard(worker_id, enabled):
     """Set or clear a worker's WILDCARD ("take all comers") routing opt-in.
 
@@ -1273,7 +1356,11 @@ def set_worker_wildcard(worker_id, enabled):
         state[worker_id] = True
     else:
         state.pop(worker_id, None)
-    safe_dump_to_file(data={"wildcard": state}, file_path=_worker_wildcard_path())
+    # Preserve the sibling distribution mode: read the whole file, replace only
+    # the wildcard map, keep every other key (the 2026-09-24 distribution mode).
+    data = _load_wildcard_file()
+    data["wildcard"] = state
+    safe_dump_to_file(data=data, file_path=_worker_wildcard_path())
     return {"worker_id": worker_id, "wildcard": enabled}
 
 

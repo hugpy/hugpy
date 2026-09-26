@@ -700,6 +700,67 @@ def gguf_metadata(model_path: str, want_suffixes: tuple) -> dict:
     return _gguf_metadata(model_path, want_suffixes)
 
 
+# ── KV-bearing (full-attention) layer count — hybrid-arch honest KV pricing ──
+# ``<arch>.block_count`` counts EVERY transformer block, but on a HYBRID model
+# (Qwen3-Next and other attention/recurrent stacks) only a fraction of the
+# blocks run FULL ATTENTION and therefore carry a context-growing KV cache; the
+# rest are linear/SSM/recurrent layers whose fixed-size state does NOT grow with
+# the context window. Pricing the KV cache against block_count overcounts —
+# verified on the real Qwen3-Coder-Next Q4_K_M header: block_count=48 but only
+# the 12 blocks with an ``blk.<i>.attn_k`` tensor (indices i where (i+1)%4==0,
+# the full_attention_interval=4 pattern) actually cache K/V; the other 36 carry
+# ``ssm_*`` tensors (gated-deltanet linear attention). A 4x KV overcount would
+# needlessly shrink the served context.
+#
+# The KV-bearing count is read from the ONE ground truth the file always carries
+# — its tensor names: a block runs standard attention iff it has an ``attn_k``
+# projection. Shard-aware (a split GGUF spreads blocks across shards). None when
+# NO ``attn_k`` tensor is found in any shard (an arch that names its KV tensors
+# differently), so the caller degrades to ``block_count`` — never a guess.
+_KV_LAYERS_CACHE: dict = {}
+
+
+def gguf_kv_bearing_layers(model_path) -> Optional[int]:
+    """Distinct transformer blocks that carry a standard attention KV cache
+    (a ``blk.<i>.attn_k`` tensor), summed across all shards of a split GGUF.
+
+    This is the honest ``n_layers`` for KV-cache byte math on HYBRID models
+    (attention + linear/SSM/recurrent), where ``block_count`` overcounts. None
+    when no ``attn_k`` tensor is present in any shard (unknown naming) so the
+    caller falls back to ``block_count``. Cached per (path, size, mtime)."""
+    try:
+        path = os.path.abspath(str(model_path))
+        st = os.stat(path)
+        sig = (int(st.st_size), int(st.st_mtime))
+    except (TypeError, ValueError, OSError):
+        return None
+    cached = _KV_LAYERS_CACHE.get(path)
+    if cached is not None and cached.get("sig") == sig:
+        return cached["val"]
+    import re
+    rx = re.compile(r"^blk\.(\d+)\.attn_k(\.|$)")
+    blocks: set = set()
+    saw_blocks = False
+    for shard in _gguf_shard_paths(path):
+        try:
+            h = gguf_read_header(shard)
+        except (GGUFHeaderError, OSError):
+            continue
+        for t in h.get("tensors") or ():
+            name = t.get("name") or ""
+            if name.startswith("blk."):
+                saw_blocks = True
+            m = rx.match(name)
+            if m:
+                blocks.add(int(m.group(1)))
+    # A file with block tensors but none named attn_k -> unknown naming (None);
+    # a file we couldn't read at all -> also None. Never 0 (0 would zero KV).
+    val = len(blocks) if blocks else None
+    if saw_blocks or val is not None:
+        _KV_LAYERS_CACHE[path] = {"sig": sig, "val": val}
+    return val
+
+
 __all__ = ["gguf_metadata", "gguf_moe_detail", "gguf_read_header",
-           "gguf_integrity", "gguf_tensor_nbytes", "GGUFHeaderError",
-           "GGML_TYPE_SIZES"]
+           "gguf_integrity", "gguf_tensor_nbytes", "gguf_kv_bearing_layers",
+           "GGUFHeaderError", "GGML_TYPE_SIZES"]

@@ -16,6 +16,7 @@ import time
 log = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 _HOST = socket.gethostname()
+_PROCESS_STARTED_AT = time.time()
 
 
 def path() -> str:
@@ -38,13 +39,28 @@ def _request_context() -> dict:
         from flask import has_request_context, request
         if not has_request_context():
             return {}
-        xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        forwarded_for = (request.headers.get("X-Forwarded-For") or "")[:512]
+        xff = forwarded_for.split(",")[0].strip()
         return {
             "client": xff or request.remote_addr,
+            "peer": request.remote_addr,
+            "forwarded_for": forwarded_for or None,
             "ua": (request.headers.get("User-Agent") or "")[:160],
+            # HTTP does not expose the remote OS process or account. Clients
+            # that want this attribution can declare it with these headers;
+            # authenticated HugPy identity remains in `principal` separately.
+            "client_process": (request.headers.get("X-Hugpy-Client-Process") or "")[:160] or None,
+            "client_pid": (request.headers.get("X-Hugpy-Client-Pid") or "")[:24] or None,
+            "client_user": (request.headers.get("X-Hugpy-Client-User") or "")[:160] or None,
+            "client_session": (request.headers.get("X-Hugpy-Client-Session") or "")[:200] or None,
+            "client_turn": (request.headers.get("X-Hugpy-Client-Turn") or "")[:200] or None,
+            "client_request": (request.headers.get("X-Hugpy-Client-Request") or "")[:200] or None,
+            "client_task": (request.headers.get("X-Hugpy-Client-Task") or "")[:200] or None,
+            "client_platform": (request.headers.get("X-Hugpy-Client-Platform") or "")[:100] or None,
             "route": request.path,
             "method": request.method,
             "host": request.host,
+            "scheme": request.scheme,
         }
     except Exception:  # noqa: BLE001
         return {}
@@ -74,6 +90,9 @@ def record(phase: str, job, **extra) -> None:
             "status": getattr(job, "status", None), "tokens": getattr(job, "tokens", 0),
             "started_ts": getattr(job, "started_ts", None),
         }
+        request_body = getattr(job, "request", None)
+        if request_body is not None:
+            row["request"] = request_body
         if phase == "start":
             row.update(_request_context())
         else:
@@ -125,6 +144,12 @@ def read(limit: int = 300, since: float | None = None, tail_bytes: int = 4 * 102
             cur.update({k: v for k, v in ev.items() if k not in ("phase", "ts") and v is not None})
             cur["ended_ts"] = ev.get("ts")
     rows = [calls[j] for j in order]
+    for row in rows:
+        if (row.get("status") == "pending"
+                and (row.get("started_ts") or 0) < _PROCESS_STARTED_AT
+                and not row.get("ended_ts")):
+            row["status"] = "interrupted"
+            row["error"] = "central API restarted before this call completed"
     if since:
         rows = [r for r in rows if (r.get("started_ts") or r.get("ts") or 0) >= since]
     rows.sort(key=lambda r: r.get("started_ts") or r.get("ts") or 0, reverse=True)

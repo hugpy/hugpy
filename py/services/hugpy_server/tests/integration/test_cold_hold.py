@@ -127,31 +127,32 @@ def test_cold_progress(remote):
     orig = remote._load_state_provider
     try:
         remote.set_load_state_provider(lambda mk, wid, since=0.0: {"healthy": True})
-        moved, prog, msg, honest = remote._cold_progress("m", WORKER, 0.0)
+        moved, prog, msg, honest, healthy = remote._cold_progress("m", WORKER, 0.0)
         check("healthy load-state counts as forward movement", moved and honest is None)
 
         remote.set_load_state_provider(
             lambda mk, wid, since=0.0: {"in_progress": True, "progress": 0.5, "message": "loading"})
-        moved, prog, msg, honest = remote._cold_progress("m", WORKER, 0.0)
+        moved, prog, msg, honest, healthy = remote._cold_progress("m", WORKER, 0.0)
         check("in-progress counts as movement + carries progress",
               moved and prog == 0.5 and msg == "loading" and honest is None)
 
         remote.set_load_state_provider(
             lambda mk, wid, since=0.0: {"healthy": False, "in_progress": False,
                                         "error": "won't fit on GPU"})
-        moved, prog, msg, honest = remote._cold_progress("m", WORKER, 0.0)
+        moved, prog, msg, honest, healthy = remote._cold_progress("m", WORKER, 0.0)
         check("a fresh PERMANENT load-state error is honest-fail", honest and "won't fit" in honest)
 
         remote.set_load_state_provider(
             lambda mk, wid, since=0.0: {"healthy": False, "in_progress": False,
                                         "error": "RemoteProtocolError: Server disconnected"})
-        moved, prog, msg, honest = remote._cold_progress("m", WORKER, 0.0)
+        moved, prog, msg, honest, healthy = remote._cold_progress("m", WORKER, 0.0)
         check("a TRANSIENT load-state error is NOT honest-fail (keep holding)",
               honest is None and not moved)
 
         remote.set_load_state_provider(None)
         check("no provider -> no movement, no error",
-              remote._cold_progress("m", WORKER, 0.0) == (False, None, None, None))
+                  remote._cold_progress("m", WORKER, 0.0) ==
+                  (False, None, None, None, False))
     finally:
         remote.set_load_state_provider(orig)
 

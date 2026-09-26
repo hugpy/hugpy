@@ -324,9 +324,15 @@ def test_runner_extract_indices_and_overlap_drop():
 
 # --------------------------------------------------------------------------- #
 # [4] Runner (REAL, GPU-LESS): a real vace_extend movie renders segment 0
-#     (synthetic) then fails segment 1 with the VACE runner's GRACEFUL Err
-#     (DEPS_MISSING), surfaced as per-segment DATA naming the segment + mode. No
-#     monkeypatch — proves the extract -> route-to-VACE -> graceful-degrade path.
+#     (synthetic, IN-PROCESS) then fails segment 1 (a real Wan-VACE model at the bumped
+#     VACE budget) as per-segment DATA naming the segment + mode. No monkeypatch — proves
+#     the synthetic-in-process seg 0 AND the real-segment placement path.
+#
+# RULING UPDATE (2026-09-24): video is placed like an LLM. Segment 0 (synthetic) still
+# renders IN-PROCESS on central. Segment 1 (a REAL VACE model) is NO LONGER run on the
+# GPU-less in-process path (which only ever produced deps_missing) — with NO studio worker
+# it is a NAMED placement refusal (``no_studio_worker``) that STILL names segment 1 + its
+# joint mode and STILL records segment 1 failed. deps_missing now comes only FROM a worker.
 # --------------------------------------------------------------------------- #
 def test_runner_real_vace_graceful_err():
     if not (_FFMPEG and _FFPROBE):
@@ -346,9 +352,12 @@ def test_runner_real_vace_graceful_err():
         # honest per-segment Err — NOT a hang/raise/500, NOT a silent still fallback.
         assert res.ok is False, "a vace_extend segment that can't run must fail as DATA"
         assert res.error is not None
-        assert res.error.code == "deps_missing", (
-            f"this GPU-less box must surface the VACE runner's graceful Err; got "
-            f"{res.error.code}: {res.error.message}")
+        # RULING (2026-09-24): the real vace_extend segment with no studio worker refuses
+        # by name (placement), never the GPU-less in-process deps_missing.
+        assert res.error.code in (
+            "no_studio_worker", "studio_model_not_on_worker", "no_feasible_studio_worker"), (
+            f"this box has no studio worker, so a real vace_extend segment must surface a "
+            f"NAMED placement refusal; got {res.error.code}: {res.error.message}")
         # the JobError names WHICH segment + mode failed.
         assert "segment 1" in res.error.message and "joint_mode=vace_extend" in res.error.message, (
             f"error must name the failing segment + joint mode; got {res.error.message!r}")
@@ -362,7 +371,9 @@ def test_runner_real_vace_graceful_err():
         assert s0["status"] in ("done", "resumed") and s0["joint_mode"] == "still", s0
         assert s1["status"] == "failed" and s1["joint_mode"] == "vace_extend", s1
         assert s1["capability"] == "v2v", s1
-        assert s1["error"]["code"] == "deps_missing", s1
+        # RULING (2026-09-24): the recorded per-segment error is the placement refusal.
+        assert s1["error"]["code"] in (
+            "no_studio_worker", "studio_model_not_on_worker", "no_feasible_studio_worker"), s1
         # the vace segment's budget was BUMPED to reach the VACE model (not left at 0.5).
         assert s1["vram_budget_gb"] >= 6.0, s1
         return res  # surfaced for the smoke printout
@@ -435,7 +446,7 @@ CHECKS = [
      test_route_vace_body),
     ("runner: fake VACE seam — exact context indices + overlap-drop + honest movie.json",
      test_runner_extract_indices_and_overlap_drop),
-    ("runner: REAL vace_extend on this box -> segment 0 renders, segment 1 graceful Err (mode named)",
+    ("runner: REAL vace_extend, no worker -> segment 0 renders (synthetic), segment 1 NAMED placement refusal (mode named)",
      test_runner_real_vace_graceful_err),
     ("regression: all-still movie labeled mode=still, context_drop=0, unchanged length",
      test_still_mode_labeled_and_unchanged),

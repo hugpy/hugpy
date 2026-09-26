@@ -47,6 +47,7 @@ Changelog = "https://github.com/hugpy/hugpy/releases"
 Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
 
 [project.scripts]
+hugpy-fleet = "hugpy_fleet.cli:main"
 hugpy-worker = "hugpy_fleet.worker.agent:main"
 hugpy-gguf-worker = "hugpy_fleet.gguf_worker.agent:main"
 hugpy-phone-brick = "hugpy_fleet.phone_brick.__main__:main"

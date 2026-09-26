@@ -44,6 +44,15 @@ STATUS_MISSING = "missing"
 STATUS_PIN = "pin_violation"
 STATUS_UNKNOWN = "unknown"
 STATUS_NO_PROFILE = "profile_absent"
+#: A companion (``torchvision``/``torchaudio``) is present but the torch it
+#: declares in its own metadata is not the torch installed in the SAME venv, so
+#: it fails to import (the ``torchvision::nms`` operator incident, 2026-09-24).
+STATUS_COMPANION_MISMATCH = "companion_mismatch"
+
+#: The pytorch wheel index, keyed by a torch build's CUDA local tag. A torch of
+#: ``2.12.1+cu130`` came from ``.../whl/cu130``; the companion that matches it
+#: must come from the same place, so its repair points pip there.
+_PYTORCH_INDEX = "https://download.pytorch.org/whl/{tag}"
 
 #: Report-level verdicts.
 VERDICT_OK = "ok"
@@ -78,7 +87,8 @@ class Finding:
         evidence that the box is broken, and both would otherwise turn a
         transient probe failure into fleet-wide ineligibility."""
         return (self.severity == "blocker"
-                and self.status in (STATUS_MISSING, STATUS_PIN))
+                and self.status in (STATUS_MISSING, STATUS_PIN,
+                                    STATUS_COMPANION_MISMATCH))
 
     def to_dict(self) -> dict[str, Any]:
         return {"dep": self.dep, "kind": self.kind, "venv": self.venv,
@@ -240,6 +250,104 @@ def _binary_repair(entry: DoctrineEntry) -> str:
     return f"sudo apt install -y {entry.name}"
 
 
+def _base_version(version: str | None) -> str | None:
+    """A torch version with its PEP 440 local tag stripped: ``2.12.1+cu130`` ->
+    ``2.12.1``. The local tag is the CUDA build, not the release the companion's
+    ``torch==X`` speaks about — that comparison is on the base version."""
+    if not version:
+        return version
+    return str(version).split("+", 1)[0].strip()
+
+
+def _cuda_local_tag(version: str | None) -> str | None:
+    """The local tag of a torch build: ``2.12.1+cu130`` -> ``cu130``, ``+cpu`` ->
+    ``cpu``, a plain ``2.13.0`` -> None. It names the pytorch wheel index the
+    matching companion must be installed from."""
+    if not version or "+" not in str(version):
+        return None
+    local = str(version).split("+", 1)[1].strip()
+    return local or None
+
+
+def _companion_repair(report: Mapping[str, Any], entry: DoctrineEntry,
+                      base_name: str, base_version: str | None) -> str:
+    """Reinstall the companion so it MATCHES the installed torch.
+
+    Built from facts, like every other repair here: the base torch version and
+    its CUDA local tag are what the box actually holds. Pinning the base torch
+    at its installed version on the matching pytorch index makes pip resolve the
+    companion that declares ``torch==<that base>`` — the paired build — rather
+    than hand-guessing a companion version number we cannot verify."""
+    python = _venv_python(report, entry.venv) or "python"
+    base = _base_version(base_version)
+    tag = _cuda_local_tag(base_version)
+    parts = [shlex.quote(python), "-m", "pip", "install"]
+    if tag:
+        parts += ["--index-url", _PYTORCH_INDEX.format(tag=tag)]
+    if base:
+        parts.append(shlex.quote(f"{base_name}=={base}"))
+    parts.append(shlex.quote(entry.name))
+    return " ".join(parts)
+
+
+def _companion_finding(report: Mapping[str, Any], entry: DoctrineEntry,
+                       packages: Mapping[str, Any],
+                       companions: Mapping[str, Any] | None,
+                       base: dict) -> Finding | None:
+    """The companion-compat verdict for a dep that IS installed, or None when the
+    check does not apply (it is satisfied, or this is not a companion).
+
+    UNKNOWN — never a blocker — whenever a fact is missing: no installed torch to
+    compare against, or a report too old to carry the companion's declared torch
+    (``torch_companions`` absent). Only a PROVEN mismatch blocks."""
+    if not entry.companion_of:
+        return None
+    severity = entry.companion_severity or entry.severity
+    base_name = entry.companion_of
+    base_version = packages.get(base_name)
+    declared = (companions or {}).get(entry.name) if isinstance(
+        companions, Mapping) else None
+    cbase = dict(base)
+    cbase["severity"] = severity
+    if not isinstance(companions, Mapping) or entry.name not in companions:
+        return Finding(
+            **cbase, status=STATUS_UNKNOWN,
+            observed=(str(base_version) if base_version else None),
+            detail=(f"this report does not carry {entry.name!r}'s declared torch "
+                    f"requirement (an older worker agent) — compatibility with "
+                    f"the installed torch is UNKNOWN, not confirmed"),
+            repair="")
+    if base_version is None:
+        return Finding(
+            **cbase, status=STATUS_UNKNOWN, observed=None,
+            detail=(f"{entry.name} declares torch {declared!r} but no torch is "
+                    f"installed in {entry.venv} to compare against — UNKNOWN"),
+            repair="")
+    if declared is None:
+        return Finding(
+            **cbase, status=STATUS_UNKNOWN, observed=str(base_version),
+            detail=(f"{entry.name} declares no torch requirement in its metadata "
+                    f"— compatibility cannot be decided, reporting UNKNOWN"),
+            repair="")
+    installed_base = _base_version(str(base_version))
+    satisfied = pin_satisfied(installed_base, str(declared))
+    if satisfied is False:
+        return Finding(
+            **cbase, status=STATUS_COMPANION_MISMATCH, observed=str(base_version),
+            detail=(f"{entry.name} requires torch {declared!r} but {entry.venv} "
+                    f"has torch {base_version} (base {installed_base}); "
+                    f"`import {entry.name}` fails against a torch it was not "
+                    f"built for"),
+            repair=_companion_repair(report, entry, base_name, str(base_version)))
+    if satisfied is None:
+        return Finding(
+            **cbase, status=STATUS_UNKNOWN, observed=str(base_version),
+            detail=(f"{entry.name}'s torch requirement {declared!r} could not be "
+                    f"evaluated against {base_version} — UNKNOWN, not a guess"),
+            repair="")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # assess
 # ---------------------------------------------------------------------------
@@ -247,7 +355,8 @@ def _binary_repair(entry: DoctrineEntry) -> str:
 
 def _pip_finding(report: Mapping[str, Any], entry: DoctrineEntry,
                  packages: Mapping[str, Any] | None,
-                 profile_present: bool) -> Finding:
+                 profile_present: bool,
+                 companions: Mapping[str, Any] | None = None) -> Finding:
     base = dict(dep=entry.name, kind=entry.kind, venv=entry.venv,
                 severity=entry.severity, tasks=entry.required_for,
                 expected=entry.pin or entry.version)
@@ -266,12 +375,19 @@ def _pip_finding(report: Mapping[str, Any], entry: DoctrineEntry,
             repair="")
     observed = packages.get(entry.name)
     if observed is None:
+        # A companion whose base torch IS present gets a repair aimed at the
+        # matching pytorch index; otherwise the plain pip line.
+        if entry.companion_of and packages.get(entry.companion_of) is not None:
+            repair = _companion_repair(report, entry, entry.companion_of,
+                                       str(packages.get(entry.companion_of)))
+        else:
+            repair = _pip_repair(report, entry, pin=bool(entry.pin))
         return Finding(
             **base, status=STATUS_MISSING, observed=None,
             detail=(f"not installed in {entry.venv}"
                     + (f" (doctrine reference has {entry.version})"
                        if entry.version else " (and the reference lacks it too)")),
-            repair=_pip_repair(report, entry, pin=bool(entry.pin)))
+            repair=repair)
     observed = str(observed)
     satisfied = pin_satisfied(observed, entry.pin)
     if satisfied is False:
@@ -286,6 +402,12 @@ def _pip_finding(report: Mapping[str, Any], entry: DoctrineEntry,
             detail=(f"pin {entry.pin!r} could not be evaluated against "
                     f"{observed} — reporting unknown rather than guessing"),
             repair="")
+    # Present and pin-clean, but a companion must ALSO agree with its torch. Its
+    # own declared requirement (from the report) is the rule; a mismatch there is
+    # the incident this check exists for.
+    companion = _companion_finding(report, entry, packages, companions, base)
+    if companion is not None:
+        return companion
     if entry.version and observed != entry.version:
         return Finding(
             dep=entry.name, kind=entry.kind, venv=entry.venv,
@@ -405,8 +527,12 @@ def assess(report: Mapping[str, Any], doctrine: Doctrine) -> DoctrineReport:
                         if isinstance(block, Mapping) else None)
             if not isinstance(packages, Mapping):
                 packages = None
+            companions = (block.get("torch_companions")
+                          if isinstance(block, Mapping) else None)
+            if not isinstance(companions, Mapping):
+                companions = None
             finding = _pip_finding(report, entry, packages,
-                                   key in present_profiles)
+                                   key in present_profiles, companions)
         elif entry.kind == "binary":
             finding = _binary_finding(entry, binaries)
         elif entry.kind == "mount":
@@ -468,6 +594,7 @@ def render(assessment: DoctrineReport, *, show_info: bool = False) -> str:
 
 
 __all__ = [
+    "STATUS_COMPANION_MISMATCH",
     "STATUS_DRIFT", "STATUS_MISSING", "STATUS_NO_PROFILE", "STATUS_OK",
     "STATUS_PIN", "STATUS_UNKNOWN",
     "VERDICT_BLOCKED", "VERDICT_OK", "VERDICT_UNKNOWN", "VERDICT_WARN",

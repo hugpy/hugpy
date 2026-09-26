@@ -259,6 +259,21 @@ def alloc_mismatch(status: dict, requested: dict,
     if _asked(requested):
         if have_sig == requested:
             return None
+        # alloc_mode is a STRATEGY to REACH a placement, not the placement itself
+        # (operator ruling 2026-09-25: nothing should suggest the want or need
+        # for a model to evacuate resources for no need). Two modes that yield
+        # the SAME effective seat must not force a reload — a seat seated
+        # "explicit" at n_gpu_layers=-1 satisfies a later "max-gpu" request at
+        # n_gpu_layers=-1. Reuse when the effective placement key (n_gpu_layers)
+        # already matches; a real placement change (ram-only 0 vs gpu -1, a
+        # different layer count) still differs HERE and still reloads, and
+        # n_cpu_moe / file are verified right after by status_satisfies_opts. A
+        # per-request-override seat is EXCLUDED (by_override) — it never outlives
+        # its request.
+        if (not by_override
+                and requested.get("n_gpu_layers") is not None
+                and have_sig.get("n_gpu_layers") == requested.get("n_gpu_layers")):
+            return None
         if not _asked(have_sig) and not by_override:
             # seated with nothing asked (autofit/default): whether it implements
             # the explicit ask is decided on the EFFECTIVE placement, as before
@@ -295,6 +310,14 @@ def env_request_opts(opts: dict | None = None) -> dict:
                      ("HUGPY_CPU_MEM_GIB", "cpu_mem_gib"),
                      ("HUGPY_N_CPU_MOE", "n_cpu_moe"),
                      ("HUGPY_ALLOC_MODE", "alloc_mode"),
+                     # PER-GPU device pin (2026-09-25): central's chosen card ->
+                     # the slot child's CUDA_VISIBLE_DEVICES (slot_agent reads
+                     # body["gpu"]); its tensor-split -> --tensor-split. Without
+                     # this the native slot child NEVER saw a per-request card and
+                     # llama.cpp auto-split across all visible GPUs on its own.
+                     ("HUGPY_MAIN_GPU", "gpu"),
+                     ("HUGPY_MAIN_GPU", "main_gpu"),
+                     ("HUGPY_TENSOR_SPLIT", "tensor_split"),
                      ("DEFAULT_LLAMA_THREADS", "threads")):
         value = os.environ.get(env)
         if value not in (None, ""):

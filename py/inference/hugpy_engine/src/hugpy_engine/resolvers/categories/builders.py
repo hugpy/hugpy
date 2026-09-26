@@ -75,9 +75,13 @@ def _build_chat_request(kwargs: Dict[str, Any], model_key: str) -> ChatRequest:
     # no_makeroom: k96 no-evict guarantee — same silent-drop trap as the keys
     # above; without forwarding it here the relay never learns the request is
     # polite and a cold brain load could evict a fleet resident.
+    # caller: harness/client attribution (2026-09-24) — same silent-drop trap as
+    # the keys above; without forwarding it here the /v1 route's derived client
+    # identity never reaches ChatRequest.caller, so every call records as "api".
+    # It is central-only (dropped from model_dump before the worker wire).
     for k in ("max_new_tokens", "temperature", "top_p", "do_sample", "request_id",
               "unbounded", "max_chunks", "pool", "images", "alloc",
-              "chat_template_kwargs", "logit_bias", "no_makeroom"):
+              "chat_template_kwargs", "logit_bias", "no_makeroom", "caller"):
         if k in kwargs:
             out[k] = kwargs[k]
     out.setdefault("request_id", make_request_id())

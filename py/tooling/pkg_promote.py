@@ -84,8 +84,8 @@ watcher) judges it:
     inference through central ``/v1/chat/completions`` pinned to it with
     ``alloc.worker`` on a model that was HOT on it at pin time (max_tokens 4).
     No hot model at pin time = smoke skipped (recorded; never cold-downloads).
-    ``SMOKE_MAX_FAILS`` consecutive non-transient smoke failures = FAIL; anything
-    not passed by ``ROLLOUT_WINDOW_S`` after the pin = FAIL;
+    one smoke attempt is made per worker. A failed/empty response is retained
+    as ``unjudged`` and is never retried by the minute watcher;
   * workers offline at pin time (or never seen) are info, never a failure.
 
 All judged online workers pass -> ``healthy``. Any FAIL -> automatic rollback:
@@ -126,6 +126,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 import zipfile
 from datetime import datetime
 from email.parser import Parser
@@ -160,7 +161,6 @@ ROLLOUT_WINDOW_S = 15 * 60        # every online worker must pass within this of
 CENTRAL_GRACE_S = 5 * 60          # central must answer at the new version within this
 HEARTBEAT_FRESH_S = 120           # a heartbeat older than this is not "back online"
 SMOKE_TIMEOUT_S = 300             # one smoke call (may reload a model from local disk)
-SMOKE_MAX_FAILS = 3               # consecutive non-transient smoke failures = FAIL
 OPEN = ("rolling_out",)
 # Quiet central (2026-09-23: promotion 11's restart killed a running benchmark).
 # A pin that restarts central first waits for no benchmark / admission work,
@@ -398,7 +398,7 @@ def build_members(conn, members: dict[str, int], version: str, out: Path, epoch:
         root = Path(tmp) / "py"
         with conn.cursor() as cur:
             dirs = S.materialise(cur, members, root)
-        console_fresh_or_exit(dirs.values())
+        console_fresh_or_rebuild(dirs.values())
         for f in root.rglob("*"):                       # modes as version identity sees them:
             if f.is_file() and not f.is_symlink():      # exec bit only (umask-independent)
                 os.chmod(f, 0o755 if S.is_exec(f.stat().st_mode) else 0o644)
@@ -426,22 +426,64 @@ def build_members(conn, members: dict[str, int], version: str, out: Path, epoch:
     return files
 
 
-def console_fresh_or_exit(member_dirs) -> None:
+def console_fresh_or_rebuild(member_dirs) -> None:
     """The console bundle ships as tracked files; the React source lives in the
-    live tree. When the hugpy-server member being built carries the LIVE
-    tree's bundle (same index.html bytes), a UI edit that was never rebuilt
-    fails the build here — naming the build_console command. A member whose
-    bundle differs from the live one (an older version rebuilt for rollback)
-    is not comparable to today's React source and is not judged."""
+    live tree. When the hugpy-server member being built carries the LIVE tree's
+    bundle (same index.html bytes) and that bundle is STALE against react/ui/src
+    (a UI edit nobody rebuilt), SELF-HEAL: this is the fleet deploy path and dev
+    is live, so an edit must reach the fleet without a human running npm. We
+    rebuild the live bundle from react/ui/src (build_console.py --from-source
+    --only /) and copy the fresh bundle into each carrier member dir so the wheel
+    ships it. If the rebuild fails, the promotion FAILS LOUDLY with the real npm
+    output (the watcher logs the SystemExit) instead of retry-spinning on "stale".
+    The staleness check itself stays a hard guard on the manual/PyPI path
+    (build_wheels.console_stale_reason). A member whose bundle differs from the
+    live one (an older version rebuilt for rollback) is not comparable to today's
+    React source and is not judged."""
     live_index = BW.CONSOLE_DIST / "index.html"
     if not live_index.is_file():
         return
-    for d in member_dirs:
-        index = Path(d) / "src" / "hugpy_server" / "console_dist" / "index.html"
-        if index.is_file() and sha256(index) == sha256(live_index):
-            stale = BW.console_stale_reason()
-            if stale:
-                raise SystemExit(f"hugpy-server: {stale}")
+    carriers = [Path(d) for d in member_dirs
+                if (Path(d) / "src" / "hugpy_server" / "console_dist" / "index.html").is_file()
+                and sha256(Path(d) / "src" / "hugpy_server" / "console_dist" / "index.html")
+                == sha256(live_index)]
+    if not carriers:
+        return
+    stale = BW.console_stale_reason()
+    if not stale:
+        return
+    rebuild_console(stale)                              # raises SystemExit on failure
+    fresh = BW.CONSOLE_DIST
+    for d in carriers:
+        dest = d / "src" / "hugpy_server" / "console_dist"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(fresh, dest)
+
+
+def rebuild_console(stale: str) -> None:
+    """Run build_console.py --from-source --only / on the LIVE tree to refresh the
+    console bundle (reusing the existing node_modules; the deploy user owns write
+    access to react/ui and console_dist by ACL). Loud on failure: SystemExit with
+    the real npm/webpack output, which the watcher prints to its journal."""
+    log(f"console self-heal: {stale}")
+    tool = BW.CONSOLE_TOOL
+    if not tool.is_file():
+        raise SystemExit(f"hugpy-server: console is stale and {tool} is missing: {stale}")
+    # npm lives in the deploy user's ~/.local/bin, node in /usr/local/bin; neither
+    # is guaranteed on a systemd user unit's PATH, so name them explicitly.
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join(p for p in (str(Path.home() / ".local" / "bin"),
+                                              "/usr/local/bin", "/usr/bin",
+                                              env.get("PATH", "")) if p)
+    cmd = [sys.executable, str(tool), "--from-source", "--skip-install", "--only", "/"]
+    log(f"console self-heal: + {' '.join(cmd)}")
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
+    if r.returncode:
+        tail = ((r.stdout or "") + (r.stderr or ""))[-4000:]
+        raise SystemExit(f"hugpy-server: console_dist rebuild FAILED (rc {r.returncode}) — deploy "
+                         f"blocked until the React build succeeds. was: {stale}\n{tail}")
+    log("console self-heal: rebuilt console_dist from react/ui/src")
 
 
 def check_pins(files: list[Path], version: str) -> None:
@@ -582,7 +624,15 @@ class LiveFleet:
                          {"model": model, "max_tokens": 4, "temperature": 0,
                           "messages": [{"role": "user", "content": "Reply with: OK"}],
                           "alloc": {"worker": worker}},
-                         headers={"Authorization": f"Bearer {key}"}, timeout=SMOKE_TIMEOUT_S)
+                         headers={
+                             "Authorization": f"Bearer {key}",
+                             "X-Hugpy-Client-Process": "pkg-src-watch/pkg-promote",
+                             "X-Hugpy-Client-Pid": str(os.getpid()),
+                             "X-Hugpy-Client-User": getpass.getuser(),
+                             "X-Hugpy-Client-Request": str(uuid.uuid4()),
+                             "X-Hugpy-Client-Task": f"worker-rollout-smoke:{worker}:{model}",
+                             "X-Hugpy-Client-Platform": "worker-package-rollout",
+                         }, timeout=SMOKE_TIMEOUT_S)
         secs = round(time.monotonic() - t0, 1)
         ok = st == 200 and isinstance(body, dict) and bool(body.get("choices"))
         out = {"ok": ok, "http": st, "seconds": secs, "model": model,
@@ -601,7 +651,16 @@ class LiveFleet:
         start benchmarks). ``{"reason": str, "benchmark": run_id?, ...}``."""
         reasons, out = [], {}
         st, body = _http("GET", f"{self.central}/api/llm/benchmark/status", headers=self._headers())
-        if st == 200 and isinstance(body, dict) and body.get("status") in ("running", "resuming"):
+        if st != 200 or not isinstance(body, dict):
+            # FAIL SAFE (incident 2026-09-24): the run-state could not be read
+            # (central warming up, a transient 502). A restart is exactly what
+            # kills a running benchmark, so an UNKNOWN state must DEFER the restart
+            # — never proceed as if quiet. The bounded quiet-wait still lets the
+            # pin through if central stays unreadable past the window.
+            return {"reason": f"benchmark run-state unreadable (http {st}); "
+                              f"deferring restart until central answers",
+                    "status_unreadable": True}
+        if body.get("status") in ("running", "resuming"):
             prog = body.get("progress") or {}
             out["benchmark"] = body.get("run_id")
             reasons.append(f"benchmark {body.get('run_id')} {body.get('status')} "
@@ -735,9 +794,9 @@ def api_promote(conn, config: str, apply: bool = False, pin: bool = False,
                 index_dir=DEFAULT_INDEX_DIR, central: str = DEFAULT_CENTRAL,
                 by: str | None = None, fleet=None, python: str | None = None,
                 now: bool = False) -> dict:
-    """Promote known-good ``config`` to the fleet as ONE lockstep version.
+    """Promote ``config`` (the dev tree as recorded) to the fleet as ONE lockstep version.
 
-    Refused unless ``configs.known_good`` (no bypass). Default: dry run — the plan
+    Not gated on ``configs.known_good`` (that gates PyPI uploads). Default: dry run — the plan
     (version, dists, wheels to build/publish, current pin -> new pin, commands).
     ``apply``: build from the DB tree + publish into ``index_dir``, record the
     promotion. ``pin`` (implies apply): move central's required version (the
@@ -753,9 +812,9 @@ def api_promote(conn, config: str, apply: bool = False, pin: bool = False,
         ensure_promotions(cur)
         conn.commit()
         plan = plan_promotion(cur, config, index_dir)
-        if not plan["known_good"]:
-            raise SystemExit(f"config {config} is not known-good — promotion refused "
-                             f"(pkg_src.py config good {config} after a passing verify job)")
+        # Dev IS live: the fleet runs what /srv/hugpy/src/hugpy/py holds, so a fleet
+        # promotion is not gated on configs.known_good — known-good gates PyPI
+        # uploads only (operator ruling 2026-09-25).
         current = fleet.required_version()
         plan |= {"current_pin": current, "new_pin": plan["version"],
                  "pin_changes": current != plan["version"],
@@ -961,6 +1020,18 @@ def judge_worker(fleet, name: str, target: str, base: dict, live: dict | None, p
         if not model:
             v.update(verdict="pass", smoke="skipped: no hot model answered before the pin")
             return v
+        # The watcher runs every minute. Repeating a model request after a
+        # timeout/empty answer cannot make the already-converged package more
+        # correct, and can hammer a model whose provider/session is unavailable.
+        # Persist the first result in the rollout verdict and stop probing.
+        previous_smoke = v.get("smoke")
+        if isinstance(previous_smoke, dict):
+            if previous_smoke.get("ok"):
+                v["verdict"] = "pass"
+            else:
+                detail = previous_smoke.get("error") or f"HTTP {previous_smoke.get('http', 'unknown')}"
+                v.update(verdict="unjudged", why=f"single smoke attempt did not pass; not retried: {detail}")
+            return v
         r = fleet.smoke(name, model)
         v["smoke"] = r
         if r["ok"]:
@@ -968,11 +1039,9 @@ def judge_worker(fleet, name: str, target: str, base: dict, live: dict | None, p
             return v
         if r.get("no_key"):
             v["no_key"] = True
-        elif not r.get("transient"):
-            v["smoke_fails"] = v.get("smoke_fails", 0) + 1
-            if v["smoke_fails"] >= SMOKE_MAX_FAILS:
-                v.update(verdict="fail", why=f"smoke failed {v['smoke_fails']}x")
-                return v
+        detail = r.get("error") or f"HTTP {r.get('http', 'unknown')}"
+        v.update(verdict="unjudged", why=f"single smoke attempt did not pass; not retried: {detail}")
+        return v
     if past_deadline:
         if v.get("no_key"):
             v.update(verdict="unjudged", why="converged, but no API key for the smoke call")

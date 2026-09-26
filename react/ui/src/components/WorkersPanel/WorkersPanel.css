@@ -1640,3 +1640,36 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 /* Archive mark in the load/designate picker (recorded facts, never pickable). */
 .wp-lt-archive-note { font-size: 0.8em; opacity: 0.85; font-style: italic; }
 .wp-lt-size-why { font-size: 0.8em; white-space: normal; }
+
+/* ── Per-worker WILDCARD toggle ("take all comers") — sibling chip to the pool
+   chip. On = solid accent; off = dashed muted. In Feasible mode the whole chip
+   is de-emphasized (it is nearly moot there — see WorkerRow's title). */
+.wp-wildcard {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  cursor: pointer;
+  color: var(--muted);
+  border: 1px dashed var(--border-strong, #555);
+  white-space: nowrap;
+  user-select: none;
+}
+.wp-wildcard.wp-wildcard-on {
+  color: var(--bright);
+  border-style: solid;
+  border-color: var(--purple, #c084fc);
+  background: rgba(192, 132, 252, 0.12);
+}
+.wp-wildcard.wp-wildcard-moot { opacity: 0.55; }
+
+/* ── Read-only fleet DISTRIBUTION badge (operator ruling 2026-09-24). The SWITCH
+   lives in Settings; this is only a reminder so the wildcard chip's "only matters
+   in Designated mode" hint has context. */
+.wp-dist-badge {
+  margin: 4px 0 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.wp-dist-badge b { color: var(--text); }
+.wp-dist-badge-env { color: var(--amber, #e0a44a); }
+.wp-dist-badge-where { color: var(--muted); }

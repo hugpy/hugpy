@@ -108,6 +108,117 @@ def _index_json_for(weight_kind: str, rel: str) -> bool:
     return False
 
 
+# ── precision-variant selection (diffusers) ─────────────────────────────────
+# A diffusers pipeline is NOT a flat repo — it is per-component subdirs
+# (unet/ vae/ text_encoder/ …), and each component routinely ships the SAME
+# weights at two precisions:
+#     unet/diffusion_pytorch_model.safetensors        (default — full precision)
+#     unet/diffusion_pytorch_model.fp16.safetensors   (the fp16 variant)
+# A GPU worker loads ONE variant (torch_dtype float16 / variant="fp16"), so
+# summing both is the same double-count that made sd-turbo read as 12.07 GiB
+# (operator incident 2026-09-25) when its fp16 footprint is ~2.5 GiB — and it
+# CUDA-OOM'd after being mis-sized to ram-only. Unlike the transformers layout
+# above (where the UNTAGGED file IS the fp16 that serves and the redundant copy
+# carries an explicit ``.fp32`` tag), diffusers tags the SMALL copy (``.fp16``)
+# and leaves the full-precision copy untagged — so the fp32-tag rule cannot see
+# it. This selects the loader's preferred precision per component instead.
+#
+# The precision the loader prefers, low rank = kept first: fp16 < bf16 < fp8 <
+# untagged (native/default) < fp32 (explicit full-precision duplicate).
+_VARIANT_RANK = {
+    "fp16": 0, "float16": 0, "f16": 0,
+    "bf16": 1, "bfloat16": 1,
+    "fp8": 2, "float8": 2, "f8": 2,
+    "fp32": 4, "float32": 4, "f32": 4,
+}
+_UNTAGGED_RANK = 3
+_SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})$")
+
+
+def _weight_meta(rel: str):
+    """``(dir, base, fmt, rank, shard)`` for a torch weight file, else None.
+
+    ``base`` has the format extension, the shard suffix and any precision-variant
+    segment stripped, so the two precisions of one component group together.
+    ``rank`` is the load preference (see _VARIANT_RANK). ``shard`` is ``(part,
+    total)`` for a sharded file, else None."""
+    b = _basename(rel)
+    low = b.lower()
+    if low.endswith(".safetensors"):
+        fmt, stem = "safetensors", b[: -len(".safetensors")]
+    elif low.endswith(".bin"):
+        fmt, stem = "bin", b[: -len(".bin")]
+    else:
+        return None
+    shard = None
+    m = _SHARD_RE.search(stem)
+    if m:
+        shard = (int(m.group(1)), int(m.group(2)))
+        stem = stem[: m.start()]
+    # A precision variant is a dot-delimited segment of the stem (diffusers'
+    # ``diffusion_pytorch_model.fp16`` convention). Split on '.' so we never
+    # mistake a substring inside a component name for a precision tag.
+    segs = stem.split(".")
+    rank = _UNTAGGED_RANK
+    kept_segs = []
+    for seg in segs:
+        r = _VARIANT_RANK.get(seg.lower())
+        if r is not None and rank == _UNTAGGED_RANK:
+            rank = r          # first recognised precision segment wins
+            continue          # drop it from the base name
+        kept_segs.append(seg)
+    base = ".".join(kept_segs).lower()
+    d = rel.replace("\\", "/").rsplit("/", 1)
+    dirpart = d[0] if len(d) > 1 else ""
+    return dirpart, base, fmt, rank, shard
+
+
+def _best_rank_set_complete(idxs, metas) -> bool:
+    """A sharded best-rank set is only safe to keep-alone when it names all of
+    its own shards (part 1..total present). An unsharded winner is complete by
+    itself. Degrade-to-correct: an incomplete winner means we do NOT drop the
+    other precision — we keep everything rather than risk an unloadable model."""
+    shards = [metas[i][4] for i in idxs if metas[i][4] is not None]
+    if not shards:
+        return True
+    totals = {t for (_p, t) in shards}
+    if len(totals) != 1:
+        return False
+    total = next(iter(totals))
+    return {p for (p, _t) in shards} == set(range(1, total + 1))
+
+
+def _dedup_precision_variants(
+    items: List[Tuple[str, int]],
+) -> List[Tuple[str, int]]:
+    """Drop the redundant PRECISION copy of a weight when a preferred one is
+    present in the same component (see the variant block comment). Grouped by
+    (dir, base, format) so unet's two precisions dedup while unet vs vae — and
+    safetensors vs bin — never collide. Conservative: only drops within a group
+    that holds two precisions AND whose winning precision is a complete set."""
+    metas = {i: _weight_meta(r) for i, (r, _s) in enumerate(items)}
+    groups: dict = {}
+    for i, m in metas.items():
+        if m is None:
+            continue
+        groups.setdefault((m[0], m[1], m[2]), []).append(i)
+    drop = set()
+    for idxs in groups.values():
+        ranks = [metas[i][3] for i in idxs]
+        best = min(ranks)
+        if best == max(ranks):
+            continue                      # one precision present — nothing to do
+        winners = [i for i in idxs if metas[i][3] == best]
+        if not _best_rank_set_complete(winners, metas):
+            continue                      # winner incomplete — keep everything
+        for i in idxs:
+            if metas[i][3] != best:
+                drop.add(i)
+    if not drop:
+        return items
+    return [it for i, it in enumerate(items) if i not in drop]
+
+
 def _has_complete_safetensors(rels: Iterable[str]) -> bool:
     """A COMPLETE non-fp32 safetensors weight set is present.
 
@@ -197,7 +308,12 @@ def select_files(
             if _is_fp32_duplicate(rel):
                 continue
         keep.append((rel, size))
-    return keep
+    # DIFFUSERS PRECISION DEDUP (operator incident 2026-09-25): after the flat
+    # transformers pruning, drop the per-component full-precision duplicate when
+    # a preferred (fp16/bf16) variant is present — the fp32-tag rule above cannot
+    # see it because diffusers tags the SMALL copy, not the large one. No-op on a
+    # repo carrying a single precision (every transformers layout in the suite).
+    return _dedup_precision_variants(keep)
 
 
 def effective_bytes(

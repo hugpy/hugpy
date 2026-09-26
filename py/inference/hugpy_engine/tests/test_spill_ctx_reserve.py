@@ -155,14 +155,13 @@ def test_flux2_regression_against_the_real_file_on_disk():
 
 
 def test_the_reserve_is_kv_at_the_real_ctx_plus_the_compute_graph(tmp_path):
-    """2 x 36 layers x 8 kv heads x 128 head_dim x 2 B (fp16) = 147_456 B/token;
-    at the loader's 16384 ctx that is exactly 2.25 GiB of KV cache."""
+    """The reserve prices KV at the fit-bounded context actually served."""
     g = flux2_like(tmp_path)
-    reserve, source, detail = spill.vram_ctx_reserve_bytes(g)
+    ctx = spill.served_ctx_for_fit(g, free_vram=int(7.5 * GIB))
+    reserve, source, detail = spill.vram_ctx_reserve_bytes(g, n_ctx=ctx)
     assert source == "computed"
-    assert detail["ctx"] == 16384                       # min(trained 40960, cap)
-    assert detail["kv_bytes"] == 2 * 36 * 16384 * 8 * 128 * 2
-    assert round(detail["kv_bytes"] / GIB, 3) == 2.25
+    assert detail["ctx"] == ctx == 16384
+    assert detail["kv_bytes"] == 2 * 36 * ctx * 8 * 128 * 2
     assert reserve == detail["kv_bytes"] + spill._CTX_COMPUTE_RESERVE_BYTES
     # measured on the box: 2.59 GiB of KV+compute+context at this ctx. The
     # computed reserve must COVER that (never under-reserve) without ballooning.
@@ -217,9 +216,16 @@ def test_the_projector_reserve_still_stacks(tmp_path):
     subtracted on top, or an 8 GiB card OOMs when the projector lands."""
     g = flux2_like(tmp_path)
     assert spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB)) == -1
+    plain_ctx = spill.served_ctx_for_fit(g, free_vram=int(6.5 * GIB))
+    projector_ctx = spill.served_ctx_for_fit(
+        g, free_vram=int(6.5 * GIB),
+        extra_reserve_bytes=int(1.35 * GIB))
     n = spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB),
                                  extra_reserve_bytes=int(1.35 * GIB))
-    assert 0 < n < 36, n
+    # The projector is charged by shrinking context first; the weights can
+    # still remain whole when that yields enough room.
+    assert projector_ctx < plain_ctx
+    assert n == -1
 
 
 # --------------------------------------------------------------------------- #
@@ -235,22 +241,19 @@ def test_70b_on_a_24gib_card_still_reserves_for_llama_context(tmp_path):
     g = write_gguf(tmp_path / "70b-Q2_K.gguf", size_bytes=20 * GIB, arch="llama",
                    block_count=80, head_count=64, head_count_kv=8,
                    embedding_length=8192, key_length=128, context_length=131072)
-    reserve, source, detail = spill.vram_ctx_reserve_bytes(g)
+    ctx = spill.served_ctx_for_fit(g, free_vram=23 * GIB)
+    reserve, source, detail = spill.vram_ctx_reserve_bytes(g, n_ctx=ctx)
     assert source == "computed"
-    assert detail["kv_bytes"] == 2 * 80 * 16384 * 8 * 128 * 2
-    assert round(detail["kv_bytes"] / GIB, 2) == 5.0
+    assert detail["kv_bytes"] == 2 * 80 * ctx * 8 * 128 * 2
 
     free = 23 * GIB                       # a 24 GiB card, after the 1.0 reserve
     assert _flat_old_fit(20 * GIB, free, 80) == -1        # the OOM, reproduced
     n = spill.autofit_gpu_layers(g, free_vram=free)
-    assert n != -1, "must not promise every layer when the KV cache cannot fit"
-    assert 0 < n < 80, n
-    # What is left after the weights land must genuinely cover the context that
-    # killed it — KV *and* the compute graph — with the external floor still
-    # intact on the raw card (the split stays fully stacked).
-    left = free - int(n * (20 * GIB / 80))
-    assert left >= reserve
-    assert left >= detail["kv_bytes"] + spill._CTX_COMPUTE_RESERVE_BYTES
+    # The new policy preserves whole weights by reducing context to the largest
+    # value that actually fits, instead of promising all layers at a fixed 16k.
+    assert ctx < 16384
+    assert n == -1
+    assert free - 20 * GIB >= max(0, reserve - spill.vram_reserve_bytes())
 
 
 def test_a_big_card_is_not_starved_by_a_small_model(tmp_path):
@@ -328,42 +331,29 @@ def test_explicit_vram_reserve_env_still_governs_the_floor(tmp_path, monkeypatch
     assert n == -1
     monkeypatch.setenv("HUGPY_VRAM_RESERVE_GIB", "0")
     assert spill.vram_reserve_bytes() == 0
-    # with no external floor the FULL computed context need is charged
-    assert spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB)) != -1
+    # With no external floor the fit-bounded context still allows the measured
+    # whole model to seat; removing a reserve must never make fit stricter.
+    assert spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB)) == -1
 
 
-def test_the_credit_applies_to_the_whole_fit_but_never_to_a_split(tmp_path):
-    """THE STACKING DECISION. The whole-fit test is un-stacked (the larger of the
-    context need and the external floor binds); a SPLIT stays fully stacked, so
-    the credit can only ever convert a spill into a whole seat."""
+def test_fit_bounded_context_preserves_whole_weights_before_spilling(tmp_path):
+    """A tighter card reduces context before it spills otherwise-fitting weights."""
     g = flux2_like(tmp_path)
-    need, source, _ = spill.vram_ctx_reserve_bytes(g)
-    floor = spill.vram_reserve_bytes()
-    assert source == "computed" and need > floor
-
-    # whole-fit: held back from the RAW card is max(need, floor), not need+floor
-    free = int(6.5 * GIB)                 # already floor-adjusted, upstream
-    assert spill.autofit_gpu_layers(g, free_vram=free) == -1
-    assert (free + floor) - (free - max(0, need - floor)) == max(need, floor)
-    assert max(need, floor) < need + floor
-
-    # split: a card that cannot hold it whole is priced with BOTH reserves, so
-    # the layers planned are exactly the stacked arithmetic — never the credited
-    # one (which would have fitted two more layers into the floor).
     tight = int(5.0 * GIB)
-    n = spill.autofit_gpu_layers(g, free_vram=tight)
-    assert 0 < n < 36
-    assert n == int((tight - need) // (FLUX2_BYTES / 36))
-    assert n < int((tight - max(0, need - floor)) // (FLUX2_BYTES / 36))
+    roomy = int(7.5 * GIB)
+    assert spill.served_ctx_for_fit(g, free_vram=tight) < \
+           spill.served_ctx_for_fit(g, free_vram=roomy)
+    assert spill.autofit_gpu_layers(g, free_vram=tight) == -1
 
 
 def test_safety_multiplier_still_applies(tmp_path, monkeypatch):
     """HUGPY_VRAM_SAFETY is untouched — a box that wants the old cushion back
     still gets it, and it still only ever tightens."""
     g = flux2_like(tmp_path)
-    assert spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB)) == -1
+    free = int(5.5 * GIB)
+    assert spill.autofit_gpu_layers(g, free_vram=free) == -1
     monkeypatch.setenv("HUGPY_VRAM_SAFETY", "0.85")
-    assert spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB)) != -1
+    assert spill.autofit_gpu_layers(g, free_vram=free) != -1
 
 
 # --------------------------------------------------------------------------- #
@@ -372,8 +362,9 @@ def test_safety_multiplier_still_applies(tmp_path, monkeypatch):
 def test_ctx_for_fit_prefers_the_explicit_value(tmp_path):
     g = flux2_like(tmp_path)
     assert spill.ctx_for_fit(g, n_ctx=8192) == 8192
-    assert spill.ctx_for_fit(g) == 16384                 # min(trained, cap)
-    assert spill.ctx_for_fit(g, n_ctx=0) == 16384        # 0/None -> derive
+    derived = spill.ctx_for_fit(g)
+    assert spill._ctx_floor() <= derived <= 40960
+    assert spill.ctx_for_fit(g, n_ctx=0) == derived       # 0/None -> derive
 
 
 def test_ctx_for_fit_uses_the_trained_ctx_when_it_is_smaller(tmp_path):
@@ -383,26 +374,13 @@ def test_ctx_for_fit_uses_the_trained_ctx_when_it_is_smaller(tmp_path):
     assert spill.ctx_for_fit(g) == 4096
 
 
-def test_llama_ctx_cap_defaults_and_env(monkeypatch):
-    """With the serve layer NOT loaded (the offline fit-math case) the cap comes
-    from the same DEFAULT_LLAMA_CTX env var serve itself reads, then the module
-    fallback. Never 0, never raises."""
-    monkeypatch.delitem(sys.modules,
-                        "hugpy_engine.serve.serve", raising=False)
-    assert spill.llama_ctx_cap() == 16384
-    monkeypatch.setenv("DEFAULT_LLAMA_CTX", "8192")
-    assert spill.llama_ctx_cap() == 8192
-    monkeypatch.setenv("DEFAULT_LLAMA_CTX", "garbage")
-    assert spill.llama_ctx_cap() == 16384                # never 0, never raises
-
-
-def test_ctx_cap_follows_the_serve_layer_when_it_is_loaded(monkeypatch):
-    """When serve is already imported (every real serving path) its
-    DEFAULT_LLAMA_CTX is authoritative — read out of sys.modules, never by
-    importing the heavy serve chain from the fit math."""
-    from hugpy_engine.serve import serve as S
-    monkeypatch.setattr(S, "DEFAULT_LLAMA_CTX", 32768)
-    assert spill.llama_ctx_cap() == 32768
+def test_ctx_floor_defaults_and_env(monkeypatch):
+    """The global policy is a floor, not a ceiling on trained context."""
+    assert spill._ctx_floor() == 4096
+    monkeypatch.setenv("HUGPY_LLAMA_CTX_FLOOR", "8192")
+    assert spill._ctx_floor() == 8192
+    monkeypatch.setenv("HUGPY_LLAMA_CTX_FLOOR", "garbage")
+    assert spill._ctx_floor() == 4096
 
 
 # --------------------------------------------------------------------------- #

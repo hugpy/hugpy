@@ -98,7 +98,7 @@ def test_diverged_remote_is_skipped_never_forced(tmp_path, _no_db):
 
     # a second clone advances the remote past local
     other = tmp_path / "other"
-    subprocess.run(["git", "clone", "-q", str(bare), str(other)], check=True)
+    subprocess.run(["git", "clone", "-q", "-b", "main", str(bare), str(other)], check=True)
     (other / "extra.txt").write_text("remote-only\n")
     g(other, "add", "-A"); g(other, "commit", "-q", "-m", "remote commit")
     g(other, "push", "-q", "origin", "main")

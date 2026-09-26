@@ -406,7 +406,8 @@ def _legacy_setters() -> Dict[str, Callable]:
         return out
     for name in ("set_worker_provider", "set_worker_lookup_provider",
                  "set_placement_provider", "set_worker_candidates_provider",
-                 "set_no_worker_diagnostic", "set_load_state_provider",
+                 "set_no_worker_diagnostic", "set_no_worker_skips",
+                 "set_load_state_provider",
                  "set_serve_metrics_sink", "set_member_selector"):
         fn = getattr(R, name, None)
         if callable(fn):
@@ -433,6 +434,7 @@ def _install_legacy_providers() -> None:
     _try("set_placement_provider", W.placement_for_model)
     _try("set_worker_candidates_provider", W.candidates_for_model)
     _try("set_no_worker_diagnostic", W.explain_no_worker)
+    _try("set_no_worker_skips", W.no_worker_skips)
     _try("set_load_state_provider", W.load_state_for_model)
     _try("set_serve_metrics_sink", W.record_serve_metrics)
     # Registering is not enabling: the selector's own kill switch

@@ -197,6 +197,9 @@ def test_central_cap_gating():
     remote._select = lambda mk, pool=None, task=None: (dict(W1), {})
     remote.set_worker_candidates_provider(lambda mk, pool=None: [dict(W1)])
     remote._inflight_try_acquire("w1", MODEL, 1)  # saturate the only holder
+    # Production's zero default waits until capacity/cancellation. Exercise the
+    # bounded refusal surface here with an explicit short ceiling.
+    os.environ["HUGPY_CENTRAL_GATE_WAIT_S"] = "0.05"
 
     req = types.SimpleNamespace(request_id="rid-busy", pool=None,
                                 model_dump=lambda: {"model_key": MODEL})
@@ -217,6 +220,7 @@ def test_central_cap_gating():
         return evs
 
     evs = asyncio.run(_collect())
+    os.environ.pop("HUGPY_CENTRAL_GATE_WAIT_S", None)
     check("DelegatingRunner.stream yields exactly one honest busy error event",
           len(evs) == 1
           and getattr(evs[0], "type", None) == "error"

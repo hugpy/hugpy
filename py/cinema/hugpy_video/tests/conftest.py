@@ -11,6 +11,19 @@ import sys
 if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
     sys.modules.setdefault("abstract_hugpy_dev", None)
 
+# Storage isolation MUST run before hugpy_platform.constants is first imported:
+# it FORCES DEFAULT_ROOT and every sibling storage root to a private temp dir so
+# a test process whose environment carried DEFAULT_ROOT=<live> (incident
+# 2026-09-24) can never open a WAL connection against, or mkdtemp into, the
+# operator's live storage. The audit guard is the safety net (see
+# hugpy_platform.test_isolation).
+from hugpy_platform.test_isolation import (  # noqa: E402
+    install_live_storage_guard, isolate_storage_to_tmp,
+)
+
+isolate_storage_to_tmp()
+install_live_storage_guard()
+
 # Script-style studio tests create their work dirs with tempfile.mkdtemp(dir=...)
 # under the storage root's video_intel/_scratch (the route jails source paths to
 # it). A fresh machine (CI runner) has no storage root yet, so make it here,

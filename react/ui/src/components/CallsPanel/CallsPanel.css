@@ -8,6 +8,20 @@
 .cp-tablewrap { overflow: auto; max-height: calc(100vh - 220px); border: 1px solid #262b36; border-radius: 8px; }
 .cp-table { width: 100%; border-collapse: collapse; }
 .cp-table th, .cp-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #262b36; vertical-align: top; white-space: nowrap; }
+.cp-call-row { cursor: pointer; }
+.cp-call-row:hover td { background: rgba(156, 208, 255, 0.06); }
+.cp-expand { width: 22px; color: #9cd0ff; text-align: center !important; }
+.cp-request-row td { white-space: normal; width: 100%; }
+.cp-request-row pre { display: block; box-sizing: border-box; width: 100%; max-width: calc(100vw - 80px); max-height: 420px; overflow-x: hidden; overflow-y: auto; margin: 4px 0; padding: 10px; border-radius: 6px; background: #0b0d11; color: #dfe3ea; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.cp-request-meta { display: grid; gap: 4px; max-width: calc(100vw - 80px); padding: 8px 10px; color: var(--cp-dim, #aab2c0); font: 12px/1.45 ui-monospace, monospace; overflow-wrap: anywhere; }
+.cp-request-meta b { color: var(--cp-fg, #f0f2f5); }
+.cp-json-tree, .cp-json-raw { box-sizing: border-box; width: 100%; max-width: calc(100vw - 80px); margin: 6px 0; padding: 8px 10px; border-radius: 6px; background: #0b0d11; color: #dfe3ea; font: 12px/1.5 ui-monospace, monospace; }
+.cp-json-node { margin: 3px 0; }
+.cp-json-node > summary, .cp-json-raw > summary { cursor: pointer; overflow-wrap: anywhere; }
+.cp-json-node > summary b { color: #b7d5ff; }
+.cp-json-summary { margin-left: 8px; color: #aab2c0; }
+.cp-json-children { margin: 3px 0 3px 14px; padding-left: 10px; border-left: 1px solid #343b48; }
+.cp-json-node pre, .cp-json-raw pre { box-sizing: border-box; width: 100%; max-height: 320px; overflow: auto; margin: 5px 0; padding: 8px; background: #11151c; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .cp-table th { position: sticky; top: 0; background: #171a21; color: #8b93a7; font-weight: 500; z-index: 1; }
 .cp-num { text-align: right; font-variant-numeric: tabular-nums; }
 .cp-mono { font-family: ui-monospace, monospace; font-size: 12px; }

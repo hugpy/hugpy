@@ -268,6 +268,15 @@ def _query_meta(worker: dict, model_key: str, payload: Any, *,
     meta["request_id"] = getattr(req, "request_id", None)
     meta["streaming"] = bool(streaming)
     meta["ok"] = bool(ok)
+    # HARNESS ATTRIBUTION (2026-09-24): the client identity the /v1 route derived
+    # rides on ChatRequest.caller (central-only, never on the worker wire).
+    # per_call_row reads meta["caller"] and stamps it into the durable
+    # compute_actions row's detail.caller, so every harness call is attributed to
+    # its harness instead of the bare "api" default. Absent -> unset (per_call_row
+    # keeps the honest "api" default), byte-identical to before.
+    _caller = getattr(req, "caller", None)
+    if _caller:
+        meta["caller"] = str(_caller)
     mt = getattr(req, "max_new_tokens", None) or getattr(req, "max_tokens", None)
     if mt is not None:
         meta["max_tokens"] = mt
@@ -739,6 +748,39 @@ def _no_worker_detail(model_key: str, pool: Optional[str] = None,
     return ""
 
 
+_no_worker_skips_fn: Optional[Callable[..., Dict[str, str]]] = None
+
+
+def set_no_worker_skips(fn: Optional[Callable]) -> None:
+    """Register the per-worker SPECIFIC-GATE explainer (web -> core), optional.
+
+    Unlike ``set_no_worker_diagnostic`` (one human sentence), this returns
+    ``{worker_id: gate-reason}`` so the structured routing_diagnostics record can
+    name WHY each worker was skipped instead of the bare "not a routing
+    candidate" default (BUG 2, 2026-09-24)."""
+    global _no_worker_skips_fn
+    _no_worker_skips_fn = fn
+    logger.info("no-worker per-gate skips registered: %s",
+                getattr(fn, "__name__", fn))
+
+
+def _no_worker_skips(model_key: str, pool: Optional[str] = None,
+                     task: Optional[str] = None) -> Dict[str, str]:
+    """``{worker_id: specific-gate}`` for the refusal record, or ``{}`` when the
+    seam is unset or on ANY failure (advisory; never breaks a request)."""
+    if _no_worker_skips_fn is None:
+        return {}
+    try:
+        for _args in ((model_key, pool, task), (model_key, pool), (model_key,)):
+            try:
+                return _no_worker_skips_fn(*_args) or {}
+            except TypeError:
+                continue
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never break a request
+        logger.warning("no-worker skips failed for %s: %s", model_key, exc)
+    return {}
+
+
 def _pick_worker(model_key: str, pool: Optional[str] = None,
                  task: Optional[str] = None,
                  require_comfy_id_lock: bool = False) -> Optional[dict]:
@@ -902,6 +944,40 @@ _INFLIGHT: Dict[Tuple[str, str], int] = {}
 # crash-preventer, so a false reset merely lets the worker serialize.
 _INFLIGHT_TS: Dict[Tuple[str, str], float] = {}
 _INFLIGHT_LOCK = threading.Lock()
+# FIFO admission tickets for same-model relay requests. The request at the head
+# gets first chance to reserve capacity; once it reserves, the next ticket may
+# proceed up to the worker's advertised cap. This queue is process-local, like
+# the in-flight counter above; worker-side admission remains the cross-process
+# safety backstop.
+_GATE_WAITERS: Dict[str, list] = {}
+_GATE_WAITERS_LOCK = threading.Lock()
+
+
+def _gate_waiter_join(model_key: str):
+    ticket = object()
+    with _GATE_WAITERS_LOCK:
+        _GATE_WAITERS.setdefault(str(model_key), []).append(ticket)
+    return ticket
+
+
+def _gate_waiter_is_head(model_key: str, ticket) -> bool:
+    with _GATE_WAITERS_LOCK:
+        q = _GATE_WAITERS.get(str(model_key)) or []
+        return bool(q) and q[0] is ticket
+
+
+def _gate_waiter_leave(model_key: str, ticket) -> None:
+    with _GATE_WAITERS_LOCK:
+        key = str(model_key)
+        q = _GATE_WAITERS.get(key)
+        if not q:
+            return
+        try:
+            q.remove(ticket)
+        except ValueError:
+            pass
+        if not q:
+            _GATE_WAITERS.pop(key, None)
 
 
 def _gate_disabled() -> bool:
@@ -911,11 +987,11 @@ def _gate_disabled() -> bool:
 
 
 def _gate_wait_s() -> float:
-    """Bounded wait for a busy (worker, model) slot to free before giving up."""
+    """Optional admission wait ceiling; zero means wait until capacity/cancel."""
     try:
-        return max(0.0, float(os.environ.get("HUGPY_CENTRAL_GATE_WAIT_S", "30")))
+        return max(0.0, float(os.environ.get("HUGPY_CENTRAL_GATE_WAIT_S", "0")))
     except (TypeError, ValueError):
-        return 30.0
+        return 0.0
 
 
 def _gate_stale_s() -> float:
@@ -1053,17 +1129,88 @@ def _effective_cap(worker: Optional[dict], model_key: str) -> Optional[int]:
     return _advertised_cap(worker)
 
 
-def _inflight_try_acquire(worker_id: str, model_key: str, cap: int) -> bool:
+def _worker_idle_for(worker: Optional[dict], model_key: str) -> bool:
+    """True when the worker's OWN live heartbeat says this (worker, model) has no
+    generation in flight RIGHT NOW — so a saturated central in-flight counter is
+    provably a leaked release and may be reconciled immediately instead of
+    wedging the queue until the stale timer.
+
+    Authoritative source = the worker's heartbeat, which is why this can override
+    central's guess: any slot seated for the model reports ``busy`` (a real
+    generation) vs idle, and the worker also advertises its own in-process
+    ``in_flight`` count. IDLE requires BOTH to say zero. Alias-tolerant on the
+    model key (the ~/-tail unification), matching _model_slot_served.
+
+    Conservative by construction — ANY doubt returns False (keep the existing
+    cap/stale-timer behaviour): a missing/partial heartbeat, a busy slot, or a
+    non-zero advertised in-flight all read as 'not provably idle'. So this only
+    ever RELAXES a wedge central can prove is phantom; it never tightens one and
+    never admits past a genuinely-busy in-process runner (the crash guard)."""
+    if not worker or not model_key:
+        return False
+    wanted = _slot_match_keys(model_key)
+    # Any slot busy on this model -> real work in flight -> not idle.
+    for s in (worker.get("slots") or []):
+        if not isinstance(s, dict) or not s.get("model_key"):
+            continue
+        if wanted & _slot_match_keys(str(s["model_key"])):
+            if s.get("busy"):
+                return False
+    # The worker's advertised in-process in-flight for this model, if present,
+    # must be zero. Absent (older agent / not reported) leaves the slot check as
+    # the only evidence; a slot child present-and-not-busy is enough to reconcile.
+    infl = (worker.get("in_flight") or worker.get("inflight")
+            or (worker.get("serving") or {}).get("in_flight"))
+    try:
+        if infl is not None and int(infl) > 0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    # Positive evidence of readiness: a slot child seated for the model (idle),
+    # OR the worker holding the model with a healthy heartbeat and no busy slot.
+    if _model_slot_served(worker, model_key):
+        return True
+    for s in (worker.get("slots") or []):
+        if isinstance(s, dict) and s.get("model_key") and \
+                (wanted & _slot_match_keys(str(s["model_key"]))):
+            return True   # a slot for this model, not busy (checked above)
+    return False
+
+
+def _inflight_try_acquire(worker_id: str, model_key: str, cap: int,
+                          worker_idle: bool = False) -> bool:
     key = (worker_id, model_key)
     with _INFLIGHT_LOCK:
         cur = _INFLIGHT.get(key, 0)
         if cur >= cap:
-            # STALE-LEAK SELF-HEAL (2026-09-10): saturated with no acquire
-            # activity for the stale window = a release() that never ran.
-            # Reset loudly and admit, instead of bouncing "worker_busy" off an
-            # idle worker forever (the computron/flux2-klein phantom).
+            # STALE-LEAK SELF-HEAL. A saturated counter is a LEAKED release when
+            # the count no longer reflects real work — a release() that never ran
+            # (client vanished mid-stream, a stream generator whose finally was
+            # never driven, or a mirror row owned by another gunicorn process
+            # that this process can never clear). Left to rot it bounces
+            # "worker_busy" off an IDLE worker while requests pile in /llm/queue
+            # and nothing executes (the coder-next frozen-queue incident,
+            # 2026-09-25) — a passive count wedging a model the worker is ready
+            # to serve.
+            #
+            # Two triggers, either resets loudly and admits:
+            #   * WORKER-IDLE RECONCILE (2026-09-25): the worker's OWN live
+            #     heartbeat says this (worker, model) is idle — no busy slot, its
+            #     llama-server child (which schedules its own N slots) free. The
+            #     worker is authoritative about its own concurrency (its gen_gate
+            #     is the real crash-preventer), so central's guess is provably
+            #     stale RIGHT NOW; do not make the queue wait out the timer.
+            #   * TIME-BASED (2026-09-10): no acquire activity for the stale
+            #     window, the backstop when no live worker state is available.
             age = time.monotonic() - _INFLIGHT_TS.get(key, time.monotonic())
-            if age > _gate_stale_s():
+            if worker_idle:
+                logger.warning(
+                    "relay gate: in-flight counter for %s/%s stuck at %d but the "
+                    "worker reports the model IDLE — reconciling the leaked count "
+                    "to 0 and admitting (no wedge on an idle worker)",
+                    worker_id, model_key, cur)
+                cur = 0
+            elif age > _gate_stale_s():
                 logger.warning(
                     "relay gate: in-flight counter for %s/%s stuck at %d with "
                     "no activity for %.0fs — treating as a leaked release and "
@@ -1162,7 +1309,8 @@ def _try_reserve(worker: Optional[dict], spill, model_key: str,
     if cap is None:                       # slot-served — the child schedules itself
         return _RelaySlot(worker, spill, _NOOP_RELEASE)
     wid = worker.get("id") or ""
-    if _inflight_try_acquire(wid, model_key, cap):
+    if _inflight_try_acquire(wid, model_key, cap,
+                             worker_idle=_worker_idle_for(worker, model_key)):
         return _RelaySlot(worker, spill, lambda: _inflight_release(wid, model_key))
     return None
 
@@ -1280,15 +1428,25 @@ def _acquire_relay_slot(model_key: str, pool: Optional[str], primary_worker: dic
     """
     if _gate_disabled():
         return _RelaySlot(primary_worker, primary_spill, _NOOP_RELEASE)
-    deadline = time.monotonic() + (_gate_wait_s() if wait_s is None else wait_s)
-    while True:
-        slot = _reserve_once(model_key, pool, primary_worker, primary_spill, viable, task)
-        if slot is not None:
-            return slot
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _busy(primary_worker, model_key, req=req, pool=pool, task=task)
-        time.sleep(min(0.1, remaining))
+    wait = _gate_wait_s() if wait_s is None else max(0.0, float(wait_s))
+    # The configured default of zero means "wait until capacity/cancel", but an
+    # explicit wait_s=0 is the caller's request for a single admission attempt.
+    deadline = (None if wait_s is None and wait == 0
+                else time.monotonic() + wait)
+    ticket = _gate_waiter_join(model_key)
+    try:
+        while True:
+            if _gate_waiter_is_head(model_key, ticket):
+                slot = _reserve_once(model_key, pool, primary_worker, primary_spill, viable, task)
+                if slot is not None:
+                    _gate_waiter_leave(model_key, ticket)
+                    return slot
+            remaining = deadline - time.monotonic() if deadline is not None else 0.1
+            if deadline is not None and remaining <= 0:
+                raise _busy(primary_worker, model_key, req=req, pool=pool, task=task)
+            time.sleep(min(0.1, remaining))
+    finally:
+        _gate_waiter_leave(model_key, ticket)
 
 
 async def _acquire_relay_slot_async(model_key: str, pool: Optional[str],
@@ -1308,15 +1466,23 @@ async def _acquire_relay_slot_async(model_key: str, pool: Optional[str],
     """
     if _gate_disabled():
         return _RelaySlot(primary_worker, primary_spill, _NOOP_RELEASE)
-    deadline = time.monotonic() + (_gate_wait_s() if wait_s is None else wait_s)
-    while True:
-        slot = _reserve_once(model_key, pool, primary_worker, primary_spill, viable, task)
-        if slot is not None:
-            return slot
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _busy(primary_worker, model_key, req=req, pool=pool, task=task)
-        await asyncio.sleep(min(0.1, remaining))
+    wait = _gate_wait_s() if wait_s is None else max(0.0, float(wait_s))
+    deadline = (None if wait_s is None and wait == 0
+                else time.monotonic() + wait)
+    ticket = _gate_waiter_join(model_key)
+    try:
+        while True:
+            if _gate_waiter_is_head(model_key, ticket):
+                slot = _reserve_once(model_key, pool, primary_worker, primary_spill, viable, task)
+                if slot is not None:
+                    _gate_waiter_leave(model_key, ticket)
+                    return slot
+            remaining = deadline - time.monotonic() if deadline is not None else 0.1
+            if deadline is not None and remaining <= 0:
+                raise _busy(primary_worker, model_key, req=req, pool=pool, task=task)
+            await asyncio.sleep(min(0.1, remaining))
+    finally:
+        _gate_waiter_leave(model_key, ticket)
 
 
 # ---------------------------------------------------------------------------
@@ -2070,14 +2236,26 @@ def _retry_backoff_next(current_s: float) -> float:
 
 
 def _loading_status(request_id: str, model_key: str, worker: Optional[dict],
-                    progress: Optional[float], message: Optional[str]) -> "StatusEvent":
+                    progress: Optional[float], message: Optional[str], *,
+                    stage: str = "awaiting-load", reason: Optional[str] = None,
+                    retry_in_s: Optional[float] = None, elapsed_s: Optional[float] = None,
+                    worker_state: Optional[str] = None) -> "StatusEvent":
     """A held call's progress event. Reuses the SAME wire shape the browser
     already renders for provisioning (``type:"status"`` + message/stage/progress
     — ChatPanel shows ``⏳ {message}{pct}``), so nothing new is invented. ``stage``
     is ``awaiting-load`` so /llm/jobs can show the hold distinctly."""
     wname = (worker or {}).get("name") or (worker or {}).get("id") or "worker"
-    msg = message or f"loading {model_key} on {wname}…"
-    ev = StatusEvent(request_id=request_id, stage="awaiting-load", message=msg)
+    msg = message or (f"worker load state for {model_key} is unknown on {wname}; "
+                      "waiting for a fresh worker response…")
+    ev = StatusEvent(request_id=request_id, stage=stage, message=msg)
+    if reason:
+        ev.reason = reason
+    if retry_in_s is not None:
+        ev.retry_in_s = round(float(retry_in_s), 2)
+    if elapsed_s is not None:
+        ev.elapsed_s = round(float(elapsed_s), 1)
+    if worker_state:
+        ev.worker_state = worker_state
     if progress is not None:
         try:
             ev.progress = round(float(progress), 4)
@@ -2227,20 +2405,38 @@ def _is_worker_busy_signal(err: Any) -> bool:
 
 
 def _cold_progress(model_key: str, worker: Optional[dict],
-                   since_ts: float) -> Tuple[bool, Optional[float], Optional[str], Optional[str]]:
+                   since_ts: float) -> Tuple[bool, Optional[float], Optional[str], Optional[str], bool]:
     """Consult worker load-state → (moved, progress, message, honest_error).
 
     ``moved`` is True when the worker reports the model healthy or actively
     loading/provisioning (forward progress — resets the stall clock). ``honest_error``
     is a FRESH permanent load failure (fail the hold) or None."""
+    # A worker can already have this model serving in a native slot while the
+    # central load-state provider has no entry for it. Trust the live heartbeat:
+    # otherwise transient relay errors are repeatedly mislabeled "loading" for
+    # a model that is visibly loaded and idle.
+    wanted = _slot_match_keys(model_key)
+    for slot in (worker or {}).get("slots") or []:
+        if not isinstance(slot, dict) or not slot.get("model_key"):
+            continue
+        if not (wanted & _slot_match_keys(str(slot["model_key"]))):
+            continue
+        if slot.get("healthy") or slot.get("serving"):
+            wname = (worker or {}).get("name") or (worker or {}).get("id") or "worker"
+            if slot.get("busy"):
+                msg = f"{model_key} is loaded on {wname}; waiting for its current request to finish…"
+            else:
+                msg = f"{model_key} is loaded and idle on {wname}; retrying the request…"
+            return True, None, msg, None, True
+
     ls = _load_state(model_key, (worker or {}).get("id"), since_ts)
     if not ls:
-        return False, None, None, None
+        return False, None, None, None, False
     err = ls.get("error")
     if err and _is_permanent_load_error(err):
-        return True, ls.get("progress"), ls.get("message"), str(err)
+        return True, ls.get("progress"), ls.get("message"), str(err), False
     moved = bool(ls.get("healthy") or ls.get("in_progress"))
-    return moved, ls.get("progress"), ls.get("message"), None
+    return moved, ls.get("progress"), ls.get("message"), None, bool(ls.get("healthy"))
 
 
 # ---------------------------------------------------------------------------
@@ -2908,7 +3104,7 @@ def make_delegating_runner(framework: str, task: str):
             return self._local
 
         def ensure_loaded(self):
-            """Force residency NOW, for the warm / probe / slot-fill paths (t141).
+            """Force residency NOW, for the explicit /probe load path (t141).
 
             runner_for() builds only this lazy wrapper; before this method the
             worker's ``_materialize`` (agent.py) duck-typed ``ensure_loaded`` and
@@ -3174,7 +3370,7 @@ def make_delegating_runner(framework: str, task: str):
                         # candidate (set above); no cold-hold accounting applies.
                         continue
                     # action == "retry": transient hold. Honest-fail / stall / ceiling.
-                    moved, _prog, _msg, honest = _cold_progress(self.model_key, worker, start)
+                    moved, _prog, _msg, honest, ready = _cold_progress(self.model_key, worker, start)
                     if honest:
                         # The worker's load-state names a hard failure — record
                         # it so queued/re-submitted calls fail fast (see
@@ -3190,11 +3386,11 @@ def make_delegating_runner(framework: str, task: str):
                     if moved or _is_worker_busy_signal(last_err):
                         last_move = time.time()
                     now = time.time()
-                    if now > deadline:
+                    if (not ready) and now > deadline:
                         raise RuntimeError(_cold_timeout_message(
                             self.model_key, worker, last_err,
                             last_progress=last_progress, ceiling=True))
-                    if (now - last_move) > stall_s:
+                    if (not ready) and (now - last_move) > stall_s:
                         raise RuntimeError(_cold_timeout_message(
                             self.model_key, worker, last_err,
                             last_progress=last_progress,
@@ -3222,7 +3418,8 @@ def make_delegating_runner(framework: str, task: str):
                     self.model_key, req, "no_worker",
                     "no worker selected or every selected worker failed before output, "
                     "and HUGPY_NO_LOCAL_SERVING forbids serving on central"
-                    + (f" ({_nw})" if _nw else "")))
+                    + (f" ({_nw})" if _nw else ""),
+                    skips=_no_worker_skips(self.model_key, pool, task)))
             result = self._local_runner().run(req=req)
             if inspect.isawaitable(result):
                 result = await result
@@ -3283,8 +3480,13 @@ def make_delegating_runner(framework: str, task: str):
                 _t_call = time.time()
                 _t_first = _t_last = None
                 _text_parts: list = []
+                # Bind the worker SSE stream so a client disconnect (GeneratorExit)
+                # closes the httpx stream to the worker deterministically in the
+                # finally below — the worker then sees ITS connection drop and
+                # tears down its own runner→llama-server stream, freeing the slot.
+                _ws = _worker_stream(worker, payload, req.request_id)
                 try:
-                    async for ev in _worker_stream(worker, payload, req.request_id):
+                    async for ev in _ws:
                         etype = getattr(ev, "type", None)
                         if etype == "error":
                             if produced_tokens:
@@ -3408,6 +3610,18 @@ def make_delegating_runner(framework: str, task: str):
                                              self.model_key, str(exc))
                         raise _LoadFailed(f"worker {wname} failed for {self.model_key}: {exc}")
                     raise _ColdRetry(str(exc))            # transient — hold + retry
+                except GeneratorExit:
+                    logger.info("relay client-disconnect: closing worker stream "
+                                "worker=%s model=%s req=%s",
+                                worker.get("id"), self.model_key, req.request_id)
+                    raise
+                finally:
+                    _ac = getattr(_ws, "aclose", None)
+                    if _ac is not None:
+                        try:
+                            await _ac()
+                        except Exception:  # noqa: BLE001 — teardown must never raise
+                            pass
 
             # -- the HOLD loop -----------------------------------------------
             hold = _cold_hold_enabled() and not _local_fallback_allowed()
@@ -3496,7 +3710,7 @@ def make_delegating_runner(framework: str, task: str):
                     # wait, surfacing progress. (check-and-add is atomic on the one loop.)
                     if hold and key in _COLD_KICKING:
                         slot.release()
-                        moved, prog, msg, honest = _cold_progress(self.model_key, worker, start)
+                        moved, prog, msg, honest, ready = _cold_progress(self.model_key, worker, start)
                         if honest:
                             yield ErrorEvent(request_id=req.request_id,
                                              message=_humanize_worker_error(
@@ -3507,7 +3721,7 @@ def make_delegating_runner(framework: str, task: str):
                         if moved or _is_worker_busy_signal(last_err):
                             last_move = time.time()
                         now = time.time()
-                        if now > deadline or (now - last_move) > stall_s:
+                        if (not ready) and (now > deadline or (now - last_move) > stall_s):
                             yield ErrorEvent(request_id=req.request_id,
                                              message=_cold_timeout_message(
                                                  self.model_key, worker, last_err,
@@ -3516,7 +3730,13 @@ def make_delegating_runner(framework: str, task: str):
                                                               else now - last_move),
                                                  ceiling=now > deadline))
                             return
-                        yield _loading_status(req.request_id, self.model_key, worker, prog, msg)
+                        wait_msg = msg or f"waiting for another request's load attempt for {self.model_key} on {worker.get('name') or wid}"
+                        yield _loading_status(
+                            req.request_id, self.model_key, worker, prog, wait_msg,
+                            stage="awaiting-capacity" if ready else "awaiting-load",
+                            reason="another request currently owns the model load attempt",
+                            retry_in_s=_cold_hold_poll_s(), elapsed_s=time.time() - start,
+                            worker_state="loaded" if ready else "load state not confirmed")
                         await asyncio.sleep(_cold_hold_poll_s())
                         continue
 
@@ -3524,8 +3744,12 @@ def make_delegating_runner(framework: str, task: str):
                         _COLD_KICKING.add(key)
                     action = None                       # "local" | "retry" | None(=done)
                     warm = False
+                    # Bind the attempt so its aclose runs deterministically in the
+                    # finally (cascades the disconnect into _worker_stream's httpx
+                    # close) rather than waiting on GC.
+                    _relay = _relay_attempt(worker, spill_override)
                     try:
-                        async for ev in _relay_attempt(worker, spill_override):
+                        async for ev in _relay:
                             if hold and not warm and getattr(ev, "type", None) == "token":
                                 # First token ⇒ the model is LOADED. Free the cold-kick
                                 # key NOW so coalesced waiters dispatch CONCURRENTLY
@@ -3565,12 +3789,20 @@ def make_delegating_runner(framework: str, task: str):
                         slot.release()
                         if hold:
                             _COLD_KICKING.discard(key)
+                        # Close the relay attempt so a disconnect cascades to the
+                        # worker httpx stream now, not at GC time.
+                        _ac = getattr(_relay, "aclose", None)
+                        if _ac is not None:
+                            try:
+                                await _ac()
+                            except Exception:  # noqa: BLE001 — teardown must never raise
+                                pass
                     if action == "local":
                         break  # → local fallback / refusal below
                     # action == "retry": the transient hold. Consult load-state for an
                     # honest fail / progress, emit a loading status, bound by the
                     # stall/ceiling clocks, then retry.
-                    moved, prog, msg, honest = _cold_progress(self.model_key, worker, start)
+                    moved, prog, msg, honest, ready = _cold_progress(self.model_key, worker, start)
                     if honest:
                         # Hard load failure from the worker's load-state — record
                         # so queued/re-submitted calls answer from the cache.
@@ -3584,7 +3816,7 @@ def make_delegating_runner(framework: str, task: str):
                     if moved or _is_worker_busy_signal(last_err):
                         last_move = time.time()
                     now = time.time()
-                    if now > deadline or (now - last_move) > stall_s:
+                    if (not ready) and (now > deadline or (now - last_move) > stall_s):
                         yield ErrorEvent(request_id=req.request_id,
                                          message=_cold_timeout_message(
                                              self.model_key, worker, last_err,
@@ -3593,7 +3825,15 @@ def make_delegating_runner(framework: str, task: str):
                                                           else now - last_move),
                                              ceiling=now > deadline))
                         return
-                    yield _loading_status(req.request_id, self.model_key, worker, prog, msg)
+                    wait_msg = msg or f"retrying {self.model_key} on {worker.get('name') or wid}; worker load state is not confirmed"
+                    if last_err:
+                        wait_msg += f"; last worker response: {last_err}"
+                    yield _loading_status(
+                        req.request_id, self.model_key, worker, prog, wait_msg,
+                        stage="awaiting-capacity" if ready else "awaiting-load",
+                        reason=last_err or "worker has not confirmed model readiness",
+                        retry_in_s=retry_wait, elapsed_s=now - start,
+                        worker_state="loaded" if ready else "unknown/loading")
                     if moved:
                         retry_wait = _cold_hold_poll_s()    # progressing: poll tight
                     await asyncio.sleep(retry_wait)
@@ -3618,7 +3858,8 @@ def make_delegating_runner(framework: str, task: str):
                                      self.model_key, req, "no_worker",
                                      "no worker selected or every selected worker failed before "
                                      "output, and HUGPY_NO_LOCAL_SERVING forbids serving on central"
-                                     + (f" ({_nw})" if _nw else "")))
+                                     + (f" ({_nw})" if _nw else ""),
+                                     skips=_no_worker_skips(self.model_key, pool, task)))
                 return
             # Local fallback — reuse dispatch's shared stream-or-wrap primitive
             # (imported lazily to avoid a resolvers<->dispatch import cycle).

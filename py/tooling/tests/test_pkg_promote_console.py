@@ -31,18 +31,24 @@ def _setup(tmp_path, monkeypatch):
     return src, live, member
 
 
-def test_live_bundle_member_fails_when_the_ui_changed(tmp_path, monkeypatch):
+def test_live_bundle_member_rebuilds_when_the_ui_changed(tmp_path, monkeypatch):
     src, live, member = _setup(tmp_path, monkeypatch)
     (member / "src" / "hugpy_server" / "console_dist" / "index.html").write_text("<html>v2</html>")
-    P.console_fresh_or_exit([member])                       # fresh: passes
+    P.console_fresh_or_rebuild([member])                    # fresh: passes
     (src / "A.jsx").write_text("edited, never rebuilt\n")
-    with pytest.raises(SystemExit) as exc:
-        P.console_fresh_or_exit([member])
-    assert "STALE" in str(exc.value) and "build_console.py --from-source --only /" in str(exc.value)
+    rebuilt = []
+    def _rebuild(stale):
+        rebuilt.append(stale)
+        BC.write_source_stamp(live, src)
+    monkeypatch.setattr(P, "rebuild_console", _rebuild)
+    P.console_fresh_or_rebuild([member])
+    assert rebuilt and P.sha256(member / "src" / "hugpy_server" /
+                                "console_dist" / "SOURCE_HASH.json") == \
+        P.sha256(live / "SOURCE_HASH.json")
 
 
 def test_other_bundle_member_is_not_judged(tmp_path, monkeypatch):
     src, live, member = _setup(tmp_path, monkeypatch)
     (member / "src" / "hugpy_server" / "console_dist" / "index.html").write_text("<html>v1 (rollback)</html>")
     (src / "A.jsx").write_text("edited\n")
-    P.console_fresh_or_exit([member])                       # an older version: no verdict
+    P.console_fresh_or_rebuild([member])                    # an older version: no verdict

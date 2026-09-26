@@ -155,16 +155,9 @@ WK = {"id": "wk", "name": "box", "url": "http://192.0.2.1:9100",
       "config": {"residency": {"A": "static", "B": "static"}}}
 
 
-def test_reconcile_warm_set_and_kick_warm_filter_blocked():
-    assert wr._reconcile_warm_set(WK) == ["A", "B"]
-    bl.block("A")
-    assert wr._reconcile_warm_set(WK) == ["B"]
-    # _kick_warm filters blocked keys — all-blocked schedules NOTHING
-    assert wr._kick_warm({"id": "wk", "url": "http://192.0.2.1:9100"}, ["A"], "test") == []
-    bl.block("B")
-    assert wr._kick_warm({"id": "wk", "url": "http://192.0.2.1:9100"}, ["A", "B"], "test") == []
-    _reset()
-    assert wr._reconcile_warm_set(WK) == ["A", "B"]
+def test_background_warm_reconciliation_is_retired():
+    assert not hasattr(wr, "_reconcile_warm_set")
+    assert not hasattr(wr, "_kick_warm")
 
 
 # ── 6) the routes: assign 409, block/unblock, placement, gating ──────────────

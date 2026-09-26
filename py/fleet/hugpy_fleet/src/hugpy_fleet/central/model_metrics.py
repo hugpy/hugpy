@@ -577,6 +577,36 @@ class ModelMetricsStore:
                  "avg_tok_output_per_call": r[2], "avg_compute_s": r[3],
                  "n_calls": r[4], "updated_at": r[5]} for r in rows]
 
+    def all_calls_by_caller(self) -> list:
+        """Per-CALLER call aggregate — n and the means over ALL recorded call
+        rows, grouped by the harness/client identity stamped on each row
+        (compute_actions.detail.caller). One server-side source (the durable
+        compute-action log the panel already reads), so the caller pivot can
+        never drift from the per-call rows. ``(unattributed)`` collects rows with
+        no caller (pre-attribution history). Empty list on any fault (never
+        raises); ``json_extract`` needs SQLite's JSON1 (standard since 3.38)."""
+        if not self._ensure():
+            return []
+        try:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT COALESCE(json_extract(detail_json,'$.caller'),"
+                    " '(unattributed)') AS caller,"
+                    " COUNT(*) AS n_calls,"
+                    " AVG(tokens) AS avg_tok_output_per_call,"
+                    " AVG(duration_s) AS avg_compute_s,"
+                    " MAX(ts) AS updated_at"
+                    " FROM compute_actions WHERE action='call'"
+                    " GROUP BY caller ORDER BY n_calls DESC").fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            return []
+        return [{"caller": r[0], "n_calls": r[1],
+                 "avg_tok_output_per_call": r[2], "avg_compute_s": r[3],
+                 "updated_at": r[4]} for r in rows]
+
     def all_loads(self) -> list:
         """Every load_metrics row, for the Metrics panel's cold-load sheet.
         Empty list on any fault. Mirrors PgMetricsStore.all_loads so the read
@@ -793,6 +823,51 @@ def recent_actions(store: Any = None, limit: int = 200, *,
             lim = max(1, min(int(limit or 200), 5000))
             return [r for r in rows if r.get("outcome") == outcome][:lim]
     return store.recent_actions(limit=limit, **kw)
+
+
+def calls_by_caller(store: Any = None) -> list:
+    """Per-CALLER call aggregate on EVERY backend (SQLite ``ModelMetricsStore``
+    and the toolserver Postgres ``PgMetricsStore``), so the harness-attribution
+    pivot works live.
+
+    n and the means over ALL recorded call rows, grouped by the harness/client
+    identity (compute_actions.detail.caller) — the ONE server-side source the
+    durable compute-action log already is, aggregated once at read. Prefers the
+    store's own ``all_calls_by_caller`` (the SQLite method above); a store
+    without it (the PG drop-in) is aggregated with a direct GROUP BY through the
+    toolserver's own connection, exactly the dual path ``get_action`` uses.
+    Returns [] on any fault — a read surface never raises."""
+    store = store if store is not None else model_metrics_store
+    fn = getattr(store, "all_calls_by_caller", None)
+    if callable(fn):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            return []
+    # Postgres path: same access seam as get_action's PG branch. detail_json is
+    # stored as JSON text on both backends (append_action json.dumps it), so it
+    # casts to json for the ->> accessor.
+    try:
+        from abstract_toolserver import metrics as _pg
+        if not _pg._ensure():
+            return []
+        with _pg._conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE((detail_json::json)->>'caller','(unattributed)')"
+                " AS caller, COUNT(*) AS n_calls, AVG(tokens) AS avg_tok,"
+                " AVG(duration_s) AS avg_s, MAX(ts) AS updated_at"
+                " FROM compute_actions WHERE action='call'"
+                " GROUP BY 1 ORDER BY n_calls DESC")
+            rows = cur.fetchall()
+        out = []
+        for r in rows:
+            out.append({"caller": r[0], "n_calls": r[1],
+                        "avg_tok_output_per_call": float(r[2]) if r[2] is not None else None,
+                        "avg_compute_s": float(r[3]) if r[3] is not None else None,
+                        "updated_at": r[4]})
+        return out
+    except Exception:  # noqa: BLE001 — no PG store / query unsupported -> empty
+        return []
 
 
 def _variant_of(load_failure: Optional[dict], variant: Optional[str]) -> Optional[str]:

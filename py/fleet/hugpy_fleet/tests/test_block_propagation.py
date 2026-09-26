@@ -62,7 +62,7 @@ def _skip_count(logged, mk):
     return sum(1 for a in logged if "skipping" in str(a) and mk in str(a))
 
 
-def test_slot_fill_skips_blocked_candidate_log_once(monkeypatch):
+def test_retired_slot_fill_is_a_strict_noop(monkeypatch):
     slots = importlib.import_module("hugpy_engine.serve.slots")
     dispatch = importlib.import_module("hugpy_engine.dispatch.dispatch")
     seated, logged = [], []
@@ -81,25 +81,8 @@ def test_slot_fill_skips_blocked_candidate_log_once(monkeypatch):
     st = A.WorkerState(name="t", url=None, worker_id="w-fill-block")
     st.assigned_models = ["m-ok", "m-blocked"]
     A._fill_empty_slots(st)
-    assert "m-blocked" not in seated and "m-ok" in seated
-    assert _skip_count(logged, "m-blocked") == 1
-    assert any("slot fill" in str(a) for a in logged)
-
-    seated.clear()
-    for _ in range(3):
-        A._fill_empty_slots(st)
-    assert _skip_count(logged, "m-blocked") == 1
-    assert "m-blocked" not in seated
-
-    A._adopt_blocked_models({})
-    seated.clear()
-    A._fill_empty_slots(st)
-    assert "m-blocked" in seated
-
-    A._adopt_blocked_models({"blocked_models": ["m-blocked"]})
-    seated.clear()
-    A._fill_empty_slots(st)
-    assert _skip_count(logged, "m-blocked") == 2
+    assert seated == []
+    assert logged == []
 
 
 def _wait_done(st, timeout=5.0):

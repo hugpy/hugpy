@@ -97,7 +97,7 @@
   border-radius: 4px;
   padding: 1px 5px;
 }
-.sp-src-settings, .sp-src-fleet { color: var(--text); }
+.sp-src-settings, .sp-src-fleet, .sp-src-store { color: var(--text); }
 
 .sp-actions {
   display: flex;

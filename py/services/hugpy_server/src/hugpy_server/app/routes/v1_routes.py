@@ -50,6 +50,7 @@ from hugpy_server.app.functions.imports.utils.video_share_keys import (
 from hugpy_server.app.routes.v1_helpers import (
     _build_tools_preamble,
     _completion_kwargs,
+    _derive_caller,
     _inject_tools_preamble,
     _fleet_status_text,
     _parse_tool_calls,
@@ -78,6 +79,107 @@ def _openai_error(message: str, status: int, err_type: str = "invalid_request_er
     if retry_after is None:
         return body, status
     return body, status, {"Retry-After": str(int(retry_after))}
+
+
+_TRAINED_CTX_CACHE: dict = {}   # gguf path -> ((mtime_ns, size), ctx_train)
+
+
+def _trained_ctx(gguf: str) -> int:
+    """The GGUF's trained context (metadata only — no tensor scan), read once per
+    file and re-read only when the file changes."""
+    import os
+    st = os.stat(gguf)
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _TRAINED_CTX_CACHE.get(gguf)
+    if hit and hit[0] == sig:
+        return hit[1]
+    from hugpy_storage.gguf_inspect import gguf_metadata
+    ctx = int((gguf_metadata(gguf, (".context_length",)) or {}).get(".context_length") or 0)
+    _TRAINED_CTX_CACHE[gguf] = (sig, ctx)
+    return ctx
+
+
+def _served_context_length(model_key: str, model: dict, live_map: "dict | None" = None):
+    """The context window to ADVERTISE for a model (agent harnesses size their
+    prompt budget from it, so it must be honest).
+
+      1. LIVE — the ctx the model is actually served at right now (the worker's
+         slot ``-c``, read from heartbeats via central.live_served_ctx). Wins
+         whenever the model is loaded, because a fit-bounded ctx can differ per
+         load.
+      2. NATIVE — not loaded: the model's TRAINED context (GGUF n_ctx_train when
+         the weights are on this box, else the manifest model_max_length). There
+         is no hugpy-wide ceiling — the cap is the model's own trained ctx.
+
+    Never raises: any hiccup degrades to the manifest model_max_length."""
+    try:
+        if live_map is None:
+            from hugpy_fleet.central.workers import live_served_ctx_map
+            live_map = live_served_ctx_map()
+        live = live_map.get(model_key) or live_map.get(str(model_key).rsplit("/", 1)[-1])
+        if live:
+            return int(live)
+    except Exception:  # noqa: BLE001 — central store optional / degrades below
+        pass
+    base = None
+    try:
+        mml = model.get("model_max_length")
+        base = int(mml) if mml else None
+    except (TypeError, ValueError):
+        base = None
+    # Prefer the GGUF's own trained ctx when the weights are present here (the
+    # manifest cap can under-state a long-context model) — cheap cached header
+    # read, no VRAM probe (the catalog is not a per-load fit decision).
+    try:
+        framework = str(model.get("framework") or "").lower()
+        if framework in ("gguf", "llama_cpp"):
+            from hugpy_storage.model_paths import route_destination
+            path = route_destination(model)
+            gguf = None
+            if path:
+                try:
+                    from hugpy_engine.serve.serve import _model_file_for
+                    from hugpy_engine.config.main import get_model_config
+                    gguf = _model_file_for(model_key, get_model_config(model_key))
+                except Exception:  # noqa: BLE001
+                    gguf = None
+            trained = _trained_ctx(gguf) if gguf else 0
+            if trained and (not base or trained > base):
+                base = trained
+    except Exception:  # noqa: BLE001 — geometry read is best-effort
+        pass
+    return int(base) if base else model.get("model_max_length")
+
+
+_LIVE_CTX_SNAPSHOT: dict = {"at": 0.0, "map": {}}
+
+
+def _advertised_ctx_for(model_key: str):
+    """The chat ctx-fit guard's window = the SAME figure /v1/models advertises
+    (see chat_context.set_ctx_max_resolver). The heartbeat snapshot is reused
+    for 5s so a chat request never pays a full worker-store read."""
+    now = time.monotonic()
+    if now - _LIVE_CTX_SNAPSHOT["at"] > 5.0:
+        try:
+            from hugpy_fleet.central.workers import live_served_ctx_map
+            _LIVE_CTX_SNAPSHOT["map"] = live_served_ctx_map()
+        except Exception:  # noqa: BLE001
+            _LIVE_CTX_SNAPSHOT["map"] = {}
+        _LIVE_CTX_SNAPSHOT["at"] = now
+    cfg = get_models_dict().get(model_key)
+    if cfg is None:
+        return None
+    model = cfg.to_dict() if hasattr(cfg, "to_dict") else cfg
+    if not isinstance(model, dict):
+        return None
+    return _served_context_length(model_key, model, _LIVE_CTX_SNAPSHOT["map"])
+
+
+try:
+    from hugpy_engine.chat_context.chat_context import set_ctx_max_resolver
+    set_ctx_max_resolver(_advertised_ctx_for)
+except Exception:  # noqa: BLE001 — the guard falls back to model_max_length
+    pass
 
 
 def _request_diagnostics(request_id: "str | None" = None):
@@ -155,6 +257,11 @@ def v1_models():
         _archived = archived_keys()
     except Exception:  # noqa: BLE001
         _archived = frozenset()
+    try:   # ONE heartbeat snapshot for the whole listing
+        from hugpy_fleet.central.workers import live_served_ctx_map
+        _live_ctx = live_served_ctx_map()
+    except Exception:  # noqa: BLE001
+        _live_ctx = {}
     data = []
     for key, model in manifest.items():
         model = update_model_status(model)
@@ -174,7 +281,13 @@ def v1_models():
             # capabilities from every task-filtered UI (e.g. a dual
             # text-to-image + image-to-image model looked t2i-only).
             "tasks": model.get("tasks") or ([model.get("primary_task")] if model.get("primary_task") else []),
-            "context_length": model.get("model_max_length"),
+            # HONEST served window: the ctx the model is ACTUALLY served at when
+            # loaded (the worker's live slot -c), else the PREDICTED served ctx
+            # (fit-bounded native, spill.served_ctx_for_fit via serve._ctx_for),
+            # else the declared trained ctx. Never the raw manifest cap that
+            # made /v1/models advertise a window the slot didn't serve (agent
+            # harnesses read this to size their context budget).
+            "context_length": _served_context_length(key, model, _live_ctx),
             # k61 — WHY a listed model cannot be picked for a task. Adapters and
             # pipeline components are real, present files; they are simply not
             # servable on their own. The task-filtered pickers show them greyed
@@ -198,7 +311,7 @@ def v1_models():
 # /v1/chat/completions
 # (payload -> prompt_kwargs translation is _completion_kwargs in v1_helpers)
 # ──────────────────────────────────────────────────────────────────────────
-async def _v1_events(prompt_kwargs: dict):
+async def _v1_events(prompt_kwargs: dict, call_data=None):
     """Raw StreamEvents from the chat engine (late import dodges circulars).
 
     Registered in the live queue (same as the console /chat/stream path) so /v1
@@ -215,14 +328,61 @@ async def _v1_events(prompt_kwargs: dict):
             name = getattr(get_model_config(mk), "name", None) or mk
     except Exception:
         pass
-    activity.begin(rid, mk, name, kind="v1")
+    # This scope OWNS the job row: begin() opens it, and the finally below closes
+    # it on EVERY exit path (normal end, error, client disconnect, an exception
+    # building the stream). begin() therefore sits OUTSIDE the try only in that
+    # its finally must always run — _sq starts None so the finally is safe even if
+    # stream_query() itself raises before the loop.
+    activity.begin(
+        rid, mk, name, kind="v1",
+        prompt=activity.format_prompt(prompt_kwargs.get("messages"),
+                                      prompt_kwargs.get("prompt")),
+        request=call_data,
+    )
+    # Bind the engine stream so a client disconnect (GeneratorExit) acloses it
+    # deterministically — that cascade releases the relayed worker's httpx stream
+    # and frees the llama-server slot instead of leaving it to GC (incident
+    # 2026-09-25). Also log the disconnect once here, at the /v1 hop.
+    _sq = None
     try:
-        async for event in stream_query(**prompt_kwargs):
-            if getattr(event, "type", None) == "token":
+        _sq = stream_query(**prompt_kwargs)
+        async for event in _sq:
+            etype = getattr(event, "type", None)
+            if etype == "token":
                 activity.on_token(rid)
+            elif etype == "error":
+                # Reflect an honest failure ONTO the job (first-terminal-wins; the
+                # finally's end() then no-ops) so a v1 call that errored — e.g. the
+                # model failed to load — reads `failed` with its real message on
+                # /llm/jobs instead of finalizing as a bland `done`. Mirrors the
+                # console chat path (streaming.stream_events).
+                activity.fail(rid, error=getattr(event, "message", "error"))
             yield event
+    except GeneratorExit:
+        logger.info("/v1 client-disconnect: cancelling upstream req=%s model=%s", rid, mk)
+        raise
+    except Exception as exc:
+        # Record the honest failure ONTO the row (first-terminal-wins) before the
+        # exception propagates to the consumer for HTTP mapping (503/400/500); the
+        # finally's end() then no-ops. Without this a one-shot relay that RAISED
+        # (rather than yielding an error event) would finalize as a bland `done`.
+        activity.fail(rid, error=exc)
+        raise
     finally:
+        # FINALIZE THE ROW FIRST (incident 2026-09-25: v1 pending rows stuck
+        # forever). end() is a cheap in-store transition and cannot block; the
+        # aclose cascade CAN hang when a relay whose model is failing to load
+        # never releases its httpx stream. If aclose ran first and hung, end()
+        # would never run and the row would stay `pending` after its request was
+        # gone. Closing the job before the best-effort resource teardown makes the
+        # row reflect its call on every exit path regardless of the relay's state.
         activity.end(rid)
+        _ac = getattr(_sq, "aclose", None)
+        if _ac is not None:
+            try:
+                await _ac()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
 
 
 def _finish_reason(reason: str | None) -> str:
@@ -243,10 +403,92 @@ def _is_request_shape_message(message: str) -> bool:
         return False
 
 
+# ── Context-overflow passthrough (2026-09-25) ──────────────────────────────
+# When a prompt is longer than the slot's launched -c, llama-server answers
+# ``{"error":{"code":400,"type":"exceed_context_size_error","n_prompt_tokens":N,
+# "n_ctx":M,...}}``. That reaches central as a 4xx worker-error MESSAGE. Instead
+# of a generic 500/"bad request", surface it as an OpenAI-shaped 400 whose text
+# carries the exact phrase OpenAI-compatible clients (Hermes/LiteLLM) parse —
+# "maximum context length is M tokens" — plus the n_ctx / n_prompt_tokens fields,
+# so the harness learns the real window instead of guessing it.
+_CTX_OVERFLOW_SIGNALS = (
+    "exceed_context_size_error", "exceeds the available context",
+    "exceeds context", "exceed the context", "context length exceeded",
+    "context_length_exceeded", "context window", "n_ctx",
+)
+
+
+def _is_context_overflow_message(message) -> bool:
+    low = str(message or "").lower()
+    return any(sig in low for sig in _CTX_OVERFLOW_SIGNALS)
+
+
+def _ctx_overflow_numbers(message: str):
+    """(n_ctx, n_prompt_tokens) parsed out of an upstream overflow message, each
+    None when not stated. Best-effort — the mapper falls back to the live served
+    ctx for n_ctx when the message did not carry the number."""
+    import re
+    text = str(message or "")
+    m_ctx = None
+    for pat in (r"n_ctx\D{0,6}(\d+)",
+                r"maximum context length is (\d+)",
+                r"context (?:size|length|window)\D{0,14}(\d+)"):
+        mm = re.search(pat, text, re.I)
+        if mm:
+            m_ctx = int(mm.group(1))
+            break
+    n_prompt = None
+    for pat in (r"n_prompt_tokens\D{0,6}(\d+)",
+                r"(?:requested|you requested|prompt is)\D{0,14}(\d+) tokens"):
+        mm = re.search(pat, text, re.I)
+        if mm:
+            n_prompt = int(mm.group(1))
+            break
+    return m_ctx, n_prompt
+
+
+def _context_overflow_payload(message, model_key=None) -> dict:
+    """The OpenAI-shaped ``error`` object for a context overflow (dict, so both
+    the JSON 400 and the streaming error frame can emit it)."""
+    m_ctx, n_prompt = _ctx_overflow_numbers(str(message or ""))
+    if not m_ctx and model_key:
+        try:
+            from hugpy_fleet.central.workers import live_served_ctx
+            m_ctx = live_served_ctx(model_key)
+        except Exception:  # noqa: BLE001
+            m_ctx = None
+    if m_ctx and n_prompt:
+        text = (f"This model's maximum context length is {int(m_ctx)} tokens, "
+                f"however you requested {int(n_prompt)} tokens. Please reduce "
+                "the length of the messages.")
+    elif m_ctx:
+        text = (f"This model's maximum context length is {int(m_ctx)} tokens. "
+                "Please reduce the length of the messages.")
+    else:
+        text = ("This request exceeds the model's maximum context length — "
+                "please reduce the length of the messages.")
+    err = {"message": text, "type": "context_length_exceeded",
+           "code": "context_length_exceeded", "param": "messages"}
+    if m_ctx:
+        err["n_ctx"] = int(m_ctx)
+    if n_prompt:
+        err["n_prompt_tokens"] = int(n_prompt)
+    diag = _request_diagnostics()
+    if diag is not None:
+        err["diagnostics"] = diag
+    return err
+
+
+def _context_overflow_error(message, model_key=None):
+    """OpenAI-compatible 400 for a context overflow (non-streaming path)."""
+    return jsonify({"error": _context_overflow_payload(message, model_key)}), 400
+
+
 @v1_bp.route("/v1/chat/completions", methods=["POST"])
 @v1_auth
 def v1_chat_completions():
     payload = request.get_json(silent=True) or {}
+    call_data = payload
 
     # Central-side tools shim (see v1_helpers): the frozen engine schema can't
     # carry `tools`, so tool-calling is prompt-injected here and parsed back
@@ -264,6 +506,22 @@ def v1_chat_completions():
         prompt_kwargs = _completion_kwargs(payload)
     except (ValueError, TypeError) as exc:
         return _openai_error(str(exc), 400)
+    # HARNESS ATTRIBUTION (2026-09-24): tag this call with the harness/client
+    # identity (header, OpenAI ``user`` field, or the bearer key's name) so the
+    # per-call metrics row credits the harness instead of the bare "api" default.
+    # Recorded facts only; None when nothing identifies the caller (no guess).
+    try:
+        _key_name = None
+        try:
+            from hugpy_server.app.functions.imports.utils.api_keys import key_name_for_token
+            _key_name = key_name_for_token(_bearer_token())
+        except Exception:  # noqa: BLE001 — attribution must never break a call
+            _key_name = None
+        _caller = _derive_caller(request.headers, payload, _key_name)
+        if _caller:
+            prompt_kwargs["caller"] = _caller
+    except Exception:  # noqa: BLE001 — attribution is best-effort
+        pass
     try:
         from flask import g
         g.hugpy_request_id = prompt_kwargs.get("request_id")
@@ -384,8 +642,12 @@ def v1_chat_completions():
             # fragment) is a later refinement. Non-tool requests stream
             # token-by-token exactly as before.
             buffered: list = []
+            # Bind so a client disconnect (GeneratorExit) acloses the event stream
+            # deterministically in the finally — cascades to the worker relay /
+            # llama-server slot rather than leaving it to GC (incident 2026-09-25).
+            _v1ev = _v1_events(prompt_kwargs, call_data)
             try:
-                async for ev in _v1_events(prompt_kwargs):
+                async for ev in _v1ev:
                     t = getattr(ev, "type", None)
                     if t == "token":
                         if tools_preamble:
@@ -427,16 +689,33 @@ def v1_chat_completions():
                         if buffered:
                             yield chunk({"content": "".join(buffered)})
                             buffered = []
-                        _err = {"content": f"\n[error: {ev.message}]"}
-                        _d = _request_diagnostics(prompt_kwargs.get("request_id"))
-                        if _d is not None:
-                            _err["hugpy_diagnostics"] = _d
-                        yield chunk(_err, finish="stop")
+                        # Context overflow: emit a STRUCTURED OpenAI error frame
+                        # (data: {"error": {...}}) naming the real window, so a
+                        # streaming client parses the same context_length_exceeded
+                        # it would get on the non-streaming 400 — not just prose.
+                        if _is_context_overflow_message(ev.message):
+                            _ovf = _context_overflow_payload(
+                                ev.message, prompt_kwargs.get("model_key"))
+                            yield b"data: " + json.dumps({"error": _ovf}).encode() + b"\n\n"
+                            yield chunk({}, finish="stop")
+                        else:
+                            _err = {"content": f"\n[error: {ev.message}]"}
+                            _d = _request_diagnostics(prompt_kwargs.get("request_id"))
+                            if _d is not None:
+                                _err["hugpy_diagnostics"] = _d
+                            yield chunk(_err, finish="stop")
             except Exception as exc:
                 logger.exception("v1 stream failed")
                 if buffered:
                     yield chunk({"content": "".join(buffered)})
                 yield chunk({"content": f"\n[error: {exc}]"}, finish="stop")
+            finally:
+                _ac = getattr(_v1ev, "aclose", None)
+                if _ac is not None:
+                    try:
+                        await _ac()
+                    except Exception:  # noqa: BLE001 — teardown must never raise
+                        pass
             if include_usage:
                 yield usage_chunk(usage)
             yield b"data: [DONE]\n\n"
@@ -462,7 +741,7 @@ def v1_chat_completions():
     hugpy_meta = None
     timings = None
     try:
-        for ev in chat_iter_sync(_v1_events(prompt_kwargs)):
+        for ev in chat_iter_sync(_v1_events(prompt_kwargs, call_data)):
             t = getattr(ev, "type", None)
             if t == "token":
                 text_parts.append(ev.text)
@@ -486,6 +765,10 @@ def v1_chat_completions():
             return _openai_error(f"{exc}", 503, "server_busy",
                                  retry_after=_capacity_retry_after())
         logger.exception("v1 completion failed")
+        # Context overflow that escaped as an exception (one-shot relay raises):
+        # a 400 that names the real window, same as the yielded-error path.
+        if _is_context_overflow_message(f"{exc}"):
+            return _context_overflow_error(f"{exc}", _mk)
         # Same classification for an exception that escaped the stream (the
         # one-shot relay raises rather than yielding): a request-shape fault is
         # a 400, never a 500 the client is invited to retry.
@@ -507,6 +790,12 @@ def v1_chat_completions():
         # instead of treating it as a hard error.
         if "worker_busy" in error_message or "model_busy" in error_message:
             return _openai_error(error_message, 503, "server_busy")
+        # Prompt longer than the slot's context window: pass the upstream
+        # exceed_context_size_error through as an OpenAI 400 that names the real
+        # window ("maximum context length is M tokens") so the client can resize,
+        # instead of a generic 500/bad-request that hides the number.
+        if _is_context_overflow_message(error_message):
+            return _context_overflow_error(error_message, _mk)
         # A malformed request (the model's chat template refuses this message
         # sequence) is the CLIENT's fault, not ours: answer 400
         # invalid_request_error so an OpenAI SDK raises BadRequestError instead

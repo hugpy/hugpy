@@ -198,6 +198,16 @@ class ChatRequest(BaseModel):
     # rather than a silently broken promise). Omitted from model_dump() when
     # None (serializer below).
     no_makeroom: Optional[bool] = None
+    # HARNESS ATTRIBUTION (2026-09-24): who made this call — a harness/client
+    # identity ("hermes", "aider", "codex", an API-key name, ...) the /v1 route
+    # derives (header, OpenAI ``user`` field, or the bearer key's name) so the
+    # per-call metrics row (resolvers.remote.per_call_row -> compute_actions
+    # detail.caller) attributes the call to it instead of the bare default
+    # "api". Central-only: it never crosses the worker wire — the serializer
+    # below drops it from model_dump() UNCONDITIONALLY (the relay ships
+    # model_dump() and released workers run extra="forbid"). None = the honest
+    # default, exactly today's behaviour.
+    caller: Optional[str] = None
 
     @model_serializer(mode="wrap")
     def _omit_null_engine_extras(self, handler):
@@ -209,6 +219,12 @@ class ChatRequest(BaseModel):
         for key in ("chat_template_kwargs", "logit_bias", "no_makeroom"):
             if data.get(key) is None:
                 data.pop(key, None)
+        # ``caller`` is a CENTRAL-ONLY attribution field (metrics read it off the
+        # object as ``req.caller``); it is never a worker input, so it is dropped
+        # from EVERY model_dump() — the relay wire (remote._relay_payload /
+        # peer relay both ship model_dump()) stays byte-identical and an
+        # extra="forbid" worker never sees an unknown key.
+        data.pop("caller", None)
         return data
 
     @field_validator("messages", mode="before")

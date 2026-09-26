@@ -238,10 +238,23 @@ def run_generate_image(spec: GenerateImageSpec, job_id: str) -> JobResult:
 
     img = images[0]
     path = getattr(img, "path", None)
-    if not path or not os.path.isfile(path):
-        # The plane served this on a remote worker — its `path` lives on THAT
-        # machine's disk. The result rides the bytes for exactly this case:
-        # materialize them locally and continue.
+    # A returned path is only usable DIRECTLY when it is a local file that also
+    # lives under central's storage jail (UPLOADS_HOME / DEFAULT_ROOT). A worker
+    # co-located on this host (e.g. ae-worker, unix user `aeb`) writes its output
+    # to its OWN local uploads root — that path is visible on this machine (same
+    # host) so os.path.isfile() is True, but it escapes central's jail and ingest
+    # would reject it. Whenever the path isn't jailed here, ignore it and
+    # materialize from the inline bytes the result already rides (return_b64=True),
+    # exactly as a genuinely-remote worker (computron) always does.
+    from hugpy_platform.constants import UPLOADS_HOME
+    from hugpy_platform.filesystem import is_within
+    path_is_jailed_local = bool(path) and os.path.isfile(path) and (
+        is_within(path, UPLOADS_HOME) or is_within(path, DEFAULT_ROOT)
+    )
+    if not path_is_jailed_local:
+        # The plane served this on a remote (or co-located, non-jailed) worker —
+        # its `path` lives outside central's store. The result rides the bytes
+        # for exactly this case: materialize them locally and continue.
         b64 = getattr(img, "b64", None)
         if not b64:
             return JobResult(job_id, ok=False, error=JobError(
@@ -251,7 +264,6 @@ def run_generate_image(spec: GenerateImageSpec, job_id: str) -> JobResult:
                 retryable=False,
             ))
         import base64
-        from hugpy_platform.constants import UPLOADS_HOME
         out_dir = os.path.join(UPLOADS_HOME, "generated")
         os.makedirs(out_dir, exist_ok=True)
         path = os.path.join(out_dir, f"{job_id}_0.png")

@@ -76,6 +76,14 @@ _DEFAULT_FLOOR_MIB = 400
 # same-instant re-read would report a false "it didn't work".
 _DEFAULT_SETTLE_S = 2.0
 
+# How long a MANAGED comfy must stay idle (empty queue, no registered call)
+# before the worker STOPS the process (releasing its CUDA context entirely), a
+# longer window than the /free debounce: /free hands the model weights back at
+# idle_ttl_s, then a fully idle managed comfy is stopped at this window so it
+# stops holding even the bare context. Only for a launcher the worker manages
+# (systemd-user/spawn) — an ``external`` comfy is never stopped.
+_DEFAULT_IDLE_STOP_S = 900.0
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -105,6 +113,21 @@ def enabled() -> bool:
     Default ON: a stale comfy squatter is the operator's directive to remove,
     and the whole predicate degrades to a no-op on a box with no comfy."""
     v = (os.environ.get("HUGPY_COMFY_IDLE_FREE") or "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def idle_stop_s() -> float:
+    """Idle window before a MANAGED comfy is STOPPED, ``HUGPY_COMFY_IDLE_STOP_S``
+    (seconds). Longer than idle_ttl_s (the /free debounce): free the weights
+    first, stop the fully idle process later."""
+    return _env_float("HUGPY_COMFY_IDLE_STOP_S", _DEFAULT_IDLE_STOP_S)
+
+
+def stop_enabled() -> bool:
+    """The idle-STOP kill switch (``HUGPY_COMFY_IDLE_STOP=0`` disables it).
+    Default ON; still a no-op unless the launcher is worker-managed and a
+    ``stop_call`` is bound."""
+    v = (os.environ.get("HUGPY_COMFY_IDLE_STOP") or "").strip().lower()
     return v not in ("0", "false", "no", "off")
 
 
@@ -171,6 +194,9 @@ class ComfyIdleWatchdog:
       * ``queue_probe(url)`` -> ``{"running", "pending"}`` | None.
       * ``call_probe()``  -> the active foreign call dict | None | UNKNOWN.
       * ``emit(stage, **fields)`` -> eviction telemetry (best-effort).
+      * ``stop_call()``   -> ``(ok, note)`` | dict — STOP a managed comfy (the
+        worker's ComfyManager.stop). None (external / unmanaged) => the idle-stop
+        path is a no-op, byte-identical to a probe-only box.
     """
 
     def __init__(self, vram_probe: Callable[..., "Optional[int]"],
@@ -180,7 +206,8 @@ class ComfyIdleWatchdog:
                  call_probe: "Optional[Callable[[], object]]" = None,
                  emit: "Optional[Callable[..., None]]" = None,
                  clock: "Optional[Callable[[], float]]" = None,
-                 sleep: "Optional[Callable[[float], None]]" = None) -> None:
+                 sleep: "Optional[Callable[[float], None]]" = None,
+                 stop_call: "Optional[Callable[[], object]]" = None) -> None:
         self._vram_probe = vram_probe
         self._url_probe = url_probe
         self._free_call = free_call
@@ -189,11 +216,19 @@ class ComfyIdleWatchdog:
         self._emit = emit or _default_emit
         self._clock = clock or time.time
         self._sleep = sleep or time.sleep
+        self._stop_call = stop_call
         # When the CURRENT unbroken idle streak began, or None when comfy is not
         # (provably) idle. Reset on every non-idle observation, which is what
         # makes the TTL a persistence test rather than a stopwatch on the box.
         self._idle_since: "Optional[float]" = None
         self._last_free_at: float = 0.0
+        # The idle-STOP clock — a SEPARATE persistence test from _idle_since.
+        # _idle_since is VRAM-gated (it resets to None once /free drops comfy to
+        # the context floor, because there is then nothing to reclaim), so it can
+        # never time the stop window. This clock tracks process idleness (empty
+        # queue + no registered call) regardless of VRAM, so it keeps running
+        # after a /free right up to the stop.
+        self._stop_idle_since: "Optional[float]" = None
 
     # -- observation ---------------------------------------------------------
     @staticmethod
@@ -316,6 +351,90 @@ class ComfyIdleWatchdog:
                              need_bytes=need_bytes,
                              note="contention — idle TTL waived")
 
+    # -- the idle STOP (managed launchers only) ------------------------------
+    def stop_tick(self, *, managed: bool, running: bool) -> dict:
+        """Stop a fully idle MANAGED comfy after ``idle_stop_s()`` so it releases
+        even its bare CUDA context. Rides the same residency beat as ``tick``.
+
+        The idle predicate here is PROCESS idleness — no registered comfy call
+        AND comfy's own /queue empty (the mid-render guard, clauses 2-3 of the
+        free predicate). It is deliberately NOT VRAM-gated: after a /free comfy
+        sits at the context floor but is still a stoppable idle process.
+
+        A no-op (silent) unless the launcher is worker-managed, a ``stop_call`` is
+        bound, and comfy is currently running — so a probe-only / external box is
+        byte-identical to before."""
+        if not stop_enabled():
+            return {"action": "skip", "reason": "idle-stop disabled "
+                                                "(HUGPY_COMFY_IDLE_STOP=0)"}
+        if not managed or self._stop_call is None:
+            return {"action": "skip", "reason": "comfy launcher is not "
+                                                "worker-managed (external)"}
+        if not running:
+            # Nothing to stop. Reset the clock so the window starts fresh at the
+            # next start, not from a stale streak measured while comfy was down.
+            self._stop_idle_since = None
+            return {"action": "skip", "reason": "comfy not running"}
+        call = self._call_probe()
+        now = self._clock()
+        if call is UNKNOWN:
+            self._stop_idle_since = None
+            return {"action": "skip",
+                    "reason": "comfy call table unreadable — cannot prove idle"}
+        if call:
+            self._stop_idle_since = None
+            mk = (call or {}).get("model_key") or "?"
+            return {"action": "skip",
+                    "reason": f"a comfy call is in flight ({mk}) — never stop mid-render"}
+        q = self._queue_probe(self._url_probe())
+        if q is None:
+            self._stop_idle_since = None
+            return {"action": "skip",
+                    "reason": "comfy /queue unreadable — cannot prove idle"}
+        if int(q.get("running") or 0) or int(q.get("pending") or 0):
+            self._stop_idle_since = None
+            return {"action": "skip",
+                    "reason": (f"comfy queue busy (running={q.get('running')}, "
+                               f"pending={q.get('pending')}) — never stop mid-render")}
+        if self._stop_idle_since is None:
+            self._stop_idle_since = now
+        idle_for = max(0.0, now - self._stop_idle_since)
+        window = idle_stop_s()
+        if idle_for < window:
+            return {"action": "wait",
+                    "reason": (f"idle for {idle_for:.0f}s of the {window:.0f}s "
+                               "idle-stop window"),
+                    "idle_for_s": idle_for}
+        logger.info(
+            "comfy idle-stop: ComfyUI has been idle (empty queue, no registered "
+            "call) for %.0fs (window %.0fs) — stopping the managed process so its "
+            "CUDA context is released", idle_for, window)
+        self._emit("headroom.start", trigger="comfy-idle-stop", incoming_model=None,
+                   note=f"idle {idle_for:.0f}s >= stop window {window:.0f}s")
+        try:
+            res = self._stop_call()
+        except Exception as exc:  # noqa: BLE001 — a broken stop never breaks a beat
+            self._stop_idle_since = None
+            logger.warning("comfy idle-stop: stop_call raised (%s) — surfacing, "
+                           "will retry next beat", exc)
+            self._emit("evict.fail", model_key="comfy", tier="comfy",
+                       trigger="comfy-idle-stop", error=f"{type(exc).__name__}: {exc}")
+            return {"action": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        ok, note = _stop_result(res)
+        self._stop_idle_since = None
+        if ok:
+            self._emit("evict.done", model_key="comfy", tier="comfy",
+                       trigger="comfy-idle-stop")
+            self._emit("headroom.done", trigger="comfy-idle-stop", evicted=["comfy"],
+                       outcome="fit", note=note)
+            return {"action": "stopped", "reason": note, "idle_for_s": idle_for}
+        logger.warning("comfy idle-stop: stop did not take (%s) — surfacing", note)
+        self._emit("evict.fail", model_key="comfy", tier="comfy",
+                   trigger="comfy-idle-stop", error=note)
+        self._emit("headroom.done", trigger="comfy-idle-stop", evicted=[],
+                   outcome="proceeded-unfit", note=note)
+        return {"action": "failed", "reason": note, "idle_for_s": idle_for}
+
     # -- the free itself -----------------------------------------------------
     def _do_free(self, obs: dict, trigger: str, incoming_model: "Optional[str]",
                  need_bytes: "Optional[int]" = None,
@@ -392,6 +511,16 @@ class ComfyIdleWatchdog:
                    evicted=["comfy"], outcome="fit", freed_bytes=freed)
         return {"action": "freed", "reason": why, "before_bytes": before,
                 "after_bytes": after_i, "freed_bytes": freed}
+
+
+def _stop_result(res) -> "tuple[bool, str]":
+    """Normalize a ``stop_call`` return to ``(ok, note)``. Accepts a
+    ``(ok, note)`` tuple or a ``{"ok", "note"}`` dict (ComfyManager.stop)."""
+    if isinstance(res, dict):
+        return bool(res.get("ok")), str(res.get("note") or "")
+    if isinstance(res, (tuple, list)) and len(res) >= 2:
+        return bool(res[0]), str(res[1])
+    return bool(res), ""
 
 
 def _default_emit(stage: str, **fields) -> None:

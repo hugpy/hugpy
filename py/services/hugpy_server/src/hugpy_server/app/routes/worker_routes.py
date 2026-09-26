@@ -82,24 +82,8 @@ from hugpy_fleet.central.enrollment_tokens import (
     revoke_enrollment_token,
     list_enrollment_tokens,
 )
-# Per-worker BOOT-LOAD STAR (boot_prewarm) — the ⭐ lever does exactly TWO
-# things (operator RULINGS 2026-07-23, post-incident, which REVERTED the 0.1.201
-# "reconcile-kept-warm" every-beat re-warm): (1) LOAD ON BOOT, once per worker
-# process lifetime; (2) a PRIORITY tie-break in central's worker ranking for
-# ambiguous/no-warm model calls. It is NOT keep-warm and has NO reconcile
-# re-warm — central's _reconcile_warm_set (below) deliberately EXCLUDES the star,
-# and the worker fires it boot-once (worker_agent._adopt_boot_prewarm).
-# ⚠ Do not restore the "reconcile keeps it warm every beat" behavior: re-warm-
-# after-eviction fights the headroom sweep + active inference (the 2026-07-23
-# zombie-seat incident, and k67 item K's sweep×star oscillation). k67 keeps a
-# FITTING star warm the convergent way — the worker's headroom sweep simply does
-# not evict a star whose footprint fits under the pressure ceiling — so there is
-# nothing to re-warm. Co-fit-gated re-entry is the future safe path (Slice D,
-# DEFERRED). DISTINCT from media_default (a UI/routing preference that loads
-# nothing) and from 🔒static (which IS eviction-protected — the star is a plain
-# evictable resident). Persisted server-side (worker_boot_prewarm.json) beside
-# the media stores; surfaced on the worker record and carried to the worker on
-# the heartbeat reply (omit-when-unset, so an older worker just ignores it).
+# Per-worker ⭐ star (boot_prewarm): a stored per-worker setting, surfaced on
+# the worker record and used as a routing-priority tie-break. It loads nothing.
 # Per-worker WILDCARD flag — the "take all comers" ROUTING opt-in (operator
 # doctrine 2026-07-23): designations are a hard routing scope; an undesignated
 # model routes onto a worker ONLY if that worker opted in here. Routing
@@ -113,28 +97,17 @@ from hugpy_engine.config.models.models_config import (
     set_worker_boot_prewarm,
     worker_wildcard_state,
     set_worker_wildcard,
+    fleet_distribution_status,
+    set_fleet_distribution,
 )
 
 worker_bp, logger = get_bp("worker_bp", __name__)
 
 
-# ── assigned = ready: background warm + heartbeat reconcile ─────────────────
-# An operator's assignment is a READINESS contract, not a routing hint: a model
-# designated to a worker is loaded there proactively — assign kicks a warm, and
-# every heartbeat re-converges assigned-vs-loaded (covers worker reboots, agent
-# restarts and evictions) — so the first real request never pays a multi-GB
-# lazy load. Best-effort and rate-limited: a model that doesn't fit simply
-# fails its probe on the worker (reported honestly there) and is retried only
-# after the cooldown; probes run SEQUENTIALLY per worker so two multi-GB loads
-# never race for the same VRAM.
+# Central never loads a model on its own: a model loads when it is called
+# (2026-09-25 — the assign/heartbeat/boot warms were removed).
 import time as _time
 import threading as _threading
-
-_WARM_COOLDOWN_S = float(os.environ.get("HUGPY_WARM_COOLDOWN_S", "600"))
-_warm_last: dict = {}          # (worker_id, model_key) -> monotonic ts
-_warm_busy: set = set()        # worker_ids with a warm thread in flight
-_warm_lock = _threading.Lock()
-
 
 def _model_blocked(model_key: str) -> bool:
     """Operator BLOCK check — guarded (fail-open = not blocked). See
@@ -174,358 +147,9 @@ def _archived_keys() -> frozenset:
         return frozenset()
 
 
-def _admission_held(model_key: str) -> bool:
-    """Post-download admission HELD this model (fail-open = not held)."""
-    try:
-        from hugpy_fleet.central.admission_gate import is_held
-        return is_held(model_key)
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _polite_warm_ok(worker, model_key) -> bool:
-    """k56: may a POLITE (``no_evict``) model be warmed onto this worker?
-
-    Only when central can prove the model lands in genuinely free VRAM. An
-    unflagged model is always warmable (True) — this gate exists solely for the
-    flagged case. Fails OPEN on anything unprovable (unsizable model, no VRAM
-    figure, an unreadable overrides file): the worker's own polite admission is
-    the authority, so central's job here is to skip the warms it can already
-    see would have to evict, never to invent a refusal.
-
-    k62 — politeness is resolved for THIS worker (``no_evict_by_worker`` beats
-    the model-wide default), so a model that is polite on the contended card is
-    still warmed normally onto the box where the operator left it assertive.
-    """
-    worker = worker or {}
-    try:
-        from hugpy_engine.serve.overrides import polite_on_worker
-        if not polite_on_worker(model_key, worker.get("id"), worker.get("name")):
-            return True
-        verdict = _worker_fit(model_key, worker)
-        if verdict.get("vram_free") is None or verdict.get("need") is None:
-            return True
-        if verdict.get("gpu_resident"):
-            return True
-    except Exception:  # noqa: BLE001 — a gate miss must not stop ordinary warms
-        return True
-    logger.info(
-        "polite warm skipped: %s is polite ON WORKER %s and would need an "
-        "eviction to land there (no_evict) — leaving it cold rather than "
-        "displacing a resident",
-        model_key, worker.get("name") or worker.get("id"))
-    return False
-
-
-def _kick_warm(worker, model_keys, source: str) -> list:
-    """Probe the given models on the worker in ONE background thread.
-
-    Returns the models actually scheduled (cooldown/busy-filtered). Safe to
-    call from any request: never blocks, never raises."""
-    from hugpy_fleet.central import worker_http
-    wid = (worker or {}).get("id") or ""
-    base = ((worker or {}).get("url") or "").rstrip("/")
-    if not wid or not base:
-        return []
-    # Operator BLOCK is the single choke on central-initiated PROVISIONING: a
-    # warm probe DOWNLOADS an absent model onto the worker (ensure_model_present),
-    # so filtering here stops every central pull path (reconcile-warm AND
-    # assign-warm AND any future caller) for a blocked model — never a routing
-    # candidate, never a transfer target.
-    blocked = _blocked_keys()
-    model_keys = [mk for mk in (model_keys or []) if mk not in blocked]
-    # ADMISSION (2026-09-23): a model the post-download admission HELD is not a
-    # warm/provision target either — same choke, same reason as the block.
-    model_keys = [mk for mk in model_keys if not _admission_held(mk)]
-    # ARCHIVE MARK (2026-09-23): a model the operator marked for archive is not
-    # a warm/provision target — same choke, at least as strict as the block.
-    _arch = _archived_keys()
-    model_keys = [mk for mk in model_keys if mk not in _arch]
-    # k56 POLITE WARM. A warm probe is a LOAD: it runs the worker's admission,
-    # which for an unflagged model evicts to fit. A polite model must never be
-    # warmed by evicting anyone, and the probe carries no spill (so the worker
-    # never sees the flag on this path) — the gate therefore belongs here,
-    # beside the block filter directly above and for the identical reason: this
-    # is the ONE choke every central-initiated warm passes through (reconcile,
-    # assign-warm, and any future caller).
-    model_keys = [mk for mk in model_keys if _polite_warm_ok(worker, mk)]
-    if not model_keys:
-        return []
-    now = _time.monotonic()
-    with _warm_lock:
-        if wid in _warm_busy:
-            return []
-        due = [mk for mk in model_keys
-               if now - _warm_last.get((wid, mk), 0.0) >= _WARM_COOLDOWN_S]
-        if not due:
-            return []
-        for mk in due:
-            _warm_last[(wid, mk)] = now
-        _warm_busy.add(wid)
-    logger.info("warming %s on worker %s (%s)", due, wid[:8], source)
-
-    def _run():
-        try:
-            for mk in due:
-                try:
-                    worker_http.post(worker, "/probe/" + mk, call="load")
-                except Exception:
-                    # Best-effort; the next reconcile retries post-cooldown. A
-                    # WorkerUnreachable here is the breaker doing its job — the
-                    # box is down, so the remaining models in `due` will fail
-                    # fast too instead of each burning a thread for minutes.
-                    pass
-        finally:
-            with _warm_lock:
-                _warm_busy.discard(wid)
-
-    _threading.Thread(target=_run, name=f"warm-{source}-{wid[:8]}",
-                      daemon=True).start()
-    return due
-
-
-# Reconcile's "deduce, don't count the world" prefilter: cooldown for the
-# skip-log below, same cadence as _kick_warm's own cooldown so an un-fittable
-# assigned model gets ONE note per window instead of per-beat spam.
-_fit_skip_last: dict = {}      # (worker_id, model_key) -> monotonic ts of last skip-log
-
-
-def _warmable_subset(worker, cold: list) -> list:
-    """Filter reconcile's ``cold`` (assigned-but-not-loaded) model keys down to
-    the subset actually worth paying a live load-probe for.
-
-    ``_worker_fit`` (below, ~line 1235) already computes fit from numbers
-    central has every heartbeat (effective GGUF bytes vs vram_free/free_ram) —
-    no load required. Reconcile used to skip this and blanket-probe every cold
-    assignment, which on a worker with dozens of assignments meant sequentially
-    loading each one onto a card that physically holds a handful — a load/evict
-    churn to answer a question already answerable from data on hand.
-
-    Rules (see PLAN-reconcile-deduce-fit.md):
-      * ``fit is False`` (can't fit VRAM+RAM combined) -> DROP. Probing it only
-        confirms what we already know. Logged once per cooldown window, not
-        every beat.
-      * ``fit is None`` (can't be sized) -> KEEP unconditionally. This is the
-        genuinely-ambiguous case where a real load is the only honest answer —
-        the live-probe fallback stays in play for it.
-      * otherwise -> co-residency cap: greedy-pack GPU-resident-first,
-        smallest-``need``-first, until the running total would exceed the
-        worker's current ``vram_free``. The rest stays assigned-but-cold; they
-        still lazy-load correctly the moment real demand hits them.
-
-    Pure function of (worker, cold) plus the module-level cooldown dict — no
-    I/O, no network, safe to unit test directly.
-    """
-    wid = (worker or {}).get("id") or ""
-    vram_free = (worker or {}).get("vram_free")
-    unsizable = []
-    fittable = []   # (need, gpu_resident, model_key)
-    now = _time.monotonic()
-    for mk in (cold or []):
-        verdict = _worker_fit(mk, worker)
-        if verdict.get("fit") is False:
-            key = (wid, mk)
-            # first skip for this pair always logs: monotonic() counts from boot,
-            # so a "0.0 default" would swallow the note for a whole cooldown on
-            # a freshly started box (seen on CI runners)
-            last = _fit_skip_last.get(key)
-            if last is None or now - last >= _WARM_COOLDOWN_S:
-                _fit_skip_last[key] = now
-                logger.info(
-                    "reconcile: skipping load-probe for %s on worker %s "
-                    "(assigned but won't fit) — %s",
-                    mk, wid[:8] if wid else wid, verdict.get("reason") or "won't fit")
-            continue
-        if verdict.get("fit") is None:
-            unsizable.append(mk)
-            continue
-        fittable.append((verdict.get("need") or 0, bool(verdict.get("gpu_resident")), mk))
-
-    if vram_free is None:
-        # No VRAM number to cap against (e.g. a worker that hasn't reported a
-        # GPU yet) — the fit-based drop above already did the useful work;
-        # don't invent a cap out of missing data.
-        return unsizable + [mk for _, _, mk in fittable]
-
-    fittable.sort(key=lambda t: (not t[1], t[0]))   # gpu_resident first, then smallest need
-    capped = []
-    used = 0
-    for need, _resident, mk in fittable:
-        if used + need <= vram_free:
-            capped.append(mk)
-            used += need
-        # else: leave assigned-but-cold — the existing lazy-load-on-demand path
-        # already handles first real request correctly.
-    return unsizable + capped
-
-
-# ── curated keep-warm set: 🔒static ONLY (the star does NOT reconcile-warm) ───
-# Operator rulings 2026-07-23 (post-incident — SUPERSEDES both the 2026-07-15
-# "immutable task-default floor" below AND the 0.1.201 star-in-warm-set design):
-#   "the star is only supposed to indicate load that model on boot."
-#   "it shouldn't effect anything but priority for ambiguous model calls."
-#
-# So central's reconcile keep-warm set is exactly ONE tier — the only one that
-# PROMISES central-kept presence:
-#   * 🔒 static — warm AND eviction-protected (unchanged). This is THE keep-warm
-#     tier.
-# The ⭐ star (boot_prewarm) is deliberately NOT here. The star's warm happens
-# exactly ONCE, on the WORKER'S boot (agent._adopt_boot_prewarm, boot-once); it
-# is NOT re-probed warm by this reconcile loop. The 0.1.201 build put the star in
-# this set (RULING-2 "reconcile-kept-warm"); that re-warm fought active inference
-# on ae today (star re-warm of coder-next → slot child stalled → zombie seat →
-# agent freeze). Reverted: a starred model evicted under pressure STAYS cold
-# until the worker restarts. Co-fit-gated re-entry is future work (Slice D).
-#
-# Everything else — the fleet TASK_DEFAULTS (sd-turbo et al.), 📌 pins, the ⭐
-# star, and the whole ``models`` inventory — is NOT kept warm here and lazy-loads
-# on first real request. "Nothing warms until starred (boot-load) or static":
-# the task-defaults floor stays DEAD (do not resurrect); a task default is a
-# ROUTING fallback (model_resolver.TASK_DEFAULTS still resolves "task named alone
-# → default model"), never a warm designation. Pure central-side — no worker
-# release.
-#
-# NOTE: ``_immutable_warm_defaults`` / ``_IMMUTABLE_WARM_DEFAULTS`` below are now
-# UNUSED by the warm set (dropped from _reconcile_warm_set per RULING 1). Left in
-# place — harmless and cheap — rather than churn; TASK_DEFAULTS itself is
-# untouched and still drives routing (model_resolver.py) and the /prompt defaults
-# feed (prompt_routes.py). If a future cleanup wants them gone, this pair (and
-# only this pair) is safe to delete.
-_IMMUTABLE_WARM_DEFAULTS: frozenset | None = None
-
-
-def _immutable_warm_defaults() -> frozenset:
-    """Fleet default model_keys (one per task), sourced from ``TASK_DEFAULTS``.
-
-    ⚠ NO LONGER part of the keep-warm set (operator RULING 1, 2026-07-23: only
-    the ⭐ star and 🔒static warm). Retained as a harmless helper; TASK_DEFAULTS
-    stays the ROUTING fallback table (model_resolver.py). Guarded so a refactor
-    of the constant's home can never raise on any caller.
-    """
-    global _IMMUTABLE_WARM_DEFAULTS
-    if _IMMUTABLE_WARM_DEFAULTS is None:
-        try:
-            from hugpy_engine.categories import TASK_DEFAULTS as _TASK_DEFAULTS
-            _IMMUTABLE_WARM_DEFAULTS = frozenset(
-                str(v) for v in _TASK_DEFAULTS.values() if v)
-        except Exception:  # noqa: BLE001 — never fail over a default lookup
-            _IMMUTABLE_WARM_DEFAULTS = frozenset()
-    return _IMMUTABLE_WARM_DEFAULTS
-
-
-def _reconcile_warm_set(worker) -> list:
-    """The curated set of a worker's on-disk models to keep warm on reconcile.
-
-    = 🔒static ∩ on-disk − blocked (operator RULING 2026-07-23, post-incident).
-    NOTHING warms here but 🔒static: the ⭐ star, the fleet TASK_DEFAULTS, 📌 pins,
-    and the whole ``models`` inventory are all excluded and lazy-load on demand
-    (the star additionally boot-loads ONCE on the worker side). The result still
-    passes through ``_warmable_subset`` (fit-cap) before any real load, so this
-    only ever *narrows* what reconcile touches.
-
-      * 🔒 static — the one eviction-protected, central-kept-warm local-presence
-        tier. THE keep-warm tier.
-
-    ⚠ The ⭐ star (boot_prewarm) is deliberately NOT reconcile-warmed. It warms
-    exactly once, on the worker's boot (agent._adopt_boot_prewarm, boot-once) —
-    re-probing it warm here is what fought active inference on ae 2026-07-23
-    (0.1.201's RULING-2 re-warm → coder-next slot child stalled → zombie seat →
-    freeze). A starred model evicted under pressure STAYS cold until the worker
-    restarts; co-fit-gated re-entry is future work (Slice D).
-
-    ⚠ "on disk" = ``models_local`` (the worker's heartbeat disk-truth, UTIL-08),
-    NEVER ``worker["models"]`` — that is the operator DESIGNATION set. Reading
-    designations here made the ∩ a no-op, so every unloaded designation probed
-    "cold" and the worker's /probe downloads absent models — central re-creating
-    the eager-pull storm through the probe side door (2026-07-17: ae ground
-    toward its full 1.2TB at ~5GB/min until this was fixed). A worker that
-    reports no models_local warms NOTHING — a missed warm costs one first-call
-    load; the designation fallback costs a terabyte.
-    """
-    present = set(worker.get("models_local") or [])
-    if not present:
-        return []
-    cfg = worker.get("config") or {}
-    # 🔒 STATIC — warm AND eviction-protected. The ONLY tier central keeps warm
-    # (operator RULING 2026-07-23). The ⭐ star is NOT here (it boot-loads once,
-    # worker-side, and is never reconcile-re-warmed); 📌 pins are routing
-    # persistence only; the fleet TASK_DEFAULTS are a routing fallback
-    # (model_resolver.TASK_DEFAULTS) — none of them warm.
-    static = {k for k, v in (cfg.get("residency") or {}).items() if v == "static"}
-    curated = static & present
-    # Operator BLOCK outranks warm: a blocked model is never kept warm, even if
-    # it is static. Intersect the curated set with not-blocked.
-    curated -= _blocked_keys()
-    curated -= _archived_keys()      # archive mark outranks static too
-    return sorted(curated)
-
-
-# ── 📌 PIN RESTORE + automated-designation prune (2026-09-23) ────────────────
-# Operator: "it should allocate only those that are pinned if the hugpy api
-# restarts. for the sake of model testing, where they all load at one point."
-# The pin is central's per-(worker, model) record (workers.effective_pin). What
-# gets (re)loaded after a WORKER boot (a /register stamps agent_boot_at) or a
-# CENTRAL restart (this process's latch starts empty) is exactly the pinned set
-# — never the automated designations, never the boot ⭐ (a separate, untouched
-# media lever). Bounded so it can never become the per-beat re-warm the
-# 2026-07-23 incident reverted:
-#   * one attempt per (worker, agent_boot_at, model) per central process — a
-#     pinned model evicted later STAYS cold until the next boot/restart;
-#   * only inside HUGPY_PIN_RESTORE_WINDOW_S (default 900s) of the later of
-#     central start / agent boot;
-#   * only files already on the worker's disk (models_local — no pulls), and
-#     only what _warmable_subset says fits in free VRAM together (no eviction);
-#   * through _kick_warm, so block / archive / admission-hold / polite gates
-#     and the per-worker sequential probe all apply unchanged.
-_CENTRAL_STARTED_AT = _time.time()
-_PIN_RESTORE_WINDOW_S = float(os.environ.get("HUGPY_PIN_RESTORE_WINDOW_S", "900"))
-_pin_restore_done: dict = {}     # (worker_id, agent_boot_at) -> set(model_key)
-_pin_restore_lock = _threading.Lock()
-
-
-def _pin_restore_warm(worker) -> list:
-    """Kick the one-shot pin reload for this worker; returns what was scheduled.
-    Never raises (a missed restore costs one first-call load)."""
-    try:
-        from hugpy_fleet.central.workers import pinned_keys
-        wid = (worker or {}).get("id")
-        if not wid:
-            return []
-        epoch = worker.get("agent_boot_at") or 0.0
-        start = max(_CENTRAL_STARTED_AT, float(epoch or 0.0))
-        key = (wid, epoch)
-        with _pin_restore_lock:
-            done = _pin_restore_done.setdefault(key, set())
-        pins = pinned_keys(worker)
-        if not pins:
-            return []
-        present = set(worker.get("models_local") or [])
-        busy = (set(worker.get("loaded_models") or [])
-                | set(worker.get("loading") or [])
-                | set(worker.get("provisioning") or []))
-        pending = [mk for mk in pins
-                   if mk not in done and mk in present and mk not in busy]
-        if not pending:
-            return []
-        if _time.time() - start > _PIN_RESTORE_WINDOW_S:
-            with _pin_restore_lock:
-                done.update(pending)       # window closed — give up quietly
-            return []
-        warm_now = _warmable_subset(worker, pending)
-        scheduled = _kick_warm(worker, warm_now, "pin-restore") if warm_now else []
-        with _pin_restore_lock:
-            # Latch what was scheduled AND what does not fit now (boot-once: a
-            # pin that does not fit is not retried every beat); anything merely
-            # deferred by _kick_warm's busy/cooldown gate stays pending.
-            done.update(scheduled)
-            done.update(mk for mk in pending if mk not in warm_now)
-        if scheduled:
-            logger.info("pin restore on %s: reloading pinned %s",
-                        worker.get("name") or wid, scheduled)
-        return scheduled
-    except Exception:  # noqa: BLE001 — never fail a heartbeat
-        logger.debug("pin restore failed", exc_info=True)
-        return []
+# Pin restore (reload pinned models on worker boot) was REMOVED 2026-09-25 —
+# operator: no default loads on startup; models load when called.
+_pin_restore_lock = _threading.Lock()   # (still guards the designation-prune throttle)
 
 
 _PRUNE_INTERVAL_S = float(os.environ.get("HUGPY_DESIGNATION_PRUNE_INTERVAL_S", "3600"))
@@ -670,6 +294,14 @@ class RegisterRequest(BaseModel):
     # a worker that says False for the request's task (workers_for_model). None on
     # older agents -> the field is absent on the row (assumed capable, no regression).
     task_capabilities: dict | None = None
+    # STUDIO (video) placement signal (2026-09-24): {"render": bool, "models":[id...],
+    # "weights_root": str|None} — what this box can do for a studio render + which real
+    # studio models it holds on disk, so central places a video render LIKE AN LLM
+    # (registry pick) instead of depending on the HUGPY_STUDIO_WORKER env var. Persisted
+    # verbatim on the worker record (WorkerStore.register stores it); studio_placement
+    # .resolve_worker reads it off the record. Additive/optional (None on a no-GPU/no-
+    # spine box; extra='ignore' drops it for an older central).
+    studio: dict | None = None
 
 
 # Hostnames/IPs a worker might self-report that are NOT reachable from central.
@@ -816,6 +448,14 @@ class HeartbeatRequest(BaseModel):
     # every beat so an /ops/pip that adds a missing dep flips the task within one
     # heartbeat. None on older agents -> field absent (assumed capable).
     task_capabilities: dict | None = None
+    # STUDIO (video) placement signal (2026-09-24) — see RegisterRequest.studio. What
+    # this box can do for a studio render + which real studio models it holds on disk, so
+    # central places a video render LIKE AN LLM (registry pick) instead of depending on
+    # HUGPY_STUDIO_WORKER. Persisted verbatim on the worker record (WorkerStore.heartbeat
+    # stores it); studio_placement.resolve_worker reads it. Additive/optional; None on a
+    # no-GPU/no-spine box. Refreshed every beat so a newly-downloaded model appears within
+    # one heartbeat.
+    studio: dict | None = None
     # VRAM eviction churn (slice 10): {count, last:{victim,subject,host_mode,
     # vram_freed,at}, last_at} — the GPU evict-to-fit churn the operator watches,
     # surfaced beside the disk reaps. None on a pre-slice-10 worker.
@@ -902,15 +542,15 @@ def _assign_source(body) -> str:
         return "operator"
 
 
-@worker_bp.route("/llm/workers", methods=["GET"])
-def workers_list():
-    """Worker registry (F3.2): running module version surfaced prominently —
-    control-plane/worker version skew is silent behavior drift, so every row
-    carries version_ok against central's required_pkg_version."""
+def workers_payload():
+    """The /llm/workers response BODY (the enriched roster list), built without a
+    request/response context so an in-process caller — e.g. the benchmark thread,
+    which must not make a self-HTTP call that can block on central's own gunicorn
+    workers during warm-up — reads the identical data the route serves."""
     required = required_pkg_version()
     rows = list_workers()
-    # Per-worker KEEP-WARM STAR: the model this worker keeps warm (reconcile-kept
-    # every beat; evictable but returns next cycle; NOT static). Surfaced as
+    # Per-worker ⭐ STAR: this worker's routing-tie-break designation (loads
+    # nothing; NOT keep-warm, NOT static). Surfaced as
     # ``boot_prewarm: <model_key>|null`` so the console can render the star. Read
     # once for the whole list (never 5xxes the roster over it).
     try:
@@ -962,7 +602,15 @@ def workers_list():
         enrich_workers_pid_registry(rows)
     except Exception:  # noqa: BLE001 — attribution enrichment never 5xxes /llm/workers
         logger.debug("pid_registry relay attribution hook failed", exc_info=True)
-    return jsonify(rows)
+    return rows
+
+
+@worker_bp.route("/llm/workers", methods=["GET"])
+def workers_list():
+    """Worker registry (F3.2): running module version surfaced prominently —
+    control-plane/worker version skew is silent behavior drift, so every row
+    carries version_ok against central's required_pkg_version."""
+    return jsonify(workers_payload())
 
 
 @worker_bp.route("/llm/vram", methods=["GET"])
@@ -1045,6 +693,26 @@ def workers_constraints():
 def _reply_constraints_url() -> str:
     """The constraints URL for the central answering THIS request (proxy-aware)."""
     return _constraints_url_for(_central_base_url())
+
+
+_STUDIO_WEIGHTS_ROOT_CACHE: dict = {}
+
+
+def _central_studio_weights_root() -> "str | None":
+    """Central's SHARED studio weights root (``job.studio_weights_root``) — the path the
+    render manifest is built against — advertised to workers so their studio-presence probe
+    checks the SAME root the render loads from. Cached once (central's env is static at
+    runtime; ``env_value`` may read a .env file, which must not ride every heartbeat).
+    Fully guarded: a missing studio package / any error simply omits the directive."""
+    if "v" in _STUDIO_WEIGHTS_ROOT_CACHE:
+        return _STUDIO_WEIGHTS_ROOT_CACHE["v"]
+    try:
+        from hugpy_video.intel.studio.job import studio_weights_root
+        val = studio_weights_root() or None
+    except Exception:  # noqa: BLE001 — never break register/heartbeat over this
+        val = None
+    _STUDIO_WEIGHTS_ROOT_CACHE["v"] = val
+    return val
 
 
 def _reply_pkg_index_url(required: "str | None") -> "str | None":
@@ -1244,6 +912,7 @@ def workers_register():
         slot_capable=body.slot_capable,
         slot_incapable_reason=body.slot_incapable_reason,
         task_capabilities=body.task_capabilities,
+        studio=body.studio,
     )
     if worker.get("admission") == "blocked":
         # Operator evicted this worker; 403 tells the agent to stop, not respawn.
@@ -1255,9 +924,17 @@ def workers_register():
     _idx = _reply_pkg_index_url(worker["required_pkg_version"])
     if _idx:
         worker["pkg_index_url"] = _idx
-    # Per-worker KEEP-WARM STAR (operator RULINGS 2026-07-23): carry this
-    # worker's star from FIRST contact so the agent can warm it immediately
-    # (thereafter the heartbeat keeps it warm every beat). Additive/omit-when-
+    # STUDIO placement (2026-09-24): tell the worker central's SHARED studio weights root —
+    # the SAME path the render manifest is built against — so the agent's studio-presence
+    # probe checks model_index.json readability under the root the render will actually load
+    # from (never its own unset env). A worker that can't read that path advertises no
+    # studio models (honest per-worker presence). Reply-only (not persisted).
+    _swr = _central_studio_weights_root()
+    if _swr:
+        worker["studio_weights_root"] = _swr
+    # Per-worker ⭐ STAR (operator RULINGS 2026-07-23): carry this worker's star
+    # from FIRST contact so the console can render it. The star is a routing
+    # designation only — the agent loads nothing from it. Additive/omit-when-
     # unset (a released worker without the feature just ignores the extra key),
     # and this is the register reply (never persisted onto the stored record via
     # a mutation). Fully guarded — registration must never 5xx over the star store.
@@ -1346,16 +1023,17 @@ def toks_report():
 
 @worker_bp.route("/llm/workers/boot-prewarm", methods=["GET"])
 def worker_boot_prewarm_list():
-    """The full per-worker KEEP-WARM STAR map: {worker_id: model_key}.
+    """The full per-worker ⭐ STAR map: {worker_id: model_key}.
 
-    The ⭐ star = the operator's keep-warm designation (operator RULINGS
-    2026-07-23) — reconcile keeps it warm every beat, so a star evicted under
-    pressure returns next cycle. It is a NORMALLY EVICTABLE resident, NOT
-    eviction-protected (that's 🔒static), and NOT the media_default UI
-    preference. "nothing warms until starred or static." Read-only; unauthed by
+    The ⭐ star = a per-worker ROUTING designation (operator RULINGS 2026-07-23).
+    It LOADS NOTHING — not keep-warm, not boot-load, no reconcile effect; its only
+    effect is a routing tie-break for ambiguous no-warm calls (central prefers the
+    worker whose star is the requested model). It is NOT eviction-protected
+    (that's 🔒static) and NOT the media_default UI preference. A starred model
+    becomes resident only when a request for it arrives. Read-only; unauthed by
     design (same tier as the /llm/workers roster it mirrors). (The path/field
     keep the ``boot-prewarm``/``boot_prewarm`` identifier — rename churn isn't
-    worth it — but the meaning is keep-warm, not boot-once.)"""
+    worth it — but the meaning is a routing designation, not any warm.)"""
     return jsonify(worker_boot_prewarm_state())
 
 
@@ -1414,8 +1092,7 @@ def evict_policy_route():
 
 @worker_bp.route("/llm/workers/<worker_id>/boot-prewarm", methods=["POST"])
 def set_worker_boot_prewarm_route(worker_id):
-    """Set (or clear) this worker's ⭐ KEEP-WARM STAR — the ONE model this worker
-    keeps warm.
+    """Set (or clear) this worker's ⭐ STAR — a per-worker routing designation.
 
     Body: {"model_key": "<key>", "enabled": bool}. enabled=True (default) makes
     ``model_key`` this worker's star, REPLACING any previous one. enabled=False
@@ -1423,15 +1100,14 @@ def set_worker_boot_prewarm_route(worker_id):
     omitted/null — an unconditional clear). Single value per worker, persisted
     server-side (worker_boot_prewarm.json) so every client agrees.
 
-    Operator-gated (operator_auth._SENSITIVE). The star = the operator's
-    keep-warm designation (operator RULINGS 2026-07-23): reconcile keeps it warm
-    EVERY beat, so a star evicted under pressure returns next cycle. It is NOT
-    the media_default UI preference and NOT 🔒static — it does NOT mark the model
-    static, does NOT protect it from eviction (evictable under pressure, but it
-    returns next reconcile beat), and does NOT require the model to be
-    present/allocated. "nothing warms until starred or static." For "start here
-    AND stay here" with eviction protection, promote the model to 🔒static
-    instead — that tier is what protects residency."""
+    Operator-gated (operator_auth._SENSITIVE). The star LOADS NOTHING (operator
+    RULINGS 2026-07-23): it is not keep-warm, does not pre-load, boot-load or
+    reconcile-reload, does not mark the model static, does not protect it from
+    eviction, and does not require the model to be present/allocated. Its only
+    effect is a routing tie-break for ambiguous no-warm calls (central prefers the
+    worker whose star is the requested model). A starred model becomes resident
+    only when a request for it arrives. For eviction-protected residency, promote
+    the model to 🔒static instead."""
     body = request.get_json(silent=True) or {}
     model_key = body.get("model_key", body.get("model"))
     enabled = body.get("enabled", body.get("starred", True))
@@ -1452,6 +1128,48 @@ def worker_wildcard_list():
     Read-only; unauthed by design (same tier as the /llm/workers roster and the
     boot-prewarm map it mirrors)."""
     return jsonify(worker_wildcard_state())
+
+
+@worker_bp.route("/llm/fleet/distribution", methods=["GET"])
+def fleet_distribution_get():
+    """The FLEET DISTRIBUTION MODE (operator ruling 2026-09-24): the catch-all
+    that balances hugpy's default micro-placement friction.
+
+    Returns ``{mode, source, env_override, stored}`` (see
+    ``models_config.fleet_distribution_status``):
+
+      * ``mode``   — the EFFECTIVE mode: ``"feasible"`` (the default — any online
+        worker where the model feasibly fits is a routing candidate; designations
+        become an ordered preference with a feasible-set fallback) or
+        ``"designated"`` (the legacy sealed scope — an unmet preference refuses).
+      * ``source`` — ``"env"`` | ``"store"`` | ``"default"`` (which layer supplied
+        the effective mode).
+      * ``env_override`` — True when HUGPY_DISTRIBUTION pins the effective mode, so
+        the console can say a store write won't change it.
+      * ``stored``  — the persisted value (or null), i.e. what a POST would toggle.
+
+    Read-only; unauthed by design (same tier as the /llm/workers roster and the
+    per-worker wildcard map it sits beside)."""
+    return jsonify(fleet_distribution_status())
+
+
+@worker_bp.route("/llm/fleet/distribution", methods=["POST"])
+def fleet_distribution_set():
+    """Set the fleet distribution mode. Body: ``{"mode": "feasible"|"designated"}``.
+
+    Operator-gated (operator_auth._SENSITIVE — same fleet-registry-write tier as
+    the per-worker wildcard POST). A bad/absent mode is a clean 400. The value is
+    stored either way; when HUGPY_DISTRIBUTION is set the env still WINS, so the
+    reply reports ``env_override: true`` and the unchanged effective ``mode`` (the
+    store write is preserved but does not take effect until the env is cleared)."""
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode", body.get("distribution"))
+    try:
+        set_fleet_distribution(mode)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": {
+            "code": "BadValue", "message": str(exc)}}), 400
+    return jsonify({"ok": True, **fleet_distribution_status()})
 
 
 @worker_bp.route("/llm/workers/<worker_id>/moe", methods=["POST"])
@@ -1669,6 +1387,7 @@ def workers_heartbeat(worker_id):
         slot_capable=body.slot_capable,
         slot_incapable_reason=body.slot_incapable_reason,
         task_capabilities=body.task_capabilities,
+        studio=body.studio,
         vram_evictions=body.vram_evictions,
         vram_holders=body.vram_holders,
         aggregate=body.aggregate,
@@ -1683,29 +1402,12 @@ def workers_heartbeat(worker_id):
     if worker.get("admission") == "blocked":
         # Persistent eviction: 403 stops the agent instead of letting it limp on.
         abort(403, description="Worker is blocked by the operator.")
-    # Designated = ready: re-converge a CURATED keep-warm set on every beat —
-    # NOT the box's whole ``models`` inventory. The curated set is the immutable
-    # task-defaults present on disk plus the operator's pins (_reconcile_warm_set);
-    # everything else on disk lazy-loads on first real request. A cold member of
-    # that set (worker rebooted, agent restarted, weights evicted) gets a
-    # background warm — rate-limited by _WARM_COOLDOWN_S so an un-fittable model
-    # doesn't probe-spin. It then passes _warmable_subset to deduce fit from
-    # numbers already on hand before paying a live load-probe: never probe a
-    # model that can't fit, and never warm more than can co-reside at once.
-    try:
-        loaded = set(worker.get("loaded_models") or [])
-        cold = [mk for mk in _reconcile_warm_set(worker) if mk not in loaded]
-        if cold:
-            warm_now = _warmable_subset(worker, cold)
-            if warm_now:
-                _kick_warm(worker, warm_now, "reconcile")
-    except Exception:
-        pass  # readiness convergence must never fail a heartbeat
-    # 📌 PIN RESTORE (2026-09-23): once per (agent boot × central process),
-    # reload this worker's PINNED models that are on its disk but not resident.
-    # Separate from the per-beat 🔒static warm above — pins are never re-warmed
-    # every beat (the 2026-07-23 re-warm incident); see _pin_restore_warm.
-    _pin_restore_warm(worker)
+    # No per-beat warm: a heartbeat never loads a model (2026-09-25 — models
+    # load when called; 🔒static no longer means "kept loaded").
+    # 📌 PIN RESTORE REMOVED (operator, 2026-09-25): "any default loads on
+    # startup need to stop". A worker restart/self-update loads NOTHING; models
+    # load when something calls them. (It reloaded every pin — coder-next,
+    # DeepSeek-9B, VL-7B, Surogate — on each restart.)
     # Automated-designation PRUNE — event-driven off the beat, throttled.
     _maybe_prune_designations(worker_id)
     # AUTO-REAP (slice 8, Part B): event-driven — this beat is the trigger, no
@@ -1729,6 +1431,12 @@ def workers_heartbeat(worker_id):
     _idx = _reply_pkg_index_url(worker["required_pkg_version"])
     if _idx:
         worker["pkg_index_url"] = _idx
+    # STUDIO placement (2026-09-24): central's SHARED studio weights root, every beat, so a
+    # worker converges its studio-presence probe onto the root the render loads from. See
+    # the register reply + _central_studio_weights_root.
+    _swr = _central_studio_weights_root()
+    if _swr:
+        worker["studio_weights_root"] = _swr
     # t28 load-and-learn: persist any calibration observations the worker shipped
     # this beat, then publish the gate-passing per-model corrections back in the
     # reply (a plain dict the worker reads with .get() — additive, an older
@@ -1774,11 +1482,11 @@ def workers_heartbeat(worker_id):
     # omit-when-empty — same wire idiom as calibration/reservations: a plain
     # list the worker reads with .get(), an older worker just ignores it). The
     # block primitive (aa4aea3) already covers every CENTRAL path — routing,
-    # assign-409, warm sweeps, provisioning kick, the agent-brain ladder — but
-    # the worker's OWN background reconciler loops (slot fill, etc.) have no
-    # other way to learn a model was blocked out from under an assignment that
-    # is still on record (block deliberately does not auto-unassign). This
-    # closes that gap. Fully guarded — never fails a beat.
+    # assign-409, provisioning kick, the agent-brain ladder — but the worker's
+    # OWN background provisioning (download) re-kick has no other way to learn a
+    # model was blocked out from under an assignment that is still on record
+    # (block deliberately does not auto-unassign). This closes that gap. Fully
+    # guarded — never fails a beat.
     try:
         blocked = sorted(_blocked_keys())
         if blocked:
@@ -1811,15 +1519,14 @@ def workers_heartbeat(worker_id):
             reply_extra["evict_least_reaping"] = _evp.least_reaping()
     except Exception:  # noqa: BLE001 — policy propagation is best-effort; never 5xx a beat
         logger.debug("evict-policy heartbeat hook failed", exc_info=True)
-    # Per-worker KEEP-WARM STAR ("star", operator RULINGS 2026-07-23): publish
-    # THIS worker's star on the reply (additive, OMIT-WHEN-UNSET — same wire idiom
+    # Per-worker ⭐ STAR ("star", operator RULINGS 2026-07-23): publish THIS
+    # worker's star on the reply (additive, OMIT-WHEN-UNSET — same wire idiom
     # as calibration/reservations/blocked_models: a plain scalar the worker reads
     # with .get(), an older released worker just ignores it, so the extra=forbid
-    # relay schema is never broken). The worker KEEPS IT WARM: on every beat it
-    # loads the star if not currently resident (a NORMALLY EVICTABLE on-demand
-    # resident, NOT static, NOT the media_default UI preference), so an eviction
-    # under pressure is repaired next beat. Only sent when a star is set for this
-    # worker. Fully guarded — never fails a beat.
+    # relay schema is never broken). The star is a routing designation only — the
+    # worker LOADS NOTHING from it (not keep-warm, not static, not the
+    # media_default UI preference). Only sent when a star is set for this worker.
+    # Fully guarded — never fails a beat.
     try:
         star = worker_boot_prewarm_state().get(worker_id)
         if star:
@@ -1941,6 +1648,32 @@ def enroll_tokens_revoke(token_id):
     if not revoke_enrollment_token(token_id):
         abort(404, description=f"no enrollment token {token_id!r} in the token store (revoke_enrollment_token returned False)")
     return jsonify({"revoked": True, "id": token_id})
+
+
+# -- one-step WireGuard join (operator-only) -------------------------------- #
+@worker_bp.route("/llm/fleet/wg-join", methods=["POST"])
+def fleet_wg_join():
+    """Allocate the next free 10.66.0.x, register a wg0 peer (via the privileged
+    helper), mint a single-use enrollment token, and return the JOIN BUNDLE for a
+    remote worker box (client WG conf + central/advertise URLs + token + a
+    self-contained join script).
+
+    The private key and token plaintext are in THIS response ONLY — they are
+    never logged and never stored on the hub. Operator-gated (see
+    operator_auth._SENSITIVE: POST /llm/fleet/wg-join)."""
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name") or "").strip()
+    if not name:
+        abort(400, description="a worker 'name' is required")
+    from hugpy_fleet.central.wg_join import build_bundle, JoinError, redacted_bundle
+    try:
+        bundle = build_bundle(name, label=str(body.get("label") or ""))
+    except JoinError as exc:
+        # Honest failure: the real helper/allocator error text, no canned message.
+        abort(502, description=str(exc))
+    # Log only the redacted view (no private key, no token, no rendered secrets).
+    logger.info("wg-join issued: %s", redacted_bundle(bundle))
+    return jsonify(bundle)
 
 
 def _central_missing_reason(model_key: str) -> str | None:
@@ -2253,12 +1986,9 @@ def workers_assign(worker_id):
     # between what was asked and what came back, instead of hiding behind a 200.
     worker["allocation"] = _assign_allocation_result(worker, body.model_key,
                                                      body.spill)
-    # Lazy doctrine (operator 2026-07-16/17): assignment is ATTRIBUTION, never
-    # a transfer order — and the worker's /probe DOWNLOADS an absent model, so
-    # an unconditional assign-warm was a hidden pull. Warm only when the files
-    # are already on the box (seat-now); an absent model waits for first call.
-    if body.model_key in (worker.get("models_local") or []):
-        _kick_warm(worker, [body.model_key], "assign")
+    # Assignment is ALLOCATION (routing), never a load (operator 2026-09-25:
+    # "the phantom loading of models that were never called is the issue").
+    # Nothing is warmed here; the model loads when it is called.
     return jsonify(worker)
 
 
@@ -2755,9 +2485,9 @@ def _relay_pin_all(worker_id, pin: bool):
     record (designation_meta.pinned), so this no longer relays an /ops/config
     re-exec to the agent — it writes the registry, one record per model, and the
     agent never restarts. ``restarting`` stays in the reply (always False) for
-    old console builds. Pinned models are what central reloads onto the worker
-    after a worker boot or a central restart (_pin_restore_warm); nothing is
-    loaded or evicted by pinning itself.
+    old console builds. A pin is ALLOCATION only (see worker/agent.py
+    ``_pinned``): nothing is ever loaded or evicted because of a pin — not by
+    pinning, not after a worker boot, not after a central restart.
 
     Returns (json, 200): per-model ``results`` ({model_key: "ok"|error}),
     summary ``counts`` and ``restarting``: False."""
@@ -2800,11 +2530,12 @@ def _operator_name() -> str:
 def workers_pin(worker_id):
     """📌 Operator PIN for one (worker, model): body ``{"model_key": str,
     "pinned": bool}``. Persisted in central's designation record
-    (designation_meta: pinned, pinned_by, pinned_at). A pinned model is what
-    central reloads onto this worker after a worker boot or a central restart
-    (from files already on the worker's disk, fit-capped, never by eviction).
-    Pinning an undesignated model designates it (source "operator"); unpinning
-    keeps the designation. No agent restart, no load, no eviction here."""
+    (designation_meta: pinned, pinned_by, pinned_at). A pin ALLOCATES the
+    model to this worker durably (survives restarts and prunes; unassign is
+    refused while pinned). It never loads anything into VRAM/RAM — the model
+    loads when it is called (see worker/agent.py ``_pinned``). Pinning an
+    undesignated model designates it (source "operator"); unpinning keeps the
+    designation. No agent restart, no load, no eviction here."""
     from hugpy_fleet.central.workers import set_pin
     raw = request.get_json(silent=True) or {}
     mk = str(raw.get("model_key") or "").strip()
@@ -3389,17 +3120,10 @@ def _apply_alloc_map(worker_id, model_keys, spill):
                 okN += 1
         except Exception as exc:  # noqa: BLE001 — one bad key must not abort the rest
             results[mk] = f"{type(exc).__name__}: {exc}"
-    # Re-seat the models whose files are already on the box so the new contract
-    # takes effect without waiting for the next organic call — same seat-now
-    # policy the single /assign uses (warm only local files; absent ones wait).
-    try:
-        w2 = get_worker(worker_id) or worker
-        local = set(w2.get("models_local") or [])
-        seat = [mk for mk in keys if mk in local and results.get(mk) == "ok"]
-        if seat:
-            _kick_warm(w2, seat, "alloc_all")
-    except Exception:  # noqa: BLE001 — the warm is best-effort, never fails the write
-        pass
+    # No re-seat: an allocation change never loads a model (operator
+    # 2026-09-25 — phantom loads of never-called models). A resident model picks
+    # up its new contract on its next call (the worker re-seats on a changed
+    # load contract); a cold one stays cold until called.
     errN = len(keys) - okN - skipN
     # ok=True when nothing HARD-errored: an engine skip is an expected, correct
     # outcome (not a failure), so an all-transformers gguf-only apply is ok:true
@@ -3441,7 +3165,8 @@ def _apply_alloc_map_multi(worker_id, model_keys, spills_by_key):
 
     Same registry write, same engine gate (computed per key off that key's OWN
     spill, since different members can carry different explicit-budget keys),
-    same warm-reseat, same response shape as _apply_alloc_map."""
+    same registry-only application (no warm, no re-seat — the spill takes effect
+    on the model's next load), same response shape as _apply_alloc_map."""
     from hugpy_server.app.routes.comms_routes import audit
 
     worker = get_worker(worker_id)
@@ -3499,16 +3224,10 @@ def _apply_alloc_map_multi(worker_id, model_keys, spills_by_key):
                 okN += 1
         except Exception as exc:  # noqa: BLE001 — one bad key must not abort the rest
             results[mk] = f"{type(exc).__name__}: {exc}"
-    # Re-seat the models whose files are already on the box, same seat-now
-    # policy _apply_alloc_map uses.
-    try:
-        w2 = get_worker(worker_id) or worker
-        local = set(w2.get("models_local") or [])
-        seat = [mk for mk in keys if mk in local and results.get(mk) == "ok"]
-        if seat:
-            _kick_warm(w2, seat, "alloc_all")
-    except Exception:  # noqa: BLE001 — the warm is best-effort, never fails the write
-        pass
+    # No re-seat: an allocation change never loads a model (operator
+    # 2026-09-25 — phantom loads of never-called models). A resident model picks
+    # up its new contract on its next call (the worker re-seats on a changed
+    # load contract); a cold one stays cold until called.
     errN = len(keys) - okN - skipN
     out = {"ok": errN == 0, "alloc": "per-model", "results": results,
            "counts": {"ok": okN, "error": errN, "skipped": skipN, "total": len(keys)},
@@ -4129,6 +3848,26 @@ def _model_gguf_bytes(model_key):
         return None
 
 
+def _model_manifest_bytes(model_key):
+    """The model's single-format footprint from central's INSTALL MANIFEST
+    (``_model_size_bytes`` -> _model_physical), or None if unknowable.
+
+    The fit preflight's GGUF path (``_model_gguf_bytes``) resolves nothing for a
+    diffusers/transformers/comfy model — it looks for a .gguf file — so before
+    this fallback ``_worker_fit`` returned ``fit=None`` for every such model and
+    central could never prove a non-fit. That is exactly how the sd-turbo studio
+    job (operator incident 2026-09-25) landed on an OOM box: routing had no
+    capacity verdict to demote it on. This reads the SAME authoritative size the
+    blank-default derivation uses (the manifest captured at download — never a Hub
+    re-verify), so the routing demotion, the polite gate and the derived default
+    all price a non-GGUF model off one number."""
+    try:
+        from hugpy_fleet.central.workers import _model_size_bytes
+        return _model_size_bytes(model_key)
+    except Exception:  # noqa: BLE001 — unknown size is a valid answer here
+        return None
+
+
 def _model_moe_fit(model_key):
     """``(gpu_bytes, expert_bytes)`` for a detected-MoE GGUF under the expert
     split — GPU-side = non_expert + mmproj (central's cached
@@ -4146,6 +3885,26 @@ def _model_moe_fit(model_key):
         return None
 
 
+def _engine_gpu_free(worker, *, splittable, pooled):
+    """The GPU free VRAM a WHOLE model should be priced against on this box.
+
+    Splittable (GGUF) engine -> the box SUM (llama.cpp tensor-splits across the
+    cards); non-splittable pipeline -> the LARGEST SINGLE card (it lives on one
+    device). Degrades to the pooled ``vram_free`` on a single-GPU box or when the
+    worker reports no per-device ``gpus[]`` — byte-identical there."""
+    try:
+        from hugpy_engine.resolvers.device_placement import (
+            devices_from_gpus, whole_pipeline_gpu_capacity)
+        devs = devices_from_gpus(worker.get("gpus"))
+        if len(devs) > 1 and any(d.free_b for d in devs):
+            cap = whole_pipeline_gpu_capacity(devs, bool(splittable), use="free")
+            if cap is not None:
+                return int(cap)
+    except Exception:  # noqa: BLE001 — degrade to the pooled figure
+        pass
+    return pooled
+
+
 def _worker_fit(model_key, worker):
     """Capacity preflight for placing a model on a worker — the GPU analog of the
     local RAM preflight, but DUAL. A GPU worker holds weights in VRAM and can
@@ -4159,7 +3918,22 @@ def _worker_fit(model_key, worker):
     bigger than VRAM+RAM can't load at all. ``fit=None`` when the model can't be
     sized (then we don't block — defer to the live load). All byte counts."""
     need_raw = _model_gguf_bytes(model_key)
-    vram = worker.get("vram_free")
+    # A GGUF (llama.cpp) can tensor-split ONE model across the box's cards; a
+    # diffusers/transformers/comfy pipeline lives on ONE card. That split-ability
+    # decides whether the GPU-resident test below prices the box SUM or the
+    # LARGEST SINGLE card (operator 2026-09-25: a 30 GiB diffusers model is NOT
+    # gpu_resident on a 4x24 GiB box, but a 30 GiB GGUF is).
+    is_gguf = need_raw is not None
+    if need_raw is None:
+        # Non-GGUF (diffusers/transformers/comfy): size it off the install
+        # manifest so central can price a GPU landing and the capacity demotion
+        # (operator incident 2026-09-25) can fire. See _model_manifest_bytes.
+        need_raw = _model_manifest_bytes(model_key)
+    vram = worker.get("vram_free")            # box-wide pooled free (display)
+    # Per-DEVICE GPU free the GPU-resident hint must price: largest single card
+    # for a non-splittable pipeline, the box sum for a GGUF. Degrades to the
+    # pooled figure on a single-GPU box or when per-device data is absent.
+    gpu_vram = _engine_gpu_free(worker, splittable=is_gguf, pooled=vram)
     ram = worker.get("free_ram")
     gib = float(2 ** 30)
     if need_raw is None:
@@ -4197,7 +3971,11 @@ def _worker_fit(model_key, worker):
     # in VRAM+RAM — refusing on the expert bytes would refuse exactly the model
     # the split makes serveable (45 GiB MoE, 1.5 GiB backbone).
     fit = (gpu_need_raw <= capacity) if capacity else None
-    gpu_resident = (vram is not None) and (need <= vram)
+    # gpu_resident = "fits VRAM outright" — the term the capacity-outranks-
+    # residency routing penalty reads. Priced against the PER-DEVICE free
+    # (gpu_vram): a non-splittable pipeline can't pool a multi-GPU box, so the
+    # box sum would wrongly claim residency on a-brain's 4x24.
+    gpu_resident = (gpu_vram is not None) and (need <= gpu_vram)
     where = worker.get("gpu") or "this worker"
     # ── t21 central mirror: a model carrying an explicit VRAM tolerance band may,
     # UNDER CONTENTION, be seated at its band FLOOR (a smaller gpu_mem_gib =
@@ -4216,8 +3994,8 @@ def _worker_fit(model_key, worker):
             from hugpy_fleet.worker.flex import band_floor as _band_floor
             band_floor_bytes = int(_band_floor(
                 float(gpu_target_gib) * gib, gpu_dev, vram_total))
-            if vram is not None:
-                band_floor_admissible = band_floor_bytes <= vram
+            if gpu_vram is not None:
+                band_floor_admissible = band_floor_bytes <= gpu_vram
         except Exception:  # noqa: BLE001 — band math is additive; never break fit
             band_floor_bytes = None
     # ── partial-offload mirror (t21 stage 2.5): the worker now DEGRADES an
@@ -4251,6 +4029,9 @@ def _worker_fit(model_key, worker):
         reason = None
     return {"fit": fit, "gpu_resident": gpu_resident, "need": need, "need_raw": need_raw,
             "vram_free": vram, "ram_free": ram, "capacity": capacity,
+            # Per-device GPU free the residency verdict actually priced (largest
+            # single card for a non-splittable engine), beside the box-wide sum.
+            "gpu_vram_free": gpu_vram, "gpu_splittable": is_gguf,
             "headroom": VRAM_HEADROOM, "reason": reason,
             "calibration_correction": calibration_correction,
             "band_floor_bytes": band_floor_bytes,
@@ -5813,6 +5594,7 @@ def serving_list():
         _wcov = {}
     for r in rows:
         key = r.get("key")
+        _overlay_live_ctx(r, key)
         r["override"] = ov.get(key, {})
         if (r.get("override") or {}).get("serve_mode") == "systemd":
             r["unit"] = _unit_live_state(key)
@@ -5973,6 +5755,27 @@ def _with_gguf(row, model_key):
     return row
 
 
+def _overlay_live_ctx(row, model_key):
+    """Report the LIVE served ctx (the worker slot's launched ``-c``, read from
+    heartbeats) as ``ctx_size`` when the model is loaded; the PREDICTED value
+    (spec.ctx_size, fit-bounded native) rides under ``ctx_size_predicted`` and
+    ``ctx_source`` says which is which. A fit-bounded ctx can differ per load, so
+    the console/agents must see what is really served now. No-op when unloaded."""
+    live = None
+    try:
+        from hugpy_fleet.central.workers import live_served_ctx
+        live = live_served_ctx(model_key)
+    except Exception:  # noqa: BLE001 — serving status must never 5xx on the store
+        live = None
+    if live:
+        row["ctx_size_predicted"] = row.get("ctx_size")
+        row["ctx_size"] = int(live)
+        row["ctx_source"] = "live"
+    else:
+        row["ctx_source"] = "predicted"
+    return row
+
+
 @worker_bp.route("/llm/serving/<model_key>", methods=["GET"])
 def serving_get(model_key):
     # A serving STATUS poll must degrade, never 500. An unknown/stale model_key
@@ -5988,6 +5791,7 @@ def serving_get(model_key):
         return jsonify({"model_key": model_key, "known": False, "serving": False,
                         "error": f"Unknown model: {model_key}"}), 404
     row = spec_row(spec)
+    _overlay_live_ctx(row, model_key)
     row["override"] = get_override(model_key)
     # k37: the model's EFFECTIVE allocation mode (persisted alloc_mode, else
     # read-time derivation from the legacy knobs; blank model == max-gpu).
@@ -6069,7 +5873,14 @@ def slots_overview():
     meta = {"slot_count": _slot_count(), "slot_count_env": _os.environ.get("SLOT_COUNT")}
     if not slots_enabled():
         return jsonify({"enabled": False, "slots": [], "resources": _sys_resources(), **meta})
-    return jsonify({"enabled": True, "slots": SlotPool().overview(),
+    _slots = SlotPool().overview()
+    # Surface the served context per slot under both names: each slot already
+    # reports its launched -c as ``ctx`` (slot_agent.status); ``n_ctx`` is the
+    # explicit alias for OpenAI-shaped consumers/dashboards that key on n_ctx.
+    for _s in _slots:
+        if isinstance(_s, dict) and _s.get("n_ctx") is None and _s.get("ctx") is not None:
+            _s["n_ctx"] = _s.get("ctx")
+    return jsonify({"enabled": True, "slots": _slots,
                     "resources": _sys_resources(), **meta})
 
 

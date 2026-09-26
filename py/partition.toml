@@ -67,6 +67,21 @@ depends = []
 "imports/src/utils.py" = "utils.py"
 
 # ---------------------------------------------------------------------------
+# hugpy-tools is NEW code (not a monolith cut): a slim, stdlib-only capability
+# suite for agents (safe file/path ops, text chunking/diffing, hashing,
+# structured-data read/write, urllib+html.parser webpage assessment). It has no
+# `[package.moves]` because nothing moved out of the retired monolith into it,
+# and it imports no other hugpy_* package. `hugpy_tools.search` is owned by a
+# separate work-stream.
+[[package]]
+id = "tools"
+distribution = "hugpy-tools"
+import_name = "hugpy_tools"
+destination = "foundation/hugpy_tools"
+status = "new"
+depends = []
+
+# ---------------------------------------------------------------------------
 [[package]]
 id = "control"
 distribution = "hugpy-control"

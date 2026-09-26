@@ -22,7 +22,12 @@ def test_roots_follow_default_root_and_dirs_are_created(tmp_path):
         "'hf_home_env': os.environ.get('HF_HOME')}))"
     )
     env = dict(os.environ, DEFAULT_ROOT=str(root))
-    for k in ("MODELS_HOME", "PROJECTS_HOME", "HF_HOME", "HF_CACHE", "HF_HUB_CACHE"):
+    # Clear EVERY sibling storage-root override so the assertion measures pure
+    # DEFAULT_ROOT derivation (the test_isolation conftest now FORCES these to a
+    # session temp dir, and an env override always wins over the derived default).
+    for k in ("MODELS_HOME", "UPLOADS_HOME", "PROJECTS_HOME", "IDENTITIES_HOME",
+              "DATASETS_HOME", "HUGPY_VIDEO_STATE_DIR",
+              "HF_HOME", "HF_CACHE", "HF_HUB_CACHE"):
         env.pop(k, None)
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                           timeout=120, env=env)

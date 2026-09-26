@@ -157,8 +157,19 @@ async def repair_stream(events: AsyncIterator[Any], model_key: Optional[str]) ->
     model has no ``output_repair`` block)."""
     spec = repair_spec(model_key)
     if spec is None:
-        async for ev in events:
-            yield ev
+        # Identity passthrough still must aclose the source on a client disconnect
+        # (same reason as the repaired branch below) — otherwise the relayed
+        # worker httpx stream leaks for every model without an output_repair block.
+        try:
+            async for ev in events:
+                yield ev
+        finally:
+            aclose = getattr(events, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:  # noqa: BLE001
+                    pass
         return
     flt = DeadThinkFilter(spec)
     try:

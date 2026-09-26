@@ -36,8 +36,24 @@ function SourceTag({ source }) {
   )
 }
 
+// Fleet DISTRIBUTION mode (operator ruling 2026-09-24) — the catch-all that
+// balances hugpy's default micro-placement friction. GET /api/llm/fleet/
+// distribution is open; POST is operator-gated (operator_auth._SENSITIVE), same
+// as the evict-policy write below. env HUGPY_DISTRIBUTION pins the effective
+// mode (source: "env"): the buttons then read-only and a notice explains why.
+const DIST_HELP = {
+  feasible: 'Any online worker where the model feasibly fits is a routing '
+    + 'candidate; designations become an ordered preference with a feasible-set '
+    + 'fallback.',
+  designated: 'The legacy sealed scope: only designated / resident / granted '
+    + 'homes and per-worker wildcard opt-ins serve, and an unmet preference '
+    + 'refuses.',
+}
+const DIST_SOURCE_LABEL = { env: 'env HUGPY_DISTRIBUTION', store: 'set here', default: 'default' }
+
 export default function SettingsPanel({ workers = [] }) {
   const [policy, setPolicy] = useState(null)      // { least_reaping, ..._source }
+  const [dist, setDist] = useState(null)          // { mode, source, env_override, stored }
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState('')
   const [note, setNote] = useState('')
@@ -46,9 +62,33 @@ export default function SettingsPanel({ workers = [] }) {
     fetchJson('/api/llm/evict-policy')
       .then(d => { setPolicy(d); setError(null) })
       .catch(e => setError(e.message))
+    fetchJson('/api/llm/fleet/distribution')
+      .then(d => { setDist(d) })
+      .catch(e => setError(e.message))
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // Set the FLEET distribution mode. Operator-gated: a refusal surfaces the
+  // server's message (fetchJson throws on 401/403) just like the evict-policy
+  // write. When env pins the mode the reply reports env_override and the
+  // unchanged effective mode — stored, but not in effect until the env clears.
+  const setDistribution = (mode) => {
+    setBusy('dist'); setNote('')
+    fetchJson('/api/llm/fleet/distribution', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+      .then(d => {
+        setDist(d)
+        setNote(d.env_override
+          ? 'Stored — but HUGPY_DISTRIBUTION pins the effective mode until the env var is cleared.'
+          : `Fleet distribution set to ${d.mode}. Routing adopts it immediately.`)
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setBusy(''))
+  }
 
   // Flip the FLEET drop-pass policy. Applies to every worker on its next beat.
   const setLeastReaping = (value) => {
@@ -78,6 +118,63 @@ export default function SettingsPanel({ workers = [] }) {
     <div className="sp-panel">
       {error && <div className="sp-err">{error}</div>}
       {note && <div className="sp-note">{note}</div>}
+
+      {/* ── FLEET: distribution mode (feasible|designated) ───────────────── */}
+      <section className="sp-sec">
+        <div className="sp-sec-head">
+          <h3 className="sp-sec-title">Distribution</h3>
+          <span className="sp-scope sp-scope-fleet">fleet-wide</span>
+        </div>
+        <p className="sp-desc">
+          The catch-all that balances hugpy&apos;s default micro-placement.
+          <strong> Feasible</strong> (the default) lets any online worker where a
+          model actually fits be a routing candidate — your designations come
+          first as an ordered preference, but when none can serve, routing falls
+          back to any feasible worker instead of refusing.
+          <strong> Designated</strong> is the legacy sealed scope: only
+          designated / resident / granted homes and per-worker wildcard opt-ins
+          serve, and an unmet preference refuses.
+        </p>
+        {dist == null ? (
+          <div className="sp-loading">loading…</div>
+        ) : (
+          <>
+            <div className="sp-row">
+              <div className="sp-val">
+                <span className="sp-val-main">
+                  {dist.mode === 'designated' ? 'Designated' : 'Feasible'}
+                </span>
+                <span className={`sp-src sp-src-${dist.source || 'default'}`}>
+                  {DIST_SOURCE_LABEL[dist.source] || dist.source || 'default'}
+                </span>
+              </div>
+              <div className="sp-actions">
+                <button
+                  className={`sp-btn ${dist.mode === 'feasible' ? 'sp-btn-on' : ''}`}
+                  disabled={busy === 'dist' || dist.env_override || dist.mode === 'feasible'}
+                  title={DIST_HELP.feasible}
+                  onClick={() => setDistribution('feasible')}
+                >Feasible (default)</button>
+                <button
+                  className={`sp-btn ${dist.mode === 'designated' ? 'sp-btn-on' : ''}`}
+                  disabled={busy === 'dist' || dist.env_override || dist.mode === 'designated'}
+                  title={DIST_HELP.designated}
+                  onClick={() => setDistribution('designated')}
+                >Designated</button>
+              </div>
+            </div>
+            {dist.env_override && (
+              <p className="sp-desc sp-desc-why">
+                ⚙ Pinned by the <code>HUGPY_DISTRIBUTION</code> environment
+                variable — the effective mode is <strong>{dist.mode}</strong>{' '}
+                until it is cleared.
+                {dist.stored && dist.stored !== dist.mode &&
+                  <> The stored preference is <strong>{dist.stored}</strong>.</>}
+              </p>
+            )}
+          </>
+        )}
+      </section>
 
       {/* ── FLEET: least reaping ─────────────────────────────────────────── */}
       <section className="sp-sec">

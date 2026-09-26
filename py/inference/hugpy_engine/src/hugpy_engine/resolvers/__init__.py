@@ -12,6 +12,7 @@ from hugpy_engine.resolvers.model_resolver import (
 from hugpy_engine.resolvers.remote import (
     get_worker_provider,
     set_no_worker_diagnostic,
+    set_no_worker_skips,
     set_placement_provider,
     set_worker_provider,
 )
@@ -19,6 +20,6 @@ from hugpy_engine.resolvers.remote import (
 __all__ = [
     "EXTERNAL_TASK_RUNNERS", "Peer", "ensure_staple_weights", "external_runner_for",
     "get_worker_provider", "peer_for", "resolve", "resolve_model_key",
-    "set_no_worker_diagnostic", "set_placement_provider", "set_worker_provider",
-    "validate_registry",
+    "set_no_worker_diagnostic", "set_no_worker_skips", "set_placement_provider",
+    "set_worker_provider", "validate_registry",
 ]

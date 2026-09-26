@@ -105,13 +105,80 @@ def reserve_gib_for(model_id: str) -> "float | None":
     return None
 
 
-def acquire(job_id: str, model_id: "str | None"):
-    """Take the reserve for one render. Returns a zero-arg ``release``
-    callable (always safe to call, including when nothing was reserved)."""
+class _Reserve:
+    """The handle ``acquire`` returns. CALLABLE (``handle()`` releases the hold,
+    the back-compat contract every caller already uses) AND carrying
+    ``note_pid(pid)`` — the seam that RE-ATTRIBUTES the hold to the render's real
+    GPU-holding pid.
+
+    Why note_pid exists (2026-09-24): the render runs in a spawned CHILD process
+    (``_studio_subproc``); the worker process itself holds no torch VRAM. The
+    initial register used ``os.getpid()`` (the worker), so the render's real
+    bytes were UNATTRIBUTED — the child read as an own-venv orphan to the reaper
+    and vram-holder meter (a false squatter), and the eviction ledger's measured
+    join landed on a pid holding ~0 B instead of the render. Re-registering with
+    the child pid makes the render a FIRST-CLASS measured external resident in
+    the SAME pid-registry ledger every LLM slot uses (reconcile joins nvidia-smi
+    by pid), so it is attributed, protected while running, and released on exit —
+    the standard hugpy holder flow, not a bypass."""
+
+    __slots__ = ("job_id", "key", "target", "model_id", "held")
+
+    def __init__(self, job_id: str, key: str, target: "float | None",
+                 model_id: "str | None", held: bool) -> None:
+        self.job_id = job_id
+        self.key = key
+        self.target = target
+        self.model_id = model_id
+        self.held = held
+
+    def note_pid(self, pid: "int | None") -> None:
+        """Re-register the hold under the render child's real pid (best-effort).
+        A no-op when nothing was reserved (no template) or the pid is unknown —
+        the worker's ``/ops/external/register`` is idempotent, so this only
+        UPDATES the existing ``studio:<job_id>`` row's pid (keeping its
+        non-evictable policy and vram target)."""
+        if not self.held or not pid:
+            return
+        try:
+            _post("/ops/external/register",
+                  {"model_key": self.key, "pid": int(pid),
+                   "vram_gib": self.target, "evictable": False,
+                   "resume": "disabled",
+                   "note": f"studio render hold: {self.model_id} (render pid)"})
+        except Exception:  # noqa: BLE001 — re-attribution never fails a render
+            logger.warning("studio reserve %s: pid re-attribution failed "
+                           "(render still holds the card, just less visible)",
+                           self.key, exc_info=True)
+
+    def release(self) -> None:
+        if not self.held:
+            return
+        try:
+            _post("/ops/external/unregister", {"model_key": self.key})
+        except Exception:  # noqa: BLE001
+            logger.warning("studio reserve %s: unregister failed (registry "
+                           "clears on agent restart)", self.key, exc_info=True)
+
+    def __call__(self) -> None:
+        """Back-compat: the historical ``release = acquire(...); release()``
+        callable contract."""
+        self.release()
+
+
+def acquire(job_id: str, model_id: "str | None") -> "_Reserve":
+    """Take the reserve for one render. Returns a :class:`_Reserve` handle that
+    is CALLABLE (``handle()`` releases the hold — the historical contract) and
+    also carries ``note_pid(child_pid)`` for the caller to re-attribute the hold
+    to the render's real GPU-holding process once it is spawned. Always safe to
+    call/release, including when nothing was reserved (no template)."""
     key = f"studio:{job_id}"
     target = reserve_gib_for(model_id or "")
     if target is None:
-        return lambda: None
+        # No template = no reserve = no registration (operator-sanctioned; the
+        # router's own budget still refuses what truly cannot fit). Nothing to
+        # attribute either — the handle's note_pid/release are no-ops.
+        return _Reserve(job_id, key, None, model_id, held=False)
 
     # 1. evict-to-fit (idle-guarded, unforced, feasibility-checked worker-side).
     try:
@@ -137,7 +204,10 @@ def acquire(job_id: str, model_id: "str | None"):
         logger.warning("studio reserve %s: claim call failed — rendering "
                        "without a reserve", key, exc_info=True)
 
-    # 2. hold: a NON-evictable registry row for the render's lifetime.
+    # 2. hold: a NON-evictable registry row for the render's lifetime. Registered
+    #    under the worker pid FIRST (correct for the legacy in-process render
+    #    path); the subprocess path calls handle.note_pid(child_pid) right after
+    #    spawn to re-point it at the process that actually holds the VRAM.
     held = False
     try:
         _post("/ops/external/register",
@@ -149,13 +219,4 @@ def acquire(job_id: str, model_id: "str | None"):
         logger.warning("studio reserve %s: register failed — no hold",
                        key, exc_info=True)
 
-    def release() -> None:
-        if not held:
-            return
-        try:
-            _post("/ops/external/unregister", {"model_key": key})
-        except Exception:  # noqa: BLE001
-            logger.warning("studio reserve %s: unregister failed (registry "
-                           "clears on agent restart)", key, exc_info=True)
-
-    return release
+    return _Reserve(job_id, key, target, model_id, held=held)

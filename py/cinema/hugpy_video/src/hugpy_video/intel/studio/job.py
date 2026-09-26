@@ -42,6 +42,18 @@ logger = logging.getLogger(__name__)
 STUDIO_ROOT = os.path.join(DEFAULT_ROOT, "video_intel", "studio")
 DEFAULT_CLIPS_ROOT = os.path.join(STUDIO_ROOT, "clips")
 
+
+def studio_weights_root() -> str:
+    """The SHARED studio weights root the render manifest is built against: an explicit
+    ``STUDIO_WEIGHTS_ROOT`` (resolved via ``env_value`` — the .env file OR the process env)
+    else ``<STUDIO_ROOT>/weights`` (``<DEFAULT_ROOT>/video_intel/studio/weights``).
+
+    THE SINGLE source of that path: ``resolve_studio_env`` builds the manifest from it (so
+    a delegated render loads from here on the shared mount), and central advertises it to
+    workers so their placement-presence check (``studio.presence``) tests ``model_index.json``
+    readability under the SAME root the render will actually load from — never a guess."""
+    return env_value("STUDIO_WEIGHTS_ROOT") or os.path.join(STUDIO_ROOT, "weights")
+
 # Studio "Send to Editor" (k12) INBOX — a STABLE first-class sibling of clips/,
 # weights/ and manifests/ under STUDIO_ROOT. The one-click handoff writes a
 # Filmora-native MP4 here; the operator's LAN Windows workstation (Filmora
@@ -444,7 +456,7 @@ def resolve_studio_env(out_root: str, *, master_fps: int,
     # need the real card — it reads it live in the runner
     # (runners/wan_i2v._max_vram_gb), which is outside the manifest and so outside
     # addressing. Same split _hot_weights_root() already uses.
-    weights_root = env_value("STUDIO_WEIGHTS_ROOT") or os.path.join(STUDIO_ROOT, "weights")
+    weights_root = studio_weights_root()
     return StudioEnv(
         output_root=os.path.abspath(out_root),
         weights_root=weights_root,

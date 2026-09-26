@@ -4,7 +4,6 @@ Submodules (``hot_cache``, ``slots``, ``overrides``, ``profiles``, ...) are
 imported explicitly by callers; this package re-exports the serve driver API.
 """
 from hugpy_engine.serve.serve import (
-    DEFAULT_LLAMA_CTX,
     DEFAULT_LLAMA_NGL,
     DEFAULT_LLAMA_THREADS,
     DEFAULT_SERVE_MODE,
@@ -46,7 +45,7 @@ from hugpy_engine.serve.serve import (
 )
 
 __all__ = [
-    "DEFAULT_LLAMA_CTX", "DEFAULT_LLAMA_NGL", "DEFAULT_LLAMA_THREADS", "DEFAULT_SERVE_MODE",
+    "DEFAULT_LLAMA_NGL", "DEFAULT_LLAMA_THREADS", "DEFAULT_SERVE_MODE",
     "LLAMA_CPP_DIR", "LLAMA_PORT_BASE", "LLAMA_PORT_SPAN", "LLAMA_SERVER_BIN",
     "LLAMA_SERVICE_GROUP", "LLAMA_SERVICE_USER", "LLAMA_SWAP_CONFIG", "LLAMA_SWAP_HOST",
     "LLAMA_SWAP_PORT", "LLAMA_SWAP_TTL", "LLAMA_SWAP_UNIT", "LLAMA_UNIT_PREFIX",

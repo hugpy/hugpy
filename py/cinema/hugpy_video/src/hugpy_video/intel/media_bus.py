@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -282,13 +283,125 @@ def serialize_result(result: JobResult) -> str:
 # --------------------------------------------------------------------------- #
 # connection / schema
 # --------------------------------------------------------------------------- #
-def _connect() -> sqlite3.Connection:
+def _connect(busy_timeout_ms: int = 30000) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30.0, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = sqlite3.connect(DB_PATH, timeout=max(0.0, busy_timeout_ms / 1000.0),
+                           isolation_level=None)
+    # journal_mode=WAL is what keeps a reader from ever blocking a writer on this
+    # shared-storage DB (rollback-journal mode serializes reader<->writer and is
+    # the origin of the 30s "database is locked" on INSERT — a slow listing/read
+    # holding a SHARED lock across a submit). PRAGMA journal_mode returns the mode
+    # that ACTUALLY took; a value other than 'wal' is a recorded fact (the store
+    # fell back to rollback-journal locking and writers can now be blocked by
+    # readers), logged once so a stuck-insert incident has the real cause on hand.
+    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    got = (mode[0] if mode else "") or ""
+    if got.lower() != "wal":
+        global _wal_fallback_logged
+        if not _wal_fallback_logged:
+            _wal_fallback_logged = True
+            logger.error(
+                "media_bus: PRAGMA journal_mode=WAL did NOT take on %s — got %r; "
+                "the store is in rollback-journal locking, where a reader blocks a "
+                "writer and an INSERT can wait the full busy_timeout and raise "
+                "'database is locked'", DB_PATH, got)
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA busy_timeout=%d" % int(busy_timeout_ms))
     return conn
+
+
+# --------------------------------------------------------------------------- #
+# SQLITE_BUSY ("database is locked" / "database is busy") robustness. A write to
+# this shared-storage DB can lose the lock race — historically an intermittent
+# 500 on POST /video/jobs/* (52x Sep 21, then stuck 2026-09-24). The enqueue
+# INSERT now uses a SHORT per-attempt busy_timeout and a bounded app-level retry
+# with jitter, so a transient lock recovers quietly and a genuinely-wedged lock
+# surfaces as a clean, retryable 503 (MediaJobsBusy) carrying the REAL sqlite
+# error text + how long it tried — never an unhandled HTML 500.
+# --------------------------------------------------------------------------- #
+_wal_fallback_logged = False
+
+
+class MediaJobsBusy(RuntimeError):
+    """The media-jobs store could not be written within the bounded retry budget
+    because it stayed locked (SQLITE_BUSY). Carries the REAL sqlite error text
+    (``reason``), the operation, how many attempts were made, and the total
+    seconds spent — the route turns this into a retryable JSON 503, never a 500.
+    Retryable by contract: the caller may re-submit the identical request."""
+
+    def __init__(self, op: str, reason: str, attempts: int, seconds: float) -> None:
+        super().__init__(
+            f"{op}: media_jobs store stayed locked after {attempts} attempt(s) "
+            f"over {seconds:.2f}s: {reason}")
+        self.op = op
+        self.reason = reason
+        self.attempts = attempts
+        self.seconds = seconds
+        self.retryable = True
+
+
+def _is_locked(exc: BaseException) -> bool:
+    """True for the SQLITE_BUSY family — 'database is locked' / 'database is
+    busy'. These are the transient lock-contention faults the write path retries;
+    every other OperationalError (and corruption) propagates unretried."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+def _enqueue_busy_timeout_ms() -> int:
+    """Per-attempt sqlite busy_timeout for the enqueue write — SHORT (default 4s)
+    so a bounded retry can actually run instead of one call sitting the full 30s.
+    Env-overridable (``HUGPY_MEDIA_ENQUEUE_BUSY_MS``)."""
+    return _env_int("HUGPY_MEDIA_ENQUEUE_BUSY_MS", 4000)
+
+
+def _lock_retry_attempts() -> int:
+    """Total tries for a lock-contended write before it becomes a 503 (default 4).
+    Env-overridable (``HUGPY_MEDIA_LOCK_RETRIES``)."""
+    return _env_int("HUGPY_MEDIA_LOCK_RETRIES", 4)
+
+
+def _retry_on_locked(fn: Callable[[], "_T"], op: str,
+                     attempts: Optional[int] = None) -> "_T":
+    """Run ``fn`` and retry it on SQLITE_BUSY with exponential backoff + jitter,
+    up to ``attempts`` total tries. Non-lock errors propagate immediately,
+    unretried. On exhaustion raises ``MediaJobsBusy`` carrying the last real
+    sqlite error text and the total seconds spent — a recorded fact, not a canned
+    message."""
+    attempts = attempts or _lock_retry_attempts()
+    if attempts < 1:
+        attempts = 1
+    start = time.time()
+    last: Optional[sqlite3.OperationalError] = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if not _is_locked(exc):
+                raise
+            last = exc
+            if i >= attempts - 1:
+                break
+            delay = min(0.5, 0.05 * (2 ** i)) + 0.05 * random.random()
+            logger.warning(
+                "media_bus %s: SQLITE_BUSY (attempt %d/%d): %s — retrying in %.3fs",
+                op, i + 1, attempts, exc, delay)
+            time.sleep(delay)
+    raise MediaJobsBusy(op=op, reason=str(last), attempts=attempts,
+                        seconds=time.time() - start)
 
 
 def _connect_ro() -> sqlite3.Connection:
@@ -418,6 +531,31 @@ def _ensure_db() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# FORK SAFETY (incident 2026-09-24). This module never holds a sqlite connection
+# at module scope — every _connect() opens and closes per call — so the only
+# fork-inherited state is `_initialized` (which would let a child skip
+# _ensure_db and lean on the parent having opened the store) and the reaper's
+# throttle clock. The real fix is building the app INSIDE the gunicorn worker
+# (see hugpy cli `_run_wsgi` and hugpy_server.wsgi_app `_serve`/load()), so this
+# DB and the runner pool are never touched before a fork. This at-fork reset is
+# the belt-and-braces backstop: if any future code path DID open this store in a
+# pre-fork process, the child drops that cached state and its first call
+# reconnects fresh (recreating its own -wal/-shm) instead of reusing a handle
+# whose sidecars the parent can unlink. Registered once at import; never raises.
+# --------------------------------------------------------------------------- #
+def _reset_after_fork_in_child() -> None:
+    global _initialized, _last_reap_ts
+    _initialized = False
+    _last_reap_ts = 0.0
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_after_fork_in_child)
+except (AttributeError, ValueError):  # non-POSIX / interpreter without the hook
+    pass
+
+
+# --------------------------------------------------------------------------- #
 # corruption recovery (finding C8). A malformed media_jobs.db used to 500 the
 # ENTIRE /video job surface (list / get / enqueue) at once with no self-heal,
 # because the only sqlite exception ever caught was OperationalError — a
@@ -473,6 +611,47 @@ def _quarantine_corrupt_db(exc: BaseException, op: str) -> None:
         "are lost; artifact bytes on disk are untouched. If this recurs, the DB's "
         "storage (DEFAULT_ROOT) is the suspect.",
         op, type(exc).__name__, exc, DB_PATH, moved or "(already moved)")
+
+
+# --------------------------------------------------------------------------- #
+# stale-handle recovery (incident 2026-09-24). A 'disk I/O error' (SQLITE_IOERR)
+# is the symptom of an open handle whose WAL/SHM sidecars were unlinked out from
+# under it — a SECOND process switching this DB's journal mode (WAL->DELETE
+# deletes the sidecars) or deleting media_jobs.db-wal/-shm while central still
+# held them open. Unlike corruption it is NOT on-disk damage: the main
+# media_jobs.db file is intact (same inode, quick_check ok), only THIS process's
+# cached connection state is stale. The safe degrade therefore is to drop the
+# cached state so the next _connect()/_ensure_db() opens a FRESH handle (which
+# re-creates the sidecars) and return the honest empty/unknown view for this one
+# read, instead of 500ing the entire /video job surface until a restart.
+# --------------------------------------------------------------------------- #
+def _is_disk_io(exc: BaseException) -> bool:
+    """True only for a transient SQLITE_IOERR 'disk I/O error' — a stale handle
+    whose sidecars were unlinked (incident 2026-09-24), NOT corruption and NOT a
+    lock. It is an OperationalError; 'database is locked'/'is busy' deliberately
+    do NOT match here (they keep retrying/propagating exactly as before), and
+    'malformed'/'disk image' stays with _is_db_corrupt (quarantine, not reset)."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "disk i/o error" in msg or "disk io error" in msg
+
+
+def _recover_stale_handles(exc: BaseException, op: str) -> None:
+    """Drop this process's cached DB state so the next _ensure_db()/_connect()
+    reconnects fresh (re-creating the -wal/-shm sidecars). The media_jobs.db file
+    is NEVER moved or deleted here — only stale in-process state is reset. Records
+    the REAL sqlite error text so a recurring stale-handle event is diagnosable."""
+    global _initialized
+    with _init_lock:
+        _initialized = False
+    logger.error(
+        "media_bus: %s hit a disk-I/O error on %s (%s: %s) — the WAL/SHM sidecars "
+        "were unlinked under an open handle; dropped the cached handle and will "
+        "reconnect fresh next call. media_jobs.db itself is intact. If this "
+        "recurs, a second process is resetting this DB's journal mode or deleting "
+        "its sidecars (incident 2026-09-24).",
+        op, DB_PATH, type(exc).__name__, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -1123,7 +1302,9 @@ def enqueue(name: str, spec, principal: Optional[str] = None,
 
     def _insert():
         _ensure_db()
-        conn = _connect()
+        # SHORT per-attempt busy_timeout so the bounded retry below can actually
+        # run: a single 30s wait that then 500s is the bug we are removing.
+        conn = _connect(busy_timeout_ms=_enqueue_busy_timeout_ms())
         try:
             conn.execute(
                 "INSERT INTO media_jobs "
@@ -1135,14 +1316,19 @@ def enqueue(name: str, spec, principal: Optional[str] = None,
             conn.close()
 
     try:
-        _insert()
+        # Bounded retry on SQLITE_BUSY with jitter; on exhaustion this raises
+        # MediaJobsBusy (retryable) which the route turns into a clean JSON 503 —
+        # never an unhandled HTML 500 (the reported live failure mode).
+        _retry_on_locked(_insert, "enqueue")
     except sqlite3.DatabaseError as exc:
         # A corrupt job DB must not 500 the enqueue: quarantine it, let the
-        # recreated store come up, and insert into that (finding C8).
+        # recreated store come up, and insert into that (finding C8). _is_locked
+        # was already handled/retried above, so anything reaching here that is
+        # not corruption is a genuine, non-lock error and must propagate.
         if not _is_db_corrupt(exc):
             raise
         _quarantine_corrupt_db(exc, "enqueue")
-        _insert()
+        _retry_on_locked(_insert, "enqueue")
     # One-directional bridge (A/P0-2): surface this queued job in comms.JobStore
     # (GET /llm/jobs), carrying its attribution. Best-effort — never fails enqueue.
     _bridge("on_enqueue", job_id, name, principal=principal)
@@ -1574,12 +1760,18 @@ def get(job_id: str) -> dict:
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
-        if not _is_db_corrupt(exc):
+        if _is_db_corrupt(exc):
+            # Keep GET /video/jobs/<id> up: quarantine + degrade to the honest
+            # all-null "unknown id" view rather than 500 (finding C8).
+            _quarantine_corrupt_db(exc, "get")
+            row = None
+        elif _is_disk_io(exc):
+            # Stale sidecar handle (incident 2026-09-24): reconnect fresh next
+            # call, degrade to the unknown-id view this tick — never a 500.
+            _recover_stale_handles(exc, "get")
+            row = None
+        else:
             raise
-        # Keep GET /video/jobs/<id> up: quarantine + degrade to the honest
-        # all-null "unknown id" view rather than 500 (finding C8).
-        _quarantine_corrupt_db(exc, "get")
-        row = None
     if row is None:
         return {"job_id": job_id, "name": None, "status": None,
                 "result": None, "progress": None, "owner": None,
@@ -1588,7 +1780,7 @@ def get(job_id: str) -> dict:
                 "private": False,
                 # Additive telemetry fields (empty for an unknown id) so a consumer
                 # can read them unconditionally without a shape check.
-                "stage_log": [], "failure": None,
+                "stage_log": [], "error": None, "failure": None,
                 "last_movement_ts": None, "current_stage": None,
                 # k117 lifecycle keys, null for an unknown id — same reason as
                 # the block above: a consumer reads them without a shape check.
@@ -1616,6 +1808,16 @@ def get(job_id: str) -> dict:
             # stall basis tied to the current stage), and the current stage. Existing
             # keys are unchanged.
             "stage_log": stage_log,
+            # TOP-LEVEL ERROR (2026-09-24): the real terminal reason surfaced at
+            # the top of the status document — the grading/metrics contract wants
+            # real reasons visible, never hidden one level down. It MIRRORS
+            # result.error (code/message/retryable/detail) for a failed job and is
+            # an explicit None otherwise, so a poller reading top-level "error"
+            # gets the same reason that rides in result.error instead of a null
+            # while the reason sits buried in the result blob.
+            "error": (result.get("error")
+                      if isinstance(result, dict) and not result.get("ok")
+                      and isinstance(result.get("error"), dict) else None),
             "failure": build_failure_summary(result, stage_log),
             "last_movement_ts": _last_movement_ts(stage_log, updated),
             "current_stage": _current_stage(stage_log),
@@ -1973,12 +2175,17 @@ def list_jobs(include_terminal: bool = False, limit: int = 50,
         finally:
             conn.close()
     except sqlite3.DatabaseError as exc:
-        if not _is_db_corrupt(exc):
-            raise
-        # Keep GET /video/jobs up: quarantine + degrade to an empty listing
-        # rather than 500 the whole panel (finding C8).
-        _quarantine_corrupt_db(exc, "list_jobs")
-        return []
+        if _is_db_corrupt(exc):
+            # Keep GET /video/jobs up: quarantine + degrade to an empty listing
+            # rather than 500 the whole panel (finding C8).
+            _quarantine_corrupt_db(exc, "list_jobs")
+            return []
+        if _is_disk_io(exc):
+            # Stale sidecar handle (incident 2026-09-24): reconnect fresh next
+            # call, degrade to an empty listing this tick — never a 500.
+            _recover_stale_handles(exc, "list_jobs")
+            return []
+        raise
     # k117: the LIFECYCLE block — frozen terminal_at/run_s/queue_wait_s + the true
     # terminal stage on terminal rows, elapsed_in_stage_s + last_progress_at on
     # live ones. ONE sidecar query for the whole page (k57's rule: no per-row work

@@ -11,6 +11,17 @@ import sys
 if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
     sys.modules.setdefault("abstract_hugpy_dev", None)
 
+# Force every storage root to a private temp dir before hugpy_platform.constants
+# is imported, and arm the live-storage audit guard (incident 2026-09-24). The
+# ORACLE_LEDGER_PATH setdefault below still applies when isolation is opted out
+# (HUGPY_TEST_LIVE_ROOT=1).
+from hugpy_platform.test_isolation import (  # noqa: E402
+    install_live_storage_guard, isolate_storage_to_tmp,
+)
+
+isolate_storage_to_tmp()
+install_live_storage_guard()
+
 # The per-call selector ledgers every execute_route outcome. Tests must never
 # write evidence into the operator's ~/.hugpy; point the reliability ledger at
 # a scratch file (individual tests build their own ledgers under tmp_path).

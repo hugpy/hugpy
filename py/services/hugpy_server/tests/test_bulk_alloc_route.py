@@ -75,7 +75,7 @@ class Harness:
         self.client = app.test_client()
         self.use_worker(WORKER, FRAMEWORKS)
         monkeypatch.setattr(wr, "assign_model", self.fake_assign)
-        monkeypatch.setattr(wr, "_kick_warm", self._fake_warm)
+        monkeypatch.setattr(wr, "_kick_warm", self._fake_warm, raising=False)
         monkeypatch.setattr(wr, "_relay_worker_op", self._relay_tripwire)
         monkeypatch.setattr(cr, "audit", lambda *a, **k: None)
 
@@ -132,7 +132,7 @@ def test_max_gpu_subset_one_assign_per_key_same_spill_no_relay(h):
     assert body["results"] == {"a": "ok", "b": "ok"}
     assert body["counts"] == {"ok": 2, "error": 0, "skipped": 0, "total": 2}
     # only LOCAL models re-seated (a,b local; warm once)
-    assert h.warm_calls == [("a", "b")]
+    assert h.warm_calls == []
 
 
 def test_autofit_empty_spill_clears_override(h):
@@ -387,7 +387,7 @@ def test_per_model_spills_each_key_its_own(h):
     assert body["alloc"] == "per-model"
     assert body["results"] == {"a": "ok", "b": "ok"}
     assert body["counts"] == {"ok": 2, "error": 0, "skipped": 0, "total": 2}
-    assert h.warm_calls == [("a", "b")], "only LOCAL models re-seated, warm once"
+    assert h.warm_calls == [], "allocation never creates a resident"
 
 
 def test_per_model_key_absent_from_spills_is_autofit(h):

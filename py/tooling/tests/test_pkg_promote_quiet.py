@@ -153,3 +153,23 @@ def test_live_fleet_busy_reads_benchmark_and_admission(monkeypatch):
     answers["/api/llm/benchmark/status"] = (200, {"status": "complete"})
     answers["/api/llm/admission?status=pending"] = (200, {"queue": []})
     assert P.LiveFleet("http://127.0.0.1:7002").busy() is None
+
+
+def test_busy_defers_when_benchmark_status_unreadable(monkeypatch):
+    # FAIL SAFE (incident 2026-09-24): a restart must never proceed on an UNKNOWN
+    # run-state — a warm-up/transient 502 on the status probe is exactly when a
+    # running benchmark is most fragile. busy() reports it as a deferral reason.
+    monkeypatch.setattr(P, "_http", lambda m, url, *a, **k: (0, "URLError: Connection refused"))
+    monkeypatch.setattr(P, "api_key", lambda: None)
+    busy = P.LiveFleet("http://127.0.0.1:7002").busy()
+    assert busy is not None and busy["status_unreadable"] is True
+    assert "unreadable" in busy["reason"] and "benchmark" not in busy
+
+
+def test_quiet_gate_defers_while_status_is_unreadable(monkeypatch):
+    monkeypatch.delenv(P.NOW_ENV, raising=False)
+    busy = {"reason": "benchmark run-state unreadable (http 0); deferring restart",
+            "status_unreadable": True}
+    row = {"id": 7, "version": "V", "pin_log": None}
+    gate = P.quiet_gate(row, FakeFleet(busy=busy), wait_s=1800, clock=lambda: 100.0)
+    assert gate["go"] is False and gate["note"].startswith("waiting: benchmark run-state unreadable")

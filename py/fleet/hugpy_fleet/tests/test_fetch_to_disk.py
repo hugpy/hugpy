@@ -100,8 +100,9 @@ def test_kick_provision_load_false_downloads_without_seating(core):
     assert core.seats == [] and core.materializes == []   # but never seated/loaded
 
 
-def test_kick_provision_default_load_seats_after_provisioning(core):
+def test_kick_provision_legacy_default_still_never_seats(core):
     state = agent.WorkerState(name="t", url=None, worker_id="w-core2", central_url=None)
-    agent._kick_provision(state, "m-load", purpose="reconcile")   # load=True default
+    agent._kick_provision(state, "m-load", purpose="reconcile")
     assert _wait_until(lambda: "m-load" in core.prov.calls)
-    assert _wait_until(lambda: len(core.seats) >= 1)              # seating DID run
+    assert _wait_until(lambda: state._provisioning == set())
+    assert core.seats == [] and core.materializes == []

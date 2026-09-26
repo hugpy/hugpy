@@ -38,10 +38,12 @@ _BENCHMARK = {"status": "idle", "events": [], "results": [], "calls": [],
               "plan": {"rows": [], "total": 0, "runnable": 0},
               "progress": {"completed": 0, "total": 0, "percent": 0}}
 _BENCHMARK_LOCK = None
-# A run is ACTIVE while running or resuming (central restarted mid-run and is
-# continuing the same run_id). Busy checks (pkg_promote's quiet-central wait,
-# the admission runner, the single-run 409) treat both the same.
-_BENCHMARK_ACTIVE = ("running", "resuming")
+# A run is ACTIVE while collecting (running / resuming — central restarted
+# mid-collection and is continuing the same run_id) or JUDGING (phase 2, the
+# scheduled judge pass over the collected outputs). Busy checks (pkg_promote's
+# quiet-central wait, the admission runner, the single-run 409) treat all the
+# same; the restart-resume election tells the phases apart by ``status``.
+_BENCHMARK_ACTIVE = ("running", "resuming", "judging")
 _BENCHMARK_RESUME_MAX = int(os.environ.get("HUGPY_BENCHMARK_RESUME_MAX", "3") or 3)
 _RESTART_REASON = "restarted after central restart"
 
@@ -383,7 +385,17 @@ def _persist_benchmark_result(row):
         valid_grade = (row.get("status") == "complete" and
                        row.get("error") in (None, "N/A", ""))
         score, maximum = _metric_number(row.get("score")), _metric_number(row.get("max"))
-        grade = 100.0 * score / maximum if valid_grade and score is not None and maximum else None
+        # PHASE 1 (collect) persists every raw output (grade_detail) as the run
+        # goes, but the GRADE appears only once judged (operator ruling
+        # 2026-09-24): a row still awaiting the brain judge is written with its
+        # measurements + raw outputs and a NULL grade/graded_at, which PHASE 2
+        # (_persist_benchmark_grade) fills in. A row with no pending judge (the
+        # historical inline path, an exhausted ladder, a non-judged suite) keeps
+        # its grade here.
+        awaiting_judge = (isinstance(row.get("judge"), dict)
+                          and row["judge"].get("status") == "pending")
+        grade = (100.0 * score / maximum if valid_grade and not awaiting_judge
+                 and score is not None and maximum else None)
         detail = json.dumps(row.get("detail") or {}, sort_keys=True) if valid_grade else None
         query = """
           INSERT INTO model_metrics
@@ -444,6 +456,44 @@ def _persist_cold_split(row, cold):
              _metric_number(row.get("load_s")), _metric_number(row.get("bytes_per_s")),
              str(row["model"]), str(row.get("quant") or ""), str(row["worker"])))
     return True
+
+
+def _persist_benchmark_grade(row):
+    """PHASE 2 (judge): update ONLY the grade columns of the collected result's
+    existing model_metrics row — ``grade``, ``grade_detail`` (the full per-item
+    history with the judge verdicts) and ``graded_at``. The load/throughput terms
+    (cold/hot/tok_per_s/n_samples) were measured in phase 1 and are never
+    re-stamped here, so the DB grade tracks the judge without disturbing the
+    measurements. model_calls is append-only (its rows record the call as it ran)
+    and is left untouched: the judge verdict is a later grading step, recorded on
+    the rollup row's grade_detail."""
+    if not isinstance(row, dict) or not row.get("model") or not row.get("worker"):
+        return False
+    if row.get("persist") is False:
+        return False
+    try:
+        from hugpy_server.app.routes.metrics_routes import _live_db
+        config = str(row.get("config") or "full")
+        mode = str(row.get("alloc_mode") or "")
+        alloc = mode if config in ("full", "standard") else "%s:%s" % (config, mode)
+        valid_grade = (row.get("status") == "complete" and row.get("error") in (None, "N/A", ""))
+        score, maximum = _metric_number(row.get("score")), _metric_number(row.get("max"))
+        grade = 100.0 * score / maximum if valid_grade and score is not None and maximum else None
+        if grade is None:
+            return False
+        detail = json.dumps(row.get("detail") or {}, sort_keys=True)
+        with _live_db().cursor() as cursor:
+            cursor.execute(
+                "UPDATE model_metrics SET grade = %s, grade_detail = %s, graded_at = now(), "
+                "updated_at = now() WHERE model_name = %s AND quant = %s AND alloc_mode = %s "
+                "AND worker = %s",
+                (grade, detail, str(row["model"]), str(row.get("quant") or ""), alloc,
+                 str(row["worker"])))
+        return True
+    except Exception:
+        logger.warning("benchmark grade update failed for %s/%s",
+                       row.get("model"), row.get("quant"), exc_info=True)
+        return False
 
 
 @review_bp.route("/llm/benchmark/lock", methods=["POST"])
@@ -554,6 +604,27 @@ def _benchmark_client():
                   operator_token=os.environ.get("HUGPY_OPERATOR_TOKEN", ""), timeout=60)
 
 
+def _benchmark_workers(client, log=None):
+    """The worker roster the benchmark thread runs against.
+
+    Prefer central's OWN in-process data: a self-HTTP GET of /llm/workers right
+    after a restart-resume (the run thread starts the moment /health answers) can
+    block on the very gunicorn workers that would answer it, and that timeout
+    used to kill the whole run (incident 2026-09-24). When the in-process read is
+    unavailable, fall back to a BOUNDED-RETRY loopback fetch that rides out a
+    warming central instead of dying on one blip."""
+    try:
+        from hugpy_server.app.routes.worker_routes import workers_payload
+        rows = workers_payload()
+        if isinstance(rows, list):
+            return rows
+        logger.info("in-process worker roster returned %s; using loopback fetch", type(rows).__name__)
+    except Exception:  # noqa: BLE001 — fall back to the resilient loopback fetch
+        logger.info("in-process worker roster unavailable; using loopback fetch", exc_info=True)
+    from hugpy_curation.review.fleet_grading import retrying_control_request
+    return retrying_control_request(client, "/llm/workers", "workers", log=log)
+
+
 def _restore_persisted_state(reason):
     """Restore worker state from the run's PERSISTED snapshot, for a run that
     ended terminally (cancelled / interrupted) at a central restart — the thread
@@ -609,6 +680,10 @@ def benchmark_resume_orphaned(reason="central restarted"):
             if not _benchmark_orphaned(state):
                 return None
             now = _time.time()
+            # Which phase was interrupted decides how it resumes: a run
+            # interrupted while JUDGING resumes PHASE 2 only (re-judge the pending
+            # outputs), never re-running collection.
+            prev_status = state.get("status")
             interrupted_at = state.get("heartbeat") or state.get("updated")
             state["interrupted_at"] = interrupted_at
             if state.get("cancel_requested"):
@@ -636,31 +711,48 @@ def benchmark_resume_orphaned(reason="central restarted"):
             _benchmark_reload()
             state = _BENCHMARK
             now = _time.time()
-            done = _benchmark_done_keys(state.get("results"))
-            inflight = _benchmark_inflight(state, done)
             params = dict(state.get("params") or {})
             params.setdefault("tokens", state.get("tokens") or 128)
             params.setdefault("models", state.get("models") or [])
             params.setdefault("workers", state.get("workers") or [])
-            restarted = dict(state.get("restarted_lanes") or {})
-            if inflight:
-                restarted["|".join(str(k) for k in inflight)] = _RESTART_REASON
-            state.update(status="resuming", resume_count=count + 1, restarted_lanes=restarted,
-                         heartbeat=now, owner=_benchmark_owner(), finished=None, error=None,
-                         resumed_from={"run_id": state.get("run_id"), "interrupted_at": interrupted_at,
-                                       "reason": reason, "resume": count + 1,
-                                       "completed_rows": len(done),
-                                       "restarted_lane": list(inflight) if inflight else None,
-                                       "checkpoint": state.get("checkpoint")})
-            state.setdefault("events", []).append(
-                {"at": now, "kind": "resume", "message": (
-                    f"{reason}: resuming run {state.get('run_id')} — {len(done)} rows already "
-                    f"recorded are skipped" + (f"; lane {'/'.join(str(k) for k in inflight)} "
-                                               f"{_RESTART_REASON}" if inflight else ""))})
-            _benchmark_updated()
             run_id = state.get("run_id")
-        _start_benchmark_thread(run_id, params, done=done)
-        logger.warning("benchmark %s resumed after a central restart (%d rows done)", run_id, len(done))
+            if prev_status == "judging":
+                # PHASE 2 was interrupted: resume judging only. The collected
+                # outputs are already persisted; the judge grades the ones still
+                # pending and skips those already judged.
+                resume_phase, done = "judge", None
+                state.update(status="judging", resume_count=count + 1, heartbeat=now,
+                             owner=_benchmark_owner(), finished=None, error=None,
+                             resumed_from={"run_id": run_id, "interrupted_at": interrupted_at,
+                                           "reason": reason, "resume": count + 1, "phase": "judge",
+                                           "checkpoint": state.get("checkpoint")})
+                state.setdefault("events", []).append(
+                    {"at": now, "kind": "resume", "message": (
+                        f"{reason}: resuming judging for run {run_id} — already-judged "
+                        f"rows are skipped")})
+            else:
+                resume_phase = "collect"
+                done = _benchmark_done_keys(state.get("results"))
+                inflight = _benchmark_inflight(state, done)
+                restarted = dict(state.get("restarted_lanes") or {})
+                if inflight:
+                    restarted["|".join(str(k) for k in inflight)] = _RESTART_REASON
+                state.update(status="resuming", resume_count=count + 1, restarted_lanes=restarted,
+                             heartbeat=now, owner=_benchmark_owner(), finished=None, error=None,
+                             resumed_from={"run_id": run_id, "interrupted_at": interrupted_at,
+                                           "reason": reason, "resume": count + 1,
+                                           "completed_rows": len(done),
+                                           "restarted_lane": list(inflight) if inflight else None,
+                                           "checkpoint": state.get("checkpoint")})
+                state.setdefault("events", []).append(
+                    {"at": now, "kind": "resume", "message": (
+                        f"{reason}: resuming run {run_id} — {len(done)} rows already "
+                        f"recorded are skipped" + (f"; lane {'/'.join(str(k) for k in inflight)} "
+                                                   f"{_RESTART_REASON}" if inflight else ""))})
+            _benchmark_updated()
+        _start_benchmark_thread(run_id, params, done=done, phase=resume_phase)
+        logger.warning("benchmark %s resumed after a central restart (phase=%s, %d rows done)",
+                       run_id, resume_phase, len(done or ()))
         return "resumed"
     finally:
         try:
@@ -764,6 +856,40 @@ def benchmark_run():
     return jsonify(_benchmark_public()), 202
 
 
+@review_bp.route("/llm/benchmark/judge", methods=["POST"])
+def benchmark_judge():
+    """Operator-triggered PHASE 2 for the CURRENT run (finished or partial):
+    (re)judge every collected output still pending.
+
+    Refuses (409) while a run is still collecting or judging, and when there is
+    nothing collected to judge. The judge is the agent default brain, resolved by
+    key and placed by central — never pinned, never a different judge; an item
+    whose judge cannot be served stays unjudged with its recorded reason."""
+    import time as _time
+    with _benchmark_lock():
+        _benchmark_reload()
+        status = _BENCHMARK.get("status")
+        if status in _BENCHMARK_ACTIVE:
+            return jsonify({"status": status, "run_id": _BENCHMARK.get("run_id"),
+                            "reason": f"run is {status}; judging is already scheduled"}), 409
+        run_id = _BENCHMARK.get("run_id")
+        results = [r for r in (_BENCHMARK.get("results") or []) if isinstance(r, dict)]
+        if not run_id or not results:
+            return jsonify({"status": status, "run_id": run_id,
+                            "reason": "no collected run to judge"}), 409
+        from hugpy_curation.review.fleet_grading import _judge_pending
+        pending = len(_judge_pending(results))
+        params = dict(_BENCHMARK.get("params") or {})
+        _BENCHMARK.update(status="judging", finished=None, error=None,
+                          heartbeat=_time.time(), owner=_benchmark_owner())
+        _BENCHMARK.setdefault("events", []).append(
+            {"at": _time.time(), "kind": "judge-now",
+             "message": f"operator started judging {pending} pending item(s) for run {run_id}"})
+        _benchmark_updated()
+    _start_benchmark_thread(run_id, params, phase="judge")
+    return jsonify(_benchmark_public()), 202
+
+
 def _benchmark_failure_summary(results, plan, params, started_at=None):
     """Why a run produced no completed allocation, from its own rows: the
     failure classes with counts, the first recorded reason per class, and the
@@ -796,10 +922,16 @@ def _benchmark_failure_summary(results, plan, params, started_at=None):
             "elapsed_s": elapsed, "failure_classes": by_class}
 
 
-def _start_benchmark_thread(run_id, params, done=None):
-    """Run (or continue, with ``done`` = result keys already recorded) the
-    benchmark ``run_id`` on a daemon thread of THIS process. Every report is
-    persisted (``_benchmark_updated``) so a restart can resume from it."""
+def _start_benchmark_thread(run_id, params, done=None, phase="collect"):
+    """Run the benchmark ``run_id`` on a daemon thread of THIS process. Every
+    report is persisted (``_benchmark_updated``) so a restart can resume from it.
+
+    ``phase`` picks which half runs (operator ruling 2026-09-24, the two-phase
+    split): ``collect`` runs PHASE 1 (collect+persist every raw output, deferring
+    the judge) with ``done`` = result keys already recorded, then schedules PHASE
+    2 automatically once the lot is done; ``judge`` runs PHASE 2 ONLY (judge the
+    already-collected outputs) — used by the restart-resume of a run interrupted
+    while judging, and by the operator's judge-now."""
     import threading
     import time as _time
 
@@ -825,6 +957,19 @@ def _start_benchmark_thread(run_id, params, done=None):
             elif kind == "call" and isinstance(value, dict):
                 _BENCHMARK.setdefault("calls", []).append(value)
                 _persist_benchmark_call(value)
+            elif kind == "judge-result" and isinstance(value, dict):
+                # PHASE 2: a re-graded result. Replace the collected row in place
+                # (by result_key) and update ONLY its DB grade columns.
+                from hugpy_curation.review.fleet_grading import result_key
+                key = result_key(value)
+                results = _BENCHMARK.setdefault("results", [])
+                results[:] = [value if (isinstance(r, dict) and result_key(r) == key) else r
+                              for r in results]
+                _persist_benchmark_grade(value)
+            elif kind == "judge-progress" and isinstance(value, dict):
+                _BENCHMARK["judge_progress"] = value
+            elif kind == "judge-summary" and isinstance(value, dict):
+                _BENCHMARK["judge_summary"] = value
             elif kind == "plan" and isinstance(value, dict):
                 _BENCHMARK["plan"] = value
                 _BENCHMARK.setdefault("progress", {})["total"] = value.get("runnable", 0)
@@ -858,7 +1003,7 @@ def _start_benchmark_thread(run_id, params, done=None):
             from hugpy_curation.review.fleet_grading import (
                 BenchmarkControl,
                 Client,
-                response_rows,
+                judge_collected,
                 run_capacity_benchmark,
             )
             from hugpy_curation.review import worker_state
@@ -868,32 +1013,63 @@ def _start_benchmark_thread(run_id, params, done=None):
                             key=os.environ.get("HUGPY_BENCHMARK_API_KEY", ""),
                             operator_token=os.environ.get("HUGPY_OPERATOR_TOKEN", ""),
                             timeout=60)
-            workers = response_rows(client.request("/llm/workers"), "workers")
             control = BenchmarkControl()
             with _benchmark_lock():
                 _BENCHMARK["control"] = control
-                # A resumed run restores from the SNAPSHOT persisted before the
-                # restart — never re-snapshot the state the interrupted run left
-                # mutated (operator ruling 2026-09-24).
-                snap = (_BENCHMARK.get("state") or {}).get("snapshot")
-            if not snap:
-                snap = worker_state.snapshot(client, params.get("workers") or None,
-                                             params.get("models") or None)
-                report("state-snapshot", snap)
-            extra = {}
-            for key in ("suite", "budgets"):
-                if params.get(key):
-                    extra[key] = params[key]
-            for key in ("with_judge", "resume", "force", "force_cold"):
-                if params.get(key):
-                    extra[key] = True
-            if done:
-                extra["done"] = done
-            try:
-                run_capacity_benchmark(client, workers, params.get("tokens") or 128, control, report,
-                                       model_ids=params.get("models") or None,
-                                       worker_ids=params.get("workers") or None,
-                                       cold_store=_ColdStore(), **extra)
+            if phase == "judge":
+                # PHASE 2 ONLY (a judging run resumed after a restart, or the
+                # operator's judge-now): grade the already-collected outputs. No
+                # worker-state snapshot/restore — collection already restored it,
+                # and the judge is placed by central's ordinary path.
+                with _benchmark_lock():
+                    collected = [r for r in _BENCHMARK.get("results", []) if isinstance(r, dict)]
+                judge_collected(client, collected, report, stop=control)
+                status, error = "complete", None
+            else:
+                # In-process first, then a bounded-retry loopback fetch: a transient
+                # here (central warming up after the promotion that resumed this run)
+                # must never kill the run — it retries, then records honestly.
+                workers = _benchmark_workers(client, log=report)
+                with _benchmark_lock():
+                    # A resumed run restores from the SNAPSHOT persisted before the
+                    # restart — never re-snapshot the state the interrupted run left
+                    # mutated (operator ruling 2026-09-24).
+                    snap = (_BENCHMARK.get("state") or {}).get("snapshot")
+                if not snap:
+                    snap = worker_state.snapshot(client, params.get("workers") or None,
+                                                 params.get("models") or None)
+                    report("state-snapshot", snap)
+                extra = {}
+                for key in ("suite", "budgets"):
+                    if params.get(key):
+                        extra[key] = params[key]
+                for key in ("with_judge", "resume", "force", "force_cold"):
+                    if params.get(key):
+                        extra[key] = True
+                if done:
+                    extra["done"] = done
+                try:
+                    # PHASE 1 (collect): defer_judge=True — every raw output and the
+                    # deterministic check are persisted as the run goes; the brain
+                    # judge does NOT run inline.
+                    run_capacity_benchmark(client, workers, params.get("tokens") or 128, control, report,
+                                           model_ids=params.get("models") or None,
+                                           worker_ids=params.get("workers") or None,
+                                           cold_store=_ColdStore(), defer_judge=True, **extra)
+                finally:
+                    # Restore every involved worker's backed-up state after
+                    # COLLECTION (completion, cancel, failure, exception) — before
+                    # judging, so PHASE 2 grades with the models under test unloaded
+                    # (no contention) and a restart during judging never leaks
+                    # residency. A crash that kills the process before this runs is
+                    # covered by the resume path, which restores from the snapshot.
+                    if client is not None and snap is not None:
+                        try:
+                            report("state-restore", worker_state.restore(client, snap))
+                        except Exception as exc2:  # noqa: BLE001 — restore must never mask the run
+                            logger.exception("benchmark worker-state restore failed")
+                            report("state-restore", {"workers": [],
+                                                     "error": f"restore raised: {type(exc2).__name__}: {exc2}"})
                 # Do not call an all-error/timeout run successful merely because
                 # the worker loop returned. A model that answered normally should
                 # have at least one completed allocation result.
@@ -902,24 +1078,21 @@ def _start_benchmark_thread(run_id, params, done=None):
                     plan = dict(_BENCHMARK.get("plan") or {})
                 completed_results = [r for r in all_results if r.get("status") == "complete"]
                 if completed_results:
+                    # PHASE 2 is scheduled automatically once the collection lot is
+                    # done, unless the operator cancelled the run (its collected rows
+                    # stay unjudged for a later judge-now).
+                    if not control.is_set():
+                        with _benchmark_lock():
+                            if _BENCHMARK.get("run_id") == run_id:
+                                _BENCHMARK["status"] = "judging"
+                                _benchmark_updated()
+                        judge_collected(client, all_results, report, stop=control)
                     status, error = "complete", None
                 else:
                     # The reason is the recorded rows themselves, never a canned sentence.
                     with _benchmark_lock():
                         started_at = _BENCHMARK.get("started")
                     status, error = "failed", _benchmark_failure_summary(all_results, plan, params, started_at)
-            finally:
-                # Restore every involved worker's backed-up state on completion,
-                # cancel, failure, or exception (try/finally). A crash that kills
-                # the process before this runs is covered by the resume path,
-                # which restores from the persisted snapshot.
-                if client is not None and snap is not None:
-                    try:
-                        report("state-restore", worker_state.restore(client, snap))
-                    except Exception as exc2:  # noqa: BLE001 — restore must never mask the run
-                        logger.exception("benchmark worker-state restore failed")
-                        report("state-restore", {"workers": [],
-                                                 "error": f"restore raised: {type(exc2).__name__}: {exc2}"})
         except Exception as exc:  # background failure must remain visible
             logger.exception("capacity benchmark failed")
             status, error = "failed", f"{type(exc).__name__}: {exc}"

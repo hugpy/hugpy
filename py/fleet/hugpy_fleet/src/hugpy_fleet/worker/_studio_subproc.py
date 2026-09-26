@@ -177,6 +177,7 @@ def run_render_subprocess(
     timeout_s: "float | None" = None,
     *,
     on_progress=None,
+    on_child_pid=None,
     _target=_child_main,
     _ctx=None,
     _poll_s: float = 0.5,
@@ -196,6 +197,14 @@ def run_render_subprocess(
     poller and the console's bar, sees movement WITHIN a render. Best-effort: a
     throwing sink is logged and ignored. None (default) drops the frames.
 
+    ``on_child_pid`` (2026-09-24) is called ONCE with the spawned render child's
+    pid right after it starts — the seam the studio VRAM reserve uses to
+    re-attribute its non-evictable hold from the worker pid (which holds no torch
+    VRAM) to the process that actually holds the card, so the render is a
+    first-class, MEASURED external resident in the same eviction ledger as an LLM
+    slot rather than an unattributed own-venv squatter. Best-effort: a throwing
+    sink is logged and ignored; None (default) skips it.
+
     ``_target`` / ``_ctx`` / ``_poll_s`` are test seams (inject a fake child target,
     context, or a faster poll); production uses the real spawn context + child.
     """
@@ -208,6 +217,11 @@ def run_render_subprocess(
         target=_target, args=(spec_dict, child_conn, cancel_event), daemon=False)
     proc.start()
     child_conn.close()  # only the child writes; parent keeps the read end
+    if on_child_pid is not None:
+        try:
+            on_child_pid(proc.pid)
+        except Exception:  # noqa: BLE001 — pid re-attribution never fails a render
+            logger.debug("studio render on_child_pid sink failed", exc_info=True)
 
     deadline = time.monotonic() + float(timeout_s)
     cancel_deadline: "float | None" = None

@@ -431,9 +431,16 @@ def test_assembly_cut_full_plus_full_synthetic():
 
 # --------------------------------------------------------------------------- #
 # [6] Runner (REAL id-movie, GPU-LESS): an id-movie on THIS box fails segment 0 with
-#     the VACE path's GRACEFUL Err (DEPS_MISSING), naming the segment + capability
-#     id_lock. No monkeypatch — proves the real route-to-VACE + graceful-degrade path
-#     (there is NO synthetic id_lock tier; a graceful Err is the honest result).
+#     a GRACEFUL Err naming the segment + capability id_lock. No monkeypatch — proves the
+#     real route-to-VACE + graceful-degrade path (there is NO synthetic id_lock tier; a
+#     graceful Err is the honest result).
+#
+# RULING UPDATE (2026-09-24): video is placed like an LLM. A REAL id_lock render (a real
+# Wan-VACE model at the bumped VACE budget) is NO LONGER run on central's GPU-less
+# in-process path — which only ever produced deps_missing. On a box with NO studio worker
+# it is a NAMED placement refusal (``no_studio_worker``) that STILL names the segment +
+# id_lock and STILL records the segment as failed with the bumped budget. The old
+# deps_missing/no_gpu/weights_missing codes now come only FROM a worker that took the job.
 # --------------------------------------------------------------------------- #
 def test_real_id_movie_graceful_err():
     if not (_FFMPEG and _FFPROBE and _PIL):
@@ -453,9 +460,12 @@ def test_real_id_movie_graceful_err():
         # honest per-segment Err — NOT a hang/raise/500, NOT a synthetic fallback.
         assert res.ok is False, "an id-movie segment that can't run VACE must fail as DATA"
         assert res.error is not None
-        assert res.error.code in ("deps_missing", "no_gpu", "weights_missing", "vram_exceeded"), (
-            f"this GPU-less box must surface the VACE path's graceful Err; got "
-            f"{res.error.code}: {res.error.message}")
+        # RULING (2026-09-24): a real id_lock render with no studio worker refuses by name
+        # (placement), never the GPU-less in-process deps_missing.
+        assert res.error.code in (
+            "no_studio_worker", "studio_model_not_on_worker", "no_feasible_studio_worker"), (
+            f"this box has no studio worker, so a real id_lock render must surface a NAMED "
+            f"placement refusal; got {res.error.code}: {res.error.message}")
         # the JobError names segment 0 + capability id_lock.
         assert "segment 0" in res.error.message and "id_lock" in res.error.message, (
             f"error must name the failing segment + capability; got {res.error.message!r}")
@@ -483,7 +493,7 @@ CHECKS = [
      test_runner_id_movie_still_carries_both),
     ("assembly: plain cut movie renders SYNTHETICALLY done/ok — parent FULL + child FULL, movie.json cut",
      test_assembly_cut_full_plus_full_synthetic),
-    ("runner: REAL id-movie on this box -> segment 0 graceful Err (deps_missing), names segment + id_lock",
+    ("runner: REAL id-movie, no worker -> segment 0 NAMED placement refusal (no_studio_worker), names segment + id_lock",
      test_real_id_movie_graceful_err),
 ]
 

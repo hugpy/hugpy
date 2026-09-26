@@ -43,6 +43,7 @@ export default function ActivityQueue() {
             transport: null,
             kind: e.kind || 'chat',
             model: e.model || e.model_key,
+            prompt: e.prompt || '',
             worker: null, principal: null,
             elapsed: e.elapsed, tokens: e.tokens,
           }))
@@ -115,6 +116,13 @@ export default function ActivityQueue() {
                 {j.elapsed}s
                 {j.tokens ? ` · ${j.tokens} tok` : ''}
               </span>
+              <span className="aq-id" title={j.id}>{j.id}</span>
+              {j.prompt ? (
+                <details className="aq-prompt">
+                  <summary>Prompt</summary>
+                  <pre>{j.prompt}</pre>
+                </details>
+              ) : null}
               {j.placement && placementLine(j.placement) ? (
                 <span
                   className={`aq-placement${isExternal(j.placement) ? ' aq-placement-external' : ''}`}

@@ -243,10 +243,16 @@ def test_produce_v2v_ghost_source_is_source_missing():
 
 # --------------------------------------------------------------------------- #
 # [7] Bus adapter: run_studio_i2v with a v2v spec (real tiny mp4, no start_image)
-#     -> JobResult(ok=False, error.code=="deps_missing"), through the live-shaped
-#     spec->adapter->produce->runner path; never raises.
+#     -> JobResult(ok=False, error.code=="no_studio_worker"), through the live-shaped
+#     spec->adapter->placement path; never raises.
+#
+# RULING UPDATE (2026-09-24): video is placed like an LLM — a REAL-model render (v2v
+# binds a real Wan-VACE model at 6GB) is NOT run on central's GPU-less in-process path
+# (which only ever produced deps_missing). With no studio worker resolvable it is a NAMED
+# placement refusal (``no_studio_worker``), not the old in-process ``deps_missing``. The
+# honest per-worker deps_missing now only comes FROM a worker that actually took the job.
 # --------------------------------------------------------------------------- #
-def test_run_studio_i2v_v2v_spec_deps_missing():
+def test_run_studio_i2v_v2v_spec_placement_refusal():
     if not _FFMPEG:
         print("      (ffmpeg unavailable — skipping bus-adapter v2v check)")
         return
@@ -263,8 +269,12 @@ def test_run_studio_i2v_v2v_spec_deps_missing():
         result = run_studio_i2v(spec, job_id="vace-bus-1")
         assert result.ok is False, f"a v2v bus job must be ok=False on this box; got {result}"
         assert result.error is not None, "a failed job must carry a JobError"
-        assert result.error.code == "deps_missing", (
-            f"v2v through the bus adapter must map to deps_missing; got {result.error.code}")
+        # RULING: a real-model render with no studio worker refuses by name (placement),
+        # never the GPU-less in-process deps_missing.
+        assert result.error.code == "no_studio_worker", (
+            f"v2v through the bus adapter with no studio worker must refuse "
+            f"no_studio_worker; got {result.error.code}")
+        assert result.error.retryable is True
     finally:
         media_bus.is_cancelling = orig
         shutil.rmtree(out_root, ignore_errors=True)
@@ -315,8 +325,8 @@ CHECKS = [
      test_produce_v2v_no_source_is_source_missing),
     ("produce: v2v with a nonexistent source -> Err(source_missing)",
      test_produce_v2v_ghost_source_is_source_missing),
-    ("bus adapter: run_studio_i2v(v2v spec, real mp4) -> JobResult(ok=False, deps_missing)",
-     test_run_studio_i2v_v2v_spec_deps_missing),
+    ("bus adapter: run_studio_i2v(v2v spec, real mp4), no worker -> JobResult(ok=False, no_studio_worker)",
+     test_run_studio_i2v_v2v_spec_placement_refusal),
     ("route: POST /video/studio/i2v {capability:v2v, source_video, prompt} -> 200 {job_id}",
      test_route_v2v_source_video_200),
     ("import safety: importing wan_vace pulls no torch/diffusers/transformers/bitsandbytes",

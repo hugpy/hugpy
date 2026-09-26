@@ -1531,7 +1531,28 @@ def _check_gguf_config(rep: ModelReport, row: dict, ctx: Context, files: dict, f
                             + (f"; it also exceeds every online worker's RAM+VRAM (largest {_gb(max_mem)})" if too_big else ""),
                             fix=(f"unservable on this fleet (needs > {_gb(max_mem)} RAM+VRAM): drop it or place it on a bigger node"
                                  if too_big else
-                                 f"serve_overrides.json[{key!r}] += {{\"n_cpu_moe\": 999, \"n_gpu_layers\": -1}}")))
+                                 # DENSE BACKBONE FIRST (operator ruling 2026-09-25:
+                                 # nothing should suggest evacuating GPU resources
+                                 # for no need). A MoE's card holds the dense
+                                 # backbone + as many EXPERT layers as fit — NOT
+                                 # the whole file — so a static n_cpu_moe:999 (ALL
+                                 # experts to CPU) idles the card whenever the
+                                 # backbone fits it. Recommend a STATED gpu_mem_gib
+                                 # contract sized to the card instead: it flips the
+                                 # worker into moe_dense_first_plan, which
+                                 # auto-sizes n_cpu_moe to fill VRAM (backbone +
+                                 # the experts that fit, rest spilled). 999 is
+                                 # reserved for the genuinely-can't-hold-experts
+                                 # case — the backbone alone exceeding the card —
+                                 # which lands in the too_big / dense branches, not
+                                 # here.
+                                 f"serve_overrides.json[{key!r}] += {{\"gpu_mem_gib\": "
+                                 f"{max(1.0, ctx.max_gpu / (2 ** 30) * 0.85):.1f}, "
+                                 f"\"n_gpu_layers\": -1}} (a card-sized budget on "
+                                 f"the {_gb(ctx.max_gpu)} GPU; the worker's "
+                                 f"moe_dense_first_plan auto-sizes n_cpu_moe to "
+                                 f"fill it — do NOT hardcode n_cpu_moe:999, which "
+                                 f"strands every expert in RAM)")))
         reserve = 2 ** 29
         if (not ec) and ov.get("n_gpu_layers") == -1 and ctx.online and all(
                 eff_bytes + reserve > ctx.gpu_totals[w["name"]] for w in ctx.online):

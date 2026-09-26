@@ -17,6 +17,16 @@ import './ReviewPanel.css'
 
 const POLL_MS = 6000
 
+// A benchmark is ACTIVE while it collects (running / resuming — central restarted
+// mid-collection and is continuing the same run_id) or JUDGES (phase 2, the
+// scheduled judge pass over the collected outputs) — the poll keeps going through
+// all of them.
+const BENCHMARK_ACTIVE = ['running', 'resuming', 'judging']
+// A central restart (a package promotion) briefly 502s the status poll. The run
+// is persisted and resumes when central is back, so this reads as "will resume",
+// not a failure — and the poll keeps the last status and keeps polling.
+const CENTRAL_RESTART_NOTE = 'central restarting — run will resume (kept the last status)'
+
 // ── formatters ─────────────────────────────────────────────────────────────
 const fmtBytes = n => {
   if (n == null) return '—'
@@ -88,6 +98,10 @@ export default function ReviewPanel() {
   const [note, setNote]       = useState(null)
   const [busy, setBusy]       = useState(false)
   const [benchmark, setBenchmark] = useState({ status: 'idle', results: [], events: [] })
+  // The last status the poll saw, read inside loadBenchmark's catch (which has a
+  // stable [] identity) so a failed poll can tell a mid-run central restart from
+  // an ordinary refresh failure.
+  const benchmarkStatusRef = useRef(benchmark.status)
   const [benchmarkModel, setBenchmarkModel] = useState('')
   // Models ticked for grading in the workbook picker (multi-select). Empty = no
   // explicit pick; the run then falls back to the model text box, and if that is
@@ -117,8 +131,15 @@ export default function ReviewPanel() {
 
   const loadBenchmark = useCallback(() => {
     fetchJson('/api/llm/benchmark/status')
-      .then(d => { if (d && d.status) setBenchmark(d) })
-      .catch(e => setNote(`benchmark status refresh failed: ${e.message} (kept the last status)`))
+      .then(d => {
+        if (d && d.status) {
+          setBenchmark(d)
+          setNote(n => (n === CENTRAL_RESTART_NOTE ? null : n))   // recovered
+        }
+      })
+      .catch(e => setNote(BENCHMARK_ACTIVE.includes(benchmarkStatusRef.current)
+        ? CENTRAL_RESTART_NOTE
+        : `benchmark status refresh failed: ${e.message} (kept the last status)`))
   }, [])
 
   const loadWorkers = useCallback(() => {
@@ -165,8 +186,12 @@ export default function ReviewPanel() {
   // first load
   useEffect(() => { loadCriteria(); loadRunNames(); loadBenchmark(); loadWorkers() }, [loadCriteria, loadRunNames, loadBenchmark, loadWorkers])
 
+  // Keep the ref in step with EVERY status change (poll, run start, cancel) so a
+  // failed poll's catch reads the true last status.
+  useEffect(() => { benchmarkStatusRef.current = benchmark.status }, [benchmark.status])
+
   useEffect(() => {
-    if (benchmark.status !== 'running') return undefined
+    if (!BENCHMARK_ACTIVE.includes(benchmark.status)) return undefined
     const t = setInterval(loadBenchmark, 2500)
     return () => clearInterval(t)
   }, [benchmark.status, loadBenchmark])
@@ -264,6 +289,17 @@ export default function ReviewPanel() {
       .catch(e => setNote(`benchmark failed to start: ${e.message}`))
   }, [benchmark.status, benchmarkModel, gradeModels, chosenWorkers, eligibleWorkers, workersList])
 
+  // PHASE 2 on demand: grade the collected outputs still pending (a finished or
+  // partial run). Central refuses (409) while a run is still collecting/judging
+  // or when nothing has been collected.
+  const judgeNow = useCallback(() => {
+    setNote('starting judging of collected outputs…')
+    fetchJson('/api/llm/benchmark/judge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+    }).then(d => { setBenchmark(d); setNote('judging started') })
+      .catch(e => setNote(`judge failed to start: ${e.message}`))
+  }, [])
+
   const cancelBenchmark = useCallback((scope, row = {}) => {
     fetchJson('/api/llm/benchmark/cancel', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -313,8 +349,10 @@ export default function ReviewPanel() {
                 onToggle={e => setFcOpen(e.currentTarget.open)}>
         <summary className="rv-benchmark-summary">
           <span className="rv-benchmark-title">Fleet capacity test</span>
-          <span className="rv-dim">{benchmark.status === 'running'
-            ? `● running ${benchmark.progress?.completed || 0}/${benchmark.progress?.total || benchmark.plan?.runnable || 0}`
+          <span className="rv-dim">{benchmark.status === 'running' || benchmark.status === 'resuming'
+            ? `● collecting ${benchmark.progress?.completed || 0}/${benchmark.progress?.total || benchmark.plan?.runnable || 0}`
+            : benchmark.status === 'judging'
+            ? `● judging ${benchmark.judge_progress?.judged || 0}/${benchmark.judge_progress?.total || 0}`
             : `${benchmark.status || 'idle'} · ${benchmark.results?.length || 0} config(s)${benchmark.finished ? ` · last run ${fmtAgo(benchmark.finished)}` : ''}`}</span>
         </summary>
         <div className="rv-benchmark-head">
@@ -325,7 +363,10 @@ export default function ReviewPanel() {
               : benchmarkModel.trim() ? `▶ Test ${benchmarkModel.trim()} on ${chosenWorkers.length} worker(s)`
               : `▶ Grade ALL central models on ${chosenWorkers.length === eligibleWorkers.length ? 'all' : chosenWorkers.length} worker(s)`}
           </button>
-          {benchmark.status === 'running' && <button onClick={() => cancelBenchmark('execution')}>■ Cancel execution</button>}
+          {(benchmark.status === 'running' || benchmark.status === 'resuming') && <button onClick={() => cancelBenchmark('execution')}>■ Cancel execution</button>}
+          {benchmark.status === 'judging' && <button onClick={() => cancelBenchmark('execution')}>■ Cancel judging</button>}
+          {!BENCHMARK_ACTIVE.includes(benchmark.status) && (benchmark.results?.length > 0) &&
+            <button onClick={judgeNow} title="Phase 2: grade every collected output still awaiting the judge (the agent default brain, placed by central)">⚖ Judge now</button>}
         </div>
         <div className="rv-benchmark-meta">
           {gradeModels.length
@@ -371,6 +412,13 @@ export default function ReviewPanel() {
           {benchmark.report && <span title={benchmark.report}>report: {benchmark.report.split('/').pop()}</span>}
           {benchmark.error && <span className="rv-run-err">{runErrorText(benchmark.error)}</span>}
         </div>
+        {(benchmark.status === 'judging' || benchmark.judge_summary) && benchmark.judge_progress &&
+          <div className="rv-benchmark-meta">
+            <span className="rv-dim">judge (phase 2): {benchmark.judge_progress.judged || 0}/{benchmark.judge_progress.total || 0} judged
+              {benchmark.judge_progress.pending ? ` · ${benchmark.judge_progress.pending} unjudged` : ''}
+              {benchmark.judge_progress.revised ? ` · ${benchmark.judge_progress.revised} revised by judge` : ''}
+              {benchmark.judge_progress.refused ? ` · ${benchmark.judge_progress.refused} judge refusal(s)` : ''}</span>
+          </div>}
         {benchmarkModel.trim() && <div className="rv-benchmark-meta"><ModelLiveState modelKey={benchmarkModel.trim()} /></div>}
        </details>
         {/* Live progress, pass/fail counts, avg tok/s, the activity log and the

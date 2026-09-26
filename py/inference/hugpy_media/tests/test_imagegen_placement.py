@@ -5,11 +5,16 @@ the honest spill mechanism is diffusers' own CPU-offload API, driven by the SAME
 placement seam the transformers loaders read (spill.n_gpu_layers_intent /
 alloc_mode_env — no parallel intent reader):
 
-  * CPU-leaning intent (ram-only / n_gpu_layers "off"/0) -> enable_sequential_cpu_offload()
-  * max-ram alloc_mode                                   -> enable_model_cpu_offload()
-  * default (gpu-only / auto / no intent, or no cuda)    -> today's .to(cuda/cpu)
-  * a pipeline class lacking the offload method (genuine capability gap) is
-    logged ONCE and falls back to .to(cuda) — never a silent mode ignore.
+The cpu-vs-gpu decision is the CALLER's (the ``cuda`` flag, computed in
+_load_diffusers_pipeline from ram-only intent + the worker's evict-to-fit
+reclaim); _place_diffusers_pipeline only applies it:
+  * cuda=False                                 -> .to("cpu") FULLY on CPU (GPU not
+    touched; enable_sequential_cpu_offload would stream THROUGH CUDA and OOM on a
+    full card — incident 2026-09-25). ram-only that can't fit arrives as cuda=False.
+  * cuda=True + max-ram alloc_mode             -> enable_model_cpu_offload()
+  * cuda=True otherwise (gpu-only / auto / ram-only UPGRADED after reclaim) -> .to("cuda")
+  * a pipeline class lacking the max-ram offload method (genuine capability gap)
+    is logged ONCE and falls back to .to(cuda) — never a silent mode ignore.
 
 No real diffusers load: a fake pipe records which of {.to, enable_model_cpu_offload,
 enable_sequential_cpu_offload} was invoked. The intent is driven through the REAL
@@ -122,17 +127,34 @@ def test_gpu_only_intent_goes_to_cuda():
         _clear_env()
 
 
-def test_cpu_intent_uses_sequential_offload():
-    """ram-only / CPU-leaning intent -> enable_sequential_cpu_offload()."""
+def test_cpu_decision_drives_cpu_placement():
+    """The caller's cuda=False (ram-only that can't fit) -> .to('cpu') FULLY on
+    CPU, GPU untouched — regardless of the intent env (the decision was made
+    upstream, not re-derived here)."""
     for val in ("off", "0", "cpu"):
         _set_env(HUGPY_N_GPU_LAYERS=val)
         try:
             pipe = _FakePipe()
-            label = ig._place_diffusers_pipeline(pipe, cuda=True, model_key="m")
-            assert pipe.calls == [("enable_sequential_cpu_offload", None)], (val, pipe.calls)
-            assert "sequential-offload" in label, label
+            label = ig._place_diffusers_pipeline(pipe, cuda=False, model_key="m")
+            assert pipe.calls == [("to", "cpu")], (val, pipe.calls)
+            assert label == "cpu", label
         finally:
             _clear_env()
+
+
+def test_ram_only_upgraded_to_gpu_places_on_cuda():
+    """When ram-only was UPGRADED (evict-to-fit freed the card) the caller passes
+    cuda=True — _place must place on the GPU, NEVER re-read the (still ram-only)
+    intent and send the now-fitting model back to the CPU (that would undo the
+    upgrade after evicting the squatter)."""
+    _set_env(HUGPY_N_GPU_LAYERS="off")   # intent still ram-only in env
+    try:
+        pipe = _FakePipe()
+        label = ig._place_diffusers_pipeline(pipe, cuda=True, model_key="m")
+        assert pipe.calls == [("to", "cuda")], pipe.calls
+        assert label == "cuda", label
+    finally:
+        _clear_env()
 
 
 def test_max_ram_uses_model_offload():
@@ -147,26 +169,26 @@ def test_max_ram_uses_model_offload():
         _clear_env()
 
 
-def test_cpu_intent_wins_over_max_ram():
-    """Explicit CPU-only intent + max-ram both set -> the stronger CPU-only
-    (sequential) placement is chosen (matches the seam's own precedence: the
-    n_gpu_layers 'cpu' intent is the operator saying 'off the card')."""
+def test_cpu_decision_wins_regardless_of_alloc_mode():
+    """cuda=False forces the CPU even if max-ram is also set — the caller already
+    decided CPU (ram-only couldn't fit after eviction); no CUDA streaming."""
     _set_env(HUGPY_N_GPU_LAYERS="off", HUGPY_ALLOC_MODE="max-ram")
     try:
         pipe = _FakePipe()
-        ig._place_diffusers_pipeline(pipe, cuda=True, model_key="m")
-        assert pipe.calls == [("enable_sequential_cpu_offload", None)], pipe.calls
+        label = ig._place_diffusers_pipeline(pipe, cuda=False, model_key="m")
+        assert pipe.calls == [("to", "cpu")], pipe.calls
+        assert label == "cpu", label
     finally:
         _clear_env()
 
 
 def test_capability_gap_logged_and_falls_back_to_cuda():
-    """A pipeline class WITHOUT enable_sequential_cpu_offload asked for ram-only
-    -> honest fallback to .to('cuda') (the mode is not silently ignored — the
-    label says the pipeline can't honor it)."""
-    _set_env(HUGPY_N_GPU_LAYERS="off")
+    """A pipeline class WITHOUT enable_model_cpu_offload asked for max-ram ->
+    honest fallback to .to('cuda') (the mode is not silently ignored — the label
+    says the pipeline can't honor it)."""
+    _set_env(HUGPY_ALLOC_MODE="max-ram")
     try:
-        pipe = _FakePipe(offload_methods=("enable_model_cpu_offload",))  # no sequential
+        pipe = _FakePipe(offload_methods=("enable_sequential_cpu_offload",))  # no model
         label = ig._place_diffusers_pipeline(pipe, cuda=True, model_key="m")
         assert pipe.calls == [("to", "cuda")], pipe.calls
         assert "unsupported" in label, label

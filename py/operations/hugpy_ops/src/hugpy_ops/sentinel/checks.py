@@ -222,9 +222,10 @@ def check_pilot_light(workers_body, settings: SentinelSettings) -> list[Anomaly]
         fingerprint="pilot_light_not_resident:%s" % pilot,
         kind="pilot_light_not_resident", severity="warn",
         evidence={"model_key": pilot, "warm_model_keys": sorted(set(warm)),
-                  "hint": ("pin it: POST %s/llm/workers/<worker_id>/"
-                           "boot-prewarm {\"model_key\": %r} — the keep-warm "
-                           "star reseats it every reconcile beat"
+                  "hint": ("load it explicitly: POST %s/llm/workers/<worker_id>/"
+                           "probe/%s (the console Load button) — nothing keeps a "
+                           "model warm on its own; it stays resident only while it "
+                           "is being called"
                            % (settings.central, pilot))})]
 
 

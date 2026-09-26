@@ -101,11 +101,15 @@ export function workerCapacity(worker, which) {
   return null
 }
 
-// The model's EFFECTIVE flat mode from its persisted override/spill — the JS
-// mirror of managers.alloc_modes.derive_alloc_mode (the WorkersPanel serving
-// rows carry only worker.spill_by_model[key], not a server-derived alloc_mode
-// field, so the derivation happens here). A blank model == max-gpu (the
-// default: fits-and-spills, never OOMs — defaults-are-promises).
+// The model's EFFECTIVE flat mode from a spill dict — the JS mirror of
+// alloc_modes.derive_alloc_mode. This is now a FALLBACK, not the primary label:
+// the authoritative resolved mode is central's worker.model_alloc_modes[key]
+// (d.derivedMode in WorkerRow), which already overlays the MoE split, so the
+// Alloc cell reads THAT. This local derive is used only for an in-flight
+// optimistic pick (before the refetch) and for a pre-model_alloc_modes central.
+// NOTE it deliberately does NOT overlay MoE — a bare {n_gpu_layers:-1} reads
+// 'gpu-only' here — which is exactly why the cell must prefer the server field.
+// A blank spill == max-gpu (the default: fits-and-spills, never OOMs).
 export function deriveAllocMode(spill) {
   const ov = spill || {}
   const am = ov.alloc_mode != null ? String(ov.alloc_mode).trim().toLowerCase() : ''

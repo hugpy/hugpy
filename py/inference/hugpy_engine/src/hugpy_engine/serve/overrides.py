@@ -86,6 +86,12 @@ ALLOWED_FIELDS = {
                       # resolves map[W] if W is in it, else ``no_evict``, and
                       # simply includes/omits the spill key for THAT worker —
                       # the wire and the worker's admission are untouched.
+    "strict",         # k-dist (operator ruling 2026-09-24): keep the HARD
+                      # designation fence for THIS model even under the fleet
+                      # "feasible" distribution default. True -> worker_prefs /
+                      # designations are a sealed scope and an unmet preference
+                      # REFUSES (pre-2026-09-24 behaviour); absent/False -> the
+                      # preference is an ORDER with a feasible-set fallback.
     "gguf_file_by_worker",  # per-(model × worker) quant pin, modeled on
                       # no_evict_by_worker: {worker_name_or_id: basename_or_
                       # quant_token}. WHICH .gguf serves is a statement about
@@ -98,6 +104,8 @@ ALLOWED_FIELDS = {
 _INT_FIELDS = {"n_gpu_layers", "n_cpu_moe", "threads", "llama_ctx", "ttl_seconds",
                "priority"}
 _FLOAT_FIELDS = {"gpu_mem_gib", "cpu_mem_gib", "leniency_pct"}
+# NOTE: "strict" is a boolean but is handled in _coerce with the OFF-clears
+# discipline (like "no_evict"), so it is deliberately NOT in _BOOL_FIELDS.
 _BOOL_FIELDS = {"always_on"}
 
 
@@ -696,6 +704,13 @@ def _coerce(field: str, value):
         # bnb lever): the file then holds only real operator opt-ins, and an
         # absent entry unambiguously means the normal declare-need-then-evict.
         return True if _truthy(value) else None
+    if field == "strict":
+        # k-dist (operator ruling 2026-09-24): same OFF-clears discipline as
+        # no_evict above — the file holds only real fences, and an absent entry
+        # unambiguously means "follow the fleet distribution default". The
+        # PlacementControl posts strict on every save, so a cleared toggle drops
+        # the key rather than littering the store with strict:false rows.
+        return True if _truthy(value) else None
     if field == "no_evict_by_worker":
         # k62. Accept the console's {"ae": true} or a curl/script string
         # ("ae=yes,computron=no"). Name handling mirrors worker_prefs — strip,
@@ -874,6 +889,37 @@ def placement_policy(model_key: str) -> tuple:
     return prefs, bool(ov.get("no_evict")), by_worker
 
 
+def model_strict(model_key: str) -> bool:
+    """k-dist: does ``model_key`` keep the HARD designation fence even under the
+    fleet "feasible" distribution default?
+
+    True when the per-model override sets ``strict: true`` OR the enabled
+    priority group claiming it declares the group strict. Absent -> False (the
+    preference is an ORDER with a feasible-set fallback). Total guarding: an
+    unreadable override / group layer degrades to False, which is the new-default
+    behaviour, never a surprise refusal."""
+    try:
+        ov = get_override(model_key) or {}
+        if not ov:
+            want = _bare_key(str(model_key)).lower()
+            for k, row in (_load() or {}).items():
+                if _bare_key(str(k)).lower() == want and isinstance(row, dict):
+                    ov = row
+                    break
+        if bool(ov.get("strict")):
+            return True
+    except Exception:  # noqa: BLE001 — placement must never break over a read
+        return False
+    try:
+        from hugpy_engine.placement import get_priority_groups
+        gs = getattr(get_priority_groups(), "strict_for_key", None)
+        if callable(gs):
+            return bool(gs(model_key))
+    except Exception:  # noqa: BLE001 — the group half must never break placement
+        pass
+    return False
+
+
 def resolve_polite(polite: bool, by_worker: dict, forms) -> bool:
     """Effective politeness for ONE worker: ``map[W]`` when W is in the map,
     else the model-wide boolean. PURE (no disk read) so the routing loop resolves
@@ -966,3 +1012,64 @@ def migrate_overrides(registry) -> dict:
         if moved:
             _save(ov)
     return moved
+
+
+def migrate_worker_tokens(resolve) -> dict:
+    """Rewrite STALE worker-name references in the placement overrides to a stable
+    worker id (operator incident 2026-09-25).
+
+    Placement is stored by NAME in three per-model fields — ``worker_prefs`` (a
+    list), and the ``no_evict_by_worker`` / ``gguf_file_by_worker`` maps (keyed by
+    worker) — so a worker rename ("aeb" -> "ae-worker", same id) strands every
+    token written under the old name and central logs "ordered worker preference
+    ['aeb'] but NONE of them is an eligible candidate" every few minutes.
+
+    ``resolve(token) -> worker_id | None`` returns the id ONLY for a token that
+    does NOT already resolve to a live worker but DOES match a worker's recorded
+    former name (the caller builds it from the registry). A None leaves the token
+    untouched (it either already resolves or is genuinely orphaned — the honest
+    route-time warning still fires). Returns ``{model_key: [(field, old, new)]}``.
+    Idempotent: a rewritten token is an id, which never matches a former name."""
+    changed: dict = {}
+    with _LOCK:
+        data = _load()
+        if not data:
+            return changed
+        for mk, ov in list(data.items()):
+            if not isinstance(ov, dict):
+                continue
+            rows = []
+            prefs = ov.get("worker_prefs")
+            if isinstance(prefs, list):
+                new_prefs, seen = [], set()
+                for tok in prefs:
+                    new = resolve(tok)
+                    use = new or str(tok)
+                    if new:
+                        rows.append(("worker_prefs", str(tok), new))
+                    if use.lower() not in seen:
+                        seen.add(use.lower())
+                        new_prefs.append(use)
+                if new_prefs != prefs:
+                    ov["worker_prefs"] = new_prefs
+            for field in ("no_evict_by_worker", "gguf_file_by_worker"):
+                m = ov.get(field)
+                if not isinstance(m, dict):
+                    continue
+                new_map = {}
+                for tok, val in m.items():
+                    new = resolve(tok)
+                    key = new or str(tok)
+                    if new:
+                        rows.append((field, str(tok), new))
+                    new_map[key] = val
+                if new_map != m:
+                    ov[field] = new_map
+            if rows:
+                changed[mk] = rows
+                for field, old, new in rows:
+                    logger.info("placement override %s: %s %r -> worker id %r",
+                                mk, field, old, new)
+        if changed:
+            _save(data)
+    return changed

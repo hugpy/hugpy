@@ -20,6 +20,7 @@ console only READS the listing (``GET /llm/reservations``).
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -316,6 +317,27 @@ class ReservationRegistry:
 
 # One process-wide registry (central). Best-effort throughout; stdlib-only.
 reservation_registry = ReservationRegistry()
+
+
+# FORK SAFETY (incident 2026-09-24). The registry opens no connection at module
+# scope (every _connect() is per-call), so the only fork-inherited state is the
+# singleton's cached init/breaker flags. Reset them in a forked child so it
+# re-runs schema creation on a fresh handle and starts with a clean breaker,
+# rather than trusting a pre-fork parent's state. Belt-and-braces behind the real
+# fix (app built in the gunicorn worker). Registered once; never raises.
+def _reset_after_fork_in_child() -> None:
+    try:
+        reservation_registry._initialized = False
+        reservation_registry._disabled = False
+        reservation_registry._failures = 0
+    except Exception:  # noqa: BLE001 — an at-fork hook must never raise
+        pass
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_after_fork_in_child)
+except (AttributeError, ValueError):  # non-POSIX / interpreter without the hook
+    pass
 
 
 def reserved_bytes(worker_id: str) -> int:

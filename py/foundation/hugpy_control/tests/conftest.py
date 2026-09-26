@@ -15,7 +15,15 @@ if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
 # Every store in this package resolves its file lazily from env; pin them all to
 # a throwaway tree so the module singletons (job_store, settings_store,
 # principal_store) never touch a live comms db, settings.json or ~/.hugpy.
+# FORCE (not setdefault) the storage roots + arm the audit guard: an inherited
+# DEFAULT_ROOT=<live> used to win over the setdefaults below (incident 2026-09-24).
+from hugpy_platform.test_isolation import (  # noqa: E402
+    install_live_storage_guard, isolate_storage_to_tmp,
+)
+
 _SANDBOX = tempfile.mkdtemp(prefix="hugpy-control-tests-")
+isolate_storage_to_tmp(base=os.path.join(_SANDBOX, "storage"))
+install_live_storage_guard()
 os.environ.setdefault("DEFAULT_ROOT", os.path.join(_SANDBOX, "storage"))
 os.environ.setdefault("HUGPY_HOME", os.path.join(_SANDBOX, "hugpy_home"))
 os.environ.setdefault("HUGPY_COMMS_DB", os.path.join(_SANDBOX, "comms.db"))

@@ -353,6 +353,36 @@ def resolve(prompt_kwargs: Dict[str, Any]) -> Resolution:
 
     cfg = MODEL_REGISTRY[model_key]
 
+    # ROUTING-KEY RECONCILE (comfy-sd-turbo x computron, 2026-09-24). Everything
+    # downstream — the DelegatingRunner's per-request selection (its
+    # ``_base_model_key`` = ``cfg.model_key``), the instance cache, the worker
+    # relay payload — keys off ONE model identity, and that identity must be the
+    # RESOLVED REGISTRY KEY the caller/placement used. A registry row can carry a
+    # ``cfg.model_key`` that DIFFERS from its registry key: a comfy checkpoint row
+    # learned/synthesized as ``comfy-<stem>`` may hold the bare checkpoint stem
+    # (``sd-turbo``) in ``model_key``. Left unreconciled, the OUTER placement picks
+    # the worker for ``comfy-sd-turbo`` but the DelegatingRunner then re-selects
+    # under the bare ``sd-turbo`` — which matches a DIFFERENT, non-comfy 12 GiB
+    # transformers row on another worker (the live mis-route). Rebuild the cfg (a
+    # fresh copy — the shared registry object is never mutated) so its model_key IS
+    # the resolved key; only ever runs when they diverge, so ordinary rows are
+    # byte-identical.
+    if getattr(cfg, "model_key", None) != model_key:
+        from dataclasses import fields as _dc_fields
+        _prev = getattr(cfg, "model_key", None)
+        try:
+            _kw = {f.name: getattr(cfg, f.name)
+                   for f in _dc_fields(cfg) if f.name != "extra"}
+            _kw.update(getattr(cfg, "extra", {}) or {})
+            _kw["model_key"] = model_key
+            cfg = type(cfg)(**_kw)
+            logger.info("resolve: reconciled cfg.model_key %r -> %r (routing must "
+                        "use the resolved registry key)", _prev, model_key)
+        except Exception:  # noqa: BLE001 — never break resolution over the copy
+            logger.warning("resolve: could not reconcile cfg.model_key %r -> %r; "
+                           "routing may use the stale key", _prev, model_key,
+                           exc_info=True)
+
     # Reload the task-filtered registries (vision/whisper/embed/chat) from the
     # live MODEL_REGISTRY before any backend reads them. Those derived registries
     # are import-time snapshots, so a model registered at runtime (learned from

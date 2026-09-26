@@ -161,11 +161,10 @@ def test_assigning_many_pinned_models_kicks_nothing(kicks, fills):
 
 
 # ── (5) seating still runs — it is not a download ───────────────────────────
-def test_fill_empty_slots_runs_on_assignment_change(kicks, fills):
-    """Already-local models must still get seated, on-demand included."""
+def test_assignment_change_does_not_fill_slots(kicks, fills):
+    """Even already-local models remain unloaded until their first call."""
     A._sync_assignment(_state(), {"models": ["m-ondemand"]})
-    assert _wait_until(lambda: fills == [True]), \
-        "_fill_empty_slots must still run on an assignment change"
+    assert fills == []
 
 
 def test_unchanged_assignment_does_not_refill_or_kick(kicks, fills):

@@ -80,6 +80,9 @@ class EnrollmentRequest(WireDTO):
     slot_capable: Optional[bool] = None
     slot_incapable_reason: Optional[str] = None
     task_capabilities: Optional[Dict[str, bool]] = None
+    # STUDIO (video) placement signal (2026-09-24) advertised from first contact — see
+    # WorkerHeartbeat.studio + WorkerStore.register's `studio` param.
+    studio: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -138,6 +141,11 @@ class WorkerHeartbeat(WireDTO):
     slot_capable: Optional[bool] = None
     slot_incapable_reason: Optional[str] = None
     task_capabilities: Optional[Dict[str, bool]] = None
+    # STUDIO (video) placement signal (2026-09-24): {"render": bool, "models":[id...],
+    # "weights_root": str|None} — what this box can do for a studio render + which real
+    # studio models it holds on disk, so central places a video render LIKE AN LLM. Mirrors
+    # WorkerStore.heartbeat's `studio` param (kept in lockstep by test_wire_dtos).
+    studio: Optional[Dict[str, Any]] = None
     vram_evictions: Optional[Dict[str, Any]] = None
     vram_holders: Optional[Dict[str, Any]] = None
     aggregate: Optional[Dict[str, Any]] = None

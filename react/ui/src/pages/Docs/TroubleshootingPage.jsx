@@ -239,10 +239,10 @@ systemctl --user restart abstract-hugpy-worker`}</code></pre>
         <pre className="docs-block"><code>{`venv/bin/pip install --force-reinstall --no-binary llama-cpp-python \\
     llama-cpp-python==<fleet version>`}</code></pre>
         <p className="docs-note">
-          The eager slot-filler (0.1.133+) loads a model at startup, so a broken wheel crash-loops the unit
-          immediately instead of failing at the first request. A tight start → SIGILL → restart
-          loop in the journal <em>is</em> this failure — stop the unit and rebuild; don&apos;t wait
-          it out.
+          Nothing is loaded at startup — a model loads only when a request for it arrives (or you
+          explicitly Load it), so a broken llama.cpp wheel surfaces then, not at boot. A tight
+          load → SIGILL → restart loop in the journal the first time a model loads <em>is</em> this
+          failure — stop the unit and rebuild; don&apos;t wait it out.
         </p>
       </section>
 

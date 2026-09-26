@@ -42,7 +42,7 @@ export function effectivePin(worker, key) {
 
 // A worker row: status + GPUs (with used/free) + provisioning state, the models
 // it serves with per-model load state + concise GPU allocation + free controls.
-export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null }) {
+export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null, distMode = 'feasible' }) {
   // The shared per-(model, worker) state vocabulary (GET /llm/models/status):
   // the same words the Models table and the Metrics picker use. Feature-
   // detected — an older central keeps the legacy pill below.
@@ -155,6 +155,34 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
       alert(`Specialization failed: ${e.message}`)
     }
   }, [worker.id, onRefresh])
+
+  // Per-worker WILDCARD ("take all comers") routing opt-in. Optimistic-then-
+  // revert like the model-groups tick: the console has no client-side operator
+  // flag (the gate is server-side, operator_auth._SENSITIVE), so flip, POST, and
+  // on refusal snap back with the server's message. Under Feasible distribution
+  // this flag is nearly moot (any feasible worker is already a candidate); it
+  // matters under Designated mode, which the label/hint says. worker.wildcard is
+  // the authoritative value; the optimistic override wins until the next refetch.
+  const [wildcardOpt, setWildcardOpt] = useState(undefined)  // undefined = follow payload
+  const wildcardOn = wildcardOpt === undefined ? !!worker.wildcard : wildcardOpt
+  const setWildcard = useCallback(async (enabled) => {
+    setWildcardOpt(enabled)
+    try {
+      await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/wildcard`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+      if (typeof onRefresh === 'function') onRefresh()
+    } catch (e) {
+      setWildcardOpt(undefined)   // revert to the payload value
+      alert(`Wildcard toggle failed: ${e.message}`)
+    }
+  }, [worker.id, onRefresh])
+  // Drop the optimistic override once the authoritative payload agrees.
+  useEffect(() => {
+    if (wildcardOpt !== undefined && !!worker.wildcard === wildcardOpt) setWildcardOpt(undefined)
+  }, [worker.wildcard, wildcardOpt])
   // Serving-detail cache (rulings 1+2, 2026-07-24): the per-(model,worker)
   // FEASIBLE mode set and the feasibility-DERIVED default live ONLY on
   // /llm/serving/<key> (alloc_by_worker / alloc_mode_derived), NOT on the
@@ -311,7 +339,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
     //   heating     — weights loading into VRAM/RAM right now
     //   serving     — hosted in a SLOT (routable supervised child)
     //   loaded      — resident IN-PROCESS on this machine (no slot)
-    //   cold        — assigned; loads on first request or next warm pass
+    //   cold        — assigned; loads on the first request for it (or an explicit Load)
     // Residency KIND, engine-agnostic: prefer the unified allocations
     // view (a slot occupant OR an in-RAM transformers resident both count
     // as "resident"); fall back to the legacy slots+loaded_models sets.
@@ -319,8 +347,8 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
     let inSlot, isAnswering, isServing
     // isIdleResident: a ram allocation EXISTS but the worker reports NO
     // measured footprint for it (no VRAM, no RSS, no cuda/cpu device, not
-    // served recently). That is a hollow runner-cache entry — the exact
-    // thing a reconcile /probe leaves behind, and the flap the operator saw:
+    // served recently). That is a hollow runner-cache entry — e.g. what an
+    // evict/unload can leave behind, and the flap the operator saw:
     // it must read as a distinct, subtle idle state, NEVER as purple loaded.
     let isIdleResident = false
     if (allocByKey) {
@@ -384,8 +412,8 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
           ? 'actively processing a request right now'
           : 'hosted in a slot on this worker — routable, crash-isolated server child')
         : 'resident in this worker\'s own process — dedicated to this machine, not in a slot')
-      : isIdleResident ? 'a runner is cached on this worker but holds NO measured VRAM/RAM and hasn\'t served recently — not actually resident (a reconcile warm may have just instantiated it, or its weights were freed). Its measured residency is the truth here, not the runner-cache membership.'
-      : state === 'hot' ? 'files on THIS worker\'s drive, not loaded — weights lift into VRAM/RAM on the first request or the next warm pass'
+      : isIdleResident ? 'a runner is cached on this worker but holds NO measured VRAM/RAM and hasn\'t served recently — not actually resident (its weights were freed, e.g. by an evict/unload). Its measured residency is the truth here, not the runner-cache membership.'
+      : state === 'hot' ? 'files on THIS worker\'s drive, not loaded — weights lift into VRAM/RAM on the first request'
       : state === 'central'
         ? 'files on CENTRAL storage (llm_storage), not on this worker\'s drive yet — they copy to this worker on the FIRST CALL (lazy download). Not missing: the files exist.'
         : 'files NOWHERE — not on this worker\'s drive and not on central storage either: a stale catalog row, a phantom assignment, or a download that never happened. Serving will fail until the files are downloaded (or the key is unassigned).'
@@ -668,12 +696,19 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
         // Effective spill: an in-flight optimistic pick wins, else the persisted
         // override — so the cell flips the instant a mode is chosen.
         const effSpill = key in allocOptimistic ? allocOptimistic[key] : d.override
-        // Blank (no persisted contract) => show the BACKEND's derived default,
-        // not deriveAllocMode's 'max-gpu' fallback. Only a real spill is read
-        // locally; an optimistic pick still wins so the cell stays responsive.
-        const hasSpill = !!(effSpill && Object.keys(effSpill).length > 0)
-        const mode = hasSpill ? deriveAllocMode(effSpill)
-                              : (d.derivedMode || deriveAllocMode(effSpill))
+        // THE LABEL IS THE BACKEND's resolved mode (worker.model_alloc_modes ->
+        // d.derivedMode), the ONE source of truth: central derives it from the
+        // SAME spill it emits to the worker, WITH the MoE split overlaid, so a
+        // stale gpu-only stamp on a MoE model reads 'explicit' here exactly as it
+        // serves and as planned_split reports — never the bare-spill 'gpu-only'
+        // this cell used to re-derive locally (which ignored the MoE overlay and
+        // was the "gpu-only Alloc while MoE ticked" inconsistency). Only an
+        // in-flight optimistic pick derives locally, so the cell still flips
+        // instantly before the refetch lands; a pre-model_alloc_modes central
+        // falls back to the local derivation.
+        const mode = (key in allocOptimistic)
+          ? deriveAllocMode(effSpill)
+          : (d.derivedMode || deriveAllocMode(effSpill))
         const engineGguf = /^(gguf|llama_cpp)$/.test(String(m?.framework || '').toLowerCase())
         const isOpen = allocMenu === key
         // Ruling 2 (2026-07-24) — DERIVED vs PINNED at a glance. A model with NO
@@ -1103,7 +1138,21 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
               onClick={() => onSetPool(worker)}>
           🏷 {worker.pool || 'general'}
         </span>
-        {worker.role === 'rpc' && <span className="wp-role" title="shard backend (lends GPU via rpc-server)">rpc</span>}
+        {/* Per-worker WILDCARD toggle ("take all comers"). De-emphasized under
+            Feasible mode, where it is nearly moot (any feasible worker is already
+            a routing candidate); it matters under Designated mode. */}
+        <span className={`wp-wildcard ${wildcardOn ? 'wp-wildcard-on' : ''}${distMode === 'feasible' ? ' wp-wildcard-moot' : ''}`}
+              role="button" aria-pressed={wildcardOn}
+              title={(wildcardOn
+                ? 'Wildcard ON: this worker takes all comers — undesignated models may route here and designated models overflow here when their home workers are refused. Click to clear.'
+                : 'Wildcard OFF: this worker serves only its own designated / resident / granted models. Click to opt in to "take all comers".')
+                + (distMode === 'feasible'
+                  ? ' — only matters in Designated mode (under Feasible, any worker where the model fits is already a candidate).'
+                  : '')}
+              onClick={() => setWildcard(!wildcardOn)}>
+          🃏 {wildcardOn ? 'wildcard' : 'no wildcard'}
+        </span>
+        {worker.role === 'rpc' &&<span className="wp-role" title="shard backend (lends GPU via rpc-server)">rpc</span>}
         {worker.comfy?.available && (
           <span className="wp-role" title={`ComfyUI running on this worker${worker.comfy.version ? ` (v${worker.comfy.version})` : ''} at ${worker.comfy.url} — comfy-templated generation routes here (engine slice B)`}>
             🧩 comfy

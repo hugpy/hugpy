@@ -33,6 +33,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from hugpy_fleet.worker import agent as A
+from hugpy_fleet.worker import external_residents as extres
 from hugpy_fleet.worker import pid_registry as PR
 
 MIB = 1 << 20
@@ -150,6 +151,27 @@ def test_foreign_process_never_reapable(rig):
     assert row["action"] == "skipped"
     assert "foreign" in row["reason"]
     assert rig.kills == []
+
+
+def test_registered_external_resident_pid_never_reaped(rig):
+    # A studio/video render child (or a gpu_lease batch child) is own-venv, holds
+    # VRAM, has no slot claim, and can outlive min-age — all four gates hold. But
+    # it is a REGISTERED external resident, so the external-claim gate skips it:
+    # it is yielded via its supervisor, never a raw PID kill. Without this an
+    # in-flight render would be reaped mid-render.
+    extres.clear()
+    try:
+        rig.add_orphan(918273, mib=12000)         # own-venv, OLD, holds VRAM
+        extres.register("studio:live-render", 918273, vram_gib=12.0,
+                        evictable=False)
+        out = rig.reap(dry_run=False)
+        row = _row(out, 918273)
+        assert row["action"] == "skipped"
+        assert "external resident" in row["reason"]
+        assert rig.kills == []                     # never signalled
+        assert rig.procs[918273] is not None       # still alive
+    finally:
+        extres.clear()
 
 
 def test_comfy_pid_never_reapable(rig):

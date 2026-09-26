@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # (guarded below). Module-level so re-entrant app creation can't spawn a second.
 _VIDEO_DAEMON_STARTED = False
 _ADMISSION_RUNNER_STARTED = False
+_WORKER_RENAME_MIGRATED = False
 
 
 class ApiPrefixMiddleware:
@@ -581,6 +582,20 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
             start_benchmark_resume()
         except Exception as _exc:  # noqa: BLE001 — must never break app creation
             logger.error("benchmark resume hook failed: %s", _exc)
+    # STALE WORKER-NAME MIGRATION (operator incident 2026-09-25): rewrite
+    # placement tokens written under a now-renamed worker ("aeb" -> "ae-worker")
+    # to that worker's stable id, so central stops logging "ordered worker
+    # preference ['aeb'] but NONE ... is an eligible candidate" and the model
+    # routes to its intended box. Idempotent + fully guarded; runs once per
+    # process (the store writes are themselves fcntl-locked across processes).
+    global _WORKER_RENAME_MIGRATED
+    if not _WORKER_RENAME_MIGRATED:
+        try:
+            from hugpy_fleet.central.workers import migrate_worker_name_references
+            migrate_worker_name_references()
+            _WORKER_RENAME_MIGRATED = True
+        except Exception as _exc:  # noqa: BLE001 — must never break app creation
+            logger.error("worker-name migration hook failed: %s", _exc)
     return app
 
 
@@ -604,10 +619,14 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-def _serve(flask_app, host: str, port: int, threads: int, workers: int,
+def _serve(build_app, host: str, port: int, threads: int, workers: int,
            debug: bool) -> int:
     """gunicorn on POSIX, waitress on Windows, Flask dev server as the last
-    resort. Server-agnostic glue; no routes live here."""
+    resort. ``build_app`` is a zero-arg factory thunk; for gunicorn it is called
+    from load(), INSIDE the forked worker, so the app's sqlite connections and
+    background threads are created post-fork — never in the arbiter (incident
+    2026-09-24). waitress and the Flask dev server do not fork, so they build the
+    app in-process. Server-agnostic glue; no routes live here."""
     bind = f"{host}:{port}"
     banner = (f"hugpy serving on http://{bind}  (console at /, API at /api/v1)\n"
               f"  first run? finish setup at  http://{bind}/welcome")
@@ -625,7 +644,11 @@ def _serve(flask_app, host: str, port: int, threads: int, workers: int,
                     self.cfg.set("timeout", 300)
 
                 def load(self):
-                    return flask_app
+                    # gunicorn calls this in the WORKER (after fork). Building the
+                    # app here — not in the arbiter — is the fix: media_jobs.db
+                    # handles and the runner/admission threads belong to the
+                    # serving process (incident 2026-09-24).
+                    return build_app()
 
             print(banner)
             _App().run()
@@ -635,10 +658,10 @@ def _serve(flask_app, host: str, port: int, threads: int, workers: int,
     except ImportError:
         print(f"hugpy: gunicorn/waitress not installed; using the Flask dev "
               f"server on {bind}", file=sys.stderr)
-        flask_app.run(host=host, port=port, debug=debug)
+        build_app().run(host=host, port=port, debug=debug)
         return 0
     print(banner + "  [waitress]")
-    _waitress_serve(flask_app, host=host, port=port, threads=threads)
+    _waitress_serve(build_app(), host=host, port=port, threads=threads)
     return 0
 
 
@@ -662,7 +685,9 @@ def build_arg_parser():
 
 def main(argv=None) -> int:
     """``hugpy-serve`` console script (also what ``hugpy serve`` dispatches
-    to). Builds the app — which runs ``wiring.install_all()`` — then serves."""
+    to). Serves the app; under gunicorn the app (and its ``wiring.install_all()``,
+    sqlite stores and background threads) is built INSIDE the forked worker via
+    the ``_serve`` load() thunk, never in the arbiter (incident 2026-09-24)."""
     args = build_arg_parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.auth:
         os.environ["HUGPY_AUTH_MODE"] = args.auth
@@ -671,8 +696,17 @@ def main(argv=None) -> int:
         # /v1 API-key system still gates programmatic access.
         os.environ.setdefault("HUGPY_AUTH_MODE", "open")
     origins = [o.strip() for o in (args.origins or "").split(",") if o.strip()] or None
-    flask_app = get_hugpy_flask(name="hugpy", allowed_origins=origins, debug=args.debug)
-    return _serve(flask_app, args.host, args.port, args.threads, args.workers, args.debug)
+
+    # Pass the factory as a zero-arg THUNK — do NOT build the app here, in the
+    # process that becomes the gunicorn arbiter. get_hugpy_flask opens the
+    # media/comms/reservation sqlite stores and starts the media-bus runner pool,
+    # the admission runner and the benchmark-resume thread; all of that must be
+    # born INSIDE the forked worker (see _serve/load()), never inherited across a
+    # fork (incident 2026-09-24).
+    def _build_app():
+        return get_hugpy_flask(name="hugpy", allowed_origins=origins, debug=args.debug)
+
+    return _serve(_build_app, args.host, args.port, args.threads, args.workers, args.debug)
 
 
 if __name__ == "__main__":  # pragma: no cover

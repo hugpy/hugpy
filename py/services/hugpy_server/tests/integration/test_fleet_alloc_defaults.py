@@ -269,7 +269,11 @@ check("feasible_modes_for -> (ram-only, max-gpu, max-ram) for the 68/24 "
 check("feasibility_context surfaces the raw numbers for an honest 409",
       W.feasibility_context(w["id"], "tf-big") ==
       {"engine": "transformers", "model_bytes": 68 * GIB,
-       "gpu_total_bytes": 24 * GIB, "ram_total_bytes": 124 * GIB,
+       # Per-device (2026-09-25): gpu_total_bytes is the ENGINE-AWARE GPU ceiling
+       # (largest single card for a non-splittable engine) — here a single-GPU
+       # box so it equals the box sum; gpu_box_total_bytes carries the naive sum.
+       "gpu_total_bytes": 24 * GIB, "gpu_box_total_bytes": 24 * GIB,
+       "ram_total_bytes": 124 * GIB,
        # MoE (2026-07-24): the expert-split GPU need; None for non-MoE.
        "moe_split_gpu_bytes": None,
        # bnb (2026-07-29): which size the decision priced — a 409 quoting fp16

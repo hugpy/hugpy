@@ -280,6 +280,60 @@ def _render_tool_messages(messages):
     return out
 
 
+def _caller_from_user_agent(ua: str) -> "str | None":
+    """The harness product token out of a User-Agent, or None.
+
+    A recorded fact, never invented: ``aider/0.42`` -> ``aider``,
+    ``OpenAI/Python 1.2`` -> ``OpenAI``. The bare product name (before the first
+    ``/`` or space) is a stable per-harness identity; the version is dropped so
+    every release of one harness aggregates together. Empty / whitespace -> None.
+    """
+    ua = (ua or "").strip()
+    if not ua:
+        return None
+    head = ua.split()[0]
+    product = head.split("/", 1)[0].strip()
+    return product or None
+
+
+def _derive_caller(headers, payload, key_name=None) -> "str | None":
+    """The harness/client identity for a /v1 call, from RECORDED facts only.
+
+    Precedence (first present wins), so a harness has a clear way to name itself
+    and, failing that, its API key or its software still attributes the call:
+      1. ``X-Hugpy-Client`` header — the hugpy-native, explicit opt-in.
+      2. ``X-Title`` header — the OpenRouter/OpenAI app-title convention many
+         OpenAI SDK clients (hermes, aider, opencode) already send.
+      3. the OpenAI ``user`` request field — the standard per-caller tag.
+      4. ``key_name`` — the bearer API key's operator-given name (the
+         api-key-to-client mapping the key store already keeps).
+      5. the User-Agent product token — the harness software itself.
+    None when NONE of these is present (absence is explicit: the metrics row
+    keeps its honest "api" default rather than a guessed identity). ``headers``
+    is any case-insensitive mapping (Flask ``request.headers``); ``payload`` the
+    parsed JSON body. Pure — no Flask import — so it unit-tests standalone.
+    """
+    def _h(name):
+        try:
+            v = headers.get(name)
+        except AttributeError:
+            v = None
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    candidate = (
+        _h("X-Hugpy-Client")
+        or _h("X-Title")
+        or (str(payload.get("user")).strip()
+            if isinstance(payload, dict) and payload.get("user") else None)
+        or (str(key_name).strip() if key_name else None)
+        or _caller_from_user_agent(_h("User-Agent") or "")
+    )
+    if not candidate:
+        return None
+    # Bound it: a metrics dimension is a short label, not a free-text sink.
+    return candidate[:64]
+
+
 def _usage_block(usage) -> dict:
     """Shape a DoneEvent usage dict into the OpenAI `usage` object.
 

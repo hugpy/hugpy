@@ -90,12 +90,21 @@ def model_metrics_snapshot():
             by_task = store.all_calls_by_task()
         except Exception:  # noqa: BLE001 — additive; never fail the snapshot
             by_task = []
+        # Harness attribution (2026-09-24): n + means per calling harness/client,
+        # over ALL recorded call rows, from the one durable source. Portable
+        # across the SQLite and Postgres backends via the module helper.
+        try:
+            from hugpy_fleet.central.model_metrics import calls_by_caller
+            by_caller = calls_by_caller(store)
+        except Exception:  # noqa: BLE001 — additive; never fail the snapshot
+            by_caller = []
         return jsonify({"load_metrics": load_rows, "call_metrics": call_rows,
-                        "calls_by_task": by_task, "generated_at": time.time()})
+                        "calls_by_task": by_task, "calls_by_caller": by_caller,
+                        "generated_at": time.time()})
     except Exception as exc:  # noqa: BLE001 — a read surface must not 500
         logger.warning("GET /llm/model-metrics failed: %s", exc, exc_info=True)
         return jsonify({"load_metrics": [], "call_metrics": [],
-                        "calls_by_task": [],
+                        "calls_by_task": [], "calls_by_caller": [],
                         "generated_at": time.time(), "error": str(exc)}), 200
 
 

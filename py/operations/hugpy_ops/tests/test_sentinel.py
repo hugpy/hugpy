@@ -417,7 +417,8 @@ def test_pilot_light_absent_or_unhealthy_is_warn_anomaly(tmp_path):
     assert [a.kind for a in out] == ["pilot_light_not_resident"]
     assert out[0].severity == "warn"
     assert out[0].evidence["model_key"] == PILOT
-    assert "boot-prewarm" in out[0].evidence["hint"]
+    assert "load it explicitly" in out[0].evidence["hint"]
+    assert "nothing keeps a model warm" in out[0].evidence["hint"]
     # present but wedged (healthy: False) is NOT warm
     out2 = checks.check_pilot_light(
         _workers_with({"kind": "slot", "model_key": PILOT, "healthy": False}), s)

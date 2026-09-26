@@ -27,11 +27,12 @@ class LocalEngineUnavailable(RuntimeError):
 
 _LLAMA_INSTANCES: Dict[str, "LlamaCppBaseRunner"] = {}
 _LLAMA_LOCK = threading.Lock()
-# DRAFT-MODEL-GATE-20260910: a build that FAILED is not retried for a while. Without this a caller
-# retrying every few seconds rebuilt (and re-leaked) a doomed model each time.
+# A build that FAILED is recorded here for the console/logs (the last reason per
+# model), but the record NEVER blocks a later call: every call re-attempts the
+# load and, if it fails, fails with THAT attempt's real loader error. Cleared the
+# moment a load succeeds.
 import time as _time
-_REFUSED: dict = {}            # model_key -> (ts, reason)
-_REFUSE_BACKOFF_S = float(__import__("os").environ.get("HUGPY_LOAD_REFUSE_BACKOFF_S", "120"))
+_REFUSED: dict = {}            # model_key -> (ts, reason, exc_type, load_failure)
 # Builds are SLOW (slot-child spawn, evict-to-fit, a 46G cold load — minutes)
 # and used to run UNDER _LLAMA_LOCK. That serialized the data plane against
 # every registry READER: the heartbeat's loaded_runner_detail only wants a
@@ -252,47 +253,13 @@ def get_llama_runner(model_key: str) -> "LlamaCppBaseRunner":
             runner = _LLAMA_INSTANCES.get(model_key)   # built while we waited?
         if runner is not None:
             return runner
-        refused = _REFUSED.get(model_key)
-        if refused and (_time.time() - refused[0]) < _REFUSE_BACKOFF_S:
-            left = int(_REFUSE_BACKOFF_S - (_time.time() - refused[0]))
-            msg = (f"{model_key}: load refused {int(_time.time() - refused[0])}s ago and not "
-                   f"retried for another {left}s — {refused[1]}")
-            # REFUSE-BACKOFF-V2-20260910: keep the ORIGINAL exception type so the relay classifies
-            # the refusal exactly as it did the first time (permanent stays permanent).
-            exc_type = refused[2] if len(refused) > 2 else RuntimeError
-            _lf = refused[3] if len(refused) > 3 else None
-            err = None
-            # A typed ModelLoadFailure exposes load_failure as a read-only
-            # property, so the setattr below cannot restore its class — rebuild
-            # it with the recorded class/path/stderr (vision_needs_slot,
-            # vram_fit, ... used to re-raise as class "other").
-            if isinstance(_lf, dict) and _lf.get("class"):
-                try:
-                    from hugpy_engine.serve.load_failure import ModelLoadFailure as _MLF
-                    if isinstance(exc_type, type) and issubclass(exc_type, _MLF):
-                        err = exc_type(msg, load_class=_lf.get("class"),
-                                       loader_stderr=_lf.get("loader_stderr"),
-                                       path=_lf.get("path"), model_key=model_key,
-                                       log_ref=_lf.get("log_ref"))
-                except Exception:  # noqa: BLE001 — fall back to the plain rebuild
-                    err = None
-            if err is None:
-                try:
-                    err = exc_type(msg)
-                except TypeError:
-                    err = RuntimeError(msg)
-            if isinstance(_lf, dict):
-                try:
-                    err.load_failure = _lf
-                except Exception:  # noqa: BLE001 — a read-only attr keeps the text
-                    pass
-            raise err
         try:
             runner = _build_runner(model_key)
         except Exception as exc:
-            # The FULL reason (uncapped, 2026-09-23 — it was cut at 300 then
-            # 4000 chars, which dropped the loader stderr the backoff re-raise
-            # is supposed to preserve) + the structured load_failure.
+            # Record the last failure for the console/logs: the FULL reason
+            # (uncapped — it must keep the loader stderr) + the structured
+            # load_failure. Informational ONLY — it never blocks the next call,
+            # which re-attempts the load. Cleared on success below.
             _REFUSED[model_key] = (_time.time(), f"{type(exc).__name__}: {exc}",
                                    type(exc), getattr(exc, "load_failure", None))
             raise
@@ -766,16 +733,22 @@ def _build_runner(model_key: str) -> "LlamaCppBaseRunner":
         if _moe.get("is_moe"):
             _exp = int(_moe.get("expert_bytes") or 0)
             _non = int(_moe.get("non_expert_bytes") or 0)
+            # Surface the slot path's REAL reason (this attempt's loader error /
+            # eviction outcome), not a generic "all slots busy" — the in-process
+            # fallback is refused, so the slot's error is the answer the caller
+            # must see.
+            _why = (f" Slot path: {_slot_refusal}." if _slot_refusal is not None
+                    else " No slot seated it (SLOT_COUNT=0 / slots disabled).")
             raise LocalEngineUnavailable(
                 f"model {model_key!r} is a MoE GGUF "
                 f"({_non / 2**30:.2f} GiB non-expert + {_exp / 2**30:.2f} GiB "
                 "experts) and needs the expert split (--n-cpu-moe), which only a "
                 "native llama-server slot child can express — the in-process "
                 "llama-cpp-python path has no equivalent and would load the whole "
-                "model onto the GPU. No slot could seat it (SLOT_COUNT=0 / slots "
-                "disabled, or all slots busy); refusing the in-process fallback "
-                "rather than silently discarding the split. Free a slot or install "
-                "a native llama-server (`hugpy install-engine`).")
+                "model onto the GPU." + _why +
+                " Refusing the in-process fallback rather than silently discarding "
+                "the split. Free a slot or install a native llama-server "
+                "(`hugpy install-engine`).")
         # (Vision GGUFs never reach here: the projector gate above either
         # seated them on a native --mmproj server or raised vision_needs_slot.)
         logger.info(

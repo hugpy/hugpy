@@ -112,9 +112,9 @@ tr '\\0' '\\n' < /proc/$(systemctl show -p MainPID --value <svc>)/environ | grep
         <h2>Models &amp; memory</h2>
 
         <h3 id="ram-oom" className="docs-h3">The server eats way more RAM than expected / OOMs at startup</h3>
-        <p><strong>What you see:</strong> memory use spikes at boot, sometimes an OOM before a single request.</p>
-        <p><strong>Why:</strong> local llama-server slots preload <code>DEFAULT_CHAT_MODEL</code> at boot — <code>SLOT_COUNT</code> of them — and each loaded GGUF costs roughly its file size.</p>
-        <p><strong>Fix:</strong> size RAM ≈ base services (~2–4 GiB) + the largest model(s) you&apos;ll hold concurrently, or lower <code>SLOT_COUNT</code> (<code>SLOT_COUNT=0</code> disables the preloading pool). Offloading inference to workers? Unload local slots first and confirm none remain before shrinking the box:</p>
+        <p><strong>What you see:</strong> memory use climbs as models are requested; a box sized only for base services can OOM once a model loads.</p>
+        <p><strong>Why:</strong> a local llama-server slot loads its model on the FIRST request for it (never at boot — slots start empty), and each loaded GGUF costs roughly its file size. <code>SLOT_COUNT</code> bounds how many can be resident at once.</p>
+        <p><strong>Fix:</strong> size RAM ≈ base services (~2–4 GiB) + the largest model(s) you&apos;ll hold concurrently, or lower <code>SLOT_COUNT</code> (<code>SLOT_COUNT=0</code> disables the local slot pool). Offloading inference to workers? Unload local slots first and confirm none remain before shrinking the box:</p>
         <pre className="docs-block"><code>{`pgrep -af llama-server   # expect nothing before you cut the box's RAM`}</code></pre>
 
         <h3 id="free-cache" className="docs-h3"><code>free</code> says memory is nearly full but nothing is running</h3>

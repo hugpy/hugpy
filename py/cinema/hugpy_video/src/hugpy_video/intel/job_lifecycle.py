@@ -122,6 +122,27 @@ def _ensure() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# FORK SAFETY (incident 2026-09-24). This sidecar shares media_bus's DB and, like
+# it, holds no connection at module scope — the only fork-inherited state is the
+# `_initialized` flag, the stall-watchdog throttle clock and the one-shot armed
+# log. Drop them in a forked child so it re-creates the sidecar table on a fresh
+# handle rather than trusting a pre-fork parent's belief. Belt-and-braces behind
+# the real fix (app built in the gunicorn worker). Registered once; never raises.
+# --------------------------------------------------------------------------- #
+def _reset_after_fork_in_child() -> None:
+    global _initialized, _last_sweep_ts, _armed_logged
+    _initialized = False
+    _last_sweep_ts = 0.0
+    _armed_logged = False
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_after_fork_in_child)
+except (AttributeError, ValueError):  # non-POSIX / interpreter without the hook
+    pass
+
+
+# --------------------------------------------------------------------------- #
 # env knobs — every deadline is tunable; the defaults are the operator's numbers
 # --------------------------------------------------------------------------- #
 def _env_float(name: str, default: float) -> float:

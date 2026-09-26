@@ -344,6 +344,25 @@ def _video_enqueue(name, spec, private=None):
                              owner=_caller_username(), private=bool(private))
 
 
+@video_bp.errorhandler(media_bus.MediaJobsBusy)
+def _media_jobs_busy(exc):
+    """Turn a media-jobs store LOCK timeout (SQLITE_BUSY, exhausted retries) into a
+    clean, retryable JSON 503 carrying the REAL sqlite reason — never an unhandled
+    HTML 500. Every /video/jobs/* enqueue funnels through media_bus.enqueue, so
+    this one handler covers them all. The client may re-submit the identical
+    request (idempotent: nothing was persisted)."""
+    logger.error("video enqueue: media_jobs store locked (%s) after %d attempt(s) "
+                 "over %.2fs: %s", exc.op, exc.attempts, exc.seconds, exc.reason)
+    return jsonify({
+        "error": "media job store is temporarily locked; please retry",
+        "reason": exc.reason,
+        "op": exc.op,
+        "attempts": exc.attempts,
+        "waited_seconds": round(exc.seconds, 3),
+        "retryable": True,
+    }), 503
+
+
 # --------------------------------------------------------------------------- #
 # storage jail — same realpath-under-roots check as media_store._is_within,
 # replicated here so a route never touches a path outside the storage roots.
@@ -3441,7 +3460,7 @@ def video_preset_apply(preset_id):
 
     # Item-4 invariant: central must hold the files, or the worker silently pulls
     # from HF at internet speed. Reuse the exact guard workers_assign uses.
-    from hugpy_server.app.routes.worker_routes import _central_missing_reason, _kick_warm
+    from hugpy_server.app.routes.worker_routes import _central_missing_reason
     missing = _central_missing_reason(model_key)
     if missing:
         return jsonify({"ok": False, "error": {
@@ -3458,17 +3477,18 @@ def video_preset_apply(preset_id):
             "message": ("no online GPU-capable worker is available to warm this "
                         "preset — bring a GPU worker online or assign manually")}}), 409
 
-    # Designate = ready: assign then background-warm (never wait on the load).
+    # Apply = ALLOCATE only: assign the preset's model to the picked worker. It
+    # is NOT loaded here — it loads when a generation calls it (operator
+    # 2026-09-25: no phantom loads of never-called models).
     from hugpy_fleet.central.workers import assign_model
     # Auto-picked worker → an automated ("autoplace") designation: transient,
-    # pruned when idle, never reloaded on restart (only a 📌 pin is).
+    # pruned when idle.
     assigned = assign_model(worker["id"], model_key, source="autoplace")
     if assigned is None:
         # Raced: the worker vanished between pick and assign.
         return jsonify({"ok": False, "error": {
             "code": "NoGpuWorker",
             "message": "the selected worker is no longer available — retry"}}), 409
-    _kick_warm(assigned, [model_key], "video-preset")
 
     return jsonify({
         "ok": True,
@@ -3476,7 +3496,7 @@ def video_preset_apply(preset_id):
         "model_key": model_key,
         "mode": preset.mode,
         "defaults": preset.defaults(),
-        "warming": True,
+        "warming": False,   # allocation only — loads on the first generation
     }), 200
 
 

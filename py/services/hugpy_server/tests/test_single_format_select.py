@@ -206,3 +206,111 @@ def test_empty_and_framework_none():
               ("pytorch_model.bin", 100)]
     kept = _kept(single, framework=None)
     assert "model.safetensors" in kept and "pytorch_model.bin" not in kept
+
+
+# ── diffusers precision-variant dedup (operator incident 2026-09-25) ─────────
+# A diffusers pipeline is per-component subdirs, each shipping the SAME weights
+# at two precisions: the UNTAGGED (full precision) copy AND a ``.fp16.`` variant.
+# The old selector kept BOTH (the fp32-tag rule only sees an explicit ``.fp32``
+# tag, and diffusers tags the SMALL copy, not the large one), so sd-turbo summed
+# to 12.07 GiB and derived ram-only -> CUDA OOM. It should count the fp16 the
+# loader actually loads: ~2.5 GiB.
+GIB = 2 ** 30
+SD_TURBO = [
+    ("model_index.json", 600),
+    ("scheduler/scheduler_config.json", 300),
+    ("tokenizer/vocab.json", 1000), ("tokenizer/merges.txt", 500),
+    ("text_encoder/config.json", 700),
+    ("text_encoder/model.safetensors", int(0.49 * GIB)),        # fp32 (untagged)
+    ("text_encoder/model.fp16.safetensors", int(0.24 * GIB)),   # fp16 variant
+    ("text_encoder/pytorch_model.bin", int(0.49 * GIB)),        # bin duplicate
+    ("unet/config.json", 700),
+    ("unet/diffusion_pytorch_model.safetensors", int(3.4 * GIB)),       # fp32
+    ("unet/diffusion_pytorch_model.fp16.safetensors", int(1.7 * GIB)),  # fp16
+    ("unet/diffusion_pytorch_model.bin", int(3.4 * GIB)),              # bin dup
+    ("vae/config.json", 700),
+    ("vae/diffusion_pytorch_model.safetensors", int(0.32 * GIB)),      # fp32
+    ("vae/diffusion_pytorch_model.fp16.safetensors", int(0.16 * GIB)), # fp16
+]
+
+
+def test_sd_turbo_keeps_only_the_fp16_variant():
+    kept = _kept(SD_TURBO, framework="diffusers")
+    # fp16 variant weights survive per component
+    for keep in ("unet/diffusion_pytorch_model.fp16.safetensors",
+                 "vae/diffusion_pytorch_model.fp16.safetensors",
+                 "text_encoder/model.fp16.safetensors"):
+        assert keep in kept, keep
+    # the untagged full-precision duplicate AND the bin duplicate are gone
+    for gone in ("unet/diffusion_pytorch_model.safetensors",
+                 "unet/diffusion_pytorch_model.bin",
+                 "vae/diffusion_pytorch_model.safetensors",
+                 "text_encoder/model.safetensors",
+                 "text_encoder/pytorch_model.bin"):
+        assert gone not in kept, gone
+    # every sidecar (config/tokenizer/scheduler) is kept
+    assert "model_index.json" in kept and "unet/config.json" in kept
+    assert "scheduler/scheduler_config.json" in kept
+
+
+def test_sd_turbo_effective_is_the_fp16_footprint_not_the_dir_sum():
+    eff = F.effective_bytes(SD_TURBO, framework="diffusers")
+    dir_sum = sum(s for (_r, s) in SD_TURBO)
+    # fp16 weights + tiny sidecars ~ 2.1 GiB, not the ~10.2 GiB dir sum
+    assert eff < 2.6 * GIB, eff
+    assert dir_sum > 9 * GIB
+    expect = (int(0.24 * GIB) + int(1.7 * GIB) + int(0.16 * GIB)   # fp16 weights
+              + 600 + 300 + 1000 + 500 + 700 + 700 + 700)          # sidecars
+    assert eff == expect
+
+
+def test_bf16_variant_is_preferred_over_untagged():
+    files = [
+        ("unet/config.json", 100),
+        ("unet/diffusion_pytorch_model.safetensors", 4 * GIB),
+        ("unet/diffusion_pytorch_model.bf16.safetensors", 2 * GIB),
+    ]
+    kept = _kept(files, framework="diffusers")
+    assert "unet/diffusion_pytorch_model.bf16.safetensors" in kept
+    assert "unet/diffusion_pytorch_model.safetensors" not in kept
+
+
+def test_single_precision_component_is_untouched():
+    # No variant present -> nothing to dedup; the untagged weight stays.
+    files = [
+        ("unet/config.json", 100),
+        ("unet/diffusion_pytorch_model.safetensors", 3 * GIB),
+        ("vae/diffusion_pytorch_model.safetensors", GIB),
+    ]
+    kept = _kept(files, framework="diffusers")
+    assert "unet/diffusion_pytorch_model.safetensors" in kept
+    assert "vae/diffusion_pytorch_model.safetensors" in kept
+
+
+# The shard-completeness guard is exercised directly on _dedup_precision_variants:
+# select_files' step-1 _has_complete_safetensors is transformers-index specific
+# (it looks for model.safetensors.index.json) and already returns a sharded
+# diffusers component whole, so the guard below is what protects the dedup pass
+# itself once a component does reach it.
+def test_incomplete_fp16_shard_set_degrades_to_keeping_both():
+    # fp16 sharded set is MISSING part 2 -> not complete -> we must NOT drop the
+    # untagged copy (degrade to correct: never risk an unloadable component).
+    files = [
+        ("unet/diffusion_pytorch_model.safetensors", 4 * GIB),          # untagged, complete
+        ("unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors", GIB),  # fp16 shard 1 only
+    ]
+    kept = sorted(r for (r, _s) in F._dedup_precision_variants(files))
+    assert "unet/diffusion_pytorch_model.safetensors" in kept
+    assert "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors" in kept
+
+
+def test_complete_fp16_shard_set_drops_the_untagged():
+    files = [
+        ("unet/diffusion_pytorch_model.safetensors", 4 * GIB),          # untagged
+        ("unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors", GIB),
+        ("unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors", GIB),
+    ]
+    kept = sorted(r for (r, _s) in F._dedup_precision_variants(files))
+    assert "unet/diffusion_pytorch_model.safetensors" not in kept
+    assert "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors" in kept
+    assert "unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors" in kept

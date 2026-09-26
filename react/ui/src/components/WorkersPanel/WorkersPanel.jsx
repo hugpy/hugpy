@@ -9,11 +9,16 @@ import { allocIsGgufOnly, allocModeLabel, spillLabel } from './allocation'
 import { fmtBytes } from './formatters'
 import { findCatalogRow } from './catalogRow'
 import { GroupAssignPanel } from './GroupAssignPanel'
+import { useFleetDistribution } from './useFleetDistribution'
 import { WorkerRow, effectivePin } from './WorkerRow'
 import { responseReason } from '../responseReason'
 import './WorkersPanel.css'
 
 export default function WorkersPanel({ models = [], embedded = false }) {
+  // Fleet distribution mode (feasible|designated) — lifted here so the top-of-
+  // panel switch, the per-worker wildcard toggle and the per-model strict
+  // checkbox all read the SAME live mode from one server-side source.
+  const dist = useFleetDistribution()
   const [workers, setWorkers] = useState([])
   const [error, setError]     = useState(null)
   const [open, setOpen]       = useSessionState('hugpy.sess.wp.open', false)  // session-sticky expansion
@@ -863,8 +868,9 @@ export default function WorkersPanel({ models = [], embedded = false }) {
     if (!confirm(
       `📌 Pin all ${keys.length} model${keys.length === 1 ? '' : 's'} on ${worker.name}?\n\n` +
       'Pinning is PERMANENT attribution: each pinned model then refuses unassign ' +
-      '("unpin first") until you Unpin all, and is reloaded after a worker boot ' +
-      'or a central restart. No agent restart, no load, no eviction.')) return
+      '("unpin first") until you Unpin all, and stays allocated to this worker ' +
+      'across restarts. Pinning never loads anything into VRAM/RAM — a model ' +
+      'loads when it is called. No agent restart, no load, no eviction.')) return
     try {
       const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/pin-all`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1081,6 +1087,21 @@ export default function WorkersPanel({ models = [], embedded = false }) {
 
       {(embedded || open) && (
         <div className="wp-body">
+          {/* Read-only reminder of the fleet distribution mode (the SWITCH lives
+              in Settings — the operator-knob surface). Shown here only so the
+              per-worker Wildcard toggle's "only matters in Designated mode" hint
+              has context. Feasible (default) = any feasible worker is a routing
+              candidate; Designated = the legacy sealed-designation scope. */}
+          {dist.mode && (
+            <div className="wp-dist-badge"
+                 title={`Fleet distribution: ${dist.mode}`
+                   + (dist.source === 'env' ? ' (pinned by HUGPY_DISTRIBUTION)' : '')
+                   + '. Change it in the Settings tab (Distribution).'}>
+              Distribution: <b>{dist.mode === 'designated' ? 'Designated' : 'Feasible'}</b>
+              {dist.source === 'env' && <span className="wp-dist-badge-env"> · env-pinned</span>}
+              <span className="wp-dist-badge-where"> · change in Settings</span>
+            </div>
+          )}
           {/* t22 (operator): the page reads live workers first, then group
               actions, then the "Add & manage workers" tooling — so the per-worker
               cards + central footer come first, GroupAssignPanel next, and the
@@ -1146,6 +1167,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
               applying={!!applying[w.id]}
               blockedKeys={blockedKeys}
               onToggleBlock={toggleBlock}
+              distMode={dist.mode}
             />
           ))}
 

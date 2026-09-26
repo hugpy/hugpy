@@ -100,6 +100,19 @@ _SENSITIVE = [
     # Worker enrollment tokens (minting/revoking enrollment — CRITICAL)
     ({"GET", "POST"},            re.compile(r"^/llm/enroll-tokens$")),
     ({"DELETE"},                 re.compile(r"^/llm/enroll-tokens/[^/]+$")),
+    # One-step WireGuard join (2026-09-24): allocates a fleet IP, registers a
+    # wg0 peer via a privileged helper, and MINTS an enrollment token + returns a
+    # private key. Strictly more powerful than /llm/enroll-tokens (it also grants
+    # network reachability into the hub subnet), so it is operator-only, same
+    # CRITICAL tier — and it must never be reachable anonymously.
+    ({"POST"},                   re.compile(r"^/llm/fleet/wg-join$")),
+    # FLEET DISTRIBUTION MODE (operator ruling 2026-09-24): feasible|designated,
+    # the catch-all that flips the whole fleet between feasible-set routing and
+    # the legacy sealed-designation scope. A fleet-wide routing-registry write of
+    # the same tier as the per-worker wildcard opt-in, so the POST is operator-
+    # only. The GET (/llm/fleet/distribution) stays open — same tier as the
+    # /llm/workers roster and the wildcard map it sits beside.
+    ({"POST"},                   re.compile(r"^/llm/fleet/distribution$")),
     # Model review (review_routes): /run spends disk, bandwidth and GPU time on
     # weights chosen by the caller, and /criteria writes the saved queries the
     # unattended timer later executes — both are operator intent, not public
@@ -118,9 +131,9 @@ _SENSITIVE = [
     # prune drops designations — both registry writes of the assign tier. The
     # prune is gated even as a dry run (one verb, one rule).
     ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/(pin|designations/prune)$")),
-    # Per-worker KEEP-WARM STAR ("star") — operator intent that projects onto the
-    # fleet (which model a worker keeps warm; reconcile-kept every beat), same
-    # registry-write privilege tier as assign. The GET map
+    # Per-worker ⭐ STAR ("star") — operator intent that projects onto the fleet
+    # (a routing tie-break designation; it loads nothing), same registry-write
+    # privilege tier as assign. The GET map
     # (/llm/workers/boot-prewarm) and the per-worker read (surfaced on the roster)
     # stay open — only the write is gated. Two path segments (worker id + verb)
     # with a hyphen, so it needs its own rule (the single-segment worker-verb rule

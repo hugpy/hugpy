@@ -8,11 +8,11 @@ import './AgentNodesPanel.css'
 // Reads the P3.1 / P3.1b operator-gated routes (all under the /api mount):
 //   GET  /api/agent/nodes                 — full roster + live health
 //   POST /api/agent/<id>/dispatch {task}  — queue a task -> 201 with its {seq}
+//   GET  /api/agent/nodes/<id>/tasks       — recent task history
 //   GET  /api/agent/<id>/tasks/<seq>      — one task's row (status/result)
 //
-// There is NO operator task-LIST route yet, so this panel tracks only the tasks
-// it dispatched THIS session (by their returned seq) and polls each until it
-// finalizes. Modeled on WorkersPanel / PhoneBrickPanel (collapsible bar, ~10s
+// The roster and recent task history are recovered from central, so completed
+// work remains visible across page reloads. Modeled on WorkersPanel / PhoneBrickPanel (collapsible bar, ~10s
 // roster poll, error surfaced in the header). The /agent/* routes are not
 // deployed everywhere yet, so the roster read degrades to a clear
 // "routes not deployed" state rather than a crash or a forever-spinner.
@@ -71,6 +71,11 @@ function taskStatusClass(status) {
   return 'an-ts-queued'   // queued / anything not terminal
 }
 
+function taskLabelText(task) {
+  if (!task || typeof task !== 'object') return String(task || '(empty task)')
+  return task.instruction || task.prompt || task.kind || JSON.stringify(task)
+}
+
 // One dispatched-task card: prompt echo, live status, spinner while queued, and
 // the final result (which may end with central's "…[truncated N bytes]" marker).
 function TaskCard({ rec }) {
@@ -86,12 +91,19 @@ function TaskCard({ rec }) {
         </span>
         <span className="an-task-seq" title="dispatch sequence (this node's monotonic task cursor)">seq {rec.seq}</span>
         <span className="an-task-prompt" title={rec.prompt}>{rec.prompt}</span>
+        {v.created_at != null && <span className="an-task-fin">· queued {fmtAgo(v.created_at)}</span>}
         {v.finished_at != null && (
           <span className="an-task-fin" title="finished_at (from central)">· {fmtAgo(v.finished_at)}</span>
         )}
       </div>
       {running && (
         <div className="an-task-wait">Dispatched — waiting for the node to pull, run, and report…</div>
+      )}
+      {v.task != null && (
+        <details className="an-task-payload">
+          <summary>Task payload</summary>
+          <pre className="an-task-result">{JSON.stringify(v.task, null, 2)}</pre>
+        </details>
       )}
       {status === 'done' && (
         <pre className="an-task-result">{v.result != null && v.result !== '' ? v.result : '(empty result)'}</pre>
@@ -181,13 +193,34 @@ export default function AgentNodesPanel({ embedded = false }) {
   // roster state machine: what the last /agent/nodes read told us.
   //   loading | ok | unavailable (routes not deployed) | auth | error
   const [state, setState] = useState({ kind: 'loading', msg: null })
-  // Tasks dispatched THIS session (no operator list route to recover them).
+  // Recent task history loaded from central, plus newly dispatched tasks.
   // Each: { key, nodeId, nodeName, seq, prompt, view, dispatchedAt }
   const [tasks, setTasks] = useState([])
   const aliveRef = useRef(true)
 
   // Roster read — done via raw hugpyFetch so we can branch on the status code:
   // a 404/501 on this collection endpoint is the "routes not deployed" signal.
+  const loadTaskHistory = useCallback(async (nodeList) => {
+    const perNode = await Promise.all(nodeList.map(async node => {
+      try {
+        const data = await fetchJson(
+          `/api/agent/nodes/${encodeURIComponent(node.id)}/tasks?limit=100`)
+        return (data.tasks || []).map(view => ({
+          key: `${node.id}:${view.seq}`,
+          nodeId: node.id,
+          nodeName: node.name || node.id,
+          seq: view.seq,
+          prompt: taskLabelText(view.task),
+          view,
+          dispatchedAt: Number(view.created_at || 0) * 1000,
+        }))
+      } catch {
+        return []
+      }
+    }))
+    if (aliveRef.current) setTasks(perNode.flat())
+  }, [])
+
   const loadNodes = useCallback(async () => {
     let r
     try {
@@ -201,7 +234,9 @@ export default function AgentNodesPanel({ embedded = false }) {
     if (r.ok) {
       let data = []
       try { data = JSON.parse(body) } catch { data = [] }
-      setNodes(Array.isArray(data) ? data : [])
+      const nodeList = Array.isArray(data) ? data : []
+      setNodes(nodeList)
+      void loadTaskHistory(nodeList)
       setState({ kind: 'ok', msg: null })
       return
     }
@@ -214,7 +249,7 @@ export default function AgentNodesPanel({ embedded = false }) {
       try { const j = JSON.parse(body); msg = j.error || j.detail || j.message || msg } catch { /* keep text */ }
       setState({ kind: 'error', msg: msg || `HTTP ${r.status}` })
     }
-  }, [])
+  }, [loadTaskHistory])
 
   useEffect(() => {
     aliveRef.current = true

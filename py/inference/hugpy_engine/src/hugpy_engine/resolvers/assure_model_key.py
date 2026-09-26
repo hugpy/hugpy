@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 import re
+import threading
 from pathlib import PurePosixPath
 from typing import Optional
 
@@ -9,6 +12,86 @@ from hugpy_engine.name_match import _tokens as _nm_tokens
 from hugpy_engine.placement import get_blocklist, get_model_metrics, get_worker_registry
 
 _log = logging.getLogger(__name__)
+
+
+# ── OPERATOR MODEL ALIASES (2026-09-24) ──────────────────────────────────────
+# An OPT-IN, operator-editable map of harness/vendor model names -> a hugpy model
+# name, so a harness that hardcodes its own default ("anthropic/claude-opus-4.6",
+# "gpt-6-luna", ...) resolves through hugpy without editing the harness. It is
+# EXPLICIT config, never a guess: the file is empty/absent by default (behaviour
+# byte-identical to before), an alias TARGET must itself resolve to a real
+# registry key (a broken alias is IGNORED so the honest "unknown model" refusal
+# for the original name still fires — an alias can never silently substitute a
+# nonexistent model), and the alias tier runs BEFORE fuzzy matching but the exact
+# registry membership of the literal name still wins first. JSON shape:
+#   {"anthropic/claude-opus-4.6": "Qwen~Qwen3-Coder-Next-GGUF", ...}
+# Path: $HUGPY_MODEL_ALIASES_PATH, else <PROJECTS_HOME>/model_aliases.json (the
+# same runtime-state root api_keys.json / the manifests use).
+_ALIAS_LOCK = threading.Lock()
+_ALIAS_CACHE: "dict[str, str]" = {}
+_ALIAS_MTIME: float = -1.0
+_ALIAS_PATH_CACHED: Optional[str] = None
+
+
+def _aliases_path() -> str:
+    global _ALIAS_PATH_CACHED
+    if _ALIAS_PATH_CACHED is None:
+        p = os.environ.get("HUGPY_MODEL_ALIASES_PATH")
+        if not p:
+            try:
+                from hugpy_platform.constants import PROJECTS_HOME
+                p = os.path.join(PROJECTS_HOME, "model_aliases.json")
+            except Exception:  # noqa: BLE001 — no platform root -> a stable dud path
+                p = os.path.join(os.path.expanduser("~"), ".hugpy", "model_aliases.json")
+        _ALIAS_PATH_CACHED = p
+    return _ALIAS_PATH_CACHED
+
+
+def _load_aliases() -> "dict[str, str]":
+    """The alias map {lookup_form: target_name}, reloaded on file mtime change.
+
+    Lookup forms are pre-normalized (raw-stripped-lower AND slugified) so a call
+    can match either the literal alias key or its slug. Fail-open to {} on any
+    fault (missing file, bad JSON, non-string values) — a broken alias file must
+    never break resolution."""
+    global _ALIAS_CACHE, _ALIAS_MTIME
+    path = _aliases_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        if _ALIAS_MTIME != -1.0 or _ALIAS_CACHE:
+            with _ALIAS_LOCK:
+                _ALIAS_CACHE, _ALIAS_MTIME = {}, -1.0
+        return {}
+    if mtime == _ALIAS_MTIME:
+        return _ALIAS_CACHE
+    built: "dict[str, str]" = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if not isinstance(k, str) or not isinstance(v, str) or not v.strip():
+                    continue
+                target = v.strip()
+                built[k.strip().lower()] = target
+                built.setdefault(_slugify(k), target)
+    except Exception:  # noqa: BLE001 — a bad alias file is no aliases, never a crash
+        _log.warning("model aliases at %s ignored (unreadable/invalid)", path,
+                     exc_info=True)
+        built = {}
+    with _ALIAS_LOCK:
+        _ALIAS_CACHE, _ALIAS_MTIME = built, mtime
+    return built
+
+
+def _alias_target(model_key: str) -> Optional[str]:
+    """The operator-registered target for ``model_key``, or None. Matches the
+    literal name (case-insensitive) or its slug."""
+    aliases = _load_aliases()
+    if not aliases:
+        return None
+    return aliases.get(model_key.strip().lower()) or aliases.get(_slugify(model_key))
 
 
 def _normalize_model_path(value: str) -> str:
@@ -268,7 +351,7 @@ def _pick_by_total_order(keys, *, strict):
     return ranked[0]
 
 
-def assure_model_key(model_key, *, strict: bool = False):
+def assure_model_key(model_key, *, strict: bool = False, _expand_aliases: bool = True):
     """
     Resolve a user-provided model key, repo id, manifest slug, folder name,
     or folder suffix into the canonical key from MODEL_REGISTRY.
@@ -291,8 +374,24 @@ def assure_model_key(model_key, *, strict: bool = False):
 
     model_key = str(model_key).strip().rstrip("/")
 
+    # Literal registry membership always wins first — an alias can only ever
+    # redirect a name hugpy does NOT already serve under that spelling.
     if model_key in MODEL_REGISTRY:
         return model_key
+
+    # OPERATOR ALIAS TIER (opt-in): a registered vendor/harness name resolves to
+    # its hugpy target. Resolve the TARGET through the normal cascade (with alias
+    # expansion OFF, so a chained/cyclic alias can't loop); a broken alias whose
+    # target does not resolve is IGNORED — we fall through to the honest refusal
+    # for the original name rather than silently substituting a missing model.
+    if _expand_aliases:
+        target = _alias_target(model_key)
+        if target and target != model_key:
+            resolved = assure_model_key(target, strict=strict, _expand_aliases=False)
+            if resolved is not None:
+                _log.debug("assure_model_key: alias %r -> %r -> %s",
+                           model_key, target, resolved)
+                return resolved
 
     slug = _slugify(model_key)
     bare_slug = _slugify(_bare_tail(model_key))

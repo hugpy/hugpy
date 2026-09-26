@@ -67,6 +67,7 @@ _TASK_PREFIX = "atsk_"
 # refusing would leave the task un-finalizable), with a byte-count marker.
 _MAX_RESULT_BYTES = 65536
 _TASK_TERMINAL = ("done", "error")
+_UNSET = object()
 
 _SCHEMA_NODES = """
 CREATE TABLE IF NOT EXISTS agent_nodes (
@@ -274,7 +275,7 @@ class AgentNodeStore:
         return secrets.compare_digest(str(row["token_hash"]), _hash(token))
 
     def heartbeat(self, node_id: str, *, status: Optional[str] = None,
-                  current_task: Optional[str] = None,
+                  current_task: Any = _UNSET,
                   version: Optional[str] = None) -> Optional[dict[str, Any]]:
         """Record a beat. Returns the updated public view, or None if central
         has no such node (the caller answers 410 -> re-register). Only the
@@ -287,8 +288,10 @@ class AgentNodeStore:
             if row is None:
                 return None
             new_status = status if status is not None else row["status"]
-            new_task = current_task if current_task is not None \
-                else row["current_task"]
+            # Omitted means a partial heartbeat; explicit null means the node
+            # has no current task and must clear the previous busy marker.
+            new_task = (row["current_task"] if current_task is _UNSET
+                        else ("" if current_task is None else str(current_task)))
             new_version = version if version is not None else row["version"]
             conn.execute(
                 "UPDATE agent_nodes SET status=?, current_task=?, version=?, "
@@ -358,6 +361,16 @@ class AgentNodeStore:
                 "SELECT * FROM agent_tasks WHERE seq=? AND node_id=?",
                 (seq_i, node_id)).fetchone()
         return self._task_view(row) if row else None
+
+    def list_tasks(self, node_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent task history for an operator's node detail view."""
+        self._ensure()
+        limit = max(1, min(int(limit), 200))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_tasks WHERE node_id=? "
+                "ORDER BY seq DESC LIMIT ?", (node_id, limit)).fetchall()
+        return [self._task_view(r) for r in rows]
 
     def complete_task(self, node_id: str, seq: Any, *, status: str,
                       result: Any = None) -> dict[str, Any]:

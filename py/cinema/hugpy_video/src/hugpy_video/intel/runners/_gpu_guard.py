@@ -39,8 +39,15 @@ def guard_gpu_worker(model_id: str, job_id: str) -> Optional[JobResult]:
         os.environ.get("HUGPY_VIDEOGEN_LOCAL", "").strip().lower()
         in ("always", "1", "true", "yes", "on"))
 
-    # 1) Is a live worker already serving this model? If so, never refuse here —
-    #    let resolve()/DelegatingRunner relay the job to it.
+    # 1) Can the fleet serve this model? The worker provider is the SAME
+    #    placement decision /v1 chat uses (WorkerStore.pick_for_model): it returns
+    #    a worker that is already serving the model OR a placement-chosen capable
+    #    box that will cold-load it just-in-time — for a comfy model, a live comfy
+    #    box that advertises the checkpoint installed. If it returns a worker, never
+    #    refuse here — let resolve()/DelegatingRunner relay the job so the worker's
+    #    evict-to-fit makes room and comfy cold-loads the checkpoint, exactly the
+    #    way a cold LLM is placed. Only when NO worker can serve it do the honest
+    #    refusals below fire.
     try:
         from hugpy_engine.resolvers.remote import get_worker_provider
         provider = get_worker_provider()
@@ -57,6 +64,21 @@ def guard_gpu_worker(model_id: str, job_id: str) -> Optional[JobResult]:
             live_worker = None  # a broken provider must not crash the runner
     if live_worker is not None:
         return None
+
+    # No worker CAN serve it (cold-placement found nothing). Pull the specific
+    # reason from the SAME no-worker diagnostic the /v1 relay uses
+    # (remote._no_worker_detail -> the fleet's explain_no_worker), so a comfy
+    # model with no capable/present box says exactly why (comfy backend down, no
+    # comfy box online, or the checkpoint installed nowhere) instead of only the
+    # generic policy refusal. "" (unregistered seam / standalone box / a truly
+    # transient miss) leaves the message byte-identical to before.
+    detail = ""
+    try:
+        from hugpy_engine.resolvers.remote import _no_worker_detail
+        detail = (_no_worker_detail(model_id) or "").strip()
+    except Exception:  # noqa: BLE001 — a diagnostic must never crash the runner
+        detail = ""
+    _why = f" Reason: {detail}" if detail else ""
 
     # 2) No live worker. Per-box "never serve locally" policy: a central box runs
     #    no in-process generation at all, even in a standalone/no-provider
@@ -75,6 +97,7 @@ def guard_gpu_worker(model_id: str, job_id: str) -> Optional[JobResult]:
                 f"(HUGPY_NO_LOCAL_SERVING); refusing in-process generation of "
                 f"{model_id!r}. Bring a GPU worker online, or set "
                 f"HUGPY_VIDEOGEN_LOCAL=always to permit local generation here."
+                f"{_why}"
             ),
             retryable=True,
         ))
@@ -89,7 +112,7 @@ def guard_gpu_worker(model_id: str, job_id: str) -> Optional[JobResult]:
                 f"no live GPU worker is serving {model_id!r} (worker "
                 "offline or still warming); refusing local CPU generation "
                 "on central. Retry shortly, or set HUGPY_VIDEOGEN_LOCAL="
-                "always to permit in-process generation."
+                f"always to permit in-process generation.{_why}"
             ),
             retryable=True,
         ))

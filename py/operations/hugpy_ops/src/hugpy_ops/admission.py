@@ -562,6 +562,24 @@ def process(job: dict, *, queue=None, central: Any = None, **kw) -> dict:
 _RUNNER: Optional[threading.Thread] = None
 
 
+# FORK SAFETY (incident 2026-09-24). `_RUNNER` is a module-global thread handle.
+# A thread does not survive fork, but the inherited Thread OBJECT still reports
+# is_alive()==True in the child, so start_admission_runner() would see a "live"
+# runner and refuse to start a real one — the worker would never claim admission
+# jobs. Reset the handle in a forked child so the worker elects and starts its
+# own runner. Belt-and-braces behind the real fix (app built in the gunicorn
+# worker, which starts the runner there in the first place). Never raises.
+def _reset_after_fork_in_child() -> None:
+    global _RUNNER
+    _RUNNER = None
+
+
+try:
+    os.register_at_fork(after_in_child=_reset_after_fork_in_child)
+except (AttributeError, ValueError):  # non-POSIX / interpreter without the hook
+    pass
+
+
 def recover_orphans(queue, owner: str) -> dict:
     """First act of a newly elected runner. The election flock is held for the
     whole life of the process that runs jobs, so a job still ``running`` now

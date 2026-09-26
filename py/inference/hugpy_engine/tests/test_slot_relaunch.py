@@ -123,16 +123,13 @@ def test_relaunch_empty_slot_raises():
     assert "no model loaded" in str(e.value).lower()
 
 
-def test_relaunch_clears_stale_backoff():
-    """A deliberate relaunch must not be refused by a load-backoff armed by an
-    earlier failure of this model — relaunch clears it before the forced load."""
+def test_relaunch_clears_stale_failure_count():
+    """A deliberate relaunch starts a fresh consecutive-failure count."""
     s = _slot_for_relaunch()
     s._load_failures = {"coder": 3}
-    s._load_backoff_until = {"coder": 9e18}
     s.load = lambda mk, **kw: {"model_key": mk}
     s.relaunch(n_gpu_layers=4)
     assert "coder" not in s._load_failures
-    assert "coder" not in s._load_backoff_until
 
 
 # ═══════════ force bypasses the already-serving short-circuit ══════════════

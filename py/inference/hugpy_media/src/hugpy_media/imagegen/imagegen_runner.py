@@ -130,39 +130,63 @@ def _evict_idle_pipelines(cache: Dict[str, Any], keep: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Placement (Slice C) — diffusers does NOT take device_map/max_memory the
-# transformers way, so the honest spill mechanism for a t2i/i2v pipeline is
-# diffusers' own CPU-offload API, driven by the SAME placement seam the
-# transformers loaders read (spill.n_gpu_layers_intent / alloc_mode_env — no
-# parallel intent reader is invented here):
-#   * CPU-leaning intent (ram-only / n_gpu_layers "off"/0)  -> sequential CPU
-#     offload: submodules stream to the GPU one at a time and return to RAM —
-#     the smallest possible VRAM footprint (slowest), matching "keep it off the
-#     card". Binds even with a GPU present (the operator asked for RAM).
-#   * fit-and-spill (max-ram alloc_mode) -> model CPU offload: whole submodules
-#     are offloaded to RAM and pulled onto the GPU only while active — big model,
-#     one consumer card, no OOM.
-#   * default (no intent / gpu-only / auto that fits) -> today's `.to(cuda)`,
-#     BYTE-IDENTICAL when the seam is silent (defaults-are-promises).
-# A pipeline class without an offload method (genuine capability gap) is logged
-# ONCE and falls back to .to(device) rather than silently ignoring the mode.
-def _place_diffusers_pipeline(pipe, cuda: bool, model_key: str) -> str:
+# Placement — diffusers does NOT take device_map/max_memory the transformers way.
+# The cpu-vs-gpu decision is made in _load_diffusers_pipeline (the `cuda` flag,
+# which folds ram-only intent + the worker's evict-to-fit reclaim); this function
+# only applies it:
+#   * cuda=False  -> FULLY on the CPU (pipe.to("cpu")): the GPU is NOT touched.
+#     diffusers' cpu-offload APIs are deliberately NOT used — enable_sequential_
+#     cpu_offload still STREAMS submodules THROUGH CUDA and OOMs on a full card
+#     (incident 2026-09-25: sd-turbo on computron, 17.88 MiB free). ram-only that
+#     still can't fit after eviction arrives here as cuda=False.
+#   * cuda=True + max-ram alloc_mode -> model CPU offload: whole submodules stream
+#     to RAM and are pulled onto the GPU only while active — big model, one card.
+#   * cuda=True otherwise (gpu-only / auto / ram-only UPGRADED after reclaim) ->
+#     `.to(cuda)`, the whole pipeline on the GPU.
+# A pipeline class without the max-ram offload method (genuine capability gap) is
+# logged ONCE and falls back to .to(cuda) rather than silently ignoring the mode.
+def _place_diffusers_pipeline(pipe, cuda: bool, model_key: str,
+                              device: "str | None" = None) -> str:
     """Place a diffusers pipeline per the allocation seam. Returns a short label
     of what was applied (for the load log). Mutates ``pipe`` in place (both
-    .to(...) and enable_*_cpu_offload() act on the object)."""
+    .to(...) and enable_*_cpu_offload() act on the object).
+
+    ``device`` is the CUDA device string the GPU branch places on — central's
+    per-GPU pin resolved to ``"cuda"`` (primary card) or ``"cuda:N"``. Defaults to
+    :func:`_cuda_device`, so the pin is honored without threading it through every
+    caller, and a single-GPU box stays byte-identical (``"cuda"``).
+
+    THE cpu-vs-gpu decision is the caller's (the ``cuda`` flag), NOT re-derived
+    here: ``_load_diffusers_pipeline`` folds ram-only intent + the worker's
+    evict-to-fit reclaim into ``cuda`` (False => fully CPU; True => the GPU is
+    wanted, incl. a ram-only load UPGRADED after eviction freed the card). So this
+    function must NEVER send a cuda=True load to the CPU by re-reading the intent —
+    that would undo the upgrade (place a now-fitting model on the CPU while the
+    idle squatter it evicted is gone). ram-only that still can't fit arrives here
+    as cuda=False and takes the CPU branch below."""
     if not cuda:
+        # Fully on the CPU — the GPU is not touched at all. diffusers' cpu-offload
+        # APIs are deliberately NOT used (they stream submodules THROUGH CUDA and
+        # OOM on a full card — incident 2026-09-25).
         pipe.to("cpu")
         return "cpu"
 
-    # Read the placement intent from the shared seam — never a parallel reader.
+    # The GPU card central chose (primary "cuda" or "cuda:N"). enable_*_cpu_offload
+    # deliberately keeps its default-device behavior (passing a device would break
+    # pipelines whose offload API has no such arg); the whole-pipeline .to() path
+    # honors the pin.
+    device = device or _cuda_device()
+
+    # GPU decided upstream. The only remaining device knob is max-ram, which
+    # streams whole components to RAM and pulls them onto the GPU while active
+    # (big model, one card). Everything else places the whole pipeline on the GPU.
     try:
-        from hugpy_engine.spill import n_gpu_layers_intent, alloc_mode_env
-        intent = n_gpu_layers_intent()          # "gpu" | "cpu" | "auto"
+        from hugpy_engine.spill import alloc_mode_env
         alloc_mode = alloc_mode_env()           # "max-ram" | "explicit" | None
     except Exception as exc:  # noqa: BLE001 — no seam: today's path, logged
         logger.warning("imagegen: placement seam unavailable (%s); using "
                        ".to(cuda)", exc)
-        pipe.to("cuda")
+        pipe.to(device)
         return "cuda (seam unavailable)"
 
     def _offload(method: str, label: str) -> str:
@@ -174,7 +198,7 @@ def _place_diffusers_pipeline(pipe, cuda: bool, model_key: str) -> str:
                 "'%s' placement; loading fully on the GPU with .to(cuda) instead",
                 model_key, type(pipe).__name__, method, label,
             )
-            pipe.to("cuda")
+            pipe.to(device)
             return f"cuda ({label} unsupported by this pipeline)"
         try:
             fn()                                # offload methods mutate in place
@@ -184,16 +208,14 @@ def _place_diffusers_pipeline(pipe, cuda: bool, model_key: str) -> str:
                 "imagegen: model=%s %s() failed (%s) — falling back to .to(cuda)",
                 model_key, method, exc,
             )
-            pipe.to("cuda")
+            pipe.to(device)
             return f"cuda ({label} failed)"
 
-    if intent == "cpu":
-        return _offload("enable_sequential_cpu_offload", "ram-only/sequential-offload")
     if alloc_mode == "max-ram":
         return _offload("enable_model_cpu_offload", "max-ram/model-offload")
 
-    # gpu-only / auto / no intent -> unchanged historical path.
-    pipe.to("cuda")
+    # gpu-only / auto / no intent / ram-only-upgraded -> whole pipeline on the GPU.
+    pipe.to(device)
     return "cuda"
 
 
@@ -256,10 +278,210 @@ def _free_vram_bytes() -> "int | None":
     try:
         import torch
         if torch.cuda.is_available():
-            return int(torch.cuda.mem_get_info()[0])
+            return int(torch.cuda.mem_get_info(_main_gpu_index())[0])
     except Exception:  # noqa: BLE001 — no cuda / can't tell
         pass
     return None
+
+
+# ── evict-to-fit hook (2026-09-25) ──────────────────────────────────────────
+# The in-process diffusers pipeline loads LAZILY inside the runner (AFTER the
+# runner object is built + cached), so dispatch.ensure_headroom_for_load — which
+# runs at runner-BUILD time — never covers the real VRAM allocation; and a
+# ram-only designation makes the cross-tier make-room a no-op. So an idle slot
+# squatter is never evicted and the diffusers load/generate CUDA-OOMs behind it
+# (incident 2026-09-25: sd-turbo on computron behind flux2-klein's idle 6.99 GiB
+# slot child). This hook lets the WORKER agent register its evict-to-fit routine
+# (the SAME evict verb/policy comfy + every other path uses); the runner calls it
+# with its priced footprint right before loading/generating. Package-shared
+# (central imports this module), so — exactly like set_comfy_headroom_hook — it
+# must NOT import worker/GPU internals; the worker registers the hook at boot and
+# this module calls it if present, else a no-op (bare central / no-GPU is
+# byte-identical). Best-effort: a failing hook NEVER blocks a generation.
+_IMAGEGEN_HEADROOM_HOOK = None
+
+# Per-model state the load path records for the generation path + honest errors.
+_MODEL_NEED: Dict[str, int] = {}          # model_key -> priced fp16 footprint bytes
+_PIPELINE_DEVICE: Dict[str, str] = {}     # model_key -> "cuda" | "cpu" (effective)
+_LAST_HEADROOM: Dict[str, dict] = {}      # model_key -> last evict-to-fit telemetry
+
+
+def set_imagegen_headroom_hook(fn) -> None:
+    """Register the worker-side evict-to-fit routine for the in-process diffusers
+    image runners: ``fn(model_key, need_bytes, job_id) -> dict|None`` — evict the
+    minimum LRU set of eligible residents (same verb/policy every other path uses,
+    honoring the busy/in-flight/static gates) until the GPU has room for
+    ``need_bytes``. None (bare central / no-GPU) => the pre-load headroom step is a
+    no-op, byte-identical to before."""
+    global _IMAGEGEN_HEADROOM_HOOK
+    _IMAGEGEN_HEADROOM_HOOK = fn
+
+
+def _ensure_imagegen_headroom(model_key: str, need_bytes: "int | None",
+                              job_id=None) -> "dict | None":
+    """Call the registered evict-to-fit hook (if present) BEFORE an in-process
+    diffusers load/generate, so the pipeline can land on the GPU instead of OOMing
+    behind an idle squatter. Best-effort — never raises into the generation path;
+    returns the worker's telemetry dict (evicted/skipped residents, free_after) or
+    None when there is no hook / it failed."""
+    hook = _IMAGEGEN_HEADROOM_HOOK
+    if hook is None:
+        return None
+    try:
+        return hook(model_key, need_bytes, job_id)
+    except Exception:  # noqa: BLE001 — headroom prep never breaks a generation
+        logger.warning("ensure-imagegen-headroom hook failed (proceeding with the "
+                       "load/gen anyway)", exc_info=True)
+        return None
+
+
+# fp16 fit headroom: the whole model is priced as fitting the GPU when free VRAM
+# >= weight_bytes / 0.85 (the same 0.85 activation/arena headroom _should_quantize
+# uses), so the two agree by construction.
+_FP16_FIT_HEADROOM = 0.85
+
+
+def _cpu_forced(need: "int | None" = None) -> bool:
+    """Should this diffusers load run ENTIRELY on the CPU?
+
+    True when central's derived serve mode is ram-only / CPU-only
+    (HUGPY_N_GPU_LAYERS off/0/cpu -> spill.n_gpu_layers_intent() == "cpu", set
+    per-request by the worker agent's _apply_spill) AND the worker has NOT been
+    able to reclaim enough VRAM to hold the model on the GPU.
+
+    Honoring ram-only via diffusers' cpu-offload APIs is WRONG:
+    enable_sequential_cpu_offload / enable_model_cpu_offload both still STREAM
+    submodules THROUGH CUDA (and a 4-bit bnb load device-places its quantized
+    components on CUDA), so both OOM on a nearly-full card — incident 2026-09-25
+    01:12:58 (sd-turbo on computron, 17.88 MiB free behind flux2-klein's idle
+    6.99 GiB slot child): ram-only priced fp16 against the tiny free VRAM, elected
+    a 4-bit bnb load with enable_model_cpu_offload, and OOM'd inside bitsandbytes
+    dequant on CUDA. So a forced-CPU load means the WHOLE pipeline, its dtype, and
+    the seed generator stay on the CPU.
+
+    But ram-only is central's decision from a CONTENDED snapshot: it derived
+    ram-only precisely because an idle resident squatted the card. Once the worker
+    has run evict-to-fit (``_ensure_imagegen_headroom``) and reclaimed room, the
+    model may now fit the GPU — so ram-only is UPGRADED to a GPU load when the
+    reclaimed free VRAM clearly holds the whole fp16 footprint. Only when it still
+    does not fit does ram-only stay binding (CPU). ``need`` is the priced fp16
+    footprint; call this AFTER the evict-to-fit pass so free VRAM is current."""
+    try:
+        from hugpy_engine.spill import n_gpu_layers_intent
+        if n_gpu_layers_intent() != "cpu":
+            return False
+    except Exception:  # noqa: BLE001 — no seam: not forced (historical path)
+        return False
+    # ram-only intent. Honor it UNLESS the reclaimed card now clearly holds the
+    # whole model on the GPU (worker owns its own contended VRAM).
+    if need:
+        free = _free_vram_bytes()
+        if free is not None and free >= int(need / _FP16_FIT_HEADROOM):
+            logger.info(
+                "imagegen: ram-only intent UPGRADED to GPU — reclaimed %.2f GiB "
+                "free >= %.2f GiB fp16 need after evict-to-fit",
+                free / 2 ** 30, (need / _FP16_FIT_HEADROOM) / 2 ** 30)
+            return False
+    return True
+
+
+def _main_gpu_index() -> int:
+    """The GPU index central pinned this request to (HUGPY_MAIN_GPU, via the spill
+    seam), or 0. An in-process diffusers load runs in the worker's own process,
+    which enumerates every card, so it can't restrict CUDA_VISIBLE_DEVICES
+    per-request the way a slot child does — it must address the chosen card by its
+    GLOBAL index (``cuda:N``). 0 when unpinned (single-GPU / device 0)."""
+    try:
+        from hugpy_engine.spill import main_gpu
+        n = main_gpu()
+        return int(n) if n is not None else 0
+    except Exception:  # noqa: BLE001 — no seam / unparseable: the primary card
+        return 0
+
+
+def _cuda_device() -> str:
+    """The CUDA device string this pipeline occupies: ``"cuda"`` for the primary
+    card (index 0 — byte-identical to the historical bare ``.to("cuda")``) or
+    ``"cuda:N"`` for a central-chosen card on a multi-GPU box."""
+    n = _main_gpu_index()
+    return "cuda" if not n else f"cuda:{n}"
+
+
+def _generator_device(model_key: "str | None" = None) -> str:
+    """Device the seed generator must live on. It MUST match where the pipeline
+    actually runs: the effective device recorded at load time (``_PIPELINE_DEVICE``)
+    when known, else CUDA only when the GPU is genuinely in use. A cuda generator
+    for a CPU-placed pipeline touches the very card ram-only exists to avoid and
+    mismatches the CPU pipeline's latents."""
+    if model_key is not None:
+        dev = _PIPELINE_DEVICE.get(model_key)
+        if dev:
+            return dev
+    try:
+        import torch
+        if torch.cuda.is_available() and not _cpu_forced():
+            return _cuda_device()
+    except Exception:  # noqa: BLE001 — no torch/cuda
+        pass
+    return "cpu"
+
+
+def _vram_snapshot() -> str:
+    """Human free/total VRAM for an honest OOM message, or "" when unmeasurable."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info(_main_gpu_index())
+            return f"{free / 2 ** 30:.2f} GiB free of {total / 2 ** 30:.2f} GiB total"
+    except Exception:  # noqa: BLE001 — no cuda / can't tell
+        pass
+    return ""
+
+
+class _HonestVRAMError(RuntimeError):
+    """A CUDA OOM during an image load/generation, rewritten to name the model,
+    the phase, the derived placement intent and free VRAM alongside torch's own
+    detail (which already names the other resident process). Still classifies as
+    the retryable VRAM class (its text carries "out of memory") so the one-shot
+    settle+retry seam is unchanged. Marked as a distinct type so it is never
+    double-wrapped as it propagates."""
+
+
+def _honest_vram_error(exc: BaseException, model_key: str,
+                       phase: str) -> "_HonestVRAMError | None":
+    """If ``exc`` is a CUDA OOM, return an _HonestVRAMError that surfaces the real
+    reason — model, phase (load/generation), derived placement intent, and free
+    VRAM — instead of an opaque torch traceback. Returns None when ``exc`` is not
+    an OOM (caller re-raises the original) or is already an _HonestVRAMError."""
+    if isinstance(exc, _HonestVRAMError):
+        return None
+    if not is_retryable_vram_failure(exc):
+        return None
+    try:
+        from hugpy_engine.spill import n_gpu_layers_intent
+        intent = n_gpu_layers_intent()
+    except Exception:  # noqa: BLE001 — no seam
+        intent = "unknown"
+    snap = _vram_snapshot()
+    ctx = f"placement intent={intent}"
+    if snap:
+        ctx += f"; VRAM {snap}"
+    # Name what the worker's evict-to-fit pass could (not) do — so the failure
+    # says WHY the card had no room (which residents wouldn't yield and why),
+    # instead of only the raw OOM. Best-effort; absent when no pass ran.
+    hr = _LAST_HEADROOM.get(model_key) or {}
+    evicted = hr.get("evicted")
+    if evicted:
+        ctx += f"; evicted {evicted} but still short"
+    skipped = hr.get("skipped") or []
+    if skipped:
+        names = ", ".join(
+            f"{s.get('model_key')} ({s.get('reason')})" for s in skipped)
+        ctx += f"; could NOT evict: {names}"
+    return _HonestVRAMError(
+        f"CUDA out of memory during {phase} of image model {model_key!r} "
+        f"({ctx}). Underlying error: {type(exc).__name__}: {exc}"
+    )
 
 
 def _should_quantize(weight_bytes: int, free_vram: "int | None", mode: str) -> bool:
@@ -371,15 +593,21 @@ def _settle_for_vram_retry(cache: Dict[str, Any], lock: threading.Lock,
                            keep: str) -> None:
     """Between a retryable VRAM-class first failure and the ONE retry (k71, the
     in-process twin of the comfy seam's cancel+headroom step): re-drive the
-    eviction machinery that already exists — evict idle sibling pipelines,
-    return freed-but-reserved CUDA blocks to the OS — then give the allocator a
-    bounded few seconds to settle. Only the settle sleep is new mechanism.
-    Every step is best-effort; the retry proceeds regardless."""
+    eviction machinery that already exists — evict idle sibling pipelines, run the
+    worker's cross-tier evict-to-fit (slot children / other-model residents the
+    in-process cache can't see), return freed-but-reserved CUDA blocks to the OS —
+    then give the allocator a bounded few seconds to settle. Only the settle sleep
+    is new mechanism. Every step is best-effort; the retry proceeds regardless."""
     try:
         with lock:
             _evict_idle_pipelines(cache, keep)
     except Exception:  # noqa: BLE001 — best-effort eviction re-drive
         pass
+    # Cross-tier: the sibling-pipeline eviction above only sees THIS process's
+    # in-process image pipelines; re-drive the worker's evict-to-fit so the retry
+    # also reclaims a slot child / other resident squatting the card (the same
+    # pass the pre-load path runs). Best-effort; records to /llm/evictions.
+    _LAST_HEADROOM[keep] = _ensure_imagegen_headroom(keep, _MODEL_NEED.get(keep)) or {}
     _release_cuda()
     delay = settle_delay_s()
     if delay > 0:
@@ -400,7 +628,35 @@ def _load_diffusers_pipeline(auto_cls, model_dir: str, model_key: str,
     load-time OOM returns the process to baseline VRAM instead of zombifying the
     card until an /ops/restart."""
     import torch
-    cuda = torch.cuda.is_available()
+    # THE priced footprint: honest on-disk fp16 weight bytes. Used both to price
+    # quantization and as the evict-to-fit target below.
+    need = _weight_bytes(model_dir)
+    _MODEL_NEED[model_key] = need
+    cuda_available = torch.cuda.is_available()
+    # EVICT-TO-FIT BEFORE pricing (2026-09-25): reclaim the GPU by evicting the
+    # minimum LRU set of idle eligible residents (same evict verb/policy every
+    # other load path uses; busy/in-flight/static are never touched), so the
+    # fit/quant/placement decision below is made against a card this load actually
+    # gets — not one an idle squatter is holding. Each eviction is logged and shows
+    # in /llm/evictions. No-op on bare central / no-GPU / no registered hook.
+    # (Incident 2026-09-25: the idle flux2-klein slot child held 6.99 GiB and was
+    # never evicted, so the diffusers load CUDA-OOM'd behind it.)
+    if cuda_available:
+        _LAST_HEADROOM[model_key] = _ensure_imagegen_headroom(model_key, need) or {}
+    # `cuda` is the EFFECTIVE decision to use the GPU for this load, NOT merely
+    # "is a card present": when central's derived serve mode is ram-only AND the
+    # reclaimed card still can't hold the model (_cpu_forced), the whole load runs
+    # on the CPU. This gates dtype (fp16 only on the GPU — fp16 on CPU is
+    # unsupported/slow), quant election (no 4-bit bnb load off the card), and
+    # placement, so the ram-only intent can no longer be dropped by the quant
+    # branch bypassing the placement seam. _cpu_forced(need) reads free VRAM AFTER
+    # the evict-to-fit pass, so a ram-only load that now fits the reclaimed card is
+    # upgraded to the GPU instead of running slow on the CPU.
+    cuda = cuda_available and not _cpu_forced(need=need)
+    # The specific card central pinned this load to ("cuda"/"cuda:N"); recorded so
+    # the generation path's seed generator lands on the SAME device as the weights.
+    _dev = _cuda_device() if cuda else "cpu"
+    _PIPELINE_DEVICE[model_key] = _dev
     dtype = torch.float16 if cuda else torch.float32
     quant_config, _plan = _elect_quantization(model_dir, model_key, cuda)
     load_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
@@ -437,16 +693,16 @@ def _load_diffusers_pipeline(auto_cls, model_dir: str, model_key: str,
                 placement = "model-cpu-offload" + ("+4bit" if quant_config else "")
             except Exception:  # noqa: BLE001 — offload gap: honest fallback
                 try:
-                    pipe = pipe.to("cuda")
+                    pipe = pipe.to(_dev)
                     placement = "cuda (offload unavailable)"
                 except Exception:  # noqa: BLE001 — quantized parts already placed
                     placement = "device-placed (quantized)"
         elif place_fn is not None:
             placement = place_fn(pipe, cuda, model_key)   # seam-aware default path
         else:
-            pipe = pipe.to("cuda" if cuda else "cpu")
+            pipe = pipe.to(_dev)
             placement = "cuda" if cuda else "cpu"
-    except BaseException:
+    except BaseException as exc:
         # Deterministic unwind: strip hooks, drop the partial pipe, empty the
         # allocator cache. Null the local BEFORE _release_cuda so the tensors are
         # actually collectable (a live reference would keep the blocks reserved).
@@ -457,6 +713,11 @@ def _load_diffusers_pipeline(auto_cls, model_dir: str, model_key: str,
             pass
         pipe = None
         _release_cuda()
+        # A load-time CUDA OOM surfaces as a clear, recorded failure naming the
+        # free VRAM + the other resident process, not an opaque traceback.
+        honest = _honest_vram_error(exc, model_key, "load")
+        if honest is not None:
+            raise honest from exc
         raise
 
     _trim_host_ram()
@@ -543,18 +804,26 @@ class ImageGenRunner(RunnerConfig):
             if value is not None:
                 call_kwargs[field] = value
         if req.seed is not None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Match the pipeline's actual device: "cpu" whenever ram-only forces
+            # the whole run off the card (a cuda generator would touch the very
+            # GPU ram-only exists to avoid, and mismatch the CPU latents).
+            device = _generator_device(self.model_key)
             call_kwargs["generator"] = torch.Generator(device).manual_seed(req.seed)
 
         with _generate_lock(self.model_key):
             try:
                 output = self.pipeline(**call_kwargs)
-            except BaseException:
+            except BaseException as exc:
                 # A generation OOM (or a load OOM reached via the .pipeline
                 # property) leaves reserved allocator blocks the process still
                 # owns — return them to the OS so failure doesn't zombie the card
                 # until an /ops/restart (item I).
                 _release_cuda()
+                # Surface a CUDA OOM as a clear, recorded reason (free VRAM +
+                # the other resident process) rather than an opaque traceback.
+                honest = _honest_vram_error(exc, self.model_key, "generation")
+                if honest is not None:
+                    raise honest from exc
                 raise
 
         out_dir = os.path.join(UPLOADS_HOME, "generated")
@@ -765,7 +1034,9 @@ class Img2ImgRunner(RunnerConfig):
             call_kwargs["num_inference_steps"] = bumped
 
         if req.seed is not None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Match the pipeline's actual device: "cpu" whenever ram-only forces
+            # the whole run off the card (see ImageGenRunner._generate).
+            device = _generator_device(self.model_key)
             call_kwargs["generator"] = torch.Generator(device).manual_seed(req.seed)
 
         # Concrete edit pipelines (QwenImageEditPlus, Flux2Klein, …) don't share
@@ -799,10 +1070,15 @@ class Img2ImgRunner(RunnerConfig):
                 pass  # unsignaturable callable — send as-is
             try:
                 output = pipe(**call_kwargs)
-            except BaseException:
+            except BaseException as exc:
                 # Unwind the transient allocation a failed/OOM'd generation left
                 # reserved so the card returns to baseline (item I).
                 _release_cuda()
+                # Surface a CUDA OOM as a clear, recorded reason (free VRAM +
+                # the other resident process) rather than an opaque traceback.
+                honest = _honest_vram_error(exc, self.model_key, "generation")
+                if honest is not None:
+                    raise honest from exc
                 raise
 
         out_dir = os.path.join(UPLOADS_HOME, "generated")

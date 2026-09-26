@@ -350,9 +350,15 @@ class LlamaCppBaseRunner(ABC):
         self._stream_usage = None
         self._stream_timings = None
 
+        # Bind the upstream iterator so a client disconnect (GeneratorExit at a
+        # yield below) deterministically closes the llama-server HTTP stream in
+        # the finally — abandoning the backend task frees the slot. Relying on GC
+        # finalization (the previous bare `async for`) left slots is_processing
+        # after the caller was gone (incident 2026-09-25).
+        it = self._iter_stream(messages, max_tokens, temp, top_p,
+                               extras=extras or None)
         try:
-            async for text, fr in self._iter_stream(messages, max_tokens, temp,
-                                                    top_p, extras=extras or None):
+            async for text, fr in it:
                 if cancel_event and cancel_event.is_set():
                     self._log_done(req, "cancelled", output_chunks, max_tokens)
                     yield DoneEvent(request_id=req.request_id, input_tokens=0,
@@ -377,9 +383,20 @@ class LlamaCppBaseRunner(ABC):
                            # the fact, but nothing can reconstruct decode speed
                            # from outside the engine. None = unmeasured.
                            timings=self._take_stream_timings())
+        except GeneratorExit:
+            logger.info("stream_chat client-disconnect: cancelling llama-server "
+                        "stream model=%s req=%s", self.model_key, req.request_id)
+            raise
         except Exception as exc:
             logger.exception("stream_chat failed: model=%s req=%s", self.model_key, req.request_id)
             yield ErrorEvent(request_id=req.request_id, message=f"{type(exc).__name__}: {exc}")
+        finally:
+            _ac = getattr(it, "aclose", None)
+            if _ac is not None:
+                try:
+                    await _ac()
+                except Exception:  # noqa: BLE001 — teardown must never raise
+                    pass
 
     # --- shared unbounded streaming ----------------------------------------
 
@@ -435,19 +452,31 @@ class LlamaCppBaseRunner(ABC):
                 piece_text = ""
                 chunk_finish: Optional[str] = None
 
-                async for text, fr in self._iter_stream(convo, chunk_tokens, temp,
-                                                        top_p, extras=extras or None):
-                    if cancel_event and cancel_event.is_set():
-                        self._log_done(req, "cancelled", output_chunks, chunk_tokens)
-                        yield DoneEvent(request_id=req.request_id, input_tokens=0,
-                                       output_chunks=output_chunks, finish_reason="cancelled")
-                        return
-                    if text:
-                        output_chunks += 1
-                        piece_text += text
-                        yield TokenEvent(request_id=req.request_id, text=text)
-                    if fr is not None:
-                        chunk_finish = fr
+                # Bind the per-pass upstream iterator so a client disconnect
+                # closes the llama-server HTTP stream deterministically (see
+                # stream_chat) — a fresh iterator per continuation pass.
+                _it = self._iter_stream(convo, chunk_tokens, temp,
+                                        top_p, extras=extras or None)
+                try:
+                    async for text, fr in _it:
+                        if cancel_event and cancel_event.is_set():
+                            self._log_done(req, "cancelled", output_chunks, chunk_tokens)
+                            yield DoneEvent(request_id=req.request_id, input_tokens=0,
+                                           output_chunks=output_chunks, finish_reason="cancelled")
+                            return
+                        if text:
+                            output_chunks += 1
+                            piece_text += text
+                            yield TokenEvent(request_id=req.request_id, text=text)
+                        if fr is not None:
+                            chunk_finish = fr
+                finally:
+                    _ac = getattr(_it, "aclose", None)
+                    if _ac is not None:
+                        try:
+                            await _ac()
+                        except Exception:  # noqa: BLE001 — teardown must never raise
+                            pass
 
                 full_text += piece_text
                 # Each engine pass may report its own usage; the request costs
@@ -486,6 +515,11 @@ class LlamaCppBaseRunner(ABC):
                            output_chunks=output_chunks, finish_reason=mapped,
                            usage=self._usage_for(usage_sum, initial_convo, full_text),
                            timings=timings_last)
+        except GeneratorExit:
+            logger.info("stream_chat_unbounded client-disconnect: cancelling "
+                        "llama-server stream model=%s req=%s",
+                        self.model_key, req.request_id)
+            raise
         except Exception as exc:
             logger.exception("stream_chat_unbounded failed: model=%s req=%s", self.model_key, req.request_id)
             yield ErrorEvent(request_id=req.request_id, message=f"{type(exc).__name__}: {exc}")

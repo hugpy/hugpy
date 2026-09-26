@@ -114,6 +114,8 @@ def discover(py_root: Path) -> dict[str, Path]:
     out: dict[str, Path] = {}
     for pp in sorted(py_root.glob("*/*/pyproject.toml")):
         name = pp.parent.name
+        if pp.parent.is_symlink():     # external repo linked in (e.g. inference/abstract_claude):
+            continue                   # tracked by its own repo, not pkg_src (relative_to would fail)
         if name in out:
             raise SystemExit(f"duplicate package dir name {name!r}: {out[name]} and {pp.parent}")
         out[name] = pp.parent
@@ -978,8 +980,12 @@ def tenv_run(cmd: list, cwd: Path | None = None, extra: dict | None = None,
     cmd = [str(c) for c in cmd]
     extra = {k: str(v) for k, v in (extra or {}).items()}
     if not SANDBOX:
+        # Strip HUGPY*/PIP_/VIRTUAL_ENV/PG AND every storage-root var (incident
+        # 2026-09-24: an inherited DEFAULT_ROOT=<live> otherwise reached the
+        # verify pytest). base_env re-pins the roots under the per-job HOME.
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("HUGPY", "PIP_", "VIRTUAL_ENV", "PG"))} | extra
+               if not k.startswith(("HUGPY", "PIP_", "VIRTUAL_ENV", "PG"))
+               and k not in _STORAGE_ROOT_VARS} | extra
         return run_step(cmd, cwd=cwd, env=env, timeout=timeout)
     wrap = ["sudo", "-n", SANDBOX, "--timeout", str(int(timeout)), "--cwd", str(cwd or TESTENV)]
     for k, v in extra.items():
@@ -996,10 +1002,34 @@ def tenv_rmtree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+# Every hugpy storage root, so a verify job can never resolve DEFAULT_ROOT (or a
+# sibling) to the operator's LIVE storage — the exposure behind incident
+# 2026-09-24: without the systemd sandbox, tenv_run inherits the process
+# environment, and a DEFAULT_ROOT=<live> on the pkg_src runner leaked straight
+# into the materialised-tree pytest, which then opened WAL sqlite stores against,
+# and mkdtemp'd into, live storage. These are STRIPPED from the inherited env
+# (below) and re-pinned under the per-job HOME by base_env.
+_STORAGE_ROOT_VARS = (
+    "DEFAULT_ROOT", "MODELS_HOME", "UPLOADS_HOME", "PROJECTS_HOME", "IDENTITIES_HOME",
+    "DATASETS_HOME", "HF_HOME", "HF_HUB_CACHE", "HF_CACHE", "TRANSFORMERS_CACHE",
+    "TORCH_HOME", "ORACLE_LEDGER_PATH", "MODELS_DISCOVERY_PATH", "MODELS_DICT_PATH",
+    "HUGPY_TEST_STORAGE_BASE",
+)
+
+
 def base_env(venv: Path, home: Path) -> dict[str, str]:
+    root = home / "llm_storage"
     return {"PATH": f"{venv / 'bin'}:/usr/local/bin:/usr/bin:/bin", "PYTHONNOUSERSITE": "1",
             "HOME": str(home), "XDG_CACHE_HOME": str(home / ".cache"),
-            "PIP_CACHE_DIR": str(TESTENV / "pip-cache"), "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
+            "PIP_CACHE_DIR": str(TESTENV / "pip-cache"), "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            # Storage roots pinned under the per-job HOME (incident 2026-09-24):
+            # the test_isolation conftests read HUGPY_TEST_STORAGE_BASE, and the
+            # explicit roots force constants even for packages without one.
+            "HUGPY_TEST_STORAGE_BASE": str(root),
+            "DEFAULT_ROOT": str(root), "MODELS_HOME": str(root / "models"),
+            "UPLOADS_HOME": str(root / "uploads"), "PROJECTS_HOME": str(root / "projects"),
+            "IDENTITIES_HOME": str(root / "identities"), "DATASETS_HOME": str(root / "datasets"),
+            "ORACLE_LEDGER_PATH": str(root / "oracle-reliability.sqlite")}
 
 
 def norm_dist(name: str) -> str:
@@ -1782,13 +1812,30 @@ def promote_step(dsn: str) -> None:
                 pkg_publish.publish_after_promotion(conn, tick["promotion"])
             except (Exception, SystemExit) as e:
                 print(f"publish: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        # Dev IS live: deploy the NEWEST configuration (the watcher saves one per
+        # settled edit — see dev_config_step). known_good gates PyPI uploads only.
         with conn.cursor() as cur:
-            cur.execute(sql.SQL("SELECT name FROM {s}.configs WHERE known_good "
-                                "ORDER BY good_at DESC NULLS LAST, id DESC LIMIT 1")
+            cur.execute(sql.SQL("SELECT name FROM {s}.configs ORDER BY id DESC LIMIT 1")
                         .format(s=sql.Identifier(SCHEMA)))
             row = cur.fetchone()
         if row:
             pkg_promote.auto_promote(conn, row[0])
+
+
+def dev_config_step(conn) -> str | None:
+    """After a settled edit is recorded: pin the tree as configuration
+    ``dev-<utc stamp>`` unless it equals the newest configuration's member set.
+    promote_step then deploys it to the fleet."""
+    with conn.cursor() as cur:
+        members = current_members(cur)
+        cur.execute(sql.SQL("SELECT name FROM {s}.configs ORDER BY id DESC LIMIT 1")
+                    .format(s=sql.Identifier(SCHEMA)))
+        row = cur.fetchone()
+        if row and live_members(cur, config_members(cur, row[0])) == members:
+            return None
+    name = "dev-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    api_config_save(conn, name, note="auto: settled dev edit")
+    return name
 
 
 def cmd_watch(dsn: str, py_root: Path, interval: float, settle: float) -> int:
@@ -1839,6 +1886,10 @@ def cmd_watch(dsn: str, py_root: Path, interval: float, settle: float) -> int:
             if ready:
                 with psycopg.connect(dsn) as conn:
                     cmd_sync(conn, pkgs, sorted(ready), False, source="watch")
+                    cfg = dev_config_step(conn)
+                if cfg:
+                    print(f"dev config {cfg} saved; promote_step deploys it", flush=True)
+                    last_promote = 0.0             # deploy on the next loop, not in 60 s
                 for n in ready:
                     pending.pop(n, None)
                 sys.stdout.flush()

@@ -246,13 +246,33 @@ def test_reversing_the_list_reverses_the_pick(store, ov):
     assert store.pick_for_model(MK)["name"] == "computron"
 
 
-def test_a_model_with_a_list_never_lands_off_list(store, ov):
-    """Designation hardness, per candidate. ae is not registered at all, so the
-    honest answer is 'nowhere' — never 'computron because it was there'."""
+def test_a_strict_list_never_lands_off_list(store, ov):
+    """Designation hardness, per candidate, when the model is ``strict``. ae is
+    not registered at all, so the honest answer is 'nowhere' — never 'computron
+    because it was there'."""
+    _admit(store, "computron", loaded_models=[MK], gpus=_gpus())
+    ov.set_override(MK, {"worker_prefs": ["ae"], "strict": True})
+    assert store.pick_for_model(MK) is None
+    assert store.candidates_for_model(MK) == []
+
+
+def test_designated_mode_list_never_lands_off_list(store, ov, monkeypatch):
+    """Legacy ``distribution: designated`` keeps the list a hard fence fleet-wide."""
+    monkeypatch.setenv("HUGPY_DISTRIBUTION", "designated")
     _admit(store, "computron", loaded_models=[MK], gpus=_gpus())
     ov.set_override(MK, {"worker_prefs": ["ae"]})
     assert store.pick_for_model(MK) is None
     assert store.candidates_for_model(MK) == []
+
+
+def test_feasible_default_falls_back_off_list(store, ov, monkeypatch):
+    """Operator ruling 2026-09-24: under the default ``feasible`` distribution a
+    list is an ORDERED PREFERENCE — when no listed box is eligible, the model
+    falls back to a feasible box instead of refusing."""
+    monkeypatch.delenv("HUGPY_DISTRIBUTION", raising=False)
+    _admit(store, "computron", loaded_models=[MK], gpus=_gpus())
+    ov.set_override(MK, {"worker_prefs": ["ae"]})
+    assert store.pick_for_model(MK)["name"] == "computron"
 
 
 def test_a_single_designation_is_the_degenerate_case(store, ov):
@@ -692,44 +712,6 @@ def _routes():
     return worker_routes
 
 
-def test_a_polite_model_is_not_warmed_onto_a_full_worker(ov, monkeypatch):
+def test_background_warm_gate_is_retired(ov, monkeypatch):
     R = _routes()
-    ov.set_override(MK, {"no_evict": True})
-    monkeypatch.setattr(R, "_worker_fit", lambda mk, w: {
-        "vram_free": 1 * GIB, "need": 9 * GIB, "gpu_resident": False})
-    assert R._polite_warm_ok({"id": "a", "name": "ae"}, MK) is False
-
-
-def test_a_polite_model_IS_warmed_when_the_room_is_free(ov, monkeypatch):
-    R = _routes()
-    ov.set_override(MK, {"no_evict": True})
-    monkeypatch.setattr(R, "_worker_fit", lambda mk, w: {
-        "vram_free": 20 * GIB, "need": 9 * GIB, "gpu_resident": True})
-    assert R._polite_warm_ok({"id": "a", "name": "ae"}, MK) is True
-
-
-def test_an_unflagged_model_is_warmed_exactly_as_before(ov, monkeypatch):
-    R = _routes()
-    monkeypatch.setattr(R, "_worker_fit", lambda mk, w: {
-        "vram_free": 1 * GIB, "need": 9 * GIB, "gpu_resident": False})
-    assert R._polite_warm_ok({"id": "a", "name": "ae"}, MK) is True
-
-
-def test_the_warm_gate_resolves_politeness_per_worker(ov, monkeypatch):
-    """k62: same full card, two verdicts — ae is left cold, computron is warmed
-    on the ordinary rule."""
-    R = _routes()
-    ov.set_override(MK, {"no_evict": True,
-                         "no_evict_by_worker": {"computron": False}})
-    monkeypatch.setattr(R, "_worker_fit", lambda mk, w: {
-        "vram_free": 1 * GIB, "need": 9 * GIB, "gpu_resident": False})
-    assert R._polite_warm_ok({"id": "a", "name": "ae"}, MK) is False
-    assert R._polite_warm_ok({"id": "c", "name": "computron"}, MK) is True
-
-
-def test_the_warm_gate_fails_open_on_an_unsizable_model(ov, monkeypatch):
-    R = _routes()
-    ov.set_override(MK, {"no_evict": True})
-    monkeypatch.setattr(R, "_worker_fit", lambda mk, w: {
-        "vram_free": None, "need": None, "gpu_resident": False})
-    assert R._polite_warm_ok({"id": "a", "name": "ae"}, MK) is True
+    assert not hasattr(R, "_polite_warm_ok")

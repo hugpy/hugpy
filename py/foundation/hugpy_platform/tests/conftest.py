@@ -15,7 +15,19 @@ if not os.environ.get("HUGPY_ALLOW_MONOLITH"):
 # hugpy_platform.constants creates the storage tree on import and app_dirs
 # creates ~/.hugpy on first use. Point both at a throwaway root for the whole
 # session so no test can touch a real /mnt/llm_storage or the home directory.
+#
+# FORCE (not setdefault) via test_isolation: an inherited DEFAULT_ROOT=<live>
+# used to WIN over the setdefault below and route constants' import-time
+# directory creation + write-probe into the operator's live storage (the same
+# setdefault hole behind incident 2026-09-24). The DEFAULT_ROOT setdefault is
+# kept as the fallback for the HUGPY_TEST_LIVE_ROOT=1 opt-out path.
+from hugpy_platform.test_isolation import (  # noqa: E402
+    install_live_storage_guard, isolate_storage_to_tmp,
+)
+
 _SANDBOX = tempfile.mkdtemp(prefix="hugpy-platform-tests-")
+isolate_storage_to_tmp(base=os.path.join(_SANDBOX, "storage"))
+install_live_storage_guard()
 os.environ.setdefault("DEFAULT_ROOT", os.path.join(_SANDBOX, "storage"))
 os.environ.setdefault("HUGPY_HOME", os.path.join(_SANDBOX, "hugpy_home"))
 os.environ.setdefault("HUGPY_DATA_DIR", os.path.join(_SANDBOX, "data"))

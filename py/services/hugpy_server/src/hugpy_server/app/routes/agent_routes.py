@@ -233,12 +233,15 @@ def agent_heartbeat(node_id):
     def _s(v):
         return str(v) if v is not None else None
 
-    node = agent_node_store.heartbeat(
-        node_id,
-        status=_s(body.get("status")),
-        current_task=_s(body.get("current_task")),
-        version=_s(body.get("version")),
-    )
+    heartbeat_fields = {
+        "status": _s(body.get("status")),
+        "version": _s(body.get("version")),
+    }
+    # Preserve partial-heartbeat semantics when the field is absent. Explicit
+    # JSON null means the node has gone idle and clears its prior task marker.
+    if "current_task" in body:
+        heartbeat_fields["current_task"] = _s(body.get("current_task"))
+    node = agent_node_store.heartbeat(node_id, **heartbeat_fields)
     if node is None:
         # Raced with a delete between the auth check and the write.
         abort(410, description="Unknown agent node id; please re-register.")
@@ -1639,6 +1642,20 @@ def agent_task_detail(node_id, seq):
     if task is None:
         abort(404, description="Unknown task for this node.")
     return jsonify(task)
+
+
+@agent_bp.route("/agent/nodes/<node_id>/tasks", methods=["GET"])
+def agent_node_task_history(node_id):
+    """Recent dispatch history for the operator's node detail view."""
+    _require_operator()
+    if agent_node_store.get(node_id) is None:
+        abort(404, description="Unknown agent node.")
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        abort(400, description="limit must be an integer")
+    return jsonify({"node_id": node_id,
+                    "tasks": agent_node_store.list_tasks(node_id, limit=limit)})
 
 
 @agent_bp.route("/agent/<node_id>/dispatch", methods=["POST"])

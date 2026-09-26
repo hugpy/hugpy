@@ -156,62 +156,17 @@ finally:
     (dispatch.last_used_snapshot, dispatch.evict,
      agent.loaded_model_keys, slots.slots_enabled, slots.SlotPool) = _orig
 
-# --- slot filler (slice 9): static first, MRU next, no double-booking -------
-agent._RUNTIME_SETTINGS.clear()
-agent._RUNTIME_SETTINGS.update({"residency": {"m-static": "static"}})
+# --- retired slot filler: compatibility entry point is a strict no-op -------
 _seated = []
-_orig = (slots.slots_enabled, slots.SlotPool, agent._models_local,
-         agent_imports.get_model_config, dispatch.last_used_snapshot,
-         dispatch.runner_for)
-class _FillPool:
-    def __init__(self, urls=None):
-        pass
-    def statuses(self):
-        return [
-            {"_control": "u1", "model_key": "m-occupied", "busy": False},
-            {"_control": "u2", "model_key": None},
-            {"_control": "u3", "model_key": None},
-        ]
-_orig_fit = agent._worker_fit_check
-_orig_fill_env = os.environ.get("HUGPY_SLOT_FILL")
+_runner_orig = dispatch.runner_for
 try:
-    os.environ["HUGPY_SLOT_FILL"] = "1"          # background seating is operator opt-in (2026-09-10)
-    agent._worker_fit_check = lambda mk: True     # background seats must fit beside residents
-    slots.slots_enabled = lambda: True
-    slots.SlotPool = _FillPool
-    agent._models_local = lambda st: ["m-a", "m-b", "m-static", "m-occupied", "m-comfy"]
-    agent_imports.get_model_config = lambda mk: types.SimpleNamespace(
-        framework=("comfy" if mk == "m-comfy" else "gguf"))
-    dispatch.last_used_snapshot = lambda: {"m-b": 100.0, "m-a": 50.0}
     dispatch.runner_for = lambda model_key=None, **kw: _seated.append(model_key)
-
     st = agent.WorkerState(name="t", url=None, worker_id="w-fill")
-    st.assigned_models = ["m-a", "m-b", "m-static", "m-occupied",
-                          "m-comfy", "m-notlocal"]
+    st.assigned_models = ["m-a", "m-static"]
     agent._fill_empty_slots(st)
-    check("filler seats one model per empty slot", len(_seated) == 2)
-    check("static seated FIRST", _seated[0] == "m-static")
-    check("then the most-recently-used", _seated[1] == "m-b")
-    check("never double-books a current occupant", "m-occupied" not in _seated)
-    check("skips non-GGUF rows (slots host llama.cpp only)",
-          "m-comfy" not in _seated)
-    check("skips models whose files aren't local yet",
-          "m-notlocal" not in _seated)
-
-    # nothing to do -> no loads
-    _seated.clear()
-    st.assigned_models = ["m-occupied"]
-    agent._fill_empty_slots(st)
-    check("no candidates -> no loads", _seated == [])
+    check("assignment never creates a VRAM resident", _seated == [])
 finally:
-    (slots.slots_enabled, slots.SlotPool, agent._models_local,
-     agent_imports.get_model_config, dispatch.last_used_snapshot,
-     dispatch.runner_for) = _orig
-    agent._worker_fit_check = _orig_fit
-    if _orig_fill_env is None:
-        os.environ.pop("HUGPY_SLOT_FILL", None)
-    else:
-        os.environ["HUGPY_SLOT_FILL"] = _orig_fill_env
+    dispatch.runner_for = _runner_orig
 
 # --- slot promotion: static occupants are immovable --------------------------
 _RES = {}
@@ -276,7 +231,7 @@ finally:
     slots.set_eviction_policy(None)
     slots.set_residency_lookup(None)
 
-# --- warm-up: slot-less box vs slots box (no double-loading) -----------------
+# --- provisioning is download-only on every box -----------------------------
 agent._RUNTIME_SETTINGS.clear()
 agent._RUNTIME_SETTINGS.update({"residency": {"m-static": "static",
                                               "m-static2": "static"}})
@@ -310,7 +265,7 @@ try:
     os.environ["WORKER_PRELOAD"] = "0"             # gate OFF
     agent._kick_provision(st, "m-static")
     check("provision thread finished (static)", _wait_done(st))
-    check("no slots: static eager-warms with the gate OFF", _warmed == ["m-static"])
+    check("no slots: static pre-pull does not warm", _warmed == [])
 
     agent._kick_provision(st, "m-default")
     check("provision thread finished (default, gate off)", _wait_done(st))
@@ -320,8 +275,7 @@ try:
     os.environ["WORKER_PRELOAD"] = "1"             # gate ON
     agent._kick_provision(st, "m-default")
     check("provision thread finished (default, gate on)", _wait_done(st))
-    check("no slots: default on-demand DOES warm behind the gate "
-          "(old on-demand-never-preloads rule retired)", "m-default" in _warmed)
+    check("WORKER_PRELOAD cannot create a resident", "m-default" not in _warmed)
 
     # slots box: the slot filler is kicked for slot-eligible (GGUF) seating, AND
     # a STATIC model still warms IN-PROCESS. Doctrine FIX (see _kick_provision,
@@ -335,10 +289,9 @@ try:
     agent._fill_empty_slots = lambda s: _fills.append(True)
     agent._kick_provision(st, "m-static2")
     check("provision thread finished (slots box)", _wait_done(st))
-    check("slots box: a STATIC model still warms in-process (transformers-on-"
-          "slots-box fix — no hollow 0-VRAM shell)", _warmed == ["m-static2"])
-    check("slots box: the slot filler is ALSO kicked (GGUF seating)",
-          _fills == [True])
+    check("slots box: static remains disk-only until a call", _warmed == [])
+    check("slots box: provisioning does not invoke the retired filler",
+          _fills == [])
 
     # no double-loading (the ORIGINAL intent, via the CURRENT mechanism): a model
     # already SEATED IN A SLOT is skipped by the _slot_occupants() guard, so a

@@ -84,10 +84,12 @@ class LlamaCppChatRunner:
         __init__ and runner_for() build only this lazy wrapper — the heavy
         runner (which seats a llama-server slot via get_llama_runner ->
         _build_runner -> SlotPool.endpoint_for, or loads in-process) is
-        resolved on first .runner access. Warm / slot-fill / probe paths call
-        this so the model actually becomes resident + slot-seated instead of a
-        hollow shell that still registers as "loaded". Idempotent — the heavy
-        runner is a per-model_key singleton (get_llama_runner cache)."""
+        resolved on first .runner access. The explicit /probe load path (the
+        operator's "Load" relay, via _materialize) calls this so the model
+        actually becomes resident + slot-seated instead of a hollow shell that
+        still registers as "loaded". Nothing calls it on its own — an ordinary
+        request seats the runner through run(). Idempotent — the heavy runner is
+        a per-model_key singleton (get_llama_runner cache)."""
         return self.runner
 
     # --- non-streaming -----------------------------------------------------

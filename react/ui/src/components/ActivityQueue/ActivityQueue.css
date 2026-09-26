@@ -74,6 +74,29 @@
   white-space: nowrap;
 }
 .aq-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.aq-id {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font: 10px var(--mono, monospace);
+  overflow-wrap: anywhere;
+}
+.aq-prompt {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--text);
+}
+.aq-prompt summary { color: var(--accent, #6ab0f3); cursor: pointer; }
+.aq-prompt pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 5px 0 2px;
+  padding: 7px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.45 var(--mono, monospace);
+}
 /* Placement badge (media/video jobs): WHERE it physically executes. Present only
    on rows carrying a placement object — non-media rows render nothing. */
 .aq-placement {

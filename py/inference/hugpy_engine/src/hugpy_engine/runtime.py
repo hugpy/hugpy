@@ -21,17 +21,33 @@ def execute_request(*args: Any, **kwargs: Any):
 
 
 async def stream_request(*args: Any, cancel_event=None, **kwargs: Any):
-    async for event in get_backend().stream_request(
-        *args, cancel_event=cancel_event, **kwargs
-    ):
-        yield event
+    _it = get_backend().stream_request(*args, cancel_event=cancel_event, **kwargs)
+    try:
+        async for event in _it:
+            yield event
+    finally:
+        # Cascade a client disconnect into the backend stream (releases the
+        # relay/runner/llama-server stream beneath it) instead of leaving it to GC.
+        _ac = getattr(_it, "aclose", None)
+        if _ac is not None:
+            try:
+                await _ac()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
 
 
 async def stream_chat_request(*args: Any, cancel_event=None, **kwargs: Any):
-    async for event in get_backend().stream_chat_request(
-        *args, cancel_event=cancel_event, **kwargs
-    ):
-        yield event
+    _it = get_backend().stream_chat_request(*args, cancel_event=cancel_event, **kwargs)
+    try:
+        async for event in _it:
+            yield event
+    finally:
+        _ac = getattr(_it, "aclose", None)
+        if _ac is not None:
+            try:
+                await _ac()
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
 
 
 def loaded_models() -> tuple[tuple[str, str], ...]:

@@ -580,6 +580,38 @@ class WorkerRejected(Exception):
         self.code = code
 
 
+# CENTRAL'S OWN terminal-refusal markers. A 401/403 is only terminal (stop, don't
+# respawn) when it is CENTRAL saying so — its register/heartbeat routes
+# abort(401/403, description=...) with these exact strings (see
+# hugpy_server/app/routes/worker_routes.py: "Worker is blocked by the operator."
+# at the admission gate, "Worker enrollment token invalid or required." at the
+# enrollment gate). A 401/403 whose body carries NEITHER marker is almost always
+# an INTERMEDIARY between us and central — a reverse-proxy / web auth gate /
+# captive login page (a-brain 2026-09-24: dev.hugpy.ai's web gate returned a 403
+# HTML page while central's own record was 'approved' and central logged nothing;
+# the agent read it as a block and os._exit(0)'d permanently). Those must be
+# logged with the URL + body and RETRIED with backoff, never treated as a block.
+_CENTRAL_BLOCK_MARKER = "Worker is blocked by the operator."
+_CENTRAL_ENROLL_MARKER = "Worker enrollment token invalid or required."
+
+
+def _is_central_terminal_refusal(code: int, body: str) -> bool:
+    """True iff an HTTP ``code``/``body`` is CENTRAL's own terminal worker refusal
+    (block or enrollment reject), as opposed to any other 401/403 from a proxy or
+    web gate sitting in front of central. Body-marker matched, case-insensitively
+    and whitespace-tolerant, so an HTML error page that wraps the description
+    still matches while a generic gate page does not."""
+    if code not in (401, 403):
+        return False
+    hay = " ".join((body or "").split()).lower()
+    if not hay:
+        # Central always sends a description; a truly empty body is NOT central's
+        # refusal (a bare proxy 403). Don't treat it as terminal.
+        return False
+    return (_CENTRAL_BLOCK_MARKER.lower() in hay
+            or _CENTRAL_ENROLL_MARKER.lower() in hay)
+
+
 # WORKER-DB-HEARTBEAT-20260910: the heartbeat also lands in Postgres (comms/heartbeat_db.py) so
 # central/console can read worker state from the DB instead of asking over HTTP.
 _DB_BEAT_LOCK = __import__("threading").Lock()
@@ -626,12 +658,32 @@ class CentralClient:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            # 401 (bad/revoked/required token) and 403 (blocked) are terminal —
-            # the operator decided this worker isn't welcome. Surface them as
-            # WorkerRejected so callers stop instead of retrying. Other codes
-            # (e.g. 410 "re-register") propagate unchanged.
+            # A 401/403 is terminal (stop, don't respawn) ONLY when CENTRAL says
+            # so — its route bodies carry a specific marker (see
+            # _is_central_terminal_refusal). Any other 401/403 is an intermediary
+            # (proxy / web gate / login page) between us and central: log it with
+            # the URL + body snippet and re-raise so the caller RETRIES with
+            # backoff. Other codes (e.g. 410 "re-register") propagate unchanged.
             if exc.code in (401, 403):
-                raise WorkerRejected(exc.code, exc.reason or "") from exc
+                body = ""
+                try:
+                    raw = exc.read()
+                    body = raw.decode("utf-8", "replace") if raw else ""
+                except Exception:  # noqa: BLE001 — body is best-effort context
+                    body = ""
+                if _is_central_terminal_refusal(exc.code, body):
+                    reason = exc.reason or ""
+                    detail = " ".join(body.split())[:300]
+                    raise WorkerRejected(
+                        exc.code,
+                        (reason + (": " + detail if detail else "")).strip()) from exc
+                logger.warning(
+                    "central call %s returned HTTP %s but the body is NOT central's "
+                    "own worker refusal — treating it as an intermediary (proxy / "
+                    "web gate), NOT a block; will retry. body: %s",
+                    self.base + path, exc.code,
+                    (" ".join(body.split())[:300] or "(empty)"))
+                raise
             raise
 
     def register(self, payload: dict) -> dict:
@@ -1080,6 +1132,16 @@ _SPILL_ENV_CLEAR_WHEN_ABSENT = ("alloc_mode", "leniency_pct", "priority_device",
                                 # sibling key above already clears; this one was
                                 # simply missed.
                                 "n_gpu_layers",
+                                # PER-DEVICE pin (2026-09-25): the GPU a request
+                                # binds is per-model, and both HUGPY_MAIN_GPU and
+                                # HUGPY_TENSOR_SPLIT feed PROCESS-WIDE placement
+                                # (in-process torch VRAM reads + llama_kwargs) —
+                                # a leaked main_gpu/tensor_split from one model
+                                # would silently pin the NEXT model to the wrong
+                                # card / a stale split. So they clear-when-absent
+                                # exactly like the mode-contract keys above.
+                                "main_gpu",
+                                "tensor_split",
                                 # provenance is per-request by definition
                                 "alloc_source")
 
@@ -1124,6 +1186,15 @@ def _local_caps() -> dict:
                 out[key] = float(raw)
             except ValueError:
                 pass
+    # Capability marker (2026-09-25): this worker HONORS a central per-GPU device
+    # pin — it threads main_gpu -> the slot child's CUDA_VISIBLE_DEVICES, places
+    # in-process torch on the chosen card, and reports per-device residents. A
+    # POSITIVE signal (not a version guess): central only emits a device pin to a
+    # worker that advertises this, so an older worker never gets a dead knob and
+    # keeps llama.cpp's own auto-split / device-0 behavior. Value is a marker, not
+    # a ceiling, so _clamp_limits (which only reads keys that match a limit)
+    # ignores it.
+    out["device_pin"] = 1
     return out
 
 
@@ -1203,20 +1274,6 @@ def _adopt_storage_inputs(state: "WorkerState", worker: dict | None) -> None:
     am = worker.get("model_alloc_modes")
     if isinstance(am, dict):
         _RUNTIME_SETTINGS["alloc_mode"] = {k: str(v) for k, v in am.items() if v}
-    # k67 lever-projection — the operator's PERSISTED per-model spill (raw
-    # spill_by_model, already on the heartbeat via _public_view). Request loads
-    # apply the spill from the request payload (_apply_spill), but a WORKER-
-    # INITIATED seat (boot star, slot-fill, static reconcile) never did — so an
-    # explicit lever like {n_cpu_moe: 20} was silently recomputed by the card-
-    # filling planner (the lever-exhaustion matrix, 2026-07-31). Adopt it here so
-    # _apply_persisted_spill_for can re-supply it before a background spawn. Raw
-    # (not the emitted/derived spill): the operator's OWN numbers are what a
-    # background load must honor; blank/MoE derivation stays the worker's auto
-    # job. Absent map leaves the prior value untouched (additive wire idiom).
-    sbm = worker.get("spill_by_model")
-    if isinstance(sbm, dict):
-        _RUNTIME_SETTINGS["spill_by_model"] = {
-            k: dict(v) for k, v in sbm.items() if isinstance(v, dict) and v}
     storage = worker.get("storage")
     if isinstance(storage, dict) and storage.get("allocated_count") is not None:
         state.allocated = {
@@ -1532,22 +1589,27 @@ def _inprocess_gpu_bytes() -> dict:
     seen_ptrs: set = set()
 
     def _obj_bytes(obj) -> tuple:
-        """(cuda_bytes, cpu_bytes) for a torch nn.Module or a diffusers pipeline
-        (walked via its ``.components`` sub-models). Non-torch → (0, 0)."""
+        """(cuda_bytes, cpu_bytes, {gpu_index: cuda_bytes}) for a torch nn.Module
+        or a diffusers pipeline (walked via its ``.components`` sub-models).
+        Non-torch → (0, 0, {}). The per-device map (2026-09-25) is what lets the
+        heartbeat report WHICH card an in-process model sits on."""
         cuda = cpu = 0
+        dev: dict = {}
         comps = getattr(obj, "components", None)     # diffusers pipeline
         if isinstance(comps, dict):
             for c in comps.values():
-                cc, pc = _obj_bytes(c)
+                cc, pc, cd = _obj_bytes(c)
                 cuda += cc
                 cpu += pc
-            return cuda, cpu
+                for k, v in cd.items():
+                    dev[k] = dev.get(k, 0) + v
+            return cuda, cpu, dev
         if not isinstance(obj, torch.nn.Module):
-            return 0, 0
+            return 0, 0, dev
         try:
             tensors = list(obj.parameters()) + list(obj.buffers())
         except Exception:
-            return 0, 0
+            return 0, 0, dev
         for t in tensors:
             try:
                 ptr = t.data_ptr()
@@ -1562,9 +1624,15 @@ def _inprocess_gpu_bytes() -> dict:
                 continue
             if getattr(t, "is_cuda", False):
                 cuda += nbytes
+                try:
+                    gi = int(t.get_device())      # cuda ordinal (-1 for cpu)
+                except Exception:
+                    gi = None
+                if gi is not None and gi >= 0:
+                    dev[gi] = dev.get(gi, 0) + nbytes
             else:
                 cpu += nbytes
-        return cuda, cpu
+        return cuda, cpu, dev
 
     objs_by_key: dict = {}
 
@@ -1644,16 +1712,26 @@ def _inprocess_gpu_bytes() -> dict:
     out: dict = {}
     for mk, objs in objs_by_key.items():
         cuda = cpu = 0
+        dev: dict = {}
         for o in objs:
-            cc, pc = _obj_bytes(o)
+            cc, pc, cd = _obj_bytes(o)
             cuda += cc
             cpu += pc
+            for k, v in cd.items():
+                dev[k] = dev.get(k, 0) + v
         device = "cuda" if cuda > 0 else ("cpu" if cpu > 0 else None)
+        # WHICH card: the cuda ordinal holding the most of this model's weights
+        # (a pipeline is normally wholly on one card; max() is robust if a stray
+        # buffer sits elsewhere). None for a CPU-only / unmeasurable model.
+        gpu_index = max(dev, key=dev.get) if dev else None
         # cpu_bytes is the CPU-side analog: parameter+buffer bytes this model
         # holds on device 'cpu' — MEASURED torch allocation (not a file size),
         # so a ram allocation row can report real host-RAM occupancy for a
         # transformers/diffusers model that torch can introspect.
-        out[mk] = {"vram_bytes": cuda, "device": device, "cpu_bytes": cpu}
+        row = {"vram_bytes": cuda, "device": device, "cpu_bytes": cpu}
+        if gpu_index is not None:
+            row["gpu_index"] = gpu_index
+        out[mk] = row
     return out
 
 
@@ -2007,6 +2085,22 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
             # omit-when-unset: an old central/UI never sees the key, and a row
             # with no device basis at all carries no provenance to mislabel.
             row["device_source"] = device_source
+        # WHICH card this seat is on (2026-09-25): the slot's OWN pin is
+        # authoritative — ``gpu`` is exactly what CUDA_VISIBLE_DEVICES was set to
+        # (the global card index central chose); a multi-GPU tensor-split reports
+        # its ``main_gpu`` + the split. Omit-when-unset so an older slot / an
+        # unpinned auto seat carries no per-device claim. Lets central place a
+        # NEXT model without guessing which card a resident already holds.
+        _gi = s.get("gpu")
+        if _gi in (None, ""):
+            _gi = s.get("main_gpu")
+        if _gi not in (None, ""):
+            try:
+                row["gpu_index"] = int(_gi)
+            except (TypeError, ValueError):
+                pass
+        if s.get("tensor_split") is not None:
+            row["tensor_split"] = s.get("tensor_split")
         # Honest allocation accuracy (2026-07-22), omit-when-unset so the wire
         # shape is unchanged for old slots/central:
         #  * total_layers — GGUF block_count so "17/48" renders instead of
@@ -2086,6 +2180,12 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
         }
         if ram_device_source is not None:
             ram_row["device_source"] = ram_device_source   # omit-when-unset
+        # WHICH card an in-process cuda-resident model sits on (2026-09-25),
+        # MEASURED by torch (the tensors' device ordinal). Omit-when-unset: a
+        # CPU-resident model / a GGUF Llama handle torch can't introspect carries
+        # no per-device claim.
+        if ip.get("gpu_index") is not None:
+            ram_row["gpu_index"] = ip.get("gpu_index")
         # MEASURED host-RAM occupancy (2026-07-28 ruling). model_bytes above is
         # the model's ON-DISK size — an upper bound, never occupancy. Two real
         # measurements, in priority order; when neither exists the keys are
@@ -2494,7 +2594,12 @@ def _apply_spill(spill: dict | None) -> None:
 _LOAD_CONTRACTS: dict[str, tuple] = {}
 _LOAD_CONTRACTS_LOCK = threading.Lock()
 # alloc_source is provenance (differs per request id), never a contract term.
-_LOAD_CONTRACT_KEYS = tuple(sorted(k for k in _SPILL_ENV if k != "alloc_source"))
+# no_evict is per-REQUEST admission politeness (may THIS load evict others?),
+# not a property of the loaded weights — as a contract term, callers that
+# differ only in politeness evicted and reloaded the model on every alternate
+# request, so it never finished loading (coder-next, 2026-09-25).
+_LOAD_CONTRACT_KEYS = tuple(sorted(k for k in _SPILL_ENV
+                                   if k not in ("alloc_source", "no_evict")))
 
 
 def _contract_key(model_key: str) -> str:
@@ -2547,32 +2652,6 @@ def _prepare_load_contract(state, model_key: str | None,
             logger.info("load contract changed for %s: %s -> %s; resident evicted "
                         "before ordinary inference", model_key, previous, wanted)
         _LOAD_CONTRACTS[model_key] = wanted
-
-
-def _apply_persisted_spill_for(model_key: str | None) -> None:
-    """Apply the operator's PERSISTED per-model spill before a WORKER-INITIATED
-    seat (boot star / slot-fill / static reconcile), so an explicit lever the
-    request path would have applied (_apply_spill) is not silently recomputed by
-    the card-filling planner on a background load — the k67 lever-projection gap.
-
-    Reads the raw spill central projected onto _RUNTIME_SETTINGS['spill_by_model']
-    (adopted from the heartbeat) and routes it through the SAME _apply_spill the
-    request handlers use, so it clears any prior model's mode-contract envs first
-    (n_cpu_moe/alloc_mode/... are cleared-when-absent) and cannot leak across
-    seats. A model with nothing persisted still calls _apply_spill({}) — that is
-    the correct RESET, not a no-op, so the previous seat's levers don't linger.
-    Fully guarded: a projection miss must never break a background load."""
-    try:
-        by_model = _RUNTIME_SETTINGS.get("spill_by_model") or {}
-        spill = by_model.get(model_key) if model_key else None
-        _apply_spill(dict(spill) if isinstance(spill, dict) else None)
-        if spill:
-            logger.info("background seat for %s: applied persisted spill %s "
-                        "(operator lever honored before spawn, k67)",
-                        model_key, spill)
-    except Exception:  # noqa: BLE001 — a background load must never crash on this
-        logger.debug("persisted-spill apply skipped for %s", model_key,
-                     exc_info=True)
 
 
 def _sse(payload: dict) -> bytes:
@@ -3798,6 +3877,12 @@ def build_app(state: "WorkerState") -> Flask:
                 _prepare_load_contract(state, payload.get("model_key"),
                                        request_spill)
                 _apply_spill(request_spill)
+                # On-demand comfy start (worker owns comfy's lifecycle): evict-to-
+                # fit FIRST, then start the managed comfy and wait for readiness.
+                # No-op for non-comfy models and for the 'external' launcher. A
+                # start failure raises ModelLoadFailure -> the except below ships
+                # its structured load_failure to central.
+                _ensure_comfy_started(state, payload.get("model_key"))
                 result = _run_once(payload)
             finally:
                 gate_token.release()
@@ -4518,8 +4603,9 @@ def build_app(state: "WorkerState") -> Flask:
         # no VRAM). Loading is cached by dispatch, so a probe also warms the model
         # for the first real chat.
         #
-        # Optional POST body: {"spill": {...}} — TASK C (2026-07-25): the ONLY
-        # path central's workers_load warm call has to seat an explicit
+        # Optional POST body: {"spill": {...}} — TASK C (2026-07-25): the path
+        # central's explicit /load relay (workers_load, the operator's ▶ activate)
+        # uses to seat an explicit
         # n_gpu_layers/n_cpu_moe (e.g. re-seating a crashed MoE slot with a
         # split instead of repeating the ngl=-1-no-split stall). Applied via
         # the SAME _apply_spill /infer already uses, so it takes effect before
@@ -5387,6 +5473,12 @@ class WorkerState:
         # "host:port" central hands to a lead as an rpc_servers entry.
         self.role = "worker"
         self.rpc_endpoint: str | None = None
+        # Central's SHARED studio weights root (2026-09-24), adopted from the
+        # register/heartbeat reply. The studio-presence probe (_studio_capability)
+        # checks model_index.json readability under it — the SAME path the render
+        # manifest is built against — so we advertise only models this box can load.
+        # None until central first advertises it.
+        self.studio_weights_root: str | None = None
         # Models central says we should serve, plus which we've already kicked
         # off a background provision for (so we don't re-trigger every beat).
         self.assigned_models: list[str] = []
@@ -5471,11 +5563,12 @@ def _eager_pull(model_key: str) -> bool:
     Exactly ONE tier pre-pulls, because for it lazy would break a promise the
     tier already makes:
 
-      * static (:_residency) — operator-locked 2026-07-05 as "eager-warmed": a
-        locked seat that paid full download latency on first call is a broken
-        promise (see the defaults-are-promises doctrine). Static is an
-        explicit, deliberately-chosen resident seat — the operator opts INTO
-        the download by choosing the tier.
+      * static (:_residency) — operator-locked 2026-07-05 as "eager-pulled": a
+        locked tier that paid full download latency on first call is a broken
+        promise (see the defaults-are-promises doctrine), so its FILES are
+        pre-pulled to disk. This is a download only — static, like every tier,
+        loads into VRAM only when a request for it arrives. The operator opts
+        INTO the pre-pull by choosing the tier.
 
     📌 pin is NOT an eager tier (operator, 2026-07-16): "pinned doesnt mean
     anything aside from: 1) is the model attributed to a worker; if yes, then
@@ -5510,9 +5603,9 @@ def _sync_assignment(state: "WorkerState", worker: dict) -> None:
     order. Without this adoption the worker never knew about UI allocation
     changes.
 
-    Seating is a SEPARATE concern from downloading: _fill_empty_slots still
-    runs on every assignment change and seats models that are ALREADY LOCAL,
-    regardless of tier.
+    Adoption NEVER loads a model into VRAM. Being assigned (or re-assigned) a
+    model — static or otherwise — does not seat it; a model becomes resident only
+    when a request for it arrives and the demand path evicts-to-fit and serves it.
     """
     if not isinstance(worker, dict):
         return
@@ -5586,22 +5679,20 @@ def _sync_assignment(state: "WorkerState", worker: dict) -> None:
         if _eager_pull(model_key):
             logger.info("pre-provisioning %s (static — eager tier)", model_key)
             _kick_provision(state, model_key, purpose="assign")
-    # Slice 9: already-local models can be seated right now — don't wait for
-    # the maintenance tick. Background thread: fills block on slot loads.
-    # NOT a download: this seats models whose files are ALREADY on disk, so it
-    # runs for every tier — an on-demand model that was downloaded by an
-    # earlier call still gets its seat back on an assignment change.
-    threading.Thread(target=_fill_empty_slots, args=(state,), daemon=True).start()
+    # Adoption stops at the disk pull above. It never seats a model into VRAM:
+    # a model becomes resident only when a request for it arrives.
 
 
 def _kick_provision(state: "WorkerState", model_key: str,
-                    purpose: str = "reconcile", load: bool = True) -> None:
-    """Provision (and, when ``load``, per-policy preload) ONE model in the
-    background.
+                    purpose: str = "reconcile", load: "bool | None" = None) -> None:
+    """Download ONE model to this worker's DISK in the background — never load.
 
-    Shared by assignment adoption, the UTIL-08 reconcile loop, and the fetch-only
-    verb (``load=False`` — download to disk, never warm into VRAM); the
-    _provisioning guard makes concurrent kicks a no-op.
+    Shared by assignment adoption (static eager pre-pull), the UTIL-08 reconcile
+    loop, and the fetch-only verb; the _provisioning guard makes concurrent kicks
+    a no-op. This puts weights on disk and stops there: a model becomes VRAM/RAM
+    resident only when a request for it arrives. ``load`` is retained as an
+    ignored compatibility keyword for older callers: provisioning is now
+    unconditionally download-only.
 
     ``purpose`` ("assign" from adoption, "reconcile" from the loop) is a
     BACKGROUND purpose (2026-07-17): central MAY 409 this pull if it would push
@@ -5670,64 +5761,9 @@ def _kick_provision(state: "WorkerState", model_key: str,
                                          state=state, purpose=purpose)
                     logger.info("pre-provisioned %s", mk)
                     state.refused.pop(mk, None)   # it fit after all
-                if not load:
-                    # Fetch-only (operator ruling 2026-09-24): the files are on
-                    # disk now; do NOT warm/seat/preload. Load into VRAM is a
-                    # separate, explicit step (/probe). This is the download half
-                    # the post-test restore uses so a re-provision never re-seats.
-                    return
-                # Warm-up policy (v3 final semantics):
-                #   * slots box — seat assignment is the SLOT-FILLER's job
-                #     (slice 9, static-first): no in-process preload here, so
-                #     nothing double-loads. Files just landed — kick a fill.
-                #   * no slots — static always eager-warms in-process; other
-                #     models (default on-demand) warm only behind the
-                #     WORKER_PRELOAD/WORKER_POOL gate and TTL-yield when idle.
-                _preload = os.environ.get(
-                    "WORKER_PRELOAD",
-                    "1" if os.environ.get("WORKER_POOL", "").strip() else "0",
-                ).strip().lower() in ("1", "true", "yes", "on")
-                _res = _residency(mk)
-                _has_slots = False
-                try:
-                    from hugpy_engine.serve.slots import slots_enabled
-                    _has_slots = slots_enabled()
-                except Exception:  # noqa: BLE001
-                    pass
-                # Slot boxes: seat slot-eligible (GGUF) models — static-first.
-                if _has_slots:
-                    try:
-                        _fill_empty_slots(state)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("post-provision slot fill failed: %s", exc)
-                # In-process warm for static (always) or preload models the slot
-                # filler does NOT seat — transformers/vision/in-process GGUF. This
-                # used to be an `elif _has_slots`, so a STATIC TRANSFORMERS model on
-                # a slots box (ae/computron) never loaded: the filler only seats
-                # GGUF and this branch was skipped, leaving a hollow shell at 0 VRAM.
-                # Warm here whenever the model is not already a live slot occupant
-                # (so a seated GGUF model is never double-loaded).
-                if _preload or _res == "static":
-                    try:
-                        from hugpy_engine.dispatch.dispatch import runner_for
-                        if mk not in _slot_occupants():
-                            logger.info("preloading (warming) %s…%s", mk,
-                                        " [static — forced]" if (_res == "static" and not _preload) else "")
-                            # k67 lever-projection: post-provision preload is a
-                            # worker-initiated seat — apply the persisted lever
-                            # before the in-process load (same re-supply as the
-                            # slot filler and the boot star).
-                            _apply_persisted_spill_for(mk)
-                            runner = runner_for(model_key=mk)   # builds + caches the runner
-                            # runner_for only BUILDS the runner; lazy in-process
-                            # runners (transformers/DeepCoder) defer the weight load
-                            # to first use, so stopping here leaves a hollow shell at
-                            # 0 VRAM/RAM that still reads "loaded". static means LIVE
-                            # in the resources — force the weights resident now.
-                            _materialize(runner)
-                            logger.info("preloaded %s (resident)", mk)
-                    except Exception as exc:
-                        logger.warning("preload of %s failed: %s", mk, exc)
+                # Files are on disk; nothing is loaded here. A model loads into
+                # VRAM/RAM only when a request for it arrives — never on download,
+                # never for static, never under WORKER_PRELOAD/WORKER_POOL.
             except BudgetRefusal as exc:
                 # Not a failure — a DECISION, made before any bytes moved. Record
                 # it so the heartbeat reports the model as MISSING with an honest
@@ -6189,17 +6225,17 @@ _LOAD_STARTED: dict = {}
 # learned off the heartbeat reply (worker['blocked_models'] = [model_key, ...]),
 # the exact same additive/omit-when-empty wire idiom as calibration. Closes the
 # gap the 2026-07-18 ae incident exposed: the block primitive covers every
-# CENTRAL path already, but a worker's OWN background reconciler loops (slot
-# fill, provisioning re-kick) had no way to learn a model was blocked out from
-# under an assignment that is still on record (block does not auto-unassign) —
-# so they kept retrying a doomed load every ~60s indefinitely.
+# CENTRAL path already, but a worker's OWN background provisioning re-kick had no
+# way to learn a model was blocked out from under an assignment that is still on
+# record (block does not auto-unassign) — so it kept retrying a doomed download
+# every reconcile interval indefinitely.
 #   _BLOCKED_MODELS   model_keys blocked as of the last heartbeat. Empty ==
 #                     nothing blocked (or an older/central without the
 #                     feature; the reply just omits the key).
 #   _BLOCKED_LOGGED   model_keys a background loop has already logged a skip
 #                     for, so the skip logs ONCE per block episode, not every
 #                     tick. Re-armed on unblock so a future re-block logs again.
-# ONLY gates the worker's own background warm/load-ahead loops — never an
+# ONLY gates the worker's own background provisioning (download) loop — never an
 # explicit relay request (that stays central's honest-refusal job).
 _BLOCKED_MODELS: set = set()
 _BLOCKED_LOGGED: set = set()
@@ -6282,9 +6318,9 @@ def _is_blocked_locally(model_key: "str | None") -> bool:
 
 def _log_blocked_skip_once(model_key: str, where: str) -> None:
     """Log a background loop's skip of a blocked model exactly ONCE per block
-    episode, not every ~60s tick — the direct fix for the 2026-07-18 ae
-    incident (slot-fill reconciler retried a blocked model every beat for
-    ~4.75 hours, each attempt failing a full-GPU fit)."""
+    episode, not every tick — the direct fix for the 2026-07-18 ae incident
+    (a background reconciler retried a blocked model every beat for ~4.75 hours,
+    each attempt failing a full-GPU fit)."""
     with _BLOCKED_LOCK:
         if model_key in _BLOCKED_LOGGED:
             return
@@ -6297,235 +6333,6 @@ def _log_blocked_skip_once(model_key: str, where: str) -> None:
         return
     logger.info("%s: skipping %s — blocked from the serving pool by the "
                 "operator (won't retry until unblocked)", where, model_key)
-
-
-# ── Per-worker BOOT-LOAD STAR (boot_prewarm) ────────────────────────────────
-# Operator RULINGS 2026-07-23 (post-incident — these REVERT the 0.1.201
-# "reconcile-kept-warm" design that caused a live incident today):
-#   "the star is only supposed to indicate load that model on boot."
-#   "it shouldn't effect anything but priority for ambiguous model calls."
-# FINAL star semantics — the ⭐ lever does exactly TWO things and NOTHING else:
-#   (1) LOAD ON BOOT, once per process lifetime.
-#   (2) a PRIORITY tie-break in central's worker ranking (ambiguous / no-warm
-#       model calls prefer the box that boot-loads the model) — that half lives
-#       in workers.py's ranking, not here.
-# It is NOT keep-warm, NOT re-warm-per-beat, and has NO eviction interaction.
-# A star evicted under pressure now STAYS evicted until the next process
-# restart. There is no reconcile re-warm.
-#
-# INCIDENT RATIONALE (2026-07-23): 0.1.201 shipped a per-beat "load-if-absent"
-# re-warm (RULING-2 "reconcile-kept-warm"). On ae the star (coder-next) was
-# re-warmed WHILE active inference was in flight → the star's slot child stalled
-# → a zombie seat → the agent froze. Re-warm-after-eviction is only safe once
-# the k35 co-fit gate (evicted A reloads IFF it CO-FITS with its evictor B) is
-# built — that is Slice D, DEFERRED and NOT present. Until then the star is
-# strictly boot-once: fire exactly once, on the FIRST register/heartbeat reply
-# carrying a star, and never again for this process.
-#
-# Central publishes this worker's star on every register/heartbeat reply as a
-# plain scalar ``worker['boot_prewarm'] = "<model_key>"`` — the exact additive/
-# omit-when-unset wire idiom as calibration/reservations/blocked_models, so an
-# older released central just omits it and this code tolerates its absence.
-#
-# The star still loads through the NORMAL on-demand path (no residency 'static'
-# write): it becomes a plain FIFO-evictable resident. "Start here AND stay here"
-# is the 🔒static tier's job, not this one. The identifier stays ``boot_prewarm``
-# (rename churn isn't worth it) and now once again means exactly "boot once".
-#   _BOOT_PREWARM_DONE  a PROCESS-LIFETIME done-latch: model_keys the boot star
-#                       has ALREADY been fired for this process. Once a star is
-#                       in this set it never re-fires — the in-flight window and
-#                       the completed-forever window are the SAME set entry. This
-#                       is what disarms the every-beat re-warm: an evicted star is
-#                       NOT reloaded (co-fit-gated re-entry is future Slice D).
-_BOOT_PREWARM_DONE: set = set()
-_BOOT_PREWARM_LOCK = threading.Lock()
-
-# The CURRENTLY-designated boot star for this worker (or None), refreshed on
-# every register/heartbeat reply — distinct from _BOOT_PREWARM_DONE (a fired-
-# once latch that also retains un-starred models). k67 item K reads this so the
-# headroom sweep and the star agree on ONE verdict for a fitting resident: a
-# star whose stable footprint fits under the pressure ceiling is kept warm by
-# NOT sweeping it (convergence WITHOUT any re-warm, so the 2026-07-23 boot-once
-# revert stands — a swept-then-rewarmed loop never forms).
-_BOOT_STAR_CURRENT: "str | None" = None
-
-
-def _star_is_loaded(model_key: str) -> bool:
-    """True iff the star model is CURRENTLY resident on this worker — in-process
-    OR seated in a slot. Used only to skip the boot load when the star already
-    happens to be resident at first contact (e.g. static + star on the same
-    model). Guarded — an accessor hiccup reads as 'not loaded'."""
-    try:
-        if model_key in set(loaded_model_keys()):
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        if model_key in _slot_occupants():
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    return False
-
-
-def _load_star_if_absent(state: "WorkerState", model_key: str) -> None:
-    """Load the ⭐ star through the NORMAL on-demand path — NOT the static eager
-    tier — IF it is not already resident. Provisions it present (downloading if
-    absent, DEMAND purpose so the worker's own fit_plan evicts-to-fit rather than
-    central budget-refusing), then warms it resident the same way the on-demand
-    preload branch does (slot-fill for a GGUF slot occupant; runner_for +
-    ensure_loaded otherwise).
-
-    Crucially this does NOT touch residency: it never writes a 'static' override,
-    so the loaded model stays a normal FIFO-evictable resident. Once evicted it
-    STAYS evicted — this boot load fires exactly ONCE per process (the
-    _BOOT_PREWARM_DONE latch in _adopt_boot_prewarm gates re-entry). Co-fit-gated
-    re-warm-after-eviction is future work (Slice D). Fully guarded — a boot-load
-    failure must NEVER crash the agent or a heartbeat.
-
-    The done-latch is NOT cleared on completion: boot-once means the star is
-    fired for the process lifetime whether the load succeeded, was refused, or
-    raised. (A genuine retry only comes with a process restart.)"""
-    try:
-        if _is_blocked_locally(model_key):
-            _log_blocked_skip_once(model_key, "boot star")
-            return
-        try:
-            from hugpy_storage.provision import ensure_model_present, ensure_model_registered, model_is_local
-            # Learn the model from central if this worker's registry hasn't yet,
-            # and work against the canonical local key.
-            try:
-                canonical = ensure_model_registered(model_key, state.central_url) or model_key
-            except Exception:  # noqa: BLE001 — resolution failure -> try the bare key
-                canonical = model_key
-            # Comfy-backed rows own their own residency (symlinks); just ensure
-            # the checkpoint is available and stop (no runner preload, no slot).
-            try:
-                from hugpy_storage.provision import ensure_comfy_checkpoint
-                from hugpy_fleet.worker.imports import get_model_config
-                if getattr(get_model_config(canonical), "framework", None) == "comfy":
-                    ok = ensure_comfy_checkpoint(canonical, state.central_url)
-                    logger.info("boot star: comfy checkpoint for %s: %s",
-                                canonical, "ready" if ok else "NOT available")
-                    return
-            except Exception:  # noqa: BLE001 — fall through to the normal flow
-                pass
-            # DISK-vs-FETCH (k35 eviction-re-entry-designated, still valid for the
-            # boot load): "reload from disk, NEVER fetch when already local."
-            # ``model_is_local`` reads DISK PRESENCE ONLY (not VRAM residency):
-            #   * ``not _has`` (absent on disk) — a genuine FIRST ACTIVATION of a
-            #     not-yet-present star (the operator starred it, this box doesn't
-            #     have it). Fetch it ONCE at boot: that download fulfils the
-            #     deliberate star order, and it's ONE model (not the pin-storm's
-            #     many), so no storm risk.
-            #   * ``_has`` (present on disk, not resident) — load FROM DISK, do not
-            #     re-download (re-fetching risks re-pulling the exact files a reap
-            #     just removed — the 2026-07-17 ae pin-storm class). Boot-once
-            #     means this whole path fires once per process anyway; the
-            #     disk-vs-fetch split just governs whether the one firing pulls.
-            try:
-                _has = model_is_local(canonical)
-            except Exception:  # noqa: BLE001
-                _has = False
-            if not _has:
-                # Fetch fires ONLY here — genuine disk-absence = first activation.
-                logger.info("boot star: first-activation fetch of %s "
-                            "(absent on disk)…", canonical)
-                ensure_model_present(canonical, state.central_url, state=state,
-                                     purpose="demand")
-            # Load it resident — the SAME mechanism the on-demand preload branch
-            # uses, WITHOUT the _residency 'static' gate. Slot boxes seat a GGUF
-            # via the slot filler; everything else warms in-process via runner_for.
-            _has_slots = False
-            try:
-                from hugpy_engine.serve.slots import slots_enabled
-                _has_slots = slots_enabled()
-            except Exception:  # noqa: BLE001
-                pass
-            if _has_slots:
-                try:
-                    _fill_empty_slots(state)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("boot star: slot fill for %s failed: %s",
-                                   canonical, exc)
-            if canonical not in _slot_occupants():
-                try:
-                    from hugpy_engine.dispatch.dispatch import runner_for
-                    logger.info("boot star: loading %s (on-demand, evictable)…",
-                                canonical)
-                    # k67 lever-projection: worker-initiated seat — apply the
-                    # operator's persisted spill before the in-process load, the
-                    # same re-supply the slot filler does above.
-                    _apply_persisted_spill_for(canonical)
-                    runner = runner_for(model_key=canonical)
-                    _materialize(runner)
-                    logger.info("boot star: loaded %s (resident, FIFO-evictable) — "
-                                "stays cold if evicted until restart", canonical)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("boot star: load of %s failed: %s", canonical, exc)
-        except BudgetRefusal as exc:
-            # Won't fit — a DECISION, not a crash. Log and continue.
-            logger.warning("boot star %s REFUSED (won't fit): %s",
-                           model_key, exc.reason.get("reason"))
-        except Exception as exc:  # noqa: BLE001 — a boot load must never crash the agent
-            logger.warning("boot star %s failed: %s", model_key, exc)
-    except Exception as exc:  # noqa: BLE001 — outer guard: the boot load must never crash the agent
-        logger.warning("boot star %s: outer failure: %s", model_key, exc)
-    # NOTE: intentionally NO ``finally`` that clears the latch. Boot-once means
-    # the done-latch stays set for the process lifetime regardless of load
-    # outcome (success / refusal / raise). A genuine retry needs a restart.
-
-
-def _adopt_boot_prewarm(state: "WorkerState", worker: "dict | None") -> None:
-    """Adopt central's per-worker BOOT-LOAD STAR from a register/heartbeat reply
-    and fire it exactly ONCE per process lifetime (operator RULING 2026-07-23,
-    post-incident: "the star is only supposed to indicate load that model on
-    boot").
-
-    BOOT-ONCE (reverts the 0.1.201 "reconcile-kept-warm" every-beat re-warm that
-    caused today's live incident — star re-warm of coder-next fought active
-    inference on ae → slot child stalled → zombie seat → agent freeze): the FIRST
-    reply carrying a star fires a single load; the _BOOT_PREWARM_DONE latch then
-    suppresses every later beat for that star. A star EVICTED under pressure now
-    STAYS cold until the next process restart — this adopt does NOT reload it.
-    (Co-fit-gated re-entry — reload only when it co-fits its evictor — is the
-    future safe path: Slice D, DEFERRED, NOT built.)
-
-    Central omits the key when no star is set, and an older/released central never
-    sends it, so a reply without ``boot_prewarm`` is the normal no-op. Fully
-    guarded (mirrors _adopt_blocked_models): a star adoption must NEVER fail a
-    beat. Loading runs on a daemon thread so a multi-GB pull never blocks the
-    heartbeat loop.
-
-    Ordering of the guards: the done-latch is claimed BEFORE the load thread is
-    spawned (set-and-forget), so even if the load is still running when the next
-    beat arrives, that beat sees the latch and no-ops — the same set entry serves
-    as both the in-flight guard and the completed-forever guard."""
-    star = (worker or {}).get("boot_prewarm")
-    # Refresh the current-star pointer EVERY beat (central re-sends it whenever
-    # set; absence means unset), so the sweep's fitting-star protection tracks
-    # the live designation rather than the fired-once latch. Done before the
-    # boot-once guards below, which are unchanged.
-    global _BOOT_STAR_CURRENT
-    _BOOT_STAR_CURRENT = star if (star and isinstance(star, str)) else None
-    if not star or not isinstance(star, str):
-        return
-    # PROCESS-LIFETIME done-latch: fire the boot star at most once, ever. Claim
-    # the latch first (under lock) so no second beat races a second load thread.
-    with _BOOT_PREWARM_LOCK:
-        if star in _BOOT_PREWARM_DONE:
-            return  # already fired this process — boot-once, never re-warm
-        _BOOT_PREWARM_DONE.add(star)
-    # Already resident at first contact (e.g. static+star on the same model)?
-    # The boot load is a no-op, but the latch above still marks it fired.
-    if _star_is_loaded(star):
-        logger.info("boot star %s already resident at first contact — no load",
-                    star)
-        return
-    logger.info("boot star %s: loading once at boot (evictable, NOT static; "
-                "stays cold if later evicted until restart)", star)
-    threading.Thread(target=_load_star_if_absent, args=(state, star),
-                     daemon=True).start()
 
 
 _COMFY_URL_BASE_ENV = "_HUGPY_COMFY_URL_BASE"  # sentinel: the pre-projection
@@ -6562,8 +6369,9 @@ def _residency(model_key: str) -> str:
         slot-less boxes). Stored legacy entries (if any) read as this
         default too.
       * "static" — the only stored override: locked seat, never swapped out
-        or yielded, eager-warmed (the ONLY tier that pre-pulls — see
-        _eager_pull). Orthogonal to 📌 pin: pin makes the ATTRIBUTION
+        or yielded, eager-PULLED to disk (the ONLY tier that pre-pulls — see
+        _eager_pull; still loads into VRAM only on call, never on the pull).
+        Orthogonal to 📌 pin: pin makes the ATTRIBUTION
         permanent (the override survives unassign-prune), but adds no
         residency or presence promise of its own.
 
@@ -7013,24 +6821,35 @@ def _moe_plan_for(model_key: str) -> "dict | None":
 def _resolved_ctx(model_key: str, cfg: dict | None = None) -> "tuple[int | None, int | None, int | None]":
     """Resolve the ctx to plan/serve for this model: (ctx_resolved, pct, max).
 
-    ctx_resolved = pct% × model_max, clamped to the engine/server cap that exists
-    today (serve.DEFAULT_LLAMA_CTX for llama.cpp). When ctx_pct is UNSET, returns
-    (None, None, max) so callers fall back to today's default ctx path — the
-    variable is opt-in and back-compat by construction."""
+    ctx_resolved = pct% × model_max (pct of the NATIVE context) — a per-model
+    operator choice, bounded ONLY by what actually fits VRAM on this worker at
+    this load (spill.served_ctx_for_fit), so the served -c equals the KV that
+    fit/admission reserved. There is no hugpy-wide ceiling. When ctx_pct is
+    UNSET, returns (None, None, max) so callers fall back to the fit-bounded
+    native default ctx path — the variable is opt-in and back-compat by
+    construction."""
     pct = _ctx_pct(model_key)
     mx = _model_max_ctx(model_key, cfg)
     if pct is None or not mx:
         return None, pct, mx
-    ctx = max(1, int(mx * pct / 100.0))
-    # Clamp to the engine/server cap the loader would apply anyway (the existing
-    # 'capping -c' logic — enforcement of the RESOLVED value, not a blind cap).
-    try:
-        from hugpy_engine.serve.serve import DEFAULT_LLAMA_CTX
-        framework = str((cfg or {}).get("framework") or "").lower()
-        if framework in ("gguf", "llama_cpp"):
-            ctx = min(ctx, int(DEFAULT_LLAMA_CTX))
-    except Exception:  # noqa: BLE001
-        pass
+    ctx = max(1, int(mx * pct / 100.0))   # per-model ctx_pct choice (kept)
+    framework = str((cfg or {}).get("framework") or "").lower()
+    if framework in ("gguf", "llama_cpp"):
+        try:
+            from hugpy_engine import spill
+            # Bound the ctx_pct choice by the real VRAM fit for the served quant
+            # on THIS worker (never raise it above what the operator asked for).
+            ppath = None
+            try:
+                ppath, _tl = _served_gguf_geometry(model_key)
+            except Exception:  # noqa: BLE001
+                ppath = None
+            if ppath:
+                fit = spill.served_ctx_for_fit(ppath)
+                if fit:
+                    ctx = min(ctx, int(fit))
+        except Exception:  # noqa: BLE001 — a fit probe never breaks resolution
+            pass
     return ctx, pct, mx
 
 
@@ -7713,7 +7532,7 @@ def _worker_slot_fit_check(model_key: str) -> bool:
     # MoE: when a split governs the plan the load lands only the non-expert
     # share (+KV) on the card — gate on THAT typed need (expert share vs free
     # RAM, failing open when RAM is unmeasurable). This is what lets the /probe
-    # and the boot star of a 41.6GB MoE pass on an empty 23.6GiB card. Checked
+    # load of a 41.6GB MoE pass on an empty 23.6GiB card. Checked
     # BEFORE the full-need gate since 2026-07-25 (the split is the DEFAULT
     # placement, so the full need is not what will be reserved).
     ms = det.get("moe_split")
@@ -8065,8 +7884,85 @@ def _comfy_watchdog(state: "WorkerState"):
             vram_probe=_comfy_vram_now,
             url_probe=lambda: _comfy_base_url(state),
             free_call=lambda: _comfy_free_models(state),
-            emit=_evt_emit)
+            emit=_evt_emit,
+            # The idle-STOP path: bound only when the launcher is worker-managed
+            # (systemd-user/spawn). For the ``external`` default, ComfyManager.stop
+            # returns ok=False with a note and stop_tick short-circuits on
+            # ``managed=False`` anyway — so an unmanaged box never stops comfy.
+            stop_call=lambda: _comfy_manager(state).stop())
     return _COMFY_WATCHDOG
+
+
+# ── comfy process manager (worker owns comfy's lifecycle, 2026-09-24) ─────────
+# The worker starts/stops the local ComfyUI the same way it hosts an LLM server:
+# on demand when a comfy job is placed here, evict-to-fit first, serve, then free
+# VRAM / stop when idle. The launcher is pluggable (HUGPY_COMFY_LAUNCH): external
+# (default — probe only, unchanged), systemd-user:<unit>, or spawn:<python>
+# <main.py> [args]. The manager is self-contained + injectable (worker_agent.
+# comfy_process); the singleton binds the real box-touching probes once.
+_COMFY_MANAGER = None
+
+
+def _comfy_manager(state: "WorkerState"):
+    """The process-wide comfy process manager, built on first use from the live
+    ``HUGPY_COMFY_LAUNCH`` spec + the adopted comfy URL."""
+    global _COMFY_MANAGER
+    if _COMFY_MANAGER is None:
+        from hugpy_fleet.worker.comfy_process import ComfyManager, parse_launch, comfy_url
+        spec = parse_launch(os.environ.get("HUGPY_COMFY_LAUNCH"))
+        _COMFY_MANAGER = ComfyManager(spec, comfy_url())
+        if spec.get("error"):
+            logger.warning("comfy launcher config ignored: %s — falling back to "
+                           "'external' (probe only)", spec["error"])
+        elif _COMFY_MANAGER.managed:
+            logger.info("comfy process manager: launcher=%s url=%s (worker owns "
+                        "comfy's lifecycle)", spec.get("kind"), _COMFY_MANAGER.url)
+    return _COMFY_MANAGER
+
+
+def _ensure_comfy_started(state: "WorkerState", model_key: "str | None") -> None:
+    """On-demand comfy start for a placed comfy job (the /infer relay path).
+
+    Ordering per the operator directive: run evict-to-fit for THIS checkpoint's
+    need FIRST (_worker_ensure_comfy_headroom, the same evict verb every path
+    uses), THEN start the managed comfy and wait for /system_stats readiness with
+    a bounded timeout. A start failure RAISES a structured ModelLoadFailure (the
+    real launcher/journal text as loader_stderr) so the /infer error body carries
+    the same ``load_failure`` envelope an LLM load ships — central's relay path
+    records it via record_load_failure.
+
+    A no-op for a non-comfy model, or when the launcher is ``external`` (the
+    default — the worker never starts comfy on those boxes, unchanged), or when
+    comfy is already running."""
+    if not model_key:
+        return
+    if _model_framework(model_key) != "comfy":
+        return
+    mgr = _comfy_manager(state)
+    if not mgr.managed:
+        return                       # external launcher: probe-only, unchanged
+    if mgr.is_running():
+        return                       # already up — the per-gen headroom hook runs as usual
+    # 1) EVICT-TO-FIT FIRST: make room for this checkpoint's need before start.
+    try:
+        _worker_ensure_comfy_headroom(state, model_key)
+    except Exception:  # noqa: BLE001 — headroom is best-effort; never block the start
+        logger.warning("ensure-comfy-headroom before start raised for %s",
+                       model_key, exc_info=True)
+    # 2) START, then wait for readiness (bounded).
+    res = mgr.start()
+    if res.get("ok"):
+        logger.info("comfy started on demand for %s (%s)", model_key,
+                    res.get("note"))
+        return
+    # 3) FAILURE -> a recorded load failure with the real reason.
+    from hugpy_engine.serve.load_failure import ModelLoadFailure
+    raise ModelLoadFailure(
+        res.get("note") or f"comfy failed to start for {model_key}",
+        load_class=res.get("load_class") or "engine_unavailable",
+        loader_stderr=res.get("loader_stderr"),
+        model_key=model_key,
+        path=(mgr.spec.get("unit") or mgr.spec.get("main")))
 
 
 def _comfy_reclaim_idle_vram(state: "WorkerState", incoming_model: "str | None",
@@ -8599,6 +8495,22 @@ def _reap_gpu_orphans(state: "WorkerState", dry_run: bool = True) -> dict:
     if slots is not None:
         claimed = {s.get("child_pid") for s in slots
                    if isinstance(s, dict) and s.get("child_pid") is not None}
+    # EXTERNAL-CLAIM gate (2026-09-24): a pid registered as an external resident
+    # (a gpu_lease batch child, a studio/video render child) is a LIVE CLAIM the
+    # same way a slot child_pid is — the worker adopted it deliberately and yields
+    # it only through the resident's own supervisor (_evict_model's external
+    # branch / studio_reserve release), never by a raw PID kill from this reaper.
+    # Without this, a studio render child (own venv, holds VRAM, no slot claim,
+    # older than min-age) matched all four gates and was reapable mid-render — the
+    # exact 8GB-studio-fork class the vram-holder meter surfaces. Degrades to the
+    # prior behaviour (no extra protection) when the registry is unreadable.
+    ext_claimed: set = set()
+    try:
+        from hugpy_fleet.worker import external_residents as _extres
+        ext_claimed = {int(r["pid"]) for r in _extres.snapshot()
+                       if r.get("pid") is not None}
+    except Exception:  # noqa: BLE001 — no registry -> no extra protection (as before)
+        ext_claimed = set()
     try:
         from hugpy_fleet.worker.pid_registry import _COMFY_NAME_MARKER as _comfy_marker
         from hugpy_fleet.worker.pid_registry import _default_proc_info as _proc_info
@@ -8645,6 +8557,13 @@ def _reap_gpu_orphans(state: "WorkerState", dry_run: bool = True) -> dict:
             continue
         if pid in claimed:
             _skip("live slot claims this pid as child_pid — not an orphan")
+            continue
+        # Gate 2b: EXTERNAL CLAIM. A registered external resident (gpu_lease
+        # child / studio render child) is adopted, not an orphan — yield it via
+        # its supervisor, never a raw kill here.
+        if pid in ext_claimed:
+            _skip("registered external resident (lease/studio render) claims "
+                  "this pid — yielded via its supervisor, not reaped")
             continue
         # Gate 4: MIN AGE. Unmeasurable age -> unverifiable -> skip.
         age = _proc_age_s(pid)
@@ -8867,6 +8786,21 @@ def _vram_holders(state: "WorkerState") -> dict:
     # The SAME primitives the reaper's gates read (never the kill verb itself).
     own = _reap_own_pids()
     marker = _self_venv_marker()
+    # Registered external residents by pid (gpu_lease children, studio/video
+    # render children) — the SAME external-claim gate the reaper honours. A pid
+    # here is an ADOPTED holder, not an own-venv orphan/squatter: it holds the
+    # card legitimately and yields only through its supervisor.
+    ext_by_pid: dict = {}
+    try:
+        from hugpy_fleet.worker import external_residents as _extres
+        for _rec in _extres.snapshot():
+            if _rec.get("pid") is not None:
+                try:
+                    ext_by_pid[int(_rec["pid"])] = _rec
+                except (TypeError, ValueError):
+                    continue
+    except Exception:  # noqa: BLE001 — no registry -> no external rows (as before)
+        ext_by_pid = {}
     try:
         from hugpy_fleet.worker.pid_registry import _COMFY_NAME_MARKER as _comfy_marker
         from hugpy_fleet.worker.pid_registry import _default_proc_info as _proc_info
@@ -8895,6 +8829,21 @@ def _vram_holders(state: "WorkerState") -> dict:
             kind = "comfy"
             reason = "external ComfyUI process — never reapable (adopted service)"
             work_state = "external-comfy"
+        elif pid in ext_by_pid:
+            # Registered external resident: a gpu_lease batch child or a studio/
+            # video render child. Adopted, measured, evictable ONLY via its
+            # supervisor — never reapable and never a squatter (that is the whole
+            # point of registering it: an EXPLICIT non-evictable hold, not a
+            # silent leak). Named by its model_key so the meter shows the render.
+            _rec = ext_by_pid[pid]
+            kind = "external"
+            model_key = _rec.get("model_key")
+            _ev = _rec.get("evictable", True)
+            reason = ("registered external resident %r (%s) — adopted holder, "
+                      "yielded via its supervisor, never reaped" % (
+                          model_key, "evictable" if _ev else "non-evictable"))
+            work_state = "external-render" if str(model_key or "").startswith(
+                "studio:") else "external-lease"
         elif pid in own:
             kind = "infra"
             reason = "agent's own pid / slot supervisor — never reapable"
@@ -8947,6 +8896,10 @@ def _vram_holders(state: "WorkerState") -> dict:
         if kind == "slot":
             row["model_key"] = model_key
             row["serving"] = serving
+        if kind == "external":
+            # Name the adopted holder (studio:<job_id> / lease key) so the meter
+            # shows the render/lease by name instead of an anonymous pid.
+            row["model_key"] = model_key
         if age_s is not None:
             row["age_s"] = round(age_s, 1)
         holders.append(row)
@@ -9200,6 +9153,22 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
     (operator ruling 2026-07-23)."""
     out: list[dict] = []
     seen: set = set()
+    # WHICH card each resident holds (2026-09-25): so eviction can free the TARGET
+    # device, not a sibling card. in-process torch models -> the measured device
+    # ordinal (_inprocess_gpu_bytes); comfy -> its provisioned pin; slot -> its own
+    # CUDA_VISIBLE_DEVICES pin (joined below). gpu_index omitted when unknown.
+    try:
+        _ip_dev = {mk: v.get("gpu_index")
+                   for mk, v in (_inprocess_gpu_bytes() or {}).items()}
+    except Exception:  # noqa: BLE001 — no torch -> no per-device attribution
+        _ip_dev = {}
+    _comfy_dev = None
+    _cd_env = (os.environ.get("HUGPY_COMFY_CUDA_DEVICE") or "").strip()
+    if _cd_env:
+        try:
+            _comfy_dev = int(_cd_env)
+        except ValueError:
+            _comfy_dev = None
     try:
         from hugpy_fleet.worker import pid_registry as _pidreg
         snap = _pidreg.snapshot_for_heartbeat() or {}
@@ -9208,12 +9177,15 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             if not mk:
                 continue                    # cuda_context lump / idle comfy: no model
             seen.add(mk)
-            out.append({
+            _row = {
                 "model_key": mk,
                 "vram_bytes": int(row.get("vram_bytes") or 0),
                 "host_mode": row.get("host_mode") or "",
                 "alive": bool(row.get("alive", True)),
-            })
+            }
+            if _ip_dev.get(mk) is not None:
+                _row["gpu_index"] = _ip_dev.get(mk)
+            out.append(_row)
     except Exception:  # noqa: BLE001 — no registry -> nothing to plan against
         pass
     # Union in comfy's residents by name (the ledger). The registry attributes
@@ -9228,12 +9200,15 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
                 if not mk or mk in seen:
                     continue
                 seen.add(mk)
-                out.append({
+                _crow = {
                     "model_key": mk,
                     "vram_bytes": int(row.get("bytes") or 0),
                     "host_mode": "comfy",
                     "alive": True,
-                })
+                }
+                if _comfy_dev is not None:
+                    _crow["gpu_index"] = _comfy_dev
+                out.append(_crow)
     except Exception:  # noqa: BLE001 — no ledger / no smi -> registry rows stand
         pass
     # Union in LIVE slot occupants the registry doesn't know (k30). A slot with
@@ -9253,15 +9228,36 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             info = gpu_procs.get(cp) if cp is not None else None
             vb = int(info["mib"]) * _MIB if info is not None else 0
             seen.add(mk)
-            out.append({
+            _srow = {
                 "model_key": mk,
                 "vram_bytes": vb,
                 "host_mode": "subprocess",
                 "alive": bool(s.get("healthy", True)),
-            })
+            }
+            _sgi = s.get("gpu")
+            if _sgi in (None, ""):
+                _sgi = s.get("main_gpu")
+            if _sgi not in (None, ""):
+                try:
+                    _srow["gpu_index"] = int(_sgi)
+                except (TypeError, ValueError):
+                    pass
+            out.append(_srow)
     except Exception:  # noqa: BLE001 — slot pool unreadable -> registry rows stand
         pass
     return out
+
+
+def _target_device_index() -> "int | None":
+    """The GPU index the INCOMING model is being placed on — central's per-request
+    HUGPY_MAIN_GPU (via the spill seam). None when unpinned (single-GPU box or an
+    older central that sends no device), which makes per-device evict a no-op."""
+    try:
+        from hugpy_engine.spill import main_gpu
+        n = main_gpu()
+        return int(n) if n is not None else None
+    except Exception:  # noqa: BLE001 — no seam / unparseable: no target
+        return None
 
 
 def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, list]":
@@ -9288,9 +9284,26 @@ def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, l
     candidates: list[dict] = []
     protected: list[dict] = []
     comfy_busy: "str | None | bool" = False        # False = not asked yet
+    # PER-DEVICE evict (2026-09-25): on a MULTI-GPU box the incoming model lands on
+    # ONE card (central's HUGPY_MAIN_GPU). Evicting a resident on a SIBLING card
+    # frees the wrong VRAM — it never helps the target card and needlessly drops a
+    # model. So a resident whose KNOWN card differs from the target is protected.
+    # A resident of UNKNOWN card stays a candidate (degrade-not-guess: never block
+    # a needed eviction on missing per-device data), and single-GPU / unpinned
+    # boxes skip this entirely (byte-identical to before).
+    _target_dev = _target_device_index()
+    try:
+        _multi_gpu = len(detect_gpus() or []) > 1
+    except Exception:  # noqa: BLE001
+        _multi_gpu = False
     for r in _vram_residents(state):
         mk = r["model_key"]
         if mk == model_key:
+            continue
+        if _multi_gpu and _target_dev is not None and r.get("gpu_index") is not None \
+                and int(r["gpu_index"]) != int(_target_dev):
+            protected.append({**r, "why": (f"on GPU {r['gpu_index']}, target is "
+                                           f"GPU {_target_dev} (per-device evict)")})
             continue
         if str(r.get("host_mode")) == "comfy":
             if comfy_busy is False:
@@ -10765,6 +10778,154 @@ def _dispatch_last_used() -> dict:
     return last_used_snapshot()
 
 
+def _evict_to_free_target(state: "WorkerState", subject: str, target: int,
+                          *, exclude: "str | None" = None, job_id=None,
+                          target_dev: "int | None" = None) -> dict:
+    """THE shared VRAM evict-to-fit loop for in-process gens (ComfyUI AND the
+    in-process diffusers image runners). Evict the coldest EVICTABLE resident one
+    at a time — the SAME candidate policy (``_comfy_headroom_candidates``: slot
+    children + in-process residents + external leases, static dropped), the SAME
+    evict verb (``_evict_model`` — the one ``/ops/evict`` proved live), and the
+    SAME per-key gates (``_evict_gate`` inside ``_evict_model`` never rips a
+    busy/in-flight/static model) — re-measuring real free VRAM after each, until
+    free >= ``target`` or nothing eligible remains. There is ONE policy; only the
+    target differs per caller (comfy's checkpoint need vs the diffusers footprint).
+
+    Honest-degrade at every seam: no GPU / unmeasurable -> no-op; nothing left to
+    evict but still short -> return and let the caller proceed (NEVER blocks/hangs
+    the gen). Every REAL eviction is recorded via ``_note_vram_eviction`` so it
+    surfaces in ``/llm/evictions`` like every other eviction. Returns telemetry:
+    ``{target, free_before, free_after, evicted:[mk...], skipped:[{model_key,
+    reason,host_mode}...], reached:bool|None}`` — ``skipped`` names the residents
+    that could NOT be evicted (and why), for an honest capacity refusal upstream."""
+    exclude = exclude or subject
+    fv = _free_vram_bytes()
+    if fv is None:
+        return {"target": target, "free_before": None, "free_after": None,
+                "evicted": [], "skipped": [], "reached": None,
+                "note": "no GPU / unmeasurable"}
+    free_before = fv
+    evicted: list[str] = []
+    skipped: list[dict] = []
+    tried: set[str] = set()
+    # PER-DEVICE (2026-09-25): on a multi-GPU box only residents on the TARGET
+    # card free the VRAM this gen needs — evicting a sibling-card model is wasted.
+    # Map model_key -> its known card once; keep unknown-card keys eligible
+    # (degrade-not-guess). Skipped when unpinned / single-GPU (byte-identical).
+    _dev_by_key: dict = {}
+    _multi_gpu = False
+    if target_dev is not None:
+        try:
+            _multi_gpu = len(detect_gpus() or []) > 1
+            if _multi_gpu:
+                _dev_by_key = {r["model_key"]: r.get("gpu_index")
+                               for r in _vram_residents(state)}
+        except Exception:  # noqa: BLE001 — no per-device data -> no filtering
+            _multi_gpu = False
+
+    def _on_target(mk: str) -> bool:
+        if not (_multi_gpu and target_dev is not None):
+            return True
+        gi = _dev_by_key.get(mk)
+        return gi is None or int(gi) == int(target_dev)
+
+    while fv < target:
+        cands = [mk for mk in _comfy_headroom_candidates(exclude=exclude)
+                 if mk not in tried and _on_target(mk)]
+        if not cands:
+            logger.warning(
+                "evict-to-fit(%s): free VRAM %.2fGiB < target %.2fGiB but nothing "
+                "on-demand is evictable — proceeding anyway (honest-degrade; not "
+                "blocking the request)", subject, fv / 2**30, target / 2**30)
+            break
+        victim = cands[0]
+        tried.add(victim)
+        try:
+            res = _evict_model(state, victim, force=False)
+        except Exception:  # noqa: BLE001 — one bad evict must not wedge the gen
+            logger.warning("evict-to-fit(%s): evict of %s raised; skipping",
+                           subject, victim, exc_info=True)
+            skipped.append({"model_key": victim, "reason": "evict raised",
+                            "host_mode": None})
+            continue
+        if res.get("evicted"):
+            fb = res.get("vram_freed")
+            evicted.append(victim)
+            _note_vram_eviction(victim, subject, fb, res.get("host_mode") or "")
+        else:
+            # gated (busy/in-flight/static) or freed nothing — name it + why, and
+            # DON'T loop on it (tried already advanced) so a gated model can't hang
+            # the pass.
+            skipped.append({"model_key": victim,
+                            "reason": res.get("reason") or "not evicted",
+                            "host_mode": res.get("host_mode")})
+        fv = _free_vram_bytes()
+        if fv is None:
+            break
+    reached = (fv is not None and fv >= target)
+    return {"target": target, "free_before": free_before, "free_after": fv,
+            "evicted": evicted, "skipped": skipped, "reached": reached}
+
+
+def _imagegen_gen_cushion_bytes() -> int:
+    """Activation/arena cushion added on top of the diffusers model's weight
+    bytes when computing the evict-to-fit target (HUGPY_IMAGEGEN_GEN_CUSHION_GIB,
+    default 1.5 GiB). The generation itself needs working VRAM beyond the resident
+    weights; clearing weights+cushion means the fp16 pipeline lands on the GPU
+    with room to run rather than OOMing at the first sampler step."""
+    gib = os.environ.get("HUGPY_IMAGEGEN_GEN_CUSHION_GIB")
+    if gib is None or not str(gib).strip():
+        val = 1.5
+    else:
+        try:
+            val = float(gib)
+        except ValueError:
+            logger.warning("ignoring non-numeric HUGPY_IMAGEGEN_GEN_CUSHION_GIB=%r; "
+                           "using 1.5", gib)
+            val = 1.5
+    return int(max(0.0, val) * 2**30)
+
+
+def _worker_ensure_imagegen_headroom(state: "WorkerState", model_key: str,
+                                     need_bytes: "int | None" = None,
+                                     job_id=None) -> dict:
+    """Evict-to-fit BEFORE an in-process diffusers (text-to-image / image-to-image
+    / studio frame) load or generation, so the pipeline can land on the GPU
+    instead of OOMing behind an idle squatter. Registered by boot as the worker
+    side of ``imagegen_runner.set_imagegen_headroom_hook`` (mirrors the comfy
+    headroom hook). Reuses the ONE eviction policy (_evict_to_free_target).
+
+    TARGET = the model's REAL footprint + a generation cushion (``need_bytes`` is
+    the diffusers weights the runner priced from disk). Unlike ``_vram_evict_to_fit``
+    this does NOT apply the placement-intent re-price — a ram-only designation
+    projects 0 B on the GPU there and would evict nobody, which is exactly the
+    2026-09-25 incident: sd-turbo derived ram-only, so nothing evicted the idle
+    flux2-klein slot child (6.99 GiB) and the diffusers load CUDA-OOM'd. Here the
+    worker reclaims its own contended card; the runner then decides GPU-vs-CPU
+    from the RECLAIMED free VRAM (ram-only upgrades to GPU when it now fits, else
+    falls back to CPU / an honest refusal). Best-effort; never blocks the gen.
+
+    Unknown need -> the legacy comfy constant target (a sane 'clear some room'
+    goal), so a model the runner couldn't size still triggers a bounded pass."""
+    if need_bytes and need_bytes > 0:
+        target = int(need_bytes) + _imagegen_gen_cushion_bytes()
+    else:
+        target = _comfy_target_free_bytes()
+    # The in-process diffusers load lands on central's chosen card (HUGPY_MAIN_GPU),
+    # so free THAT card, not a sibling.
+    tele = _evict_to_free_target(state, model_key, target, exclude=model_key,
+                                 job_id=job_id, target_dev=_target_device_index())
+    tele["need_bytes"] = int(need_bytes) if need_bytes else None
+    logger.info(
+        "ensure-imagegen-headroom: model=%s need=%s target=%.2fGiB free_after=%s "
+        "evicted=%s reached=%s",
+        model_key, _human_bytes(need_bytes), target / 2**30,
+        (_human_bytes(tele.get("free_after")) if tele.get("free_after") is not None
+         else "unmeasurable"),
+        tele.get("evicted"), tele.get("reached"))
+    return tele
+
+
 def _worker_ensure_comfy_headroom(state: "WorkerState", model_key: str,
                                   job_id=None) -> dict:
     """Evict on-demand managed models (LRU, via the SAME _evict_model mechanism
@@ -10791,42 +10952,22 @@ def _worker_ensure_comfy_headroom(state: "WorkerState", model_key: str,
         detail = {"checkpoint": None, "checkpoint_bytes": None, "held": False,
                   "need": None}
     target = _comfy_headroom_target(detail)
-    fv = _free_vram_bytes()
-    if fv is None:
+    # ComfyUI is pinned to ONE card at provision (HUGPY_COMFY_CUDA_DEVICE), so on a
+    # multi-GPU box only evict residents on THAT card.
+    _cd_env = (os.environ.get("HUGPY_COMFY_CUDA_DEVICE") or "").strip()
+    try:
+        _comfy_dev = int(_cd_env) if _cd_env else None
+    except ValueError:
+        _comfy_dev = None
+    # Delegate to the ONE shared evict-to-fit loop (same candidate policy, evict
+    # verb, gates, and /llm/evictions recording the diffusers path now uses too).
+    tele = _evict_to_free_target(state, model_key, target, exclude=model_key,
+                                 job_id=job_id, target_dev=_comfy_dev)
+    if tele.get("free_before") is None and tele.get("free_after") is None:
         # No GPU / can't measure: byte-identical to today — do nothing.
         return {"target": target, "free_before": None, "free_after": None,
                 "evicted": [], "reached": None, "note": "no GPU / unmeasurable",
                 **_comfy_need_report(detail)}
-    evicted: list[str] = []
-    tried: set[str] = set()
-    while fv < target:
-        cands = [mk for mk in _comfy_headroom_candidates(exclude=model_key)
-                 if mk not in tried]
-        if not cands:
-            logger.warning(
-                "ensure-comfy-headroom: free VRAM %.2fGiB < target %.2fGiB but "
-                "nothing on-demand is evictable — proceeding with the comfy gen "
-                "anyway (honest-degrade; not blocking the request)",
-                fv / 2**30, target / 2**30)
-            break
-        victim = cands[0]
-        tried.add(victim)
-        try:
-            res = _evict_model(state, victim, force=False)
-        except Exception:  # noqa: BLE001 — one bad evict must not wedge the gen
-            logger.warning("ensure-comfy-headroom: evict of %s raised; skipping",
-                           victim, exc_info=True)
-            continue
-        if res.get("evicted"):
-            evicted.append(victim)
-            logger.info("ensure-comfy-headroom: evicted %s (%s) to free VRAM for "
-                        "comfy %s", victim, res.get("host_mode"), model_key)
-        # Re-read real free VRAM whether or not this one evicted (a gated model
-        # frees nothing; we still advanced `tried` so we won't loop on it).
-        fv = _free_vram_bytes()
-        if fv is None:
-            break
-    reached = (fv is not None and fv >= target)
     # The gen commits next (the caller POSTs the graph): comfy holds this
     # checkpoint from here, whatever the headroom outcome was.
     try:
@@ -10834,8 +10975,9 @@ def _worker_ensure_comfy_headroom(state: "WorkerState", model_key: str,
                                       detail.get("checkpoint_bytes"))
     except Exception:  # noqa: BLE001 — bookkeeping never breaks the gen
         pass
-    return {"target": target, "free_after": fv, "evicted": evicted,
-            "reached": reached, **_comfy_need_report(detail)}
+    return {"target": target, "free_after": tele.get("free_after"),
+            "evicted": tele.get("evicted") or [],
+            "reached": tele.get("reached"), **_comfy_need_report(detail)}
 
 
 def _comfy_need_report(detail: dict) -> dict:
@@ -11371,6 +11513,28 @@ def _comfy_status() -> dict:
                            if out["vram_bytes"] else [])
     except Exception:  # noqa: BLE001 — telemetry only
         out["resident"] = []
+    # ── worker-managed comfy lifecycle (2026-09-24) ──────────────────────────
+    # The worker may OWN comfy's process (HUGPY_COMFY_LAUNCH). Advertise the
+    # launcher + a running|stopped|starting|failed state and a managed flag, and
+    # — CRUCIALLY — keep advertising the checkpoints this box CAN serve even while
+    # comfy is STOPPED but startable, so central can still place a comfy job here
+    # (the worker starts comfy on demand). Additive fields only; a probe-only /
+    # external box reports managed=False and is otherwise unchanged.
+    try:
+        mgr = _comfy_manager(None)
+        running = bool(out.get("available"))
+        out["managed"] = mgr.managed
+        out["launcher"] = mgr.mode
+        out["state"] = mgr.state(running=running)
+        if mgr.spec_error:
+            out["launcher_error"] = mgr.spec_error
+        if mgr.managed and not running and not out.get("checkpoints"):
+            disk_ckpts = mgr.checkpoints_on_disk()
+            if disk_ckpts:
+                out["checkpoints"] = disk_ckpts
+                out["checkpoints_source"] = "disk (comfy stopped; managed startable)"
+    except Exception:  # noqa: BLE001 — manager status is additive telemetry
+        pass
     return out
 
 
@@ -11431,116 +11595,6 @@ def _residency_sweep_once(started_at: float) -> None:
                 evict(mk)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("residency evict of %s failed: %s", mk, exc)
-
-
-_SLOT_FILL_LOCK = threading.Lock()
-
-
-_FILL_SKIP_LOGGED: set = set()
-
-
-def _log_fill_skip_once(model_key: str) -> None:
-    """SLOT-FILL-FIT-20260910: say once (not every 60 s tick) that a background seat was skipped
-    because the model does not fit beside the current residents."""
-    if model_key in _FILL_SKIP_LOGGED:
-        return
-    _FILL_SKIP_LOGGED.add(model_key)
-    logger.info("slot fill: %s does not fit beside the current residents without "
-                "evicting one — not seating it in the background (a real request "
-                "for it still loads it through the normal make-room path)", model_key)
-
-
-def _fill_empty_slots(state: "WorkerState") -> None:
-    """Slice 9: empty slots never sit idle while assigned models exist.
-
-    Runs on startup, after assignment adoption/provisioning, and every
-    maintenance tick. Preference order: STATIC first (they must hold seats
-    anyway — this subsumes the old static eager-warm on slots boxes), then
-    most-recently-used, then any assigned. Candidates must have their files
-    local (provisioning re-kicks the fill when a pull lands) and be GGUF
-    rows (slots host llama.cpp server children only).
-
-    Each load rides runner_for -> get_llama_runner -> SlotPool.endpoint_for —
-    the exact path a live request takes, so per-model opts/ctx resolution,
-    same-model reuse and the static-lock guard all apply for free, and each
-    load seats itself in an idle slot (never promotes: we only start as many
-    loads as there are empty seats). Single-flight."""
-    # SLOT-FILL-FIT-20260910: background seating is OFF unless the operator opts in with
-    # HUGPY_SLOT_FILL=1 (operator ruling 2026-09-10: "eliminate this"). Models load
-    # when something actually asks for them, through the normal make-room path.
-    if str(os.environ.get("HUGPY_SLOT_FILL", "0")).strip().lower() not in ("1", "on", "true", "yes"):
-        return
-    if not _SLOT_FILL_LOCK.acquire(blocking=False):
-        return                                   # a fill pass is already running
-    try:
-        from hugpy_engine.serve.slots import SlotPool, slots_enabled
-        if not slots_enabled():
-            return
-        statuses = SlotPool().statuses()
-        empties = [s for s in statuses
-                   if "error" not in s and not s.get("model_key")]
-        if not empties:
-            return
-        occupied = {s["model_key"] for s in statuses if s.get("model_key")}
-        local = set(_models_local(state))
-
-        def _framework(mk):
-            try:
-                from hugpy_fleet.worker.imports import get_model_config
-                return getattr(get_model_config(mk), "framework", None)
-            except Exception:  # noqa: BLE001 — unknown row: not seatable
-                return None
-
-        candidates = []
-        for mk in state.assigned_models:
-            if mk in occupied or mk not in local or _framework(mk) != "gguf":
-                continue
-            # k2: an operator BLOCK (aa4aea3) does not auto-unassign — the model
-            # can still be sitting in state.assigned_models. Skip it here so this
-            # loop stops retrying a doomed seat every ~60s (the 2026-07-18 ae
-            # incident); log once, not every tick.
-            if _is_blocked_locally(mk):
-                _log_blocked_skip_once(mk, "slot fill")
-                continue
-            candidates.append(mk)
-        if not candidates:
-            return
-        from hugpy_engine.dispatch.dispatch import last_used_snapshot
-        last_used = last_used_snapshot()
-        candidates.sort(key=lambda mk: (0 if _residency(mk) == "static" else 1,
-                                        -last_used.get(mk, 0.0)))
-        for mk in candidates[:len(empties)]:
-            try:
-                # SLOT-FILL-FIT-20260910: a background seat must FIT beside the current residents;
-                # otherwise the ceiling evicts one of them and the next tick seats
-                # it back — the two swap every minute forever.
-                try:
-                    _fits = _worker_fit_check(mk)
-                except Exception:  # noqa: BLE001 — can't tell -> don't seat in the background
-                    _fits = False
-                if not _fits:
-                    _log_fill_skip_once(mk)
-                    continue
-                _FILL_SKIP_LOGGED.discard(mk)
-                logger.info("slot fill: seating %s (%s) in an empty slot",
-                            mk, _residency(mk))
-                # k67 lever-projection: this is a WORKER-INITIATED seat, so the
-                # request-path _apply_spill never ran — re-supply the operator's
-                # persisted lever before the seat materializes (clears the prior
-                # candidate's mode envs first, so it cannot leak across seats).
-                _apply_persisted_spill_for(mk)
-                from hugpy_engine.dispatch.dispatch import runner_for
-                runner = runner_for(model_key=mk)   # builds the LAZY wrapper only
-                # The seat happens on first .runner access (get_llama_runner ->
-                # _build_runner -> SlotPool.endpoint_for). Without forcing it the
-                # filler registered a hollow in-process shell and NEVER seated a
-                # slot — both slots stayed empty and chat 404'd on the empty slot
-                # endpoint. ensure_loaded() materialises the runner = the seat.
-                _materialize(runner)
-            except Exception as exc:  # noqa: BLE001 — one seat must not block the rest
-                logger.warning("slot fill for %s failed: %s", mk, exc)
-    finally:
-        _SLOT_FILL_LOCK.release()
 
 
 def _raw_free_vram_bytes() -> "int | None":
@@ -11684,36 +11738,6 @@ def _vram_headroom_sweep(state: "WorkerState") -> None:
                 pass
 
 
-def _starred_and_fits_ceiling(model_key: str, resident: dict, total: "int|None") -> bool:
-    """k67 item K — is ``model_key`` the CURRENT boot star AND does its stable
-    footprint fit under the pressure ceiling (``total * ceiling_frac``)?
-
-    When True the headroom SWEEP leaves it warm instead of evicting it: keeping
-    a fitting star resident is the star's whole purpose, and doing it by NOT
-    sweeping (rather than by re-warming after a sweep) is what makes sweep and
-    star converge on one verdict — no evict→re-warm oscillation, and the
-    boot-once revert is untouched (nothing reloads here). A star whose footprint
-    ALONE exceeds the ceiling does NOT fit, so it stays a plain evictable
-    resident (it simply cannot be kept warm without breaching the ceiling).
-
-    Sweep-only: admission evict-to-fit (a real incoming load) may STILL take the
-    star's room — that is demand-driven, one-shot, and boot-once means it will
-    not thrash back. Degrades to False (no protection) on any missing datum."""
-    try:
-        if not _BOOT_STAR_CURRENT or model_key != _BOOT_STAR_CURRENT:
-            return False
-        t = int(total or 0)
-        if t <= 0:
-            return False
-        size = int(resident.get("vram_bytes") or 0)
-        if size <= 0:
-            return False                      # unmeasured footprint -> don't shield
-        ceiling = int(t * _vram_ceiling_frac())
-        return size <= ceiling
-    except Exception:  # noqa: BLE001 — a shield miss just leaves it evictable
-        return False
-
-
 def _vram_headroom_sweep_body(state: "WorkerState", total: int, fv: int) -> None:
     """The sweep's decision + eviction. Split out only so the telemetry run
     scope above can wrap it; the logic is unchanged."""
@@ -11770,14 +11794,6 @@ def _vram_headroom_sweep_body(state: "WorkerState", total: int, fv: int) -> None
             _evt_emit("candidate.skip", model_key=mk, tier=_tier,
                       reason="actively replying (in-flight/busy)")
             continue
-        if _starred_and_fits_ceiling(mk, r, total):
-            # k67 item K: the boot star fits under the ceiling — keep it warm by
-            # NOT sweeping it. This is the ONLY star/sweep interaction, and it is
-            # convergent: no re-warm, so no oscillation, and the boot-once revert
-            # stands. A real incoming load can still evict it (admission path).
-            _evt_emit("candidate.skip", model_key=mk, tier=_tier,
-                      reason="boot star, fits under ceiling (kept warm, k67)")
-            continue
         # No `queued_ahead` here — there is no subject load this pass; a resident
         # with in-flight work is already protected by _actively_replying above.
         cands.append(r)
@@ -11821,18 +11837,26 @@ def _vram_headroom_sweep_body(state: "WorkerState", total: int, fv: int) -> None
                   outcome="proceeded-unfit")
 
 
+def _fill_empty_slots(state: "WorkerState") -> None:
+    """Compatibility no-op for the retired background slot filler.
+
+    Assignment, heartbeat, provisioning, and maintenance must never create a
+    VRAM resident. Keeping the symbol lets older integrations upgrade without
+    crashing while preserving the load-only-on-call contract.
+    """
+    return None
+
+
 def _residency_sweep_loop(state: "WorkerState") -> None:
-    """Residency maintenance every 60s: fill empty slots (slice 9), enforce the
-    90% VRAM headroom (slice 10 addendum), then run the idle TTL sweep — which is
+    """Residency maintenance every 60s: enforce the 90% VRAM headroom (slice 10
+    addendum), run the idle-comfy watchdog, then run the idle TTL sweep — which is
     a no-op unless the operator opted into on_demand_ttl_s (contention governs
-    residency by default; see _residency_sweep_once + ensure_headroom_for_load)."""
+    residency by default; see _residency_sweep_once + ensure_headroom_for_load).
+    This loop only EVICTS/reclaims; it never loads a model (a model loads only when
+    a request for it arrives)."""
     started_at = time.time()
     while True:
         time.sleep(60.0)
-        try:
-            _fill_empty_slots(state)
-        except Exception as exc:  # noqa: BLE001 — the loop must never die
-            logger.warning("slot fill pass failed: %s", exc)
         try:
             _vram_headroom_sweep(state)
         except Exception as exc:  # noqa: BLE001 — the loop must never die
@@ -11846,6 +11870,17 @@ def _residency_sweep_loop(state: "WorkerState") -> None:
                                         total_vram_bytes=_total_vram_bytes())
         except Exception as exc:  # noqa: BLE001 — the loop must never die
             logger.warning("comfy idle watchdog pass failed: %s", exc)
+        try:
+            # 2026-09-24: the worker owns comfy's lifecycle. After the /free
+            # debounce reclaims the weights, a fully idle MANAGED comfy is STOPPED
+            # (a longer window) so it releases even its bare CUDA context. Rides
+            # the same beat; a no-op on the 'external' launcher and every box
+            # where comfy is not running. Never stops mid-render (clauses 2-3).
+            _mgr = _comfy_manager(state)
+            _comfy_watchdog(state).stop_tick(managed=_mgr.managed,
+                                             running=_mgr.is_running())
+        except Exception as exc:  # noqa: BLE001 — the loop must never die
+            logger.warning("comfy idle-stop pass failed: %s", exc)
         try:
             _residency_sweep_once(started_at)
         except Exception as exc:  # noqa: BLE001 — the loop must never die
@@ -12362,6 +12397,77 @@ def _task_capabilities() -> dict:
     return caps
 
 
+_STUDIO_CAP_CACHE: dict = {"at": 0.0, "value": None, "root": None}
+
+
+def _studio_capability(state: "WorkerState | None" = None) -> "dict | None":
+    """What THIS box can do for a studio (video) render, advertised so central's
+    placement can route a REAL-model studio render here LIKE AN LLM (operator ruling
+    2026-09-24) instead of depending on the central ``HUGPY_STUDIO_WORKER`` env var.
+
+    ``{"render": bool, "models": [model_id...], "weights_root": str|None}``:
+      * ``render`` — this box mounts /studio/render AND can run the studio spine
+        (``hugpy_video`` importable) AND has a GPU. A GPU-less box does NOT advertise
+        studio render (it could only ever produce a NO_GPU error), so central never
+        routes a real render to it.
+      * ``models`` — the REAL studio model_ids whose weights THIS box can actually LOAD
+        right now: a pure ``os.path.isfile(model_index.json)`` read under the roots the
+        render will use — the box-local hot root + the worker's own env root, PLUS the
+        SHARED root central advertises in its heartbeat reply (``state.studio_weights_root``,
+        the SAME path the render manifest is built against). The worker doesn't otherwise
+        know central's shared root, and its OWN env usually doesn't set it (the render
+        loads from the manifest root), which is why an env-only probe reported []. A box
+        that cannot read that root (e.g. computron, no shared studio weights) reports [] —
+        honest per-worker presence, never a transfer trigger.
+
+    ``None`` when the box cannot render studio at all (no hugpy_video / no GPU). The cache
+    is keyed on the central root too, so the first beat after central advertises it
+    RECOMPUTES immediately rather than serving a stale [] for up to 60s. Fully guarded:
+    telemetry must never break a heartbeat."""
+    now = time.time()
+    central_root = getattr(state, "studio_weights_root", None)
+    if (now - _STUDIO_CAP_CACHE["at"] < 60.0
+            and _STUDIO_CAP_CACHE.get("root") == central_root):
+        return _STUDIO_CAP_CACHE["value"]
+    value: "dict | None" = None
+    try:
+        from hugpy_fleet.worker import plugins as _plugins
+        has_spine = bool(_plugins.video_present())
+    except Exception:  # noqa: BLE001
+        has_spine = False
+    try:
+        has_gpu = bool(detect_gpus())
+    except Exception:  # noqa: BLE001
+        has_gpu = False
+    if has_spine and has_gpu:
+        try:
+            from hugpy_video.intel.studio.presence import present_model_ids, weights_roots
+            roots = list(weights_roots())            # box-local hot + worker-env shared
+            if isinstance(central_root, str) and central_root and central_root not in roots:
+                roots.append(central_root)           # the root the render manifest loads from
+            models = list(present_model_ids(tuple(roots)))
+            value = {"render": True, "models": models,
+                     "weights_root": (central_root or (roots[-1] if roots else None))}
+        except Exception as exc:  # noqa: BLE001 — presence must never break a beat
+            logger.debug("studio presence probe failed: %s", exc)
+            value = {"render": True, "models": [], "weights_root": None}
+    _STUDIO_CAP_CACHE.update(at=now, value=value, root=central_root)
+    return value
+
+
+def _adopt_studio_weights_root(state: "WorkerState", worker: "dict | None") -> None:
+    """Adopt central's SHARED studio weights root from the register/heartbeat reply, so
+    the NEXT ``_studio_capability`` probe checks presence under the root the render loads
+    from. Best-effort: a missing/blank value leaves the prior value untouched (never wipes
+    a known root over a transient reply)."""
+    try:
+        root = (worker or {}).get("studio_weights_root")
+        if isinstance(root, str) and root:
+            state.studio_weights_root = root
+    except Exception:  # noqa: BLE001 — adoption must never break the beat
+        pass
+
+
 def _environment_digest() -> "dict | None":
     """The COMPACT environment fact that rides every beat (k118).
 
@@ -12654,6 +12760,12 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
                     # this box can actually run, so central won't route a task
                     # whose optional dep is missing here (workers_for_model gate).
                     "task_capabilities": _task_capabilities(),
+                    # STUDIO (video) placement signal (2026-09-24): what this box can do
+                    # for a studio render + which real studio models it holds on disk, so
+                    # central places a video render LIKE AN LLM (registry pick) instead of
+                    # depending on HUGPY_STUDIO_WORKER. Additive/optional — an older
+                    # central drops it (extra='ignore'); None on a no-GPU / no-spine box.
+                    "studio": _studio_capability(state),
                     # k118 ENVIRONMENT DOCTRINE. Two additive fields, both
                     # optional (extra='ignore' drops them for an older central):
                     # a compact digest of what this box HAS, and its own verdict
@@ -12680,26 +12792,21 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             )
             # Adopt any assignment change made in the UI + pre-provision it.
             _sync_assignment(state, worker)
+            # Adopt central's shared studio weights root so the next studio-presence
+            # probe checks the root the render actually loads from.
+            _adopt_studio_weights_root(state, worker)
             # Adopt central's resource limits (min of central + local config).
             _apply_central_limits(worker)
             # t28: adopt central's learned per-model need corrections (if any).
             _adopt_calibration(worker)
             # k2: adopt central's model BLOCK set (if any) — see
             # _adopt_blocked_models. Gates only this worker's own background
-            # warm/load-ahead loops (slot fill, provisioning re-kick).
+            # provisioning (download) re-kick.
             _adopt_blocked_models(worker)
             # Eviction policy (2026-07-25): least-reaping is FLEET-WIDE because
             # central's storage_proposal runs the same drop pass — see
             # _adopt_least_reaping. Omitted by a central with no opinion.
             _adopt_least_reaping(worker)
-            # Per-worker BOOT-LOAD STAR (operator RULING 2026-07-23, post-
-            # incident): if central named a star for this worker, load it ONCE
-            # per process (a normally-evictable on-demand resident, NOT static).
-            # BOOT-ONCE, not reconcile-kept: the _BOOT_PREWARM_DONE latch makes
-            # every beat after the first a no-op — a star evicted under pressure
-            # STAYS cold until restart (the 0.1.201 every-beat re-warm caused a
-            # live incident; co-fit-gated re-entry is future Slice D).
-            _adopt_boot_prewarm(state, worker)
             # Keep the STORAGE budget's two central-owned inputs on state: the
             # disk allocation and the LRU clock the FIFO orders by. Both are
             # facts only central holds; the pull path reads them off state.
@@ -12751,6 +12858,10 @@ def _register(client: CentralClient, state: WorkerState, args) -> None:
         # Per-task capability honesty (2026-07-11): advertised from first contact
         # so central's routing gate is correct before the first heartbeat.
         "task_capabilities": _task_capabilities(),
+        # STUDIO (video) placement signal (2026-09-24) from first contact, so central
+        # can place a real studio render here before the first heartbeat. Additive;
+        # None on a no-GPU / no-spine box. See _studio_capability + the heartbeat.
+        "studio": _studio_capability(state),
     }
     try:
         worker = client.register(payload)
@@ -12762,13 +12873,10 @@ def _register(client: CentralClient, state: WorkerState, args) -> None:
     # Adopt central's view of what we serve (it may already have assignments
     # for this worker_id from a previous session) and pre-provision them.
     _sync_assignment(state, worker)
+    # Adopt central's shared studio weights root from the register reply, so the FIRST
+    # heartbeat's studio-presence probe already checks the right root.
+    _adopt_studio_weights_root(state, worker)
     _apply_central_limits(worker)
-    # Per-worker BOOT-LOAD STAR (operator RULING 2026-07-23, post-incident): the
-    # register reply may already carry this worker's star — load it ONCE here at
-    # first contact (a normally-evictable on-demand resident, NOT static). This is
-    # the boot firing; the _BOOT_PREWARM_DONE latch then no-ops every subsequent
-    # heartbeat for the same star (boot-once, NOT reconcile-kept).
-    _adopt_boot_prewarm(state, worker)
     logger.info("registered as worker id=%s serving models=%s", state.worker_id, worker.get("models"))
     # Converge to central's required package version before serving (restarts).
     _self_update_if_needed(worker.get("required_pkg_version"), args, state,
@@ -12900,7 +13008,7 @@ def main(argv: list[str] | None = None) -> int:
     # BOOT DETOX (2026-07-08 ae crash-loop): a 0.1.158 studio render setdefault'ed
     # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, which SURVIVES the agent's
     # re-exec (os.environ is inherited by execv) and this driver/torch combo dies
-    # natively under it — poisoning every subsequent CUDA load incl. boot warms.
+    # natively under it — poisoning every subsequent CUDA (request-driven) load.
     # Unless the operator explicitly opted in (HUGPY_CUDA_EXPANDABLE=1), strip the
     # exact leaked value BEFORE any torch import so the box heals on converge.
     if (os.environ.get("HUGPY_CUDA_EXPANDABLE", "").strip() != "1"
@@ -13052,6 +13160,22 @@ def main(argv: list[str] | None = None) -> int:
             lambda mk, job_id=None: _worker_ensure_comfy_headroom(state, mk, job_id))
     except Exception as _exc:  # noqa: BLE001 — headroom prep must never break boot
         logger.warning("comfy headroom hook not registered: %s", _exc)
+
+    # Same evict-to-fit, for the IN-PROCESS diffusers image runners (t2i / img2img
+    # / studio frames). Those pipelines load LAZILY inside the runner (AFTER the
+    # runner object is cached, so dispatch.ensure_headroom_for_load at build time
+    # never covers the real VRAM allocation), and a ram-only designation makes the
+    # cross-tier make-room a no-op — so an idle slot squatter was never evicted and
+    # the load CUDA-OOM'd (incident 2026-09-25). The runner calls this hook with
+    # its priced footprint right before loading/generating; it reclaims the card
+    # via the SAME evict verb/policy comfy uses.
+    try:
+        from hugpy_media.imagegen.imagegen_runner import set_imagegen_headroom_hook
+        set_imagegen_headroom_hook(
+            lambda mk, need=None, job_id=None:
+            _worker_ensure_imagegen_headroom(state, mk, need, job_id))
+    except Exception as _exc:  # noqa: BLE001 — headroom prep must never break boot
+        logger.warning("imagegen headroom hook not registered: %s", _exc)
 
     # Env-profiles (stage 1): register the model->profile resolver the runner
     # spawn seam consumes, then KICK materialization of every declared profile
@@ -13209,11 +13333,11 @@ def main(argv: list[str] | None = None) -> int:
     hb = threading.Thread(target=_heartbeat_loop, args=(client, state, args), daemon=True)
     hb.start()
 
-    # Residency maintenance (v3): fills empty slots (slice 9) + TTL-yields
-    # idle IN-PROCESS on-demand residents. First fill lands sooner than the
-    # loop's first 60s tick so a restarted agent's slots don't sit empty.
+    # Residency maintenance: enforces the VRAM headroom ceiling, runs the comfy
+    # idle watchdog, and TTL-yields idle IN-PROCESS on-demand residents (opt-in).
+    # It NEVER loads a model — a model becomes resident only when a request for it
+    # arrives and evict-to-fit seats it.
     threading.Thread(target=_residency_sweep_loop, args=(state,), daemon=True).start()
-    threading.Timer(20.0, lambda: _fill_empty_slots(state)).start()
 
     # UTIL-08 reconcile: failed pulls converge instead of drifting forever.
     threading.Thread(target=_reconcile_loop, args=(state,), daemon=True).start()

@@ -156,6 +156,19 @@ class Requirement:
     severity: str = DEFAULT_SEVERITY
     note: str = ""
     repair: str = ""
+    #: When set, this dep is a COMPANION of another package (its value) that
+    #: must be installed in the SAME venv and whose own ``Requires-Dist`` for
+    #: that package the installed base version must satisfy. ``torchvision``
+    #: declares ``Requires-Dist: torch==X``; a torch that is not X makes
+    #: ``import torchvision`` raise (the ``torchvision::nms`` operator incident,
+    #: computron 2026-09-24). This is orthogonal to ``pin`` (a FLEET rule):
+    #: the companion carries its OWN rule in its metadata, read from the report.
+    companion_of: str = ""
+    #: Severity for a companion-COMPAT mismatch, when it differs from the entry's
+    #: own ``severity``. ``torchaudio`` missing is a warn (audio I/O degrades) but
+    #: a torchaudio that mismatches its torch is a blocker (it fails to import).
+    #: Empty means "use ``severity``".
+    companion_severity: str = ""
 
     def __post_init__(self) -> None:
         if self.severity not in SEVERITIES:
@@ -165,6 +178,10 @@ class Requirement:
         if self.kind not in ("pip", "binary", "mount", "driver"):
             raise ValueError(
                 f"Requirement({self.name!r}).kind is unknown: {self.kind!r}")
+        if self.companion_severity and self.companion_severity not in SEVERITIES:
+            raise ValueError(
+                f"Requirement({self.name!r}).companion_severity must be one of "
+                f"{SEVERITIES}, got {self.companion_severity!r}")
 
 
 #: A pseudo-task: not a ``/ml`` dispatch task, but the row shape whose failure
@@ -224,6 +241,17 @@ KNOWN_REQUIREMENTS: tuple[Requirement, ...] = (
         note="every in-process ML task on the box. Its version is also the "
              "reason env-profile venvs exist (colliding pins)."),
     Requirement(
+        "torchvision", severity="blocker", companion_of="torch",
+        required_for=("text-to-image",),
+        note="computron 2026-09-24: torch 2.12.1+cu130 with torchvision 0.28.0 "
+             "(Requires-Dist: torch==2.13.0) -> `import torchvision` raises "
+             "'operator torchvision::nms does not exist'; transformers surfaces "
+             "it as \"Could not import module 'BloomPreTrainedModel'\" during the "
+             "diffusers->peft import, so every text-to-image job fails at load. "
+             "diffusers imports torchvision, so its ABSENCE also blocks t2i; but "
+             "the landmine is a PRESENT torchvision whose declared torch pin the "
+             "installed torch does not satisfy (companion_of='torch')."),
+    Requirement(
         "transformers", severity="blocker",
         required_for=("text-summarization", "depth-estimation",
                       "object-detection", "image-classification",
@@ -262,8 +290,12 @@ KNOWN_REQUIREMENTS: tuple[Requirement, ...] = (
                 note="every download/resolve path."),
     Requirement(
         "torchaudio", venv="profile:chatterbox-tts", severity="warn",
+        companion_of="torch", companion_severity="blocker",
         required_for=("text-to-speech",),
-        note="chatterbox's audio I/O; must match its torch in the SAME venv."),
+        note="chatterbox's audio I/O; must match its torch in the SAME venv. "
+             "Absent it degrades (warn); PRESENT-but-mismatched it fails to "
+             "import (its Requires-Dist: torch==X unmet by the seat's torch), "
+             "which silently kills TTS -> a blocker (companion_of='torch')."),
     # ── box facts ────────────────────────────────────────────────────────
     Requirement(
         "nvidia-smi", kind="binary", venv="any", severity="warn",
@@ -326,6 +358,8 @@ class DoctrineEntry:
     source: str = "reference"          # "reference" | "declared"
     note: str = ""
     repair: str = ""
+    companion_of: str = ""             # see Requirement.companion_of
+    companion_severity: str = ""       # see Requirement.companion_severity
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -345,7 +379,9 @@ class DoctrineEntry:
             required_for=tuple(d.get("required_for") or ()),
             severity=str(d.get("severity") or DEFAULT_SEVERITY),
             source=str(d.get("source") or "reference"),
-            note=str(d.get("note") or ""), repair=str(d.get("repair") or ""))
+            note=str(d.get("note") or ""), repair=str(d.get("repair") or ""),
+            companion_of=str(d.get("companion_of") or ""),
+            companion_severity=str(d.get("companion_severity") or ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,7 +474,9 @@ def snapshot(report: Mapping[str, Any], *, version: str,
             required_for=(req.required_for if req else ()),
             severity=(req.severity if req else DEFAULT_SEVERITY),
             source=source, note=(req.note if req else ""),
-            repair=(req.repair if req else ""))
+            repair=(req.repair if req else ""),
+            companion_of=(req.companion_of if req else ""),
+            companion_severity=(req.companion_severity if req else ""))
         entries[entry.key] = entry
 
     venvs = report.get("venvs") or {}
@@ -485,7 +523,9 @@ def snapshot(report: Mapping[str, Any], *, version: str,
             entries[key] = replace(entries[key], pin=req.pin,
                                    required_for=req.required_for,
                                    severity=req.severity, note=req.note,
-                                   repair=req.repair)
+                                   repair=req.repair,
+                                   companion_of=req.companion_of,
+                                   companion_severity=req.companion_severity)
             continue
         # An ``any``-scoped requirement already satisfied under a concrete venv
         # is not missing; only add when nothing matched at all.
@@ -496,7 +536,8 @@ def snapshot(report: Mapping[str, Any], *, version: str,
             name=req.name, kind=req.kind, venv=req.venv, version=None,
             pin=req.pin, required_for=req.required_for,
             severity=req.severity, source="declared", note=req.note,
-            repair=req.repair)
+            repair=req.repair, companion_of=req.companion_of,
+            companion_severity=req.companion_severity)
 
     facts = {
         "python": report.get("python"),

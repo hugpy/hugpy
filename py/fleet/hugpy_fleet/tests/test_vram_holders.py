@@ -29,6 +29,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from hugpy_fleet.worker import agent as A
+from hugpy_fleet.worker import external_residents as extres
 from hugpy_fleet.worker import pid_registry as PR
 
 MIB = 1 << 20
@@ -148,6 +149,47 @@ def test_foreign_process_never_reapable(rig):
     assert row["kind"] == "foreign"
     assert row["reapable"] is False
     assert row["squatter"] is False
+
+
+# ── a registered external render is an ADOPTED holder, not a squatter ────────
+def test_registered_external_render_is_not_a_squatter(rig):
+    # A studio/video render child is own-venv, holds VRAM, past min-age — the
+    # EXACT four gates that make the first test's fork a reapable squatter. But
+    # the studio reserve registers it as an external resident under its real pid,
+    # so it is an adopted, attributed holder: kind=external, never reapable,
+    # never a squatter, named by its studio:<job_id> key.
+    extres.clear()
+    try:
+        RENDER_PID = 90007777
+        extres.register("studio:job-xyz", RENDER_PID, vram_gib=12.0,
+                        evictable=False)
+        rig.add(RENDER_PID, mib=12000)        # own-venv name, OLD age (default)
+        out = rig.holders()
+        row = _h(out, RENDER_PID)
+        assert row["kind"] == "external"
+        assert row["reapable"] is False
+        assert row["squatter"] is False
+        assert row["model_key"] == "studio:job-xyz"
+        assert row["work_state"] == "external-render"
+        assert out["squatters"] == []
+    finally:
+        extres.clear()
+
+
+def test_registered_external_lease_labelled_lease(rig):
+    extres.clear()
+    try:
+        LEASE_PID = 90008888
+        extres.register("ocr:bluebook", LEASE_PID, vram_gib=17.0, evictable=True)
+        rig.add(LEASE_PID, mib=17000)
+        out = rig.holders()
+        row = _h(out, LEASE_PID)
+        assert row["kind"] == "external"
+        assert row["reapable"] is False and row["squatter"] is False
+        assert row["work_state"] == "external-lease"
+        assert row["model_key"] == "ocr:bluebook"
+    finally:
+        extres.clear()
 
 
 # ── the agent's own pid / infra: never reapable ─────────────────────────────

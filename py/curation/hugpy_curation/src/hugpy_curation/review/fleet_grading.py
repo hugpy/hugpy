@@ -76,8 +76,64 @@ def response_rows(payload, key):
     return value
 
 
-def verbose_catalog(client):
-    return response_rows(client.request("/models?verbose=1"), "models")
+# Control-plane setup fetches (the worker roster, the model catalog) the run
+# cannot start or resume without. Central may be WARMING UP: a restart-resume
+# runs seconds after /health first answers — before the first gunicorn worker is
+# free to serve /llm/workers — and a restart's own loopback call can briefly time
+# out, refuse the connection, or 502. Those are transient central states, not a
+# grading failure: ride them out with bounded backoff and give up (raising) only
+# after the whole window, so ONE warm-up blip can never kill a run.
+CONTROL_RETRY_TOTAL_S = float(os.environ.get("HUGPY_BENCH_CONTROL_RETRY_S") or 300.0)
+CONTROL_BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 15.0, 30.0)
+_TRANSIENT_HTTP = (500, 502, 503, 504)
+_TRANSIENT_MARKERS = ("timed out", "timeout", "temporarily unavailable",
+                      "connection refused", "connection reset", "remotedisconnected",
+                      "bad gateway", "gateway time-out", "service unavailable",
+                      "name or service not known", "warming up", "max retries")
+
+
+def _transient_control_error(exc):
+    """True for a control-plane fault that is central WARMING/BLIPPING (a bounded
+    retry rides it out), False for a hard no (a genuine 4xx, a bad response)."""
+    low = str(exc).lower()
+    if isinstance(exc, FleetError):
+        match = re.search(r"http (\d+)", low)
+        return bool(match and int(match.group(1)) in _TRANSIENT_HTTP)
+    if isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError, OSError)):
+        return True
+    return any(marker in low for marker in _TRANSIENT_MARKERS)
+
+
+def retrying_control_request(client, path, key, timeout=_DEFAULT_TIMEOUT,
+                             total_s=None, sleep=time.sleep, log=None):
+    """GET a control-plane list (``/llm/workers``, ``/models?verbose=1``) that
+    the run cannot proceed without, riding out a warming/blipping central with
+    bounded backoff. Returns the parsed list (``response_rows``). Raises the last
+    error only after ``total_s`` of PERSISTENT transient failure (a genuinely
+    down central, not a warm-up blip); a hard error (4xx, malformed reply) raises
+    at once."""
+    total_s = CONTROL_RETRY_TOTAL_S if total_s is None else total_s
+    deadline = time.monotonic() + total_s
+    attempt = 0
+    while True:
+        try:
+            return response_rows(client.request(path, timeout=timeout), key)
+        except Exception as exc:  # noqa: BLE001 — re-raised below when not transient/persistent
+            if not _transient_control_error(exc) or time.monotonic() >= deadline:
+                raise
+            wait = CONTROL_BACKOFF_S[min(attempt, len(CONTROL_BACKOFF_S) - 1)]
+            wait = min(wait, max(0.0, deadline - time.monotonic()))
+            if log is not None:
+                log("notice", {"phase": "control-plane", "path": path,
+                               "error": f"{type(exc).__name__}: {exc}", "retry_in_s": round(wait, 1),
+                               "message": f"central not ready for {path} "
+                                          f"({type(exc).__name__}: {exc}); retrying in {wait:.0f}s"})
+            sleep(wait)
+            attempt += 1
+
+
+def verbose_catalog(client, log=None):
+    return retrying_control_request(client, "/models?verbose=1", "models", log=log)
 
 
 def model_id(model):
@@ -601,6 +657,212 @@ def judge_reply(client, target, prompt, expected, actual, check_pass, tokens=JUD
     return out
 
 
+# ------------------------------------------------------- phase 2: judging ----
+# Operator ruling 2026-09-24: grading is two phases. PHASE 1 collects and
+# persists every raw output; PHASE 2 loads the judge ONCE, after the whole lot,
+# and grades the stored outputs. Bounded in-loop retry rides out a judge that
+# cannot yet be served (a serving refusal), then leaves the item unjudged WITH
+# the real reason for a later judge-now / restart-resume to retry — never a
+# silent substitution.
+JUDGE_RETRY_ROUNDS = int(os.environ.get("HUGPY_BENCH_JUDGE_ROUNDS") or 3)
+JUDGE_RETRY_BACKOFF_S = float(os.environ.get("HUGPY_BENCH_JUDGE_BACKOFF_S") or 30.0)
+
+
+def _judge_pending(results):
+    """Every collected item still awaiting a brain-judge verdict
+    (``item['judge']['status'] == 'pending'``), as ``(row, item)`` pairs. The
+    resident-VL image-judge categories (``judge_*``) are graded in phase 1 and
+    never appear here."""
+    out = []
+    for row in results or ():
+        if not isinstance(row, dict) or row.get("status") != "complete":
+            continue
+        detail = row.get("detail")
+        if not isinstance(detail, dict):
+            continue
+        for name, entry in detail.items():
+            if str(name).startswith("judge_") or not isinstance(entry, dict):
+                continue
+            for item in entry.get("history") or ():
+                if isinstance(item, dict) and isinstance(item.get("judge"), dict) \
+                        and item["judge"].get("status") == "pending":
+                    out.append((row, item))
+    return out
+
+
+def _grade_from_detail(detail):
+    """Recompute ``(score, format_score, revised_n)`` from a result row's
+    ``detail`` after phase-2 judging revised its per-item verdicts. ``max`` is
+    fixed at collection (it counts the graded items plus any resident-VL judge
+    categories); only the achieved score moves, and the ``judge_*`` categories
+    keep their phase-1 tiers untouched."""
+    score = 0
+    for name, entry in detail.items():
+        if not isinstance(entry, dict):
+            continue
+        if str(name).startswith("judge_"):
+            score += entry.get("tier", 0) or 0
+            continue
+        if "history" not in entry:
+            continue
+        entry["tier"] = sum(1 for i in entry["history"] if i.get("pass"))
+        entry["format"] = sum(1 for i in entry["history"] if i.get("format") is True)
+        entry["revised"] = sum(1 for i in entry["history"] if i.get("revised"))
+        score += entry["tier"]
+    graded = [v for k, v in detail.items() if isinstance(v, dict) and not str(k).startswith("judge_")]
+    format_score = sum(v.get("format") or 0 for v in graded)
+    revised_n = sum(v.get("revised") or 0 for v in graded)
+    return score, format_score, revised_n
+
+
+def _apply_judged_row(row):
+    """Refresh a collected result row's score/grade/format and judge summary from
+    its (now judge-revised) ``detail``. Idempotent."""
+    detail = row.get("detail") or {}
+    score, format_score, revised_n = _grade_from_detail(detail)
+    row["score"] = score
+    if row.get("max") is not None:
+        row["grade"] = f"{score}/{row['max']}"
+    row["format_score"] = format_score
+    row["revised"] = revised_n
+    if row.get("format_max"):
+        row["format_grade"] = f"{format_score}/{row['format_max']}"
+    pending = models = 0
+    brain = None
+    for name, entry in detail.items():
+        if str(name).startswith("judge_") or not isinstance(entry, dict):
+            continue
+        for item in entry.get("history") or ():
+            j = item.get("judge") if isinstance(item, dict) else None
+            if not isinstance(j, dict):
+                continue
+            if j.get("model"):
+                brain = brain or j.get("model")
+            if j.get("status") == "pending":
+                pending += 1
+    summary = row.get("judge") if isinstance(row.get("judge"), dict) else {}
+    summary.update({"status": "pending" if pending else "judged",
+                    "revised": revised_n, "pending": pending})
+    if brain:
+        summary["model"] = brain
+    row["judge"] = summary
+    return row
+
+
+def judge_collected(client, results, report, tokens=JUDGE_TOKENS, stop=None,
+                    rounds=None, sleep=time.sleep, backoff_s=None):
+    """PHASE 2. Grade every collected output still awaiting the brain judge.
+
+    Scheduled after the whole collection lot is done (review_routes) so the judge
+    — the agent DEFAULT BRAIN, resolved BY KEY per row (never the model under
+    test, never pinned, placed by central) — never contends with the make-room
+    evictions of the models under test. Resumable and idempotent: an item already
+    judged is skipped; an item whose judge cannot be served is left ``pending``
+    WITH the real refusal reason and retried for ``rounds`` bounded passes
+    (``backoff_s`` between), then left unjudged for a later judge-now /
+    restart-resume. A row whose judge ladder is exhausted (the model under test
+    IS the brain) is recorded ``unavailable`` — terminal, no judge exists. After
+    a row's items change, its score/grade is recomputed and re-reported
+    (``judge-result``) so the DB grade updates. Never substitutes a different
+    judge. Returns a summary dict."""
+    rounds = JUDGE_RETRY_ROUNDS if rounds is None else rounds
+    backoff_s = JUDGE_RETRY_BACKOFF_S if backoff_s is None else backoff_s
+    rows = [r for r in (results or ()) if isinstance(r, dict) and r.get("status") == "complete"
+            and isinstance(r.get("detail"), dict)]
+    total = len(_judge_pending(rows))
+    revised_total = refused = 0
+
+    def cancelled():
+        return stop is not None and stop.is_set()
+
+    def progress():
+        pend = len(_judge_pending(rows))
+        report("judge-progress", {"phase": "judging", "total": total,
+                                  "judged": total - pend, "pending": pend,
+                                  "revised": revised_total, "refused": refused})
+
+    progress()
+    for attempt in range(max(1, rounds)):
+        if cancelled():
+            break
+        pending_pairs = _judge_pending(rows)
+        if not pending_pairs:
+            break
+        if attempt:
+            sleep(backoff_s)
+            if cancelled():
+                break
+        by_row = {}
+        for row, item in pending_pairs:
+            by_row.setdefault(id(row), (row, []))[1].append(item)
+        for row, items in by_row.values():
+            if cancelled():
+                break
+            brain = _brain_judge(exclude=row.get("model"))
+            changed = False
+            for item in items:
+                if cancelled():
+                    break
+                if (item.get("judge") or {}).get("status") != "pending":
+                    # Already judged this pass — the alloc variations of one model
+                    # share a single graded ``detail`` object, so a shared item is
+                    # judged once; this row still needs its own DB grade refreshed.
+                    changed = True
+                    continue
+                if not brain.get("model"):
+                    item["judge"] = {"model": None, "correct": None, "format_ok": None,
+                                     "reason": None, "error": brain["exhausted"],
+                                     "status": "unavailable"}
+                    changed = True
+                    continue
+                verdict = judge_reply(client, brain, item.get("prompt"), item.get("expected"),
+                                      item.get("actual"), item.get("check_pass"), tokens)
+                if verdict["correct"] is not None:
+                    item["pass"] = bool(verdict["correct"])
+                    item["format"] = bool(verdict["format_ok"])
+                    item["revised"] = item["pass"] != bool(item.get("check_pass"))
+                    kept = {k: verdict[k] for k in
+                            ("model", "correct", "format_ok", "reason", "error", "raw") if k in verdict}
+                    kept["status"] = "judged"
+                    item["judge"] = kept
+                    if not item["pass"] and verdict.get("reason"):
+                        item["why"] = f"judge: {verdict['reason']}"
+                    elif item["revised"]:
+                        item["why"] = f"judge revised the check: {verdict.get('reason') or 'correct in substance'}"
+                    elif item["pass"]:
+                        item.pop("why", None)
+                    if item["revised"]:
+                        revised_total += 1
+                    changed = True
+                else:
+                    # A serving refusal / timeout / unparseable reply is NOT a
+                    # verdict: leave the item pending WITH the real reason so it is
+                    # retried this run's remaining rounds and by judge-now / resume.
+                    prior = item.get("judge") if isinstance(item.get("judge"), dict) else {}
+                    item["judge"] = {"model": brain["model"], "correct": None, "format_ok": None,
+                                     "reason": None, "error": verdict.get("error"),
+                                     "status": "pending",
+                                     "attempts": int(prior.get("attempts") or 0) + 1}
+                    refused += 1
+                    changed = True
+            if changed:
+                _apply_judged_row(row)
+                report("judge-result", row)
+                progress()
+    pending_pairs = _judge_pending(rows)
+    summary = {"phase": "judging", "total": total, "judged": total - len(pending_pairs),
+               "pending": len(pending_pairs), "revised": revised_total, "refused": refused,
+               "unjudged": [{"model": r.get("model"), "worker": r.get("worker"), "quant": r.get("quant"),
+                             "reason": (i.get("judge") or {}).get("error")} for r, i in pending_pairs]}
+    report("judge-summary", summary)
+    if pending_pairs:
+        report("notice", f"HugPy-native judging finished with {len(pending_pairs)} item(s) unjudged "
+                         f"(judge not served); retry with judge-now or a restart-resume")
+    else:
+        report("notice", "HugPy-native judging complete")
+    return summary
+
+
 def _mean(values):
     values = [v for v in values if isinstance(v, (int, float)) and v > 0]
     return sum(values) / len(values) if values else None
@@ -876,7 +1138,7 @@ def _last_load_report(client, worker_id, model):
 
 def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None, worker_ids=None,
                            suite=None, with_judge=False, budgets=None, resume=False, force=False,
-                           done=None, cold_store=None, force_cold=False):
+                           done=None, cold_store=None, force_cold=False, defer_judge=False):
     """Grade once per precision and benchmark every physically valid allocation.
 
     Each model is graded by the suite registered for its task
@@ -900,11 +1162,21 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
     ``force_cold``) the lane resets, measures and its rows carry
     ``cold_source: measured`` + the transfer/load split for the caller to record.
     Order: already-hot models first, then smallest first.
+
+    ``defer_judge`` (operator ruling 2026-09-24, the two-phase split): PHASE 1
+    (collect). When true, the deterministic ``check_pass`` is still computed for
+    every item and its raw output/timings persisted as the run goes, but the
+    brain (agent-default) text judge is NOT called inline — each graded item is
+    left ``judge.status == 'pending'`` and PHASE 2 (``judge_collected``) grades
+    the whole lot afterwards, so a judge load never contends with the make-room
+    evictions of the models under test. False = the historical inline behaviour.
+    The optional resident-VL image judge (``with_judge``) is unaffected: it only
+    uses an already-hot model and so never causes that contention.
     """
     from .suites import suite_by_name, suite_for_model
     b = bench_budgets(budgets)
     forced = suite_by_name(suite) if suite else None
-    full_catalog = catalog = verbose_catalog(client)
+    full_catalog = catalog = verbose_catalog(client, log=report)
     if model_ids: catalog = [m for m in catalog if model_id(m) in set(model_ids)]
     if worker_ids:
         wanted = set(worker_ids); workers = [w for w in workers if w.get("id") in wanted or w.get("name") in wanted]
@@ -1175,15 +1447,26 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
                             # judge, recorded explicitly on the call.
                             passed, format_ok, verdict, revised = check_pass, (check_pass if not error else None), None, False
                             if not error and isinstance(response.get("answer"), str):
-                                if text_judge.get("model"):
+                                if not text_judge.get("model"):
+                                    verdict = {"model": None, "correct": None, "format_ok": None,
+                                               "reason": None, "error": text_judge["exhausted"],
+                                               "status": "unavailable"}
+                                elif defer_judge:
+                                    # PHASE 1 (collect): the raw output + the
+                                    # deterministic check are recorded now; the
+                                    # brain judge runs in PHASE 2 (judge_collected)
+                                    # after the whole lot, so no judge load contends
+                                    # with the models under test. Left PENDING.
+                                    verdict = {"model": text_judge["model"], "correct": None,
+                                               "format_ok": None, "reason": None, "error": None,
+                                               "status": "pending"}
+                                else:
                                     bounded.set_phase(f"judge {category} ({tier})", b["call_s"])
                                     verdict = judge_reply(bounded, text_judge, prompt, expected, actual, check_pass)
+                                    verdict["status"] = "judged" if verdict["correct"] is not None else "error"
                                     if verdict["correct"] is not None:
                                         passed, format_ok = bool(verdict["correct"]), bool(verdict["format_ok"])
                                         revised = passed != check_pass
-                                else:
-                                    verdict = {"model": None, "correct": None, "format_ok": None,
-                                               "reason": None, "error": text_judge["exhausted"]}
                             why = _why(passed, error, expected, actual)
                             if verdict and verdict.get("reason") and not passed:
                                 why = f"judge: {verdict['reason']}"
@@ -1193,7 +1476,7 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
                                     "revised": revised, "prompt": prompt if isinstance(prompt, str) else str(prompt.get("text") or prompt.get("prompt") or prompt) if isinstance(prompt, dict) else str(prompt),
                                     "expected": expected, "expected_answer": expected_answer(checker), "actual": actual,
                                     **({"why": why} if why else {}),
-                                    **({"judge": {k: verdict[k] for k in ("model", "correct", "format_ok", "reason", "error", "raw") if k in verdict}}
+                                    **({"judge": {k: verdict[k] for k in ("model", "correct", "format_ok", "reason", "error", "raw", "status") if k in verdict}}
                                        if verdict else {})}
                             history.append(item)
                             call = {**plan, "task": f"{category} ({tier})", "timestamp": time.time(),
@@ -1246,8 +1529,8 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
                     grades[precision] = {"detail": detail, "answers": answers, "calls": calls, "score": score, "max": maximum,
                                          "format_score": format_score, "format_max": maximum, "revised": revised_n,
                                          "task_best": max(depths, key=depths.get), "task_worst": min(depths, key=depths.get),
-                                         "judge": ({"status": "judged", "model": text_judge["model"],
-                                                    "revised": revised_n}
+                                         "judge": ({"status": ("pending" if defer_judge else "judged"),
+                                                    "model": text_judge["model"], "revised": revised_n}
                                                    if text_judge.get("model") else
                                                    {"status": "unavailable",
                                                     "reason": text_judge["exhausted"]})}

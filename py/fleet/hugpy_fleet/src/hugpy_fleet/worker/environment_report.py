@@ -61,6 +61,17 @@ BINARY_PROBES: "dict[str, tuple[tuple[str, ...], str]]" = {
 #: never mutated, never created.
 MOUNT_PROBES: "tuple[str, ...]" = ("/mnt/llm_storage",)
 
+#: torch's COMPANION packages: each ships its own ``Requires-Dist: torch==X`` and
+#: fails to import against a torch that is not X (the ``torchvision::nms`` operator
+#: incident, computron 2026-09-24). Presence + version is not enough to know a
+#: companion works — its DECLARED torch requirement must be read from its metadata
+#: and checked against the torch actually installed in the SAME venv. This is the
+#: fact the report collects; ``doctrine.doctor`` does the join. Declared, not
+#: "everything that names torch": the doctrine is a statement of what the fleet
+#: needs, and a torch requirement is only load-bearing for these two.
+TORCH_BASE: str = "torch"
+TORCH_COMPANIONS: "tuple[str, ...]" = ("torchvision", "torchaudio")
+
 #: Report schema version. Bumped when a FIELD changes meaning, so a doctrine
 #: snapshotted from an older shape is recognizable rather than silently mis-read.
 REPORT_SCHEMA: str = "1"
@@ -134,20 +145,96 @@ def packages_here() -> "dict[str, str]":
     return out
 
 
+def torch_requirement_of(requires: "list[str] | None",
+                         base: str = TORCH_BASE) -> "str | None":
+    """The version specifier a dist declares for ``base`` (``torch``), from its
+    ``Requires-Dist`` lines — or None when it declares none.
+
+    ``torchvision``'s metadata carries ``Requires-Dist: torch==2.13.0``; that is
+    the rule the installed torch must satisfy, and it lives with the companion,
+    not in the doctrine. Extras/optional deps are IGNORED (a ``torch`` behind
+    ``extra == 'x'`` is not a hard requirement); markers that merely narrow the
+    platform are kept. Parentheses (``torch (==2.13.0)``) are stripped. None is
+    never a guess: a companion that declares no torch pin is not "compatible with
+    everything", it is "we cannot decide", which downstream reports as UNKNOWN."""
+    if not requires:
+        return None
+    for raw in requires:
+        text = str(raw)
+        head, _, marker = text.partition(";")
+        if "extra" in marker and "==" in marker:
+            continue          # an optional/extra dependency, not a hard one
+        head = head.strip()
+        match = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", head)
+        if not match:
+            continue
+        if normalize_dist(match.group(1)) != normalize_dist(base):
+            continue
+        spec = match.group(2).strip()
+        if spec.startswith("(") and spec.endswith(")"):
+            spec = spec[1:-1].strip()
+        return spec or None
+    return None
+
+
+def torch_companions_here() -> "dict[str, object]":
+    """``{companion: torch_specifier_or_None}`` for each INSTALLED torch companion
+    in THIS interpreter. Absent companions are simply not keyed — their absence
+    is the ``packages`` map's job to report, not this one's."""
+    out: "dict[str, object]" = {}
+    try:
+        from importlib.metadata import distribution
+    except Exception:  # noqa: BLE001 — ancient python: no answer, not a guess
+        return out
+    for comp in TORCH_COMPANIONS:
+        try:
+            dist = distribution(comp)
+        except Exception:  # noqa: BLE001 — not installed / unreadable: skip
+            continue
+        try:
+            reqs = dist.requires
+        except Exception:  # noqa: BLE001
+            reqs = None
+        out[comp] = torch_requirement_of(list(reqs) if reqs else None)
+    return out
+
+
 #: The one-liner a child interpreter runs to describe itself. Same content as
-#: ``packages_here`` + the python version, printed as JSON on stdout.
+#: ``packages_here`` + ``torch_companions_here`` + the python version, printed as
+#: JSON on stdout. The companion parse is INLINED (the child cannot import this
+#: module) and must stay in lockstep with ``torch_requirement_of``.
 _CHILD_PROGRAM = (
     "import json,re,sys\n"
-    "from importlib.metadata import distributions\n"
+    "from importlib.metadata import distributions,distribution\n"
+    "def _norm(s):\n"
+    "    return re.sub(r'[-_.]+','-',str(s).strip()).lower()\n"
+    "def _torchreq(reqs):\n"
+    "    for raw in (reqs or []):\n"
+    "        head=str(raw).split(';',1)\n"
+    "        mk=head[1] if len(head)>1 else ''\n"
+    "        if 'extra' in mk and '==' in mk: continue\n"
+    "        m=re.match(r'^([A-Za-z0-9_.-]+)\\s*(.*)$', head[0].strip())\n"
+    "        if not m or _norm(m.group(1))!='torch': continue\n"
+    "        s=m.group(2).strip()\n"
+    "        if s.startswith('(') and s.endswith(')'): s=s[1:-1].strip()\n"
+    "        return s or None\n"
+    "    return None\n"
     "o={}\n"
     "for d in distributions():\n"
     "    try:\n"
     "        n=d.metadata['Name']; v=d.version\n"
     "    except Exception: continue\n"
     "    if not n: continue\n"
-    "    o.setdefault(re.sub(r'[-_.]+','-',str(n).strip()).lower(), str(v))\n"
+    "    o.setdefault(_norm(n), str(v))\n"
+    "c={}\n"
+    "for comp in ('torchvision','torchaudio'):\n"
+    "    try: dd=distribution(comp)\n"
+    "    except Exception: continue\n"
+    "    try: rq=dd.requires\n"
+    "    except Exception: rq=None\n"
+    "    c[comp]=_torchreq(rq)\n"
     "print(json.dumps({'python': '.'.join(map(str, sys.version_info[:3])), "
-    "'packages': o}))\n"
+    "'packages': o, 'torch_companions': c}))\n"
 )
 
 
@@ -232,6 +319,7 @@ def venvs_report() -> "dict[str, object]":
             "python": sys.executable,
             "python_version": platform.python_version(),
             "packages": packages_here(),
+            "torch_companions": torch_companions_here(),
             "error": None,
         }
     }
@@ -240,12 +328,13 @@ def venvs_report() -> "dict[str, object]":
         parsed = packages_in(python)
         if parsed is None:
             out[name] = {"python": python, "python_version": None,
-                         "packages": None,
+                         "packages": None, "torch_companions": None,
                          "error": "interpreter did not answer"}
         else:
             out[name] = {"python": python,
                          "python_version": parsed.get("python"),
                          "packages": parsed.get("packages") or {},
+                         "torch_companions": parsed.get("torch_companions") or {},
                          "error": None}
     return out
 

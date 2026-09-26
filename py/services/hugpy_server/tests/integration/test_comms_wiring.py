@@ -29,7 +29,7 @@ def test_queue_view_activity_shim(client):
     mine = [e for e in q["active"] if e["request_id"] == "it-1"]
     assert len(mine) == 1 and mine[0]["state"] == "waiting", "begun request visible as waiting"
     assert set(mine[0]) == {"request_id", "model_key", "model", "kind", "state",
-                            "elapsed", "wait", "tokens"}, "old snapshot keys intact"
+        "elapsed", "wait", "tokens", "prompt"}, "snapshot keys intact"
     activity.on_token("it-1"); activity.on_token("it-1")
     q = client.get("/llm/queue").get_json()
     mine = [e for e in q["active"] if e["request_id"] == "it-1"][0]

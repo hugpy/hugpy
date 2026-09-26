@@ -416,6 +416,42 @@ def put_group(group_id: Any, *, name: Any, members: Any, enabled: Any = True,
     return rec, []
 
 
+def migrate_worker_tokens(resolve) -> dict:
+    """Rewrite STALE worker-name references in every group's ``workers`` ORDER to
+    a stable worker id (operator incident 2026-09-25).
+
+    A group's ``workers`` is the ordered allocation, stored by NAME, so a worker
+    rename ("aeb" -> "ae-worker", same id) strands the token exactly as it does
+    for a per-model ``worker_prefs``. ``resolve(token) -> worker_id | None``
+    returns the id ONLY for a token that does not already resolve to a live worker
+    but matches a former name; a None leaves the token in place (already-valid or
+    genuinely orphaned). Writes through ``put_group`` — the one validated path —
+    so ordering and dedupe stay intact. Returns ``{group_id: [(old, new)]}``.
+    Idempotent: a rewritten token is an id, which never matches a former name."""
+    changed: dict = {}
+    for g in all_groups():
+        workers = g.get("workers") or []
+        rows, new_workers = [], []
+        for tok in workers:
+            new = resolve(tok)
+            new_workers.append(new or tok)
+            if new:
+                rows.append((str(tok), new))
+        if not rows:
+            continue
+        rec, errs = put_group(g["id"], name=g["name"], members=g["members"],
+                              enabled=g.get("enabled", True), workers=new_workers,
+                              by="worker-rename-migration")
+        if errs:
+            logger.warning("priority group %s: worker-token migration skipped (%s)",
+                           g["id"], errs)
+            continue
+        changed[g["id"]] = rows
+        for old, new in rows:
+            logger.info("priority group %s: worker %r -> id %r", g["id"], old, new)
+    return changed
+
+
 def move_member(model_key: Any, group_id: Any = None,
                 by: Optional[str] = None) -> Tuple[List[dict], list]:
     """Move ``model_key`` INTO ``group_id`` (appended LAST — joining a group is

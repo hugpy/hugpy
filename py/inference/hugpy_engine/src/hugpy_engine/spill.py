@@ -28,7 +28,6 @@ layers) when no GPU is visible, so a CPU-only host behaves exactly as before.
 from __future__ import annotations
 
 import os
-import sys
 import logging
 from typing import Any, Optional
 
@@ -438,6 +437,7 @@ from hugpy_storage.gguf_inspect import (  # noqa: E402
     _gguf_shard_paths,
     _layer_index,
     gguf_moe_detail,
+    gguf_kv_bearing_layers,
 )
 
 
@@ -636,6 +636,18 @@ def _gguf_kv_geometry(model_path: str) -> dict:
                 out[k] = int(v)
         except (TypeError, ValueError):
             pass
+    # HYBRID arch (Qwen3-Next & co.): only the full-attention blocks carry a
+    # context-growing KV cache. ``n_layers`` is block_count (every block); the
+    # honest KV-cache layer count is the number of blocks with an attn_k tensor.
+    # None when unknown -> KV math falls back to n_layers (never overcount to 0).
+    # Only n_kv_layers should feed kv_bytes(); n_layers stays block_count for any
+    # non-KV reader.
+    try:
+        kvl = gguf_kv_bearing_layers(model_path)
+        if kvl:
+            out["n_kv_layers"] = int(kvl)
+    except Exception:  # noqa: BLE001 — a tensor-name scan must never break geometry
+        pass
     return out
 
 
@@ -785,63 +797,67 @@ def vision_projector_bytes(model_path: str) -> int:
 # HUGPY_VRAM_CTX_RESERVE_GIB is an operator override and is honoured verbatim,
 # flat, with no computation and no un-stacking (see autofit_gpu_layers).
 _DEFAULT_CTX_RESERVE_GIB = 2.5
-# Mirrors serve.DEFAULT_LLAMA_CTX — the cap the llama.cpp loader applies to
-# every served ctx. Duplicated (not imported) so the fit math stays self-
-# contained and offline-testable; llama_ctx_cap() prefers the REAL value
-# whenever the serve layer is already loaded in this process.
-_CTX_CAP_FALLBACK = 16384
+# A BOUNDED fallback ctx, used ONLY on the degrade path where the model's trained
+# context cannot be read (non-GGUF, truncated header) — so the fit math still
+# prices against a positive, sane ctx rather than 0. It is NEVER a cap on the
+# served context of a model whose trained ctx IS readable: the served ctx is that
+# model's TRAINED context, fit-bounded (served_ctx_for_fit). There is no
+# hugpy-wide ceiling.
+_CTX_DEGRADE_FALLBACK = 16384
 # Compute-graph + logits + CUDA-runtime VRAM that lands beside the KV cache.
 # Measured 348 MiB on the reference model (see above); 512 MiB is that with
 # headroom. Deliberately ctx-INDEPENDENT: llama.cpp sizes these off n_ubatch
 # (512 by default here) and n_vocab, not off n_ctx.
 _CTX_COMPUTE_RESERVE_BYTES = 512 * 2**20
+# The floor for a fit-bounded served ctx (a tight card shrinks ctx to at least
+# this, or the model's trained ctx when that is smaller). Override with
+# HUGPY_LLAMA_CTX_FLOOR. 4096 keeps an agent's framing intact on a small card.
+_DEFAULT_CTX_FLOOR = 4096
 
 
-def llama_ctx_cap() -> int:
-    """The ctx cap the llama.cpp loader would apply (``serve.DEFAULT_LLAMA_CTX``).
+def _ctx_floor() -> int:
+    v = _env_int("HUGPY_LLAMA_CTX_FLOOR")
+    return int(v) if (v and v > 0) else _DEFAULT_CTX_FLOOR
 
-    Read WITHOUT importing the serve layer: if serve is already in
-    ``sys.modules`` (every real serving path) its authoritative value is used;
-    otherwise the same ``DEFAULT_LLAMA_CTX`` env var serve itself reads; else the
-    module fallback. Never raises, always returns a positive int."""
-    cap = None
+
+def _round_down_multiple(n, m: int = 1024) -> int:
     try:
-        mod = sys.modules.get("hugpy_engine.serve.serve")
-        if mod is not None:
-            cap = getattr(mod, "DEFAULT_LLAMA_CTX", None)
-    except Exception:  # noqa: BLE001 — a cap read must never break a load
-        cap = None
-    if not cap:
-        cap = _env_int("DEFAULT_LLAMA_CTX")
-    try:
-        cap = int(cap or 0)
+        n = int(n)
+        m = int(m)
     except (TypeError, ValueError):
-        cap = 0
-    return cap if cap > 0 else _CTX_CAP_FALLBACK
+        return int(n or 0)
+    if m <= 0:
+        return n
+    return (n // m) * m
 
 
 def ctx_for_fit(model_path: str, n_ctx: Optional[int] = None,
                 geometry: Optional[dict] = None) -> int:
-    """The n_ctx the fit math should price the KV cache against.
+    """The n_ctx the fit math should price the KV cache against WHEN THE CALLER
+    DID NOT STATE ONE.
 
-    An explicit ``n_ctx`` (the caller KNOWS what the child will be launched with
-    — slot_agent resolves ``-c`` before it fits layers) always wins. Otherwise
-    mirror what the loader would pick: ``min(the model's trained context, the
-    engine cap)`` — the same shape as ``serve._ctx_for``'s fallback, derived from
-    the GGUF's own ``*.context_length`` rather than guessed."""
+    An explicit ``n_ctx`` always wins — and it is the norm: the SERVE path
+    (slot_agent) resolves the served ctx via :func:`served_ctx_for_fit` (native,
+    fit-bounded) and passes it here, so the reserve is priced against exactly the
+    ``-c`` the child launches with. This no-``n_ctx`` fallback prices the model's
+    TRAINED context, fit-bounded when a free-VRAM figure is readable — consistent
+    with :func:`served_ctx_for_fit`, and with no hugpy-wide ceiling (the cap is
+    the model's own trained ctx). When the trained ctx cannot be read, the bounded
+    degrade fallback keeps the reserve priced against a sane positive ctx."""
     try:
         n = int(n_ctx) if n_ctx else 0
     except (TypeError, ValueError):
         n = 0
     if n > 0:
         return n
-    cap = llama_ctx_cap()
     geo = geometry if isinstance(geometry, dict) else _gguf_kv_geometry(model_path)
     try:
         trained = int((geo or {}).get("ctx_train") or 0)
     except (TypeError, ValueError):
         trained = 0
-    return min(trained, cap) if trained > 0 else cap
+    if trained <= 0:
+        return _CTX_DEGRADE_FALLBACK
+    return served_ctx_for_fit(model_path, geometry=geo)
 
 
 def vram_ctx_reserve_bytes(model_path: str,
@@ -867,24 +883,108 @@ def vram_ctx_reserve_bytes(model_path: str,
         geo = _gguf_kv_geometry(model_path) or {}
     except Exception:  # noqa: BLE001 — an unreadable header is the flat path
         geo = {}
+    # KV-BEARING layer count (hybrid-aware): only full-attention blocks cache
+    # K/V that grows with the context. On a hybrid arch (Qwen3-Next) block_count
+    # overcounts ~4x; n_kv_layers is the honest figure (falls back to n_layers
+    # when the tensor scan can't tell). Pricing KV against block_count here would
+    # inflate the reserve and needlessly shrink the fit.
     n_layers = geo.get("n_layers")
+    n_kv_layers = geo.get("n_kv_layers") or n_layers
     n_kv_heads = geo.get("n_kv_heads")
     head_dim = geo.get("head_dim")
-    if not (n_layers and n_kv_heads and head_dim):
+    if not (n_kv_layers and n_kv_heads and head_dim):
         # Incomplete geometry: do NOT fall to kv_bytes' bytes-per-token heuristic
         # here — a fit decision must not be made on a guessed cache size. Today's
         # flat reserve is the stated degrade.
         return flat, "default", {"ctx": None}
     ctx = ctx_for_fit(model_path, n_ctx=n_ctx, geometry=geo)
-    kv = kv_bytes(ctx_tokens=ctx, n_layers=n_layers, n_kv_heads=n_kv_heads,
+    kv = kv_bytes(ctx_tokens=ctx, n_layers=n_kv_layers, n_kv_heads=n_kv_heads,
                   head_dim=head_dim, dtype_bytes=2.0)   # llama.cpp caches fp16
     if not kv:
         return flat, "default", {"ctx": ctx}
     return (int(kv) + _CTX_COMPUTE_RESERVE_BYTES, "computed",
             {"ctx": ctx, "kv_bytes": int(kv),
              "compute_bytes": _CTX_COMPUTE_RESERVE_BYTES,
-             "n_layers": int(n_layers), "n_kv_heads": int(n_kv_heads),
+             "n_layers": int(n_kv_layers), "n_kv_heads": int(n_kv_heads),
              "head_dim": int(head_dim)})
+
+
+def _weights_on_gpu_estimate(model_path: str) -> Optional[int]:
+    """Best-effort bytes that land on the GPU BESIDE the KV cache for the default
+    llama.cpp placement: the DENSE BACKBONE for a MoE served with experts on CPU
+    (the fleet default --n-cpu-moe policy — see moe_dense_first_plan), else the
+    whole file (all shards summed). Used only to fit the CONTEXT; the actual
+    layer/expert placement is still decided by autofit / slot_agent._build_cmd.
+    None when the file can't be sized."""
+    try:
+        det = gguf_moe_detail(model_path)
+        if det.get("is_moe") and det.get("non_expert_bytes"):
+            return int(det["non_expert_bytes"])
+    except Exception:  # noqa: BLE001 — MoE read is best-effort
+        pass
+    try:
+        total = 0
+        for shard in _gguf_shard_paths(model_path):
+            total += os.path.getsize(shard)
+        return int(total) if total > 0 else None
+    except OSError:
+        return None
+
+
+def served_ctx_for_fit(model_path: str, *, free_vram: Optional[int] = None,
+                       parallel: int = 1, kv_dtype_bytes: float = 2.0,
+                       extra_reserve_bytes: int = 0,
+                       geometry: Optional[dict] = None,
+                       weights_on_gpu_bytes: Optional[int] = None) -> int:
+    """THE context a llama.cpp GGUF should be SERVED at (the single source of
+    truth for ``-c``, the fit reserve, and the reported ctx).
+
+    Rule: the model's TRAINED context (GGUF ``*.context_length``), reduced ONLY
+    as far as needed so the weights that land on the GPU + the KV cache (at the
+    real cache dtype and ``parallel`` sequence count) + the compute reserve fit
+    ``free_vram``. Rounded DOWN to a 1024 multiple, with a sane floor
+    (:func:`_ctx_floor`, or the trained ctx when that is smaller). There is no
+    hugpy-wide ceiling — the upper bound is the model's own trained ctx.
+
+      * KV is priced against the KV-BEARING (full-attention) layers, so a hybrid
+        arch (Qwen3-Next) is not shrunk by counting its recurrent layers.
+      * When even the floor won't fit the budget the floor is returned — never a
+        refusal; the fit/offload logic then decides placement (spill layers).
+      * When the fit can't be priced (no free-VRAM read / incomplete geometry)
+        the native trained ctx is served: the loader's own autofit still guards
+        OOM by spilling layers, and we never invent a shrink from missing data."""
+    geo = geometry if isinstance(geometry, dict) else _gguf_kv_geometry(model_path)
+    geo = geo or {}
+    try:
+        trained = int(geo.get("ctx_train") or 0)
+    except (TypeError, ValueError):
+        trained = 0
+    upper = trained if trained > 0 else _CTX_DEGRADE_FALLBACK
+    floor = min(_ctx_floor(), upper)
+
+    n_kv_layers = geo.get("n_kv_layers") or geo.get("n_layers")
+    n_kv_heads = geo.get("n_kv_heads")
+    head_dim = geo.get("head_dim")
+    if free_vram is None:
+        free_vram = free_vram_bytes()
+    if not (free_vram and n_kv_layers and n_kv_heads and head_dim):
+        return max(floor, _round_down_multiple(upper))
+    per_tok = (2 * int(n_kv_layers) * int(n_kv_heads) * int(head_dim)
+               * float(kv_dtype_bytes) * max(1, int(parallel or 1)))
+    if per_tok <= 0:
+        return max(floor, _round_down_multiple(upper))
+    if weights_on_gpu_bytes is None:
+        weights_on_gpu_bytes = _weights_on_gpu_estimate(model_path) or 0
+    budget = (int(free_vram) - int(weights_on_gpu_bytes)
+              - _CTX_COMPUTE_RESERVE_BYTES - int(extra_reserve_bytes or 0))
+    if budget <= 0:
+        # Weights (at their intended placement) already fill the card — even the
+        # floor context has no VRAM. Return the floor and let the fit/offload
+        # logic decide the rest; never refuse.
+        return floor
+    max_ctx = int(budget // per_tok)
+    ctx = _round_down_multiple(min(int(upper), max_ctx))
+    return max(floor, ctx) if ctx >= floor else floor
 
 
 def autofit_gpu_layers(model_path: str,
@@ -983,7 +1083,17 @@ def autofit_gpu_layers(model_path: str,
                 return -1
         except Exception:
             pass
-        return 0
+            return 0
+
+    # Resolve the same fit-bounded context the loader will launch before
+    # pricing the cache.  Passing free_vram explicitly matters for callers that
+    # are evaluating a particular card/budget: falling back to the host probe
+    # here made the result depend on whichever GPU happened to run the test or
+    # planner rather than on the budget being evaluated.
+    if not n_ctx:
+        n_ctx = served_ctx_for_fit(
+            model_path, free_vram=int(free_vram),
+            extra_reserve_bytes=int(extra_reserve_bytes or 0))
 
     try:
         file_bytes = os.path.getsize(model_path)
