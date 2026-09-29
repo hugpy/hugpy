@@ -10310,35 +10310,14 @@ def _shared_evict_order(rows: list, need: "int | None",
     """Model keys to evict, in order — via THE shared function, with the
     operator's flex priority as the OUTER key.
 
-    ``need`` None (unmeasurable free VRAM) -> DEGRADE-NOT-GUESS: return the
-    full pool in shared-key order and let the caller's incremental ``_fits()``
-    loop stop it, which is exactly today's behaviour. A guessed need would
-    produce a guessed victim set, and the whole point of walk-then-drop is that
-    the set is derivable from real numbers.
-
-    Priority grouping is what keeps least-reaping honest under an override: the
-    drop pass runs WITHIN a priority band, so a high-priority resident is never
-    spared by a low-priority one covering the need (which would silently invert
-    the operator's ordering) — the bands are walked in order and each is
-    planned against the need that REMAINS."""
-    from hugpy_engine import eviction as _ev
-    pri = priority or {}
-    now = time.time()
-    if need is None:
-        ordered = sorted(rows, key=lambda r: (pri.get(r.model_key, 0),
-                                              _ev.sort_key(r, _ev.VRAM, now)))
-        return [r.model_key for r in ordered]
-    out: list[str] = []
-    remaining = int(need)
-    for band in sorted({pri.get(r.model_key, 0) for r in rows}):
-        if remaining <= 0:
-            break
-        members = [r for r in rows if pri.get(r.model_key, 0) == band]
-        plan = _ev.evict_plan(_ev.VRAM, remaining, members, now=now,
-                              least_reaping=_evict_least_reaping())
-        out.extend(plan.victims)
-        remaining -= plan.freed
-    return out
+    CORE ISOLATION: the ordering itself is ``hugpy_engine.fit.evict_order``
+    (pure; ``now`` and ``least_reaping`` passed in). This wrapper supplies the
+    two impure inputs for callers that still order at execution time (the
+    eviction-aware size-up). ``need`` None -> DEGRADE-NOT-GUESS: the full pool
+    in shared-key order; the caller's incremental fit loop stops it."""
+    from hugpy_engine.fit import evict_order
+    return evict_order(rows, need, priority, now=time.time(),
+                       least_reaping=_evict_least_reaping())
 
 
 # RETIRED 2026-07-27 (operator: "is there still some timeblock on a model being
@@ -10622,6 +10601,176 @@ def _size_up_for_eviction(state: "WorkerState", model_key: str, plan: dict,
                      f"{_human_bytes(freed)} from {len(evicted)} idle resident(s)")}
 
 
+# ── CORE ISOLATION step 1: gather ONCE -> plan_fit (pure) -> execute ─────────
+# The decision lives in hugpy_engine.fit.plan_fit (notes/CORE-ISOLATION-DESIGN.md
+# Part A). The four helpers below are the GATHER half: every live read the old
+# orchestrator did mid-decision now happens here, once, before the plan.
+def _fit_snapshot(total: "int | None" = None):
+    """Capture the card + host ONCE for a plan_fit call. ``free_bytes`` is the
+    BUDGETABLE free figure (external floor already out), exactly what the old
+    ``_fits()`` closure re-read; ``now`` is the eviction ranking's clock."""
+    from hugpy_engine.fit import DeviceVram, ResourceSnapshot
+    total = total if total is not None else _total_vram_bytes()
+    free = _free_vram_bytes()
+    try:
+        target = _target_device_index()
+    except Exception:  # noqa: BLE001 — a device index is attribution only
+        target = None
+    try:
+        from hugpy_engine.spill import ram_reserve_bytes as _ram_reserve
+        ram_reserve = int(_ram_reserve() or 0)
+    except Exception:  # noqa: BLE001
+        ram_reserve = 0
+    return ResourceSnapshot(
+        total_bytes=total, free_bytes=free,
+        external_floor_bytes=_external_vram_floor_bytes(),
+        ram_free_bytes=_free_ram_bytes(),
+        ram_total_bytes=_ram_total_bytes(),
+        ram_reserve_bytes=ram_reserve,
+        devices=(DeviceVram(index=target, total_bytes=total, free_bytes=free),),
+        target_device=target,
+        now=time.time())
+
+
+def _fit_policy(total: "int | None"):
+    """The admission knobs, resolved from env / settings ONCE: the ceiling
+    reserve (THE one binding every stage prices against), the k37 mode wire,
+    the explicit targets, the fleet-wide least-reaping switch."""
+    from hugpy_engine.fit import FitPolicy
+    from hugpy_engine.spill import (
+        alloc_mode_env as _amode,
+        leniency_pct_env as _lenpct,
+        priority_device_env as _pdev,
+    )
+
+    def _gib_bytes(v):
+        try:
+            return int(float(v) * (2 ** 30)) if v else None
+        except (TypeError, ValueError):
+            return None
+
+    return FitPolicy(
+        ceiling_reserve_bytes=_vram_ceiling_reserve_bytes(total),
+        empty_card_budget_bytes=_vram_empty_card_budget(total),
+        least_reaping=_evict_least_reaping(),
+        alloc_mode=_amode(), leniency_pct=_lenpct(), priority_device=_pdev(),
+        gpu_target_bytes=_gib_bytes(os.environ.get("HUGPY_GPU_MEM_GIB")),
+        ram_target_bytes=_gib_bytes(os.environ.get("HUGPY_CPU_MEM_GIB")))
+
+
+def _fit_moe_budget(model_key: str, ppath: "str | None",
+                    moe_detail: "dict | None") -> "int | None":
+    """``_moe_auto_gpu_budget`` as a captured fact (None when no MoE / no path /
+    unmeasurable) — a reserve probe never breaks pricing."""
+    if not (moe_detail and ppath):
+        return None
+    try:
+        return _moe_auto_gpu_budget(model_key, ppath)
+    except Exception:  # noqa: BLE001 — degrade to the dense budget
+        return None
+
+
+def _fit_request(state: "WorkerState", model_key: str, need: int, det: dict,
+                 polite: bool):
+    """The incoming load as plan_fit needs it: the caller-PRICED need (already
+    4-bit re-priced), the placement-intent figure from the loader's own
+    derivation, the subject credit, the ctx/VRAM bands + priority, and the
+    served GGUF geometry / MoE facts the offload tail consumes."""
+    from hugpy_engine.fit import FitRequest
+    planned = None
+    try:
+        from hugpy_engine.spill import planned_gpu_need_bytes
+        planned = planned_gpu_need_bytes(need)
+    except Exception:  # noqa: BLE001 — never break admission over the intent
+        planned = None
+    ppath, total_layers = _served_gguf_geometry(model_key)
+    intent, requested = _gguf_ngl_intent(model_key)
+    moe_detail = _moe_detail_for(model_key) if total_layers else None
+    try:
+        from hugpy_engine.spill import n_cpu_moe_env as _ncm_env
+        contract_n = _ncm_env()
+    except Exception:  # noqa: BLE001
+        contract_n = None
+    return FitRequest(
+        model_key=model_key, need_bytes=int(need), need_detail=dict(det),
+        planned_gpu_bytes=planned,
+        subject_held_bytes=int(_subject_resident_vram_bytes(state, model_key) or 0),
+        ctx_deviation_pct=_ctx_deviation_pct(model_key),
+        vram_deviation_pct=_vram_deviation_pct(model_key),
+        priority=_flex_priority(model_key), polite=bool(polite),
+        gguf_path=ppath, total_layers=total_layers,
+        ngl_intent=intent, ngl_requested=requested,
+        moe_detail=(dict(moe_detail) if moe_detail else None),
+        moe_auto_gpu_budget_bytes=_fit_moe_budget(model_key, ppath, moe_detail),
+        contract_n_cpu_moe=contract_n,
+        split_expressible=None)         # step 2: the slot pool's capability
+
+
+def _fit_materialized(row: dict) -> "bool | None":
+    """MEASURED residency for a resident row: the pid-registry / slot union
+    says whether the hosting process is alive; otherwise the in-process probe
+    (``_is_materialized``: a loaded llama handle or a watched ensure_loaded).
+    None = unknown. NEVER dispatch ``_INSTANCES`` membership — a hollow runner
+    object is not a resident (coder-next diagnosis 2026-09-29)."""
+    alive = row.get("alive")
+    if alive is not None:
+        return bool(alive)
+    if row.get("child_pid") or row.get("pid"):
+        return True
+    try:
+        return _is_materialized(row.get("model_key"))
+    except Exception:  # noqa: BLE001 — unknown, never a confident falsehood
+        return None
+
+
+def _fit_residents(state: "WorkerState", model_key: str):
+    """``(residents, candidate_rows, protected_rows)`` — the measured residents
+    as plan_fit's frozen ``Resident`` records, protection decided by THE single
+    definition (``_partition_residents``), eviction-ledger inputs from
+    ``_evict_residents``, flex inputs (KV at resolved ctx, band, priority) per
+    unprotected row. The raw dict rows are returned too: the executor's
+    telemetry, the size-up planner and the refusal report read them."""
+    from hugpy_engine import eviction as _ev
+    from hugpy_engine.fit import Resident
+    from hugpy_engine.fit.flex import flex_priority_key as _fpk
+    candidates, protected = _partition_residents(state, model_key)
+    units = {u.model_key: u for u in _evict_residents(state, candidates, model_key)}
+    rows: list = []
+    for r in candidates:
+        mk = r["model_key"]
+        try:
+            rkv, rdet = _kv_need_bytes(mk)
+        except Exception:  # noqa: BLE001 — a pricing gap must not break admission
+            rkv, rdet = 0, {}
+        u = units.get(mk)
+        try:
+            vb = int(r.get("vram_bytes")) if r.get("vram_bytes") is not None else None
+        except (TypeError, ValueError):
+            vb = None
+        rows.append(Resident(
+            model_key=mk, vram_bytes=vb, host_mode=r.get("host_mode"),
+            protected=False, materialized=_fit_materialized(r),
+            pinned=bool(r.get("pinned")), gpu_index=r.get("gpu_index"),
+            priority=_fpk(_flex_alloc(mk)), kv_bytes=int(rkv or 0),
+            ctx_pct=(rdet or {}).get("ctx_pct"),
+            ctx_deviation_pct=_ctx_deviation_pct(mk),
+            pref=(u.pref if u is not None else _ev.VRAM),
+            last_call=(u.last_call if u is not None else None),
+            calls=(u.calls if u is not None else 0),
+            mid_generation=(u.mid_generation if u is not None else False),
+            resident_since=(u.resident_since if u is not None else None)))
+    for p in protected:
+        try:
+            vb = int(p.get("vram_bytes")) if p.get("vram_bytes") is not None else None
+        except (TypeError, ValueError):
+            vb = None
+        rows.append(Resident(model_key=p["model_key"], vram_bytes=vb,
+                             host_mode=p.get("host_mode"), protected=True,
+                             why=p.get("why"), materialized=_fit_materialized(p),
+                             pinned=bool(p.get("pinned")), gpu_index=p.get("gpu_index")))
+    return tuple(rows), candidates, protected
+
+
 def _vram_evict_to_fit(state: "WorkerState", model_key: str,
                        need: "int | None" = None) -> dict:
     """THE VRAM admission choke point. Make room for ``model_key`` to land on the
@@ -10629,52 +10778,45 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     the minimum LRU set of EVICTABLE residents, or refuse HONESTLY before any
     CUDA allocation.
 
+    CORE ISOLATION (step 1). This function is now GATHER -> PLAN -> EXECUTE:
+    every fact the decision consumes (free/total VRAM, host RAM, the reserve,
+    the subject credit, the residents + their protection, env levers, geometry)
+    is captured ONCE into ``VramSnapshot`` / ``FitPolicy`` / ``FitRequest`` /
+    ``Resident`` rows; ``hugpy_engine.fit.plan_fit`` (PURE, deterministic,
+    tested without a GPU) returns the ``FitPlan``; ``_execute_fit_plan`` below
+    performs the only impure part — the evictions, the commits, the telemetry.
+
     Protection (operator ruling): NEVER evict a 🔒static resident, a model that is
     ACTIVELY REPLYING (measured: in-flight gen / busy slot), a model with work
     QUEUED AHEAD of the subject, comfy (its own path), or the subject itself.
     EVERYTHING else is a candidate — on-demand idle residents, SLOT CHILDREN
     included ('max GPU' alloc included) — LRU/coldest-first, minimum set to fit.
 
-    THE SUBJECT CREDIT (2026-07-27). "It says it's serving it, it gets the call,
-    it loads the model, it serves it, then says it cannot because it's not loaded
-    and has no room." An admission for an ALREADY-RESIDENT model credits that
-    model's own measured footprint on the FREE side
+    THE SUBJECT CREDIT (2026-07-27): an admission for an ALREADY-RESIDENT model
+    credits that model's own measured footprint on the FREE side
     (``_subject_resident_vram_bytes``), because a (re)seat releases the seat it
-    holds. Without it the subject was its own blocker: protected from eviction by
-    the operator's ruling, dropped from both halves of ``_partition_residents``,
-    and never counted as headroom — so a model plainly on the card was refused
-    for want of room it was itself occupying. The credit is a fit input only; the
-    DELTA still has to fit, so a re-seat that genuinely wants more than the card
-    can give still refuses honestly.
+    holds. The credit is a fit input only; the DELTA still has to fit.
 
-    POLITE LOAD (k56, operator ruling 2026-07-31). When the request's spill
-    carries ``no_evict`` (spill.no_evict_env), this function may spend only
-    GENUINELY FREE headroom: the tolerance-band flex still runs (compressing the
-    subject's OWN ctx costs no resident anything), and the honest GGUF partial
-    offload still applies (it is sized from free VRAM alone) — but the size-up
-    planner and the eviction walk are SKIPPED and the refusal says so. This is
-    the deliberate inverse of declare-need-then-evict, which stays the rule for
-    every unflagged load; the flag is per-model and off by default, so nothing
-    below changes for an ordinary admission.
+    POLITE LOAD (k56): when the request's spill carries ``no_evict`` this
+    function may spend only GENUINELY FREE headroom — flex still runs, the
+    honest GGUF partial offload still applies, but the size-up planner and the
+    eviction walk are SKIPPED and the refusal says so.
 
     Returns a typed verdict:
-      {"action": "proceed"|"evicted"|"refuse", "evicted": [mk...],
+      {"action": "proceed"|"evicted"|"partial"|"refuse", "evicted": [mk...],
        "freed_bytes": int, "reason": {...}|None}
     Fails OPEN (proceed) whenever VRAM/need is unmeasurable — an unmeasurable load
     proceeds exactly as today, never blocked because we couldn't measure."""
+    from hugpy_engine.fit import plan_fit
     # t21: every admission re-decides from TARGET — drop any stale ctx flex
-    # commitment for this subject so the fit check below is against the
-    # operator's target ctx, not a prior compression (uncontended == target).
-    # Same for any prior PARTIAL-offload commitment: a model that now fits fully
-    # must serve fully (-1), never stay pinned to a stale layer count.
+    # commitment for this subject so the fit check is against the operator's
+    # target ctx, not a prior compression. Same for a prior PARTIAL-offload
+    # commitment: a model that now fits fully must serve fully (-1).
     _FLEX_CTX_FLOOR.pop(model_key, None)
     _clear_partial_ngl(model_key)
-    # k56: read the polite flag ONCE, here, so every branch below asks the same
-    # question of the same request (the env is per-request and cleared when
-    # absent, so a mid-admission re-read could disagree with itself).
-    # k96: a request-scoped "no_makeroom" (dispatch contextvar — set when this
-    # process serves the flagged request itself rather than receiving it as a
-    # relayed spill) is the same promise and takes the same polite branch.
+    # k56: read the polite flag ONCE, here, so every branch asks the same
+    # question of the same request. k96: a request-scoped "no_makeroom"
+    # (dispatch contextvar) is the same promise and takes the same branch.
     try:
         from hugpy_engine.spill import no_evict_env
         polite = no_evict_env()
@@ -10690,22 +10832,18 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     if not total:
         return {"action": "proceed", "evicted": [], "freed_bytes": 0,
                 "reason": None, "note": "no GPU / unmeasurable — gate is a no-op"}
-    # NEED = weights + KV(resolved ctx) (slice 11): the ctx tax is reserved BEFORE
-    # the load, and the split is carried for an honest refusal ("24.1G = 21.3G
-    # weights + 2.8G kv@50%ctx"). When the caller passed an explicit `need` (a
-    # test / a pre-computed total) it wins; otherwise the authoritative detail.
+    # NEED = weights + KV(resolved ctx) (slice 11). An explicit caller-passed
+    # `need` (a test / a pre-computed total) wins; otherwise the authoritative
+    # detail. The split is carried for an honest refusal.
     _det = _incoming_need_detail(model_key)
     if need is None:
         need = _det.get("total")
     if not need:
         return {"action": "proceed", "evicted": [], "freed_bytes": 0,
                 "reason": None, "note": "unknown weight size — fail open"}
-    # 4-BIT RE-PRICE (operator lever, 2026-07-26). The need detail is computed
-    # from the model's fp16 FILE SIZE, so with the lever on, admission was
-    # refusing a load that would actually have fit: the console projected
-    # "13.1 GiB VRAM planned" while this check demanded 50.2 GB and returned
-    # LoadRefusal. Price what will ACTUALLY be loaded, using the same ratio
-    # central derived the projection from, so the two agree by construction.
+    # 4-BIT RE-PRICE (operator lever, 2026-07-26): price what will ACTUALLY be
+    # loaded, with the same ratio central derived the projection from. A
+    # PRICING lever that reads the request env, so it stays on the gather side.
     try:
         from hugpy_engine.spill import bnb_4bit_env
         if bnb_4bit_env():
@@ -10713,95 +10851,55 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
             need = int(need * BNB_4BIT_SIZE_RATIO)
     except Exception:  # noqa: BLE001 — never break admission over the lever
         pass
-    # PLACEMENT-INTENT RE-PRICE (operator incident 2026-07-29). Same invariant as
-    # the 4-bit re-price above and the MoE re-target below: admission MUST price
-    # what will ACTUALLY land on the card. A RAM-only designation (n_gpu_layers
-    # "off" -> the loader builds a 0-GiB GPU budget; max-ram -> only the
-    # remainder over the CPU budget) was being priced at the FULL fp16 total:
-    # "won't fit on GPU: needs 70.2 GB" — and an idle resident was evicted on
-    # the way to that refusal — for a load about to put 0 B on the GPU.
-    # planned_gpu_need_bytes mirrors the loader's own derivation, one function,
-    # so gate and loader cannot disagree.
-    try:
-        from hugpy_engine.spill import planned_gpu_need_bytes
-        _planned = planned_gpu_need_bytes(need)
-        if _planned is not None and _planned < need:
-            if _planned <= 0:
-                return {"action": "proceed", "evicted": [], "freed_bytes": 0,
-                        "reason": None,
-                        "note": ("placement intent puts 0 B on the GPU "
-                                 "(CPU/RAM-only) — VRAM admission is a no-op")}
-            need = int(_planned)
-            _det = dict(_det)
-            _det["intent_gpu_remainder"] = need
-    except Exception:  # noqa: BLE001 — never break admission over the intent
-        pass
-    # THE admission reserve (2026-07-27): a bounded compute/activation cushion,
-    # un-stacked against the external floor already out of `_free_vram_bytes()`
-    # — NOT a percentage of the card that re-charges for the KV `need` already
-    # carries. Derivation + measurement: see _vram_ceiling_reserve_bytes. Every
-    # downstream consumer in this function (the fit test, the flex deficit, the
-    # eviction need, the partial-offload budget, the refusal report) reads THIS
-    # one binding, so no two of them can price the ceiling differently.
-    ceiling_reserve = _vram_ceiling_reserve_bytes(total)
+    # ── GATHER (once) ───────────────────────────────────────────────────────
+    snap = _fit_snapshot(total)
+    policy = _fit_policy(total)
+    request = _fit_request(state, model_key, need, _det, polite)
+    residents, cand_rows, prot_rows = _fit_residents(state, model_key)
+    if request.subject_held_bytes:
+        logger.info(
+            "VRAM admission for %s: the subject is ALREADY resident holding ~%s "
+            "— crediting that against its own need (%s); a model is never "
+            "refused for want of room it is itself occupying",
+            model_key, _human_bytes(request.subject_held_bytes), _human_bytes(need))
+    # ── PLAN (pure) ─────────────────────────────────────────────────────────
+    plan = plan_fit(request, snap, residents, policy)
+    for _why in plan.reasons:
+        logger.info("VRAM admission for %s: %s", model_key, _why)
+    # ── EXECUTE (the only impure part) ──────────────────────────────────────
+    return _execute_fit_plan(state, model_key, plan, request, snap, policy,
+                             cand_rows, prot_rows)
 
-    # ── MoE re-target: typed bytes over the opaque byte-bag ─────────────────
-    # When a MoE split governs this model, the plan that will ACTUALLY load is
-    # the split (slot_agent._build_cmd applies it), so the whole admission
-    # (flex, eviction, fit checks) must price ITS GPU need (non-expert + KV)
-    # rather than the opaque full-file total. Pricing the full file would evict
-    # innocent residents to make room for bytes that are never going to land on
-    # the card — and, when the model is bigger than the card, refuse anyway.
-    #
-    # POLICY CHANGE (operator, 2026-07-25 — "the default needs to be the MoE
-    # split for all GGUFs that it applies to"): this used to re-target ONLY when
-    # the full weights could never fit the card even empty (need > card -
-    # reserve); a MoE that fit whole was admitted, and served, fully on the GPU.
-    # The ae measurement retires that exception (+59% tok/s at 5x less VRAM), so
-    # the split is now the default whenever a plan exists — and admission MUST
-    # agree with _build_cmd or it would reserve ~5x the VRAM the child actually
-    # takes and evict neighbours for nothing.
-    #
-    # RAM-guarded: experts must fit budgetable host RAM (fail open on
-    # unmeasurable). Only when `need` came from the authoritative detail — an
-    # explicit caller-passed need is a test/pre-priced figure and stands.
-    moe_commit = None
-    if need == _det.get("total"):
-        ms = _det.get("moe_split")
-        if ms:
-            fr_now = _free_ram_bytes()
-            exp_bytes = int(ms.get("cpu_bytes") or 0)
-            # "Could the full weights EVER land on this card?" — priced with the
-            # SAME arithmetic the gate uses (total, less the external floor that
-            # never reaches the budgetable free read, less the admission
-            # reserve), so the log line cannot claim "never fits" about a need
-            # the gate would in fact admit on an empty card. Log-only.
-            impossible_full = int(need) > _vram_empty_card_budget(total)
-            # EXPERT BYTES ARE MMAP-ELIGIBLE (worker-side analogue of the
-            # 0.1.237 central ruling, coder-next/ae 2026-08-28): the expert
-            # tensors are FILE-BACKED page cache llama.cpp streams via mmap —
-            # reclaimable, never an OOM-able reservation — so the guard prices
-            # them against the BOX (total RAM), not the momentary free figure.
-            # ae live: 43.6 GiB experts vs 124.9 GiB installed was being
-            # refused because only ~34 GiB happened to be free at that instant
-            # (page cache the very load would reclaim), forcing full-need
-            # 51.8 GB admission and a guaranteed refusal. Momentary free stays
-            # the fallback when the total is unmeasurable (degrade-not-guess).
-            ram_ceiling = _ram_total_bytes() or fr_now
-            if ram_ceiling is not None and exp_bytes > ram_ceiling * 0.95:
-                logger.info(
-                    "MoE split for %s skipped: expert tensors (~%s) exceed "
-                    "host RAM (~%s) — keeping full-need admission",
-                    model_key, _human_bytes(exp_bytes), _human_bytes(ram_ceiling))
-            elif ms.get("gpu_total"):
-                need = int(ms["gpu_total"])
-                moe_commit = dict(ms)
-                logger.info(
-                    "MoE re-target for %s: %s — admission prices the expert "
-                    "split (GPU need %s, experts ~%s to CPU)", model_key,
-                    ("full weights can never fit this card" if impossible_full
-                     else "the expert split is the default placement"),
-                    _human_bytes(need), _human_bytes(exp_bytes))
+
+def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
+                      policy, cand_rows: list, prot_rows: list) -> dict:
+    """Realise a ``FitPlan``: commit the flex / MoE / partial decisions, run the
+    planned evictions (re-proving fit per victim against the LIVE card — the
+    PLAN chooses, the LOOP verifies), reclaim idle comfy, and build the verdict
+    dict the callers have always received. Behaviour-preserving refactor of
+    the old orchestrator's execution half."""
+    from dataclasses import replace as _replace
+    from hugpy_engine.fit import plan_fit
+    subject_held = int(request.subject_held_bytes or 0)
+    need = plan.need_bytes
+    reserve = int(policy.ceiling_reserve_bytes or 0)
+    total = snap.total_bytes
+    _det = dict(plan.need_detail or {})
+    moe_commit = dict(plan.moe_commit) if plan.moe_commit is not None else None
+
+    def _free_eff() -> "int | None":
+        """Free VRAM available TO THE SUBJECT = device free + what the subject
+        itself already holds. None when the device can't be read (fail open)."""
+        fv = _free_vram_bytes()
+        if fv is None:
+            return None
+        return int(fv) + subject_held
+
+    def _fits() -> "bool | None":
+        fv = _free_eff()
+        if fv is None:
+            return None
+        return (fv - need) >= reserve
 
     def _moe_admit_verdict(evicted_list, freed_bytes) -> dict:
         """Commit + emit the MoE-split admit: n_gpu_layers=-1 + --n-cpu-moe
@@ -10822,241 +10920,78 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
                          f"+ KV), the remaining expert tensors "
                          f"(~{_human_bytes(moe_commit.get('cpu_bytes'))}) on CPU")}
 
-    # ── SUBJECT CREDIT (operator, 2026-07-27) ───────────────────────────────
-    # The subject's OWN measured footprint is headroom for the subject: an
-    # admission is a (re)seat of THIS model, so whatever it already holds is
-    # released by the seat it is about to take. Credited on the FREE side, never
-    # subtracted from `need`, deliberately:
-    #
-    #   * `need` is a property of the MODEL (weights + KV at the resolved ctx),
-    #     not of the card. It is the number the refusal PRINTS, the number
-    #     _record_calibration_refuse learns from, the base for the MoE commit
-    #     (`moe_commit["gpu_total"]`), for the flex re-price, and for the partial
-    #     offload's `kv_eff = need - weights`. Netting a card fact into it would
-    #     make every one of those lie — and drive kv_eff negative.
-    #   * the subject's footprint is a property of the CARD's current state,
-    #     which is exactly what the free side means. One credit here covers the
-    #     first fit test, the flex deficit, the eviction need, the per-victim
-    #     re-check and the partial-offload budget, so no two of them can drift.
-    #
-    # `_free_vram_bytes()` is re-read every call (the device moves under us and
-    # evictions must be seen); the credit is a constant because the subject is
-    # never evicted — it is the one resident guaranteed still to be there.
-    subject_held = _subject_resident_vram_bytes(state, model_key)
-    if subject_held:
-        logger.info(
-            "VRAM admission for %s: the subject is ALREADY resident holding ~%s "
-            "— crediting that against its own need (%s); a model is never "
-            "refused for want of room it is itself occupying",
-            model_key, _human_bytes(subject_held), _human_bytes(need))
-
-    def _free_eff() -> "int | None":
-        """Free VRAM available TO THE SUBJECT = device free + what the subject
-        itself already holds. None when the device can't be read (fail open)."""
-        fv = _free_vram_bytes()
-        if fv is None:
-            return None
-        return int(fv) + subject_held
-
-    def _fits() -> "bool | None":
-        fv = _free_eff()
-        if fv is None:
-            return None                      # can't read -> fail open at the caller
-        return (fv - need) >= ceiling_reserve
-
-    ok = _fits()
-    if ok is None:
-        return {"action": "proceed", "evicted": [], "freed_bytes": 0,
-                "reason": None, "note": "can't read free VRAM — fail open"}
-    if ok:
+    # ── fits (or the gate fails open) ───────────────────────────────────────
+    if plan.action == "proceed":
+        if plan.fits_now is None:
+            # Unmeasurable free VRAM / a 0-B placement intent: fail OPEN.
+            return {"action": "proceed", "evicted": [], "freed_bytes": 0,
+                    "reason": None, "note": plan.note}
         if moe_commit is not None:
             return _moe_admit_verdict([], 0)
-        # ── stage 0.5: EVICTION-AWARE AUTOFIT (operator, 2026-07-25) ─────────
-        # The full need fits, so nothing MUST be evicted — but "fits" is a
-        # ceiling test, not a placement. The slot child will still autofit its
-        # layer count against the VRAM free at THAT instant, and a card that is
-        # momentarily busy cripples the seat PERMANENTLY (flux2-klein-9b: 21/36
-        # layers with 3.1 GiB free; re-seating put all 36 on the card). Size up
-        # for the eviction instead: plan against free + reclaimable, evict to
-        # realise it, then RE-PLAN from what was actually freed.
-        #
-        # Deliberately the RAW device free, NOT `_free_eff()`: this planner is a
-        # bonus size-up that never refuses, and `_size_up_for_eviction` re-plans
-        # against the raw device read after evicting. Feeding it the credited
-        # figure here would make the target systematically un-deliverable and
-        # push it down its "under-delivered" branch. Byte-identical to today.
-        #
-        # k56: a POLITE load skips the size-up entirely. It is a BONUS that buys
-        # a better layer count BY EVICTING, and "never evict" outranks "seat it
-        # better" — the model takes the room that is genuinely free, which is
-        # exactly what the flag promised.
-        if polite:
+        if request.polite:
             return {"action": "proceed", "evicted": [], "freed_bytes": 0,
-                    "reason": None,
-                    "note": ("polite load (no_evict): admitted into free room; "
-                             "the eviction-aware size-up was skipped")}
-        _up = _plan_autofit_against_reclaimable(
-            state, model_key, _partition_residents(state, model_key)[0],
-            _free_vram_bytes())
-        if _up is not None:
-            return _size_up_for_eviction(state, model_key, _up, lru=None)
+                    "reason": None, "note": plan.note}
+        # ── stage 0.5: EVICTION-AWARE AUTOFIT (operator, 2026-07-25) ─────────
+        # "fits" is a ceiling test, not a placement: size up for the eviction,
+        # evict to realise it, then RE-PLAN from what was actually freed. A
+        # bonus planner that never refuses; deliberately fed the RAW device
+        # free, not the credited figure. STEP 2 SLOT ("toggle footgun"): this
+        # planner has its own live re-reads and its own eviction walk.
+        if plan.size_up_eligible:
+            _up = _plan_autofit_against_reclaimable(state, model_key, cand_rows,
+                                                    snap.free_bytes)
+            if _up is not None:
+                return _size_up_for_eviction(state, model_key, _up, lru=None)
         return {"action": "proceed", "evicted": [], "freed_bytes": 0, "reason": None}
 
-    # Over the ceiling — plan the minimum eviction set.
-    try:
-        from hugpy_engine.dispatch.dispatch import last_used_snapshot as _lus
-        lru = _lus()
-    except Exception:  # noqa: BLE001
-        lru = {}
-
-    candidates, protected = _partition_residents(state, model_key)
-
-    # TELEMETRY: stream the PROTECTED half. The console's card is only honest if
-    # it shows what was NOT touched and under which clause — "evicted 0, and
-    # here is why" is the question the doctrine actually asks. Emitted here (the
-    # real admission) rather than inside _partition_residents, which is also
-    # called by the autofit estimator where no eviction is being decided.
-    for _p in protected:
+    # ── over the ceiling ────────────────────────────────────────────────────
+    # TELEMETRY: stream the PROTECTED half — the console's card is only honest
+    # if it shows what was NOT touched and under which clause.
+    for _p in prot_rows:
         _evt_emit("candidate.skip", model_key=_p.get("model_key"),
                   tier=_telemetry_tier(_p.get("host_mode")),
                   incoming_model=model_key, reason=_p.get("why"),
                   vram_bytes=_p.get("vram_bytes"))
-
-    # ── t21 tolerance-band FLEX before evict (stage 1) ──────────────────────
-    # Try to fit WITHIN bands before evicting anyone. ctx is the CHEAPEST flex,
-    # so plan_flex (1) compresses the SUBJECT's own ctx toward its band floor,
-    # then (2) — for a strictly higher-priority subject — reclaims resident KV
-    # from lower-priority, UNPROTECTED neighbours within THEIR ctx bands.
-    # Protection is absolute: only `candidates` (already protection-filtered
-    # above) are offered as flex-eligible neighbours. The pure decision lives in
-    # flex.plan_flex; here we EXECUTE the piece that is safe worker-side now —
-    # the subject's own ctx compression, which lowers `need` so fewer (or no)
-    # residents must be evicted. In-place neighbour KV-shrink rides worker
-    # enforcement (next cut); until then a higher-priority subject's precedence
-    # manifests as the priority-ordered eviction below.
-    from hugpy_fleet.worker.flex import plan_flex, flex_priority_key as _fpk, kv_at_ctx_pct as _kvat
-    flex_note = None
-    fv_now = _free_eff()                                 # incl. the subject credit
-    if fv_now is not None:
-        deficit = ceiling_reserve - (fv_now - need)      # >0 here (ok was False)
-        # Under a MoE re-target the subject's GPU-side weights are the typed
-        # non-expert share (what actually lands on the card), not the full file.
-        _subj_weights = _det.get("weights")
+    # Commit the subject to its compressed ctx so the SERVED -c and the KV
+    # admission reserved agree (plan.need_bytes is already re-priced at it).
+    if plan.self_ctx_pct is not None:
+        _FLEX_CTX_FLOOR[model_key] = int(plan.self_ctx_pct)
+    if plan.action == "flex":
+        # Fits WITHIN bands — no eviction.
         if moe_commit is not None:
-            _subj_weights = max(0, int(moe_commit.get("gpu_total") or 0)
-                                - int(_det.get("kv") or 0))
-        subject = {"weights_bytes": _subj_weights, "kv_bytes": _det.get("kv"),
-                   "ctx_pct": _det.get("ctx_pct"),
-                   "ctx_deviation_pct": _ctx_deviation_pct(model_key),
-                   "priority": _flex_priority(model_key)}
-        resident_rows = []
-        for r in candidates:                             # unprotected only
-            mk = r["model_key"]
-            try:
-                rkv, rdet = _kv_need_bytes(mk)
-            except Exception:  # noqa: BLE001 — a pricing gap must not break admission
-                rkv, rdet = 0, {}
-            resident_rows.append({
-                "model_key": mk, "kv_bytes": int(rkv or 0),
-                "ctx_pct": (rdet or {}).get("ctx_pct"),
-                "ctx_deviation_pct": _ctx_deviation_pct(mk),
-                "vram_bytes": int(r.get("vram_bytes") or 0),
-                "protected": False, "pinned": bool(r.get("pinned")),
-                "alloc": _flex_alloc(mk)})
-        plan = plan_flex(subject, resident_rows, deficit)
-        if plan.self_ctx_pct is not None and _det.get("kv"):
-            # Commit the subject to its compressed ctx so the SERVED -c and the
-            # KV admission reserved agree, and re-price `need` at that floor. The
-            # captured _fits() closure re-reads `need`, so this shrinks the fit
-            # target for both the flex re-check and the eviction loop. Under a
-            # MoE re-target the weight term is the typed non-expert share.
-            _FLEX_CTX_FLOOR[model_key] = int(plan.self_ctx_pct)
-            new_kv = _kvat(_det.get("kv"), _det.get("ctx_pct"), plan.self_ctx_pct)
-            need = int(_subj_weights or 0) + int(new_kv or 0)
-            if moe_commit is not None:
-                moe_commit["gpu_total"] = int(need)
-        if plan.action == "flex" and _fits():
-            # Fits WITHIN bands — no eviction. (Neighbour compression in the plan
-            # is realised as reduced eviction / priority order until in-place
-            # resident shrink lands; self-flex alone already cleared the ceiling.)
-            if moe_commit is not None:
-                out = _moe_admit_verdict([], 0)
-                out["note"] += f"; flex: {plan.note}"
-                out["flex"] = plan.as_dict()
-                return out
-            return {"action": "proceed", "evicted": [], "freed_bytes": 0,
-                    "reason": None, "note": f"flex: {plan.note}",
-                    "flex": plan.as_dict()}
-        flex_note = plan.note
+            out = _moe_admit_verdict([], 0)
+            out["note"] += f"; flex: {plan.flex_note}"
+            out["flex"] = dict(plan.flex or {})
+            return out
+        return {"action": "proceed", "evicted": [], "freed_bytes": 0,
+                "reason": None, "note": f"flex: {plan.flex_note}",
+                "flex": dict(plan.flex or {})}
+    flex_note = plan.flex_note
 
-    # ── stage 2: EVICT — the SHARED function (spec assets/evictionflow.html) ─
-    # THIS is the site where key ① actually bites: these are DEVICE residents,
-    # so a resident whose preference names RAM is already off the cliff by
-    # design and yields BEFORE one that asked for this card (whose loss is the
-    # measured 135->36 tok/s drop). That is the cliff order, and it is why the
-    # old key's largest-first term had to go: size is not a measure of cost.
-    #
-    # Flex priority stays the OUTER key. It is the operator's explicit
-    # per-model override ("explicit priorities"), and an override that the
-    # spec's derived ordering could outvote would not be an override. With no
-    # priorities set (the default, 0 everywhere) it is a constant and the order
-    # is the spec's, exactly.
-    #
-    # WALK-THEN-DROP is delegated: `_shared_evict_order` returns the walked-and-
-    # dropped victim list, so least reaping and the frontier rule hold here as
-    # they do in the preview. The loop below still re-tests `_fits()` and
-    # re-proves protection per victim (the device moves for reasons no plan
-    # models), so the PLAN chooses and the LOOP verifies.
-    #
-    # k56: a POLITE load does not reach the walk at all. Flex has run (it costs
-    # residents nothing), the free room was not enough, and the flag says that
-    # is the end of what this load may spend — so `candidates` is emptied and
-    # the function falls through to the partial-offload/refusal tail, which is
-    # sized from FREE VRAM alone and therefore still honest under the flag.
-    # Emptying the list (rather than branching around the loop) is deliberate:
-    # every downstream count and telemetry line then reports the truth —
-    # nothing was evicted FOR THIS LOAD. What was spared is kept in
-    # `polite_spared` so the refusal can NAME it: "3 idle residents were
-    # spared" is the whole story here, and the orphan-message honesty fix
-    # (2026-07-27) forbids letting an empty candidate list read as "nothing was
-    # attributable" when in fact we chose not to touch what was.
-    polite_spared: list[dict] = []
-    if polite:
-        polite_spared = list(candidates)
+    # ── stage 2: EVICT — walk the plan, re-prove fit per victim ────────────
+    polite_spared = [{"model_key": e.model_key, "vram_bytes": e.vram_bytes,
+                      "host_mode": e.host_mode} for e in plan.polite_spared]
+    if request.polite:
         logger.info(
             "polite load (no_evict): %s needs %s and free room is short — "
             "NOT evicting any of the %d evictable resident(s); the load takes "
             "free headroom or refuses", model_key, _human_bytes(need),
-            len(candidates))
-        for _c in candidates:
+            len(polite_spared))
+        for _c in polite_spared:
             _evt_emit("candidate.skip", model_key=_c.get("model_key"),
                       tier=_telemetry_tier(_c.get("host_mode")),
                       incoming_model=model_key,
                       reason="polite load (no_evict) — never evicts",
                       vram_bytes=_c.get("vram_bytes"))
-        candidates = []
-    _fv_for_need = _free_eff()               # incl. the subject credit: we must
-    _ev_need = (max(0, ceiling_reserve - (_fv_for_need - need))
-                if _fv_for_need is not None else None)   # only evict the REMAINING
-                                                         # deficit, never a victim
-                                                         # for the subject's own bytes
-    _ev_rows = _evict_residents(state, candidates, model_key)
-    _ev_order = _shared_evict_order(
-        _ev_rows, need=_ev_need,
-        priority={r["model_key"]: _fpk(_flex_alloc(r["model_key"]))
-                  for r in candidates})
-    _by_mk = {r["model_key"]: r for r in candidates}
-    candidates = [_by_mk[mk] for mk in _ev_order if mk in _by_mk]
-
     evicted: list[str] = []
     evict_failed: list[dict] = []            # attempted but not freed — carried
     freed = 0                                # in the refusal so counts are TRUE
-    for r in candidates:
+    for e in plan.evictions:
         chk = _fits()
         if chk:
             break
-        mk = r["model_key"]
-        _ev_tier = _telemetry_tier(r.get("host_mode"))
+        mk = e.model_key
+        _ev_tier = _telemetry_tier(e.host_mode)
         _evt_emit("evict.start", model_key=mk, tier=_ev_tier,
                   incoming_model=model_key)
         _ev_t0 = time.time()
@@ -11072,11 +11007,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
             _trim_host_ram()                 # so the next _fits() sees the room
             _evt_emit("reclaim.done", incoming_model=model_key)
         else:
-            # An eviction that resolved to a no-op ("not resident here", a
-            # changed slot handle, a failed unload) must not vanish from the
-            # story — the old message counted only successes, so a card held by
-            # an unevictable-in-practice resident read "evicted 0 ... 0
-            # protected", contradicting the visible occupancy (k30).
+            # A no-op eviction must not vanish from the story (k30).
             evict_failed.append({"model_key": mk,
                                  "host_mode": res.get("host_mode"),
                                  "reason": res.get("reason")})
@@ -11089,21 +11020,10 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
 
     final = _fits()
     # ── stage 2.4 (k54): claim IDLE comfy VRAM before degrading or refusing ──
-    # Every managed candidate has been walked and it still doesn't fit. Comfy is
-    # protected from EVICTION here (it is out of allocations and the worker does
-    # not own its residency policy) — but a comfy holding VRAM with an empty
-    # queue and no registered call is not serving anyone, and refusing a load (or
-    # crippling it into a partial offload) for bytes nobody is using is exactly
-    # the gap k54 closes. Contention waives the idle TTL; clauses 1-3 still bind
-    # absolutely, so a comfy mid-render is never touched. Costs one cheap /queue
-    # read on the unhappy path only, and 0 on a box with no comfy.
-    #
-    # k56: NOT under a polite load. Reclaiming an idle comfy's VRAM is still
-    # taking room off another process to make this load land — the flag says
-    # this load spends only what is already free, and "idle" is a judgement the
-    # polite promise does not get to make on someone else's behalf.
+    # Not under a polite load: reclaiming an idle comfy is still taking room
+    # off another process.
     _comfy_freed = 0
-    if not final and not polite:
+    if not final and plan.comfy_reclaim_eligible:
         _comfy_freed = _comfy_reclaim_idle_vram(state, model_key, need_bytes=need)
         if _comfy_freed:
             freed += _comfy_freed
@@ -11114,213 +11034,104 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         out = {"action": "evicted", "evicted": evicted,
                "freed_bytes": freed, "reason": None}
         if _comfy_freed:
-            # Name it: the operator must never have to guess which of the two
-            # reclaim mechanisms actually produced the room.
             out["comfy_freed_bytes"] = _comfy_freed
             out["note"] = (f"reclaimed {_human_bytes(_comfy_freed)} from an idle "
                            f"ComfyUI (empty queue, no call)")
         return out
 
-    # `fv` is the RAW device read — what the refusal below REPORTS, because the
-    # operator must see the card as the driver sees it. `fv_eff` is what the
-    # subject may actually spend (raw + its own credited footprint) and is what
-    # the partial-offload budget is sized from, so the hybrid plan and the
-    # `_fits()` that just failed are priced off the same number.
+    # ── stage 2.5 / refuse: the OFFLOAD TAIL, re-planned from the card as it
+    # is NOW. The plan's tail was priced from the PREDICTED post-eviction free
+    # figure; today's contract sizes the partial-offload budget (and the
+    # refusal's "free of") from a FRESH read after the evictions. So the tail
+    # is re-planned with the same pure function over a fresh snapshot and NO
+    # remaining candidates (everything evictable has been walked).
+    # STEP 2 SLOT ("stable budget"): drop this re-plan and honour `plan` —
+    # the predicted budget becomes authoritative and the second read goes away.
     fv = _free_vram_bytes()
-    fv_eff = _free_eff()
-
-    # ── stage (2.5): honest GGUF PARTIAL offload — autofit's hybrid contract ──
-    # Full GPU offload still doesn't fit after flex + evict. For a GGUF this is
-    # NOT a dead end: autofit's PROMISE (empty spill = the default alloc mode) is
-    # a hybrid — offload as many layers as safely fit under the ceiling reserve,
-    # stream the rest from disk to CPU RAM. This is the regression this restores:
-    # a served-many-times brain must not hard-refuse on a card that plainly holds
-    # part of it. Priced from the honest, SHARD-AWARE need split (not the shard-
-    # blind on-disk autofit), floored against a degenerate offload and against a
-    # CPU remainder that would OOM host RAM (never admit-then-OOM). GGUF/slot path
-    # only; transformers placement modes are t26 (out of scope).
+    fv_eff = (int(fv) + subject_held) if fv is not None else None
     partial = None
-    ppath, total_layers = _served_gguf_geometry(model_key)
-    if fv_eff is not None and total_layers:
-        weights = int(_det.get("weights") or 0)
-        kv_eff = max(0, int(need) - weights)     # honors any committed ctx flex
-        budget = max(0, fv_eff - ceiling_reserve)  # VRAM the offloaded layers may
-                                                   # use — incl. the subject's own
-                                                   # bytes, which this seat frees
-        # Cap by the model's explicit VRAM band CEILING when a gpu_mem_gib budget
-        # is set (t21) — stretchable to the band ceiling under this model's own
-        # need. band_ceiling collapses to the gpu_mem_gib target when no deviation
-        # is projected (today), i.e. the same cap autofit already applies.
-        gpu_mem_gib = os.environ.get("HUGPY_GPU_MEM_GIB")
-        if gpu_mem_gib:
-            try:
-                from hugpy_fleet.worker.flex import band_ceiling
-                cap = int(band_ceiling(float(gpu_mem_gib) * (2 ** 30),
-                                       _vram_deviation_pct(model_key), total))
-                budget = min(budget, cap)
-            except (TypeError, ValueError):
-                pass
-        intent, requested = _gguf_ngl_intent(model_key)
-        # MoE FIRST (0.1.241, coder-next/ae 2026-08-28): EVERY partial-offload
-        # entry on a detected-MoE GGUF defers to the dense-backbone-first
-        # split BEFORE any dense layer math. The live bust this closes: a
-        # cold load whose spill shape skipped _moe_plan_for reached
-        # plan_partial_offload, which priced a 3-layer DENSE floor (~3.2 GB,
-        # dense layer-bytes) against the MoE-derived 1.5 GiB budget
-        # (non-expert cap) — mixed bases in one verdict — and refused
-        # "degenerate" a model whose MoE plan (backbone ~1.7 GB, experts to
-        # RAM) admits fine. Guards: an operator-stated layer count and a cpu
-        # (ram-only) intent are always obeyed verbatim; the backbone must
-        # actually fit the budget (dense_fits — never admit-then-OOM); the
-        # experts must fit the BOX (total RAM, mmap doctrine). Anything else
-        # falls through to the dense planners unchanged.
-        if requested is None and (intent or "auto") != "cpu":
-            _det_moe = _moe_detail_for(model_key)
-            _mplan = None
-            _mbudget = None
-            if _det_moe:
-                try:
-                    from hugpy_engine import spill as _spill
-                    _mbudget = _moe_auto_gpu_budget(model_key, ppath) or budget
-                    _mplan = _spill.moe_dense_first_plan(_det_moe, _mbudget)
-                except Exception:  # noqa: BLE001 — fall through to dense math
-                    _mplan = None
-            if _mplan and int(_mplan.get("cpu_bytes") or 0) \
-                    and _mplan.get("dense_fits"):
-                _exp_b = int(_det_moe.get("expert_bytes") or 0)
-                _ram_ceiling = _ram_total_bytes() or _free_ram_bytes()
-                if not _ram_ceiling or _exp_b <= _ram_ceiling * 0.95:
-                    _MOE_SPLIT[model_key] = {"path": ppath,
-                                             "n_cpu_moe": int(_mplan["n_cpu_moe"])}
-                    logger.info(
-                        "MoE-first partial admit for %s: -ngl -1 --n-cpu-moe %s "
-                        "(~%s dense+experts on GPU, ~%s experts to CPU; budget %s) "
-                        "— dense layer math skipped", model_key,
-                        _mplan["n_cpu_moe"], _human_bytes(_mplan.get("gpu_bytes")),
-                        _human_bytes(_mplan.get("cpu_bytes")), _human_bytes(_mbudget))
-                    return {"action": "partial", "evicted": evicted,
-                            "freed_bytes": freed, "reason": None,
-                            "n_gpu_layers": -1,
-                            "n_cpu_moe": int(_mplan["n_cpu_moe"]),
-                            "note": (f"MoE dense-first split (--n-cpu-moe "
-                                     f"{_mplan['n_cpu_moe']}): all layers on GPU, "
-                                     f"~{_human_bytes(_mplan.get('cpu_bytes'))} "
-                                     f"expert tensors on CPU")}
-        # k37: max-ram / explicit route to the leniency-band engine — degrade
-        # WITHIN the band toward the floor, bust past it with a refusal naming
-        # mode + floor. The mode arrives as env (HUGPY_ALLOC_MODE etc., set by
-        # _apply_spill from the version-gated spill keys). gpu-only/ram-only/
-        # max-gpu keep today's plan_partial_offload path byte-identical.
-        from hugpy_engine.spill import (
-            alloc_mode_env as _amode,
-            leniency_pct_env as _lenpct,
-            priority_device_env as _pdev,
-        )
-        _mode = _amode()
-        if _mode in ("max-ram", "explicit"):
-            from hugpy_fleet.worker.flex import plan_explicit_offload
-            _gpu_t = os.environ.get("HUGPY_GPU_MEM_GIB")
-            _cpu_t = os.environ.get("HUGPY_CPU_MEM_GIB")
-            def _gib_bytes(v):
-                try:
-                    return int(float(v) * (2 ** 30)) if v else None
-                except (TypeError, ValueError):
-                    return None
-            partial = plan_explicit_offload(
-                weights_bytes=weights, kv_bytes=kv_eff,
-                total_layers=total_layers, vram_budget_bytes=budget,
-                ram_free_bytes=_free_ram_bytes(), mode=_mode,
-                priority_device=("ram" if _mode == "max-ram" else _pdev()),
-                gpu_target_bytes=_gib_bytes(_gpu_t),
-                ram_target_bytes=_gib_bytes(_cpu_t),
-                # max-ram = explicit(ram priority, 100% target, generous
-                # leniency): bust only when RAM+GPU together can't satisfy.
-                leniency_pct=(100.0 if _mode == "max-ram" else (_lenpct() or 0.0)))
-        else:
-            from hugpy_fleet.worker.flex import plan_partial_offload
-            partial = plan_partial_offload(
-                weights_bytes=weights, kv_bytes=kv_eff, total_layers=total_layers,
-                vram_budget_bytes=budget, ram_free_bytes=_free_ram_bytes(),
-                intent=intent, requested_layers=requested)
-
-    if partial is not None and partial.admit:
-        # k37 + MoE (coder-next/ae 2026-08-28): a MODE-ENGINE admit on a
-        # detected-MoE GGUF must ride the DENSE-BACKBONE-FIRST split, not a raw
-        # layer count — the slot obeys a stated positive n_gpu_layers verbatim
-        # (the k14/k7 lever), which would disable the split and launch the
-        # dense layer hybrid the 2026-07-31 ruling forbids. Budget arithmetic
-        # is _moe_auto_gpu_budget (mirrors slot_agent._moe_gpu_budget) so
-        # admission and launch price ONE number. Operator-stated layer counts
-        # never reach this branch (the mode engine runs only when no legacy
-        # ngl wire is set), so the lever stays obeyed verbatim.
-        if _mode in ("max-ram", "explicit") and partial.n_gpu_layers > 0:
-            det_moe = _moe_detail_for(model_key)
-            mplan = None
-            if det_moe:
-                try:
-                    from hugpy_engine import spill as _spill
-                    _mbudget = _moe_auto_gpu_budget(model_key, ppath)
-                    if not _mbudget:
-                        _mbudget = int(partial.vram_budget_bytes or 0)
-                    mplan = _spill.moe_dense_first_plan(det_moe, _mbudget)
-                except Exception:  # noqa: BLE001 — fall back to the layer count
-                    mplan = None
-            if mplan and int(mplan.get("cpu_bytes") or 0):
-                _MOE_SPLIT[model_key] = {"path": ppath,
-                                         "n_cpu_moe": int(mplan["n_cpu_moe"])}
+    tail = None
+    if fv is not None:
+        snap2 = _replace(snap, free_bytes=int(fv), ram_free_bytes=_free_ram_bytes(),
+                         ram_total_bytes=_ram_total_bytes())
+        request2 = _replace(request, moe_auto_gpu_budget_bytes=_fit_moe_budget(
+            model_key, request.gguf_path, request.moe_detail))
+        tail = plan_fit(request2, snap2, (), policy)
+        partial = tail.partial
+        if tail.action in ("proceed", "flex", "evict") and tail.fits_now is not False:
+            # The card moved under us and now fits — same verdict `final` gives.
+            if moe_commit is not None:
+                return _moe_admit_verdict(evicted, freed)
+            return {"action": "evicted", "evicted": evicted,
+                    "freed_bytes": freed, "reason": None}
+        if tail.action == "partial":
+            ppath = request.gguf_path
+            if tail.partial_kind == "moe-first":
+                _mplan = dict(tail.moe_plan or {})
+                _MOE_SPLIT[model_key] = {"path": ppath, "n_cpu_moe": int(tail.n_cpu_moe)}
+                logger.info(
+                    "MoE-first partial admit for %s: -ngl -1 --n-cpu-moe %s "
+                    "(~%s dense+experts on GPU, ~%s experts to CPU; budget %s) "
+                    "— dense layer math skipped", model_key,
+                    tail.n_cpu_moe, _human_bytes(_mplan.get("gpu_bytes")),
+                    _human_bytes(_mplan.get("cpu_bytes")), _human_bytes(tail.budget_bytes))
+                return {"action": "partial", "evicted": evicted,
+                        "freed_bytes": freed, "reason": None,
+                        "n_gpu_layers": -1, "n_cpu_moe": int(tail.n_cpu_moe),
+                        "note": (f"MoE dense-first split (--n-cpu-moe "
+                                 f"{tail.n_cpu_moe}): all layers on GPU, "
+                                 f"~{_human_bytes(_mplan.get('cpu_bytes'))} "
+                                 f"expert tensors on CPU")}
+            if tail.partial_kind == "mode-moe":
+                _mplan = dict(tail.moe_plan or {})
+                _pd = dict(partial or {})
+                _MOE_SPLIT[model_key] = {"path": ppath, "n_cpu_moe": int(tail.n_cpu_moe)}
                 logger.info(
                     "%s admit for %s -> MoE dense-first split: -ngl -1 "
                     "--n-cpu-moe %s (~%s dense+experts on GPU, ~%s experts to "
-                    "CPU; budget %s)", _mode, model_key, mplan["n_cpu_moe"],
-                    _human_bytes(mplan.get("gpu_bytes")),
-                    _human_bytes(mplan.get("cpu_bytes")), _human_bytes(_mbudget))
+                    "CPU; budget %s)", policy.alloc_mode, model_key, tail.n_cpu_moe,
+                    _human_bytes(_mplan.get("gpu_bytes")),
+                    _human_bytes(_mplan.get("cpu_bytes")), _human_bytes(tail.budget_bytes))
                 return {"action": "partial", "evicted": evicted,
                         "freed_bytes": freed, "reason": None,
-                        "n_gpu_layers": -1, "n_cpu_moe": int(mplan["n_cpu_moe"]),
-                        "gpu_pct": partial.gpu_pct, "partial": partial.as_dict(),
-                        "note": (f"{_mode} MoE split (--n-cpu-moe "
-                                 f"{mplan['n_cpu_moe']}): dense backbone first, "
-                                 f"~{_human_bytes(mplan.get('cpu_bytes'))} "
+                        "n_gpu_layers": -1, "n_cpu_moe": int(tail.n_cpu_moe),
+                        "gpu_pct": _pd.get("gpu_pct"), "partial": _pd,
+                        "note": (f"{policy.alloc_mode} MoE split (--n-cpu-moe "
+                                 f"{tail.n_cpu_moe}): dense backbone first, "
+                                 f"~{_human_bytes(_mplan.get('cpu_bytes'))} "
                                  f"expert tensors to CPU")}
-        # Admit the hybrid. Pin the honest layer count for the in-process
-        # llama_cpp load (overriding the shard-blind autofit that re-OOMs a
-        # sharded model) AND carry it in the verdict so the slot path launches
-        # the child with --n-gpu-layers N instead of -1. Residency is MEASURED
-        # post-load (pid-registry) and the slot status reports the real ngl, so
-        # the console/bars read the true split with no declared number to drift.
-        try:
-            from hugpy_engine import spill as _spill
-            _spill.set_ngl_override(ppath, partial.n_gpu_layers)
-        except Exception:  # noqa: BLE001 — slot opts still carry N; override is a bonus
-            pass
-        _PARTIAL_NGL[model_key] = {"path": ppath, "n": partial.n_gpu_layers}
-        logger.info(
-            "partial offload: %s -> %d/%d layers on GPU (%d%%), ~%s VRAM + ~%s RAM "
-            "— admitting hybrid instead of refusing (budget %s, ram_free %s)",
-            model_key, partial.n_gpu_layers, partial.total_layers, partial.gpu_pct,
-            _human_bytes(partial.vram_need_bytes), _human_bytes(partial.ram_need_bytes),
-            _human_bytes(partial.vram_budget_bytes), _human_bytes(partial.ram_free_bytes))
-        return {"action": "partial", "evicted": evicted, "freed_bytes": freed,
-                "reason": None, "n_gpu_layers": partial.n_gpu_layers,
-                "gpu_pct": partial.gpu_pct, "partial": partial.as_dict(),
-                "note": f"partial GPU offload: {partial.note}"}
+            # Admit the dense hybrid. Pin the honest layer count for the
+            # in-process llama_cpp load AND carry it in the verdict so the slot
+            # path launches the child with --n-gpu-layers N instead of -1.
+            _pd = dict(partial or {})
+            try:
+                from hugpy_engine import spill as _spill
+                _spill.set_ngl_override(ppath, tail.n_gpu_layers)
+            except Exception:  # noqa: BLE001 — slot opts still carry N; override is a bonus
+                pass
+            _PARTIAL_NGL[model_key] = {"path": ppath, "n": tail.n_gpu_layers}
+            logger.info(
+                "partial offload: %s -> %d/%d layers on GPU (%d%%), ~%s VRAM + ~%s RAM "
+                "— admitting hybrid instead of refusing (budget %s, ram_free %s)",
+                model_key, tail.n_gpu_layers, _pd.get("total_layers"), _pd.get("gpu_pct"),
+                _human_bytes(_pd.get("vram_need_bytes")), _human_bytes(_pd.get("ram_need_bytes")),
+                _human_bytes(_pd.get("vram_budget_bytes")), _human_bytes(_pd.get("ram_free_bytes")))
+            return {"action": "partial", "evicted": evicted, "freed_bytes": freed,
+                    "reason": None, "n_gpu_layers": tail.n_gpu_layers,
+                    "gpu_pct": _pd.get("gpu_pct"), "partial": _pd,
+                    "note": f"partial GPU offload: {_pd.get('note')}"}
 
     # Still short after eviction AND no admissible partial offload -> HONEST
     # refusal (never admit-then-OOM). Carry what's resident, what's protected +
     # why, what we evicted, the numbers, and — when a partial offload was
-    # CONSIDERED and rejected — what it would have been and why (degenerate offload
-    # or CPU remainder OOM), in the C4 vision-fit style.
+    # CONSIDERED and rejected — what it would have been and why.
     # t28: a load-FAIL calibration sample (prediction with no successful load).
     _record_calibration_refuse(model_key, _det)
-    # A TRUTHFUL account of what holds the card (k30): only claim "protected
-    # resident(s) still hold the card" when there ARE protected residents; a
-    # failed eviction is reported as such; and when the planner saw NO residents
-    # at all on an occupied card, say the occupancy is unattributed instead of
-    # the self-contradictory "evicted 0 ... 0 protected still hold the card".
+    protected = prot_rows
     holders: list[str] = []
     # k56: the polite clause comes FIRST because it is the whole reason this
     # refusal exists — the room was there, this load was told not to take it.
-    if polite:
+    if request.polite:
         holders.append(
             "POLITE LOAD (no_evict): this model may spend only genuinely free "
             "headroom, so nothing was evicted"
@@ -11334,19 +11145,12 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         holders.append(f"{len(evict_failed)} eviction attempt(s) failed to free "
                        "their resident")
     _attr = {"vram_attributed_bytes": None, "vram_unattributed_bytes": None}
-    if (not protected and not evict_failed and not candidates and not evicted
+    if (not protected and not evict_failed and not plan.evictions and not evicted
             and not polite_spared):
-        # THE ORPHAN-MESSAGE HONESTY FIX (operator, 2026-07-27). This clause used
-        # to assert, unconditionally, that the card was held by "process(es) this
-        # worker cannot map to a model_key (orphaned/adopted child or out-of-band
-        # process)". On ae that was FALSE and provably so — the pid registry
-        # mapped the subject to its pid and reported vram_unattributed_bytes = 0
-        # — and it cost the operator hours hunting external PIDs. An empty
-        # candidates+protected pool means "nothing EVICTABLE was enumerable", not
-        # "nothing is attributable": `_partition_residents` deliberately drops the
-        # SUBJECT from both halves, and a model_key-less cuda_context lump never
-        # enters them either. So consult the attribution the worker already
-        # computes for the heartbeat, and say only what it supports.
+        # THE ORPHAN-MESSAGE HONESTY FIX (operator, 2026-07-27): an empty
+        # candidates+protected pool means "nothing EVICTABLE was enumerable",
+        # not "nothing is attributable" — consult the attribution the worker
+        # already computes for the heartbeat, and say only what it supports.
         occupied = None
         if fv is not None and total:
             occupied = max(0, int(total) - int(fv))
@@ -11354,9 +11158,6 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         _unattr = _attr.get("vram_unattributed_bytes")
         _attributed = _attr.get("vram_attributed_bytes")
         if subject_held:
-            # THE LIVE ae SHAPE. The subject is the holder — and it is protected
-            # from itself by the operator's own ruling, so there was never
-            # anything to evict. Name it; do not invent a squatter.
             holders.append(
                 f"the only thing holding the card is the SUBJECT ITSELF — "
                 f"{model_key} is already resident with ~{_human_bytes(subject_held)} "
@@ -11377,36 +11178,30 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
                 f"attribution is UNMEASURABLE on this box, so the holder cannot "
                 f"be named (degrade-not-guess)")
         elif not _attributed:
-            # Attribution is readable and says NOTHING is attributed, yet the
-            # card is occupied. That is the k30 shape and the orphan sentence is
-            # true here: the registry can account for none of the occupancy.
             holders.append(
                 f"no evictable resident is attributable to a model, yet "
                 f"~{_human_bytes(occupied)} of the card is in use — GPU memory is "
                 "held by process(es) this worker cannot map to a model_key "
                 "(orphaned/adopted child or out-of-band process)")
         else:
-            # Occupied, fully accounted for, and none of it evictable — say THAT.
             holders.append(
                 f"no evictable resident is attributable to a model, but the "
                 f"~{_human_bytes(occupied)} in use IS attributed to this worker "
                 f"(~{_human_bytes(_attributed)} across its model rows and its own "
                 f"CUDA context) with 0 B measured unattributed — nothing foreign "
                 f"is squatting the card, there is simply nothing evictable left")
-    _ext_floor = _external_vram_floor_bytes()
-    # BASIS-NAMING (worker-side analogue of 0.1.237's central rule): when an
-    # offload plan GOVERNED this load, the header's "needs" is the dense
-    # full-model figure, not what the plan actually asked of the GPU — say so
-    # and quote the plan's own floor, or the refusal reads 51.8 GB about a load
-    # whose plan wanted 1.5 GiB on the card (coder-next/ae 2026-08-28).
+    _ext_floor = int(snap.external_floor_bytes or 0)
+    # BASIS-NAMING: when an offload plan GOVERNED this load, the header's
+    # "needs" is the dense full-model figure — say so and quote the plan's floor.
+    _pd = dict(partial or {})
     _plan_basis = ""
-    if partial is not None and not partial.admit and partial.total_layers:
-        _plan_whole = int(partial.vram_need_bytes) + int(partial.ram_need_bytes)
-        _plan_floor_b = (_plan_whole * int(partial.floor_layers)) // int(partial.total_layers)
+    if partial is not None and not _pd.get("admit") and _pd.get("total_layers"):
+        _plan_whole = int(_pd.get("vram_need_bytes") or 0) + int(_pd.get("ram_need_bytes") or 0)
+        _plan_floor_b = (_plan_whole * int(_pd.get("floor_layers") or 0)) // int(_pd["total_layers"])
         _plan_basis = (
             f" (full-model basis; the governing offload plan asked only "
             f"~{_human_bytes(_plan_floor_b)} of GPU for its floor of "
-            f"{partial.floor_layers}/{partial.total_layers} layers)")
+            f"{_pd.get('floor_layers')}/{_pd.get('total_layers')} layers)")
     reason = {
         "state": "refused",
         "model_key": model_key,
@@ -11416,12 +11211,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
             + (f"(+{_human_bytes(subject_held)} the subject itself already holds, "
                f"credited -> {_human_bytes(fv_eff)} available to it) "
                if subject_held else "")
-            + f"({_human_bytes(ceiling_reserve)} ceiling reserve"
-            # Say where the rest of the headroom went. With the bounded cushion
-            # the ceiling reserve is often 0 B on a default box, and a bare
-            # "0 B ceiling reserve" reads like the guard is off — it is not: the
-            # external floor below is already OUT of the free figure quoted
-            # above and is the post-load working room.
+            + f"({_human_bytes(reserve)} ceiling reserve"
             + (f" + {_human_bytes(_ext_floor)} already held back from the free "
                f"figure for out-of-band GPU consumers" if _ext_floor else "")
             + "); "
@@ -11430,8 +11220,6 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
             + ("; " + "; ".join(holders) if holders else "")
         ),
         "needs_bytes": need,
-        # The weights+kv SPLIT (slice 11) — the honest report the operator asked
-        # for: what the ctx allocation costs vs the weights.
         "needs_weights_bytes": _det.get("weights"),
         "needs_kv_bytes": _det.get("kv"),
         "ctx_pct": _det.get("ctx_pct"),
@@ -11440,7 +11228,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         "kv_geometry_source": _det.get("geometry_source"),
         "free_vram_bytes": fv,
         "total_vram_bytes": total,
-        "ceiling_reserve_bytes": ceiling_reserve,
+        "ceiling_reserve_bytes": reserve,
         "evicted": evicted,
         "evicted_freed_bytes": freed,
         "evict_failed": evict_failed,
@@ -11450,18 +11238,10 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
                       for p in protected],
     }
     # SUBJECT CREDIT + ATTRIBUTION, structured for the console. WIRE: strictly
-    # ADDITIVE and OMITTED-WHEN-UNSET — the fleet is 0.1.216 and a released
-    # consumer must not meet a field it can't model. A non-resident subject and
-    # an unread attribution therefore produce a byte-identical reason dict.
-    if polite:
-        # k56, same additive/omitted-when-unset discipline: an unflagged load
-        # produces a byte-identical reason dict. Central surfaces these on the
-        # telemetry stream so the console can say WHY it didn't land.
+    # ADDITIVE and OMITTED-WHEN-UNSET.
+    if request.polite:
         reason["no_evict"] = True
-        reason["polite_spared"] = [{"model_key": r.get("model_key"),
-                                    "vram_bytes": r.get("vram_bytes"),
-                                    "host_mode": r.get("host_mode")}
-                                   for r in polite_spared]
+        reason["polite_spared"] = list(polite_spared)
     if subject_held:
         reason["subject_resident_bytes"] = subject_held
         reason["free_vram_effective_bytes"] = fv_eff
@@ -11469,22 +11249,28 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         reason["vram_attributed_bytes"] = _attr["vram_attributed_bytes"]
     if _attr.get("vram_unattributed_bytes") is not None:
         reason["vram_unattributed_bytes"] = _attr["vram_unattributed_bytes"]
-    # MoE honesty: when a split governed (or was considered for) this model,
-    # carry its typed numbers so the refusal explains what the split would have
-    # needed — the operator sees "even the 2.9G non-expert share didn't fit",
-    # not a bare full-size refusal.
     if _det.get("moe_split"):
         reason["moe_split"] = {k: v for k, v in _det["moe_split"].items()
                                if k != "path"}
         reason["moe_split"]["was_plan"] = moe_commit is not None
     if flex_note:
         reason["flex_note"] = flex_note      # what the band flex tried, for hover
-    if partial is not None and not partial.admit:
+    if partial is not None and not _pd.get("admit"):
         # A partial offload WAS considered and rejected — say what it would have
         # been and why, so the refusal is honest about the hybrid it declined.
-        reason["partial_offload_considered"] = partial.as_dict()
+        reason["partial_offload_considered"] = _pd
         reason["reason"] = reason["reason"] + "; " + (
-            partial.reject_reason or "partial GPU offload not admissible")
+            _pd.get("reject_reason") or "partial GPU offload not admissible")
+    _failure = (tail.failure if tail is not None else None) or plan.failure
+    if tail is not None and tail.refuse_reason:
+        reason["plan_refuse_reason"] = tail.refuse_reason
+    if _failure is not None:
+        # Structured cause (diagnosis (b).6): kind + the two numbers in one
+        # basis. A non-VRAM cause (RAM budget at the plan's N, an inexpressible
+        # split) leads the sentence so the operator reads WHAT failed first.
+        reason["fit_failure"] = _failure.as_dict()
+        if _failure.kind != "vram_fit":
+            reason["reason"] = _failure.reason + "; " + reason["reason"]
     # The load is refused — void any ctx compression / partial-offload commitment
     # we made for it so a future admission of this model re-decides from target.
     _FLEX_CTX_FLOOR.pop(model_key, None)
