@@ -1827,6 +1827,14 @@ class Slot:
             # model's row is degraded/retrying. Informational — it does not gate
             # re-attempts. None once a load succeeds.
             "last_load_error": self.last_load_error,
+            # LOAD-STATE-LATENCY (2026-09-29): the model a /load is seating RIGHT
+            # NOW (None when idle). Set by the /load route BEFORE load() runs its
+            # preflight/spawn/wait-healthy and cleared in its finally, so the
+            # agent's heartbeat can report "loading" from the first second of a
+            # cold load instead of after the child answered its first request.
+            # Additive: an older agent/central ignores the keys.
+            "loading": getattr(self, "loading_model_key", None),
+            "loading_since": getattr(self, "loading_since", None),
             # t140: the loader's own last words behind that error (None when
             # the child never wrote any, or once a load succeeds).
             "last_load_stderr": getattr(self, "last_load_stderr", None),
@@ -2292,6 +2300,17 @@ def build_app():
                 _ngl_body = _NglDefaulted(int(_ngl_body))
             except (TypeError, ValueError):
                 pass
+        # LOAD-STATE-LATENCY (2026-09-29): mark the load window on the status
+        # row and wake the agent's heartbeat at BOTH edges (start, and done or
+        # refused). Before this, nothing on the worker said "loading" during
+        # the preflight/spawn/wait-healthy window — the console only learned of
+        # a cold load once the child was healthy AND the next 15s beat fired,
+        # i.e. usually after the first answer. Same nudge the inflight edges
+        # use; best-effort, off the load path, no auth (LAN control plane).
+        _lk = str(body["model_key"])
+        slot.loading_model_key = _lk
+        slot.loading_since = time.time()
+        _nudge_agent_heartbeat()
         try:
             return jsonify(slot.load(body["model_key"], _ngl_body,
                                      body.get("ctx"), body.get("threads"),
@@ -2315,6 +2334,14 @@ def build_app():
             if isinstance(_lf, dict):
                 out["load_failure"] = _lf
             return jsonify(out), 500
+        finally:
+            # Clear only OUR claim (a queued second /load for another model may
+            # have re-stamped it while we held the lock), then beat again so
+            # central sees resident/refused within the nudge debounce.
+            if getattr(slot, "loading_model_key", None) == _lk:
+                slot.loading_model_key = None
+                slot.loading_since = None
+            _nudge_agent_heartbeat()
 
     @app.route("/unload", methods=["POST"])
     def unload():

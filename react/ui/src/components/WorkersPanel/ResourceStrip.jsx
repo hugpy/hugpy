@@ -31,6 +31,22 @@ export function GpuChips({ gpus, items = [], loadedSet, loadingSet, worker, size
         const total = g.memory_total, free = g.memory_free
         const used = (total != null && free != null) ? Math.max(total - free, 0) : null
         const pct = (used != null && total) ? Math.min((used / total) * 100, 100) : 0
+        // LOAD-STATE-LATENCY (2026-09-29): models loading onto THIS card right
+        // now (a slot mid-/load, a cold request in admission). Their bytes are
+        // drawn as a hatched PENDING segment: measured VRAM (already inside
+        // `used`) is hatched at the tail of the fill; an estimate (nothing
+        // measured yet — registry weight × placement) is appended after it.
+        const loadingHere = items.filter(a => a?.model_key && (loadingSet?.has(a.model_key) || a.loading)
+          && (onGpu(a, g.index ?? i) || (gpus.length === 1 && deviceIndexes(a).length === 0)))
+        let pendMeasured = 0, pendEstimated = 0
+        for (const a of loadingHere) {
+          const v = vramBytesFor(a, worker, sizeByKey)
+          if (!v || v.bytes == null) continue
+          if (v.estimated) pendEstimated += v.bytes; else pendMeasured += v.bytes
+        }
+        const pendMeasuredPct = (total && used != null) ? Math.min((Math.min(pendMeasured, used) / total) * 100, pct) : 0
+        const pendEstimatedPct = total ? Math.min((pendEstimated / total) * 100, Math.max(100 - pct, 0)) : 0
+        const loadingLabel = loadingHere.map(a => a.model_key).join(', ')
         return (
           <div key={i} className="wp-gpu" title={g.name || ''}>
             <div className="wp-gpu-head">
@@ -39,10 +55,25 @@ export function GpuChips({ gpus, items = [], loadedSet, loadingSet, worker, size
                 <em> · {fmtBytes(used)} used / {fmtBytes(total)}</em>
               )}
               {g.utilization != null && <em> · {g.utilization}% compute</em>}
+              {loadingHere.length > 0 && (
+                <span className="wp-state-pill wp-pill-heating wp-gpu-loading"
+                      title={`weights loading onto this card right now: ${loadingLabel}`}>
+                  🔶 loading {loadingLabel}
+                  {(pendMeasured || pendEstimated) ? ` · ${fmtBytes(pendMeasured || pendEstimated)}${pendMeasured ? '' : ' expected'}` : ''}
+                </span>
+              )}
             </div>
             {used != null && (
-              <div className="wp-vram-bar" title={`${fmtBytes(free)} free`}>
+              <div className="wp-vram-bar" title={`${fmtBytes(free)} free${loadingHere.length ? ` · loading: ${loadingLabel}` : ''}`}>
                 <div className="wp-vram-fill" style={{ width: `${pct}%` }} />
+                {pendMeasuredPct > 0 && (
+                  <div className="wp-vram-pending" style={{ left: `${pct - pendMeasuredPct}%`, width: `${pendMeasuredPct}%` }}
+                       title={`${fmtBytes(pendMeasured)} measured so far — still loading`} />
+                )}
+                {pendEstimatedPct > 0 && (
+                  <div className="wp-vram-pending wp-vram-pending-est" style={{ left: `${pct}%`, width: `${pendEstimatedPct}%` }}
+                       title={`~${fmtBytes(pendEstimated)} expected — load starting`} />
+                )}
               </div>
             )}
             <div className="wp-gpu-detail">

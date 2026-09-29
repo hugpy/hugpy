@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { resolveApiUrl, getHugpyConfig } from './config.ts'
 import { fetchJson } from '../api.ts'
+import { mergeAllocations, anyLoadingIn } from './liveAllocations.js'
 
 // ONE subscription for the console's live feeds (workers, slots, queue, jobs,
 // downloads, phones, serving, peers). Central materializes them in Postgres and
@@ -16,6 +17,9 @@ export const EMPTY_ARRAY = Object.freeze([])
 export const EMPTY_OBJECT = Object.freeze({})
 
 const FALLBACK_MS = 20_000
+// LOAD-STATE-LATENCY (2026-09-29): while any worker reports a model loading,
+// the stream-down fallback polls fast enough to watch the load, not 20 s.
+const FALLBACK_LOADING_MS = 3_000
 const state = { feeds: {}, versions: {}, conn: 'idle', error: null, ts: 0 }
 let snapshot = { ...state }
 const listeners = new Set()
@@ -45,11 +49,14 @@ function mergeLiveness(live) {
       const lg = (l.gpus || [])[i]
       return lg && lg.memory_free != null ? { ...g, memory_free: lg.memory_free } : g
     }) : w.gpus
-    const allocations = Array.isArray(w.allocations)
-      ? w.allocations.map(a => (a && a.model_key ? { ...a, busy: answering.has(a.model_key) } : a))
-      : w.allocations
+    const allocations = mergeAllocations(
+      Array.isArray(w.allocations)
+        ? w.allocations.map(a => (a && a.model_key ? { ...a, busy: answering.has(a.model_key) } : a))
+        : w.allocations,
+      l.allocations)
     const same = w.status === l.status && w.last_seen === l.last_seen
       && JSON.stringify(w.loaded_models) === JSON.stringify(l.loaded_models)
+      && JSON.stringify(w.loading) === JSON.stringify(l.loading)
       && JSON.stringify(w.gpus) === JSON.stringify(gpus)
       && JSON.stringify(w.allocations) === JSON.stringify(allocations)
     if (same) return w
@@ -94,14 +101,21 @@ async function pollSnapshot() {
   }
 }
 
+// Self-scheduling (not setInterval) so the cadence can follow the load state:
+// FALLBACK_LOADING_MS while a worker reports a model loading, else FALLBACK_MS.
 function startFallback() {
   if (fallbackTimer) return
-  pollSnapshot()
-  fallbackTimer = setInterval(pollSnapshot, FALLBACK_MS)
+  const tick = () => {
+    Promise.resolve(pollSnapshot()).finally(() => {
+      if (!fallbackTimer) return
+      fallbackTimer = setTimeout(tick, anyLoadingIn(state.feeds) ? FALLBACK_LOADING_MS : FALLBACK_MS)
+    })
+  }
+  fallbackTimer = setTimeout(tick, 0)
 }
 
 function stopFallback() {
-  if (fallbackTimer) { clearInterval(fallbackTimer); fallbackTimer = null }
+  if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null }
 }
 
 function open() {

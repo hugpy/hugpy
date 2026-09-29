@@ -1518,15 +1518,20 @@ def _materialize(runner, model_key: str | None = None) -> None:
     t0 = time.time()
     if _evt is not None:
         _evt_emit("load.start", model_key=mk, engine=engine)
+    # Load-state latency (2026-09-29): this IS a load window — say so on the
+    # heartbeat now, not on the next 15s tick (see _load_intent_begin).
+    _cold = _load_intent_begin(mk)
     try:
         ensure()
     except Exception as exc:  # noqa: BLE001 — observe, then re-raise unchanged
+        _load_intent_end(mk, _cold)
         if _evt is not None:
             _evt_emit("load.fail", model_key=mk, engine=engine,
                       error=f"{type(exc).__name__}: {exc}")
         raise
     with _MATERIALIZED_LOCK:
         _MATERIALIZED.add(str(mk))
+    _load_intent_end(mk, _cold)
     if _evt is not None:
         _evt_emit("load.done", model_key=mk, engine=engine,
                   duration_ms=int((time.time() - t0) * 1000))
@@ -2224,8 +2229,36 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
     gpu_procs = _gpu_process_vram()            # {} when no GPU / no nvidia-smi
     now = time.time()
     rows = slot_statuses if slot_statuses is not None else _slot_statuses()
+    # Load-state latency (2026-09-29): which keys are loading RIGHT NOW (slot
+    # claim, dispatch build, or a cold request's intent) so every row below can
+    # carry ``loading: true`` and the console attributes the load to the card
+    # from its first beat. Guarded — this must never cost a beat.
+    try:
+        loading_now = set(_loading_model_keys(rows))
+    except Exception:  # noqa: BLE001
+        loading_now = set()
     for s in (rows or []):
         mk = (s or {}).get("model_key")
+        _lk = (s or {}).get("loading")
+        if _lk and str(_lk) != str(mk or ""):
+            # PRE-CLAIM window: the slot's /load is in preflight/spawn for a
+            # model it has not stamped as model_key yet (or is replacing the
+            # current occupant). Synthesize the row so the console can show the
+            # incoming model as loading on THIS seat immediately; no measured
+            # bytes/device (nothing to measure yet), materialized False.
+            _lk = str(_lk)
+            if _lk not in seen:
+                seen.add(_lk)
+                out.append({
+                    "kind": "slot", "model_key": _lk,
+                    "slot_id": s.get("slot_id"), "healthy": False,
+                    "busy": False, "endpoint": s.get("endpoint"),
+                    "rss_bytes": None, "n_gpu_layers": None, "ctx": None,
+                    "vram_bytes": None, "device": None,
+                    "last_used": None, "serving": False,
+                    "loading": True, "materialized": False,
+                    "loading_since": s.get("loading_since"),
+                })
         if not mk:
             continue                       # empty seats aren't allocations
         seen.add(mk)
@@ -2291,6 +2324,14 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
             # omit-when-unset: an old central/UI never sees the key, and a row
             # with no device basis at all carries no provenance to mislabel.
             row["device_source"] = device_source
+        if mk in loading_now or (_lk and str(_lk) == str(mk)):
+            # The seat is mid-/load for THIS model (spawned, not yet healthy):
+            # loading, and definitively not materialized yet. Omit-when-false.
+            row["loading"] = True
+            if not s.get("healthy"):
+                row["materialized"] = False
+            if s.get("loading_since") is not None:
+                row["loading_since"] = s.get("loading_since")
         # WHICH card this seat is on (2026-09-25): the slot's OWN pin is
         # authoritative — ``gpu`` is exactly what CUDA_VISIBLE_DEVICES was set to
         # (the global card index central chose); a multi-GPU tensor-split reports
@@ -2430,7 +2471,20 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
         _mat = _is_materialized(mk)
         if _mat is not None:
             ram_row["materialized"] = bool(_mat)
+        if mk in loading_now:
+            ram_row["loading"] = True      # omit-when-false (wire shape unchanged)
         out.append(ram_row)
+    # Cold requests whose model has NO row yet (in-process load before the
+    # runner is cached, or a slot load still in the agent's admission/evict
+    # window before any slot claimed it): one synthetic row each, so the
+    # console can attribute the pending load to this worker right away.
+    for mk in sorted(loading_now):
+        if mk in seen:
+            continue
+        seen.add(mk)
+        out.append({"kind": "ram", "model_key": mk, "device": None,
+                    "vram_bytes": None, "serving": False, "last_used": None,
+                    "loading": True, "materialized": False})
     return out
 
 
@@ -3176,13 +3230,124 @@ def _loaded_models_live_check(loaded_keys: "list[str]",
     return bad
 
 
-def _loading_model_keys() -> list[str]:
-    """Models whose weights are LOADING right now — the console's 'heating'."""
+def _loading_model_keys(slot_statuses: "list | None" = None) -> list[str]:
+    """Models whose weights are LOADING right now — the console's 'heating'.
+
+    LOAD-STATE-LATENCY (2026-09-29). This used to read ONLY dispatch's
+    ``_BUILDING`` set, which brackets ``runner_cls(cfg)`` — the lazy WRAPPER
+    build (milliseconds). The real load (slot child spawn + wait-healthy, or an
+    in-process ``ensure_loaded``) happens later on first ``.runner`` access, so
+    the heartbeat's ``loading`` list was empty for the entire cold load and the
+    console never showed "loading" — the row flipped straight to serving after
+    the first answer. Three sources now, all NON-FORCING:
+
+      1. dispatch ``_BUILDING`` (unchanged — non-llama runners that load in
+         their constructor still surface here).
+      2. the slot rows' own ``loading`` claim (slot_agent /load route stamps it
+         for the whole preflight/spawn/wait-healthy window).
+      3. LOAD INTENT: a request in flight for a model that is not (yet)
+         resident on this box — covers the evict-to-fit / admission window
+         BEFORE the slot claims the model, and in-process loads. Filtered by
+         the same residency facts the allocations rows use, so a warm model
+         never reads as loading and a key drops out the moment its slot is
+         healthy (even while the request is still answering).
+
+    ``slot_statuses`` is the beat's already-computed slot view (avoid a second
+    round-trip); None falls back to the cheap in-memory facts only."""
+    keys: set[str] = set()
     try:
         from hugpy_engine.dispatch.dispatch import loading_model_keys
-        return loading_model_keys()
+        keys.update(loading_model_keys())
     except Exception:
-        return []
+        pass
+    seated: set[str] = set()       # healthy slot rows: resident, full stop
+    claimed: set[str] = set()      # model_key stamped but NOT healthy: mid-load
+    for s in (slot_statuses or []):
+        try:
+            lk = (s or {}).get("loading")
+            if lk:
+                keys.add(str(lk))
+            mk = (s or {}).get("model_key")
+            if mk:
+                (seated if (s or {}).get("healthy") else claimed).add(str(mk))
+        except Exception:  # noqa: BLE001 — never break the heartbeat
+            continue
+    for mk in _load_intent_keys():
+        if mk in keys:
+            continue
+        if mk in claimed and mk not in seated:
+            keys.add(mk)               # its seat exists but isn't up yet
+            continue
+        # A cached slot-backed runner / materialized handle is resident unless
+        # a slot row contradicts it (above) — a momentary slot-probe miss must
+        # not flash a warm model as "loading" for a beat.
+        if mk in seated or _cheaply_resident(mk):
+            continue
+        keys.add(mk)
+    return sorted(keys)
+
+
+# ---------------------------------------------------------------------------
+# LOAD INTENT (2026-09-29, load-state latency). A request's model is recorded
+# here from the moment the worker starts admitting it (before evict-to-fit and
+# the slot /load) until the request ends. The heartbeat reports the key as
+# ``loading`` only while it is NOT resident (see _loading_model_keys), and the
+# beat loop is woken (``_HB_WAKE``) at the cold edges so central sees "loading"
+# within the nudge debounce instead of the 15s cadence. Warm requests add and
+# remove their key without ever waking a beat.
+# ---------------------------------------------------------------------------
+_LOAD_INTENT: dict = {}            # model_key -> first-seen epoch seconds
+_LOAD_INTENT_LOCK = threading.Lock()
+
+
+def _load_intent_keys() -> list[str]:
+    with _LOAD_INTENT_LOCK:
+        return sorted(_LOAD_INTENT)
+
+
+def _cheaply_resident(model_key: str) -> bool:
+    """In-memory residency facts only (no slot HTTP probe, no nvidia-smi):
+    a materialized in-process handle or a cached slot-backed HTTP runner."""
+    try:
+        if _is_materialized(model_key) is True:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from hugpy_engine.llama.runners.get import slot_backed_model_keys
+        return model_key in slot_backed_model_keys()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _load_intent_begin(model_key: "str | None") -> bool:
+    """Record intent; wake the beat if the model is NOT cheaply resident (a
+    cold load is about to start). Returns True when it woke the beat, so the
+    matching ``_load_intent_end`` can wake it again at the done/refused edge."""
+    if not model_key:
+        return False
+    mk = str(model_key)
+    with _LOAD_INTENT_LOCK:
+        _LOAD_INTENT.setdefault(mk, time.time())
+    cold = not _cheaply_resident(mk)
+    if cold:
+        try:
+            _HB_WAKE.set()
+        except Exception:  # noqa: BLE001
+            pass
+    return cold
+
+
+def _load_intent_end(model_key: "str | None", cold: bool = False) -> None:
+    if not model_key:
+        return
+    with _LOAD_INTENT_LOCK:
+        _LOAD_INTENT.pop(str(model_key), None)
+    if cold:
+        try:
+            _HB_WAKE.set()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _path_bytes(path: str) -> int:
@@ -4251,6 +4416,10 @@ def build_app(state: "WorkerState") -> Flask:
             # bounded-wait timeout this raises ModelBusy -> honest 503 below.
             gate_token = gen_gate.acquire_for_payload(
                 payload, cancel_event=queued_cancel)
+            # Load-state latency (2026-09-29): from here until the request ends
+            # the model is "loading" unless it is already resident — reported on
+            # the heartbeat, woken at the cold edges (see _load_intent_begin).
+            _cold = _load_intent_begin(payload.get("model_key"))
             try:
                 _prepare_load_contract(state, payload.get("model_key"),
                                        request_spill)
@@ -4264,6 +4433,7 @@ def build_app(state: "WorkerState") -> Flask:
                 result = _run_once(payload, state)
             finally:
                 gate_token.release()
+                _load_intent_end(payload.get("model_key"), _cold)
             try:
                 job_store.finish(req_id,
                                  error=None if result.get("ok", True)
@@ -4401,12 +4571,14 @@ def build_app(state: "WorkerState") -> Flask:
             return jsonify(busy.as_error(
                 {"id": state.worker_id, "name": state.name})), 503
 
+        _cold = _load_intent_begin(payload.get("model_key"))   # load-state latency
         try:
             _prepare_load_contract(state, payload.get("model_key"),
                                    request_spill)
             _apply_spill(request_spill)
         except Exception as exc:  # before Response: retain a real HTTP error
             gate_token.release()
+            _load_intent_end(payload.get("model_key"), _cold)
             return jsonify(_with_load_failure(
                 {"ok": False,
                  "error": f"{type(exc).__name__}: {exc}",
@@ -4434,6 +4606,7 @@ def build_app(state: "WorkerState") -> Flask:
                 # Release on normal end, error, OR client disconnect (Flask closes
                 # the generator) — the gate must never leak a permit.
                 gate_token.release()
+                _load_intent_end(payload.get("model_key"), _cold)
                 # tokens_out is deliberately NOT counted for a stream: the token
                 # total is not stated on this path, and an estimate in a health
                 # file is worse than an honest absence.
@@ -14039,7 +14212,7 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             # probes. Hoisted above the collector so the load_seconds stamp
             # reads the same loading view this beat reports.
             _loaded_keys = loaded_model_keys()
-            _loading_keys = _loading_model_keys()
+            _loading_keys = _loading_model_keys(_slots)
             # F4c: the beat never claims a resident it cannot back with a live
             # runner or a healthy slot child (see _loaded_models_live_check).
             try:

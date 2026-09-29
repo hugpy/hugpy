@@ -67,7 +67,10 @@ export function isMeasuredResident(a) {
 }
 
 export function residentState(a, _loadedSet, loadingSet) {
-  if (a?.model_key && loadingSet?.has(a.model_key)) {
+  // `a.loading` is the row's own claim (slot /load window, cold admission) —
+  // merged per beat from the liveness feed (2026-09-29); the worker-level
+  // `loading` list is the same fact from the heartbeat. Either wins.
+  if (a?.loading === true || (a?.model_key && loadingSet?.has(a.model_key))) {
     return { state: 'heating', glyph: '🔶 loading', title: 'weights loading into VRAM/RAM right now' }
   }
   if (a.kind === 'slot') {

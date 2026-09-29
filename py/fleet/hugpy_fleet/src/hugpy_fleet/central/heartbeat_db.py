@@ -169,6 +169,21 @@ def rows() -> list[dict] | None:
     return [{"worker_id": w, "name": n, "ts": t, "payload": p} for w, n, t, p in out]
 
 
+_LIVE_ALLOC_KEYS = ("model_key", "kind", "slot_id", "healthy", "busy", "loading",
+                    "loading_since", "materialized", "vram_bytes", "device",
+                    "gpu_index", "serving")
+
+
+def _slim_allocations(allocs) -> list[dict]:
+    """The load-state scalars of every allocation row (omit-when-None)."""
+    out = []
+    for a in allocs or []:
+        if not isinstance(a, dict) or not a.get("model_key"):
+            continue
+        out.append({k: a[k] for k in _LIVE_ALLOC_KEYS if a.get(k) is not None})
+    return out
+
+
 def liveness_from_record(rec: dict, ts: float | None, stale_s: float) -> dict:
     """The small per-worker liveness row (shared shape for DB rows and roster rows)."""
     now = time.time()
@@ -183,6 +198,13 @@ def liveness_from_record(rec: dict, ts: float | None, stale_s: float) -> dict:
         "answering": sorted({a.get("model_key") for a in allocs if isinstance(a, dict) and a.get("model_key") and a.get("busy")}),
         "loaded_models": list(rec.get("loaded_models") or []),
         "loading": list(rec.get("loading") or []),
+        # LOAD-STATE-LATENCY (2026-09-29): the per-allocation LOAD STATE rides
+        # the small per-beat feed too. The big `workers` roster is rebuilt at
+        # most every 30s (and strips vram_bytes/busy from its digest), so a
+        # seat's healthy flip and its growing VRAM only reached the console
+        # after the next roster rebuild — i.e. after the first answer. A few
+        # scalars per resident; the console merges them into the roster rows.
+        "allocations": _slim_allocations(allocs),
         "gpus": gpus,
         "free_ram": rec.get("free_ram"),
         "pkg_version": rec.get("pkg_version"),

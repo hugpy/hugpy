@@ -524,6 +524,19 @@
 /* Encroachment slice: an amber segment floated at the tail of the fill so the
    operator sees budget eaten by external usage vs the worker's own models. */
 .wp-vram-bar { position: relative; }
+/* Pending (loading) segment: the part of the card a model is still lifting
+   onto — hatched amber over the measured tail of the fill, or dashed-outline
+   amber appended after it when only an estimate is known yet (2026-09-29). */
+.wp-vram-pending {
+  position: absolute; top: 0; height: 100%;
+  background: repeating-linear-gradient(45deg,
+    rgba(210, 153, 34, 0.75) 0, rgba(210, 153, 34, 0.75) 3px,
+    rgba(210, 153, 34, 0.35) 3px, rgba(210, 153, 34, 0.35) 6px);
+  animation: wp-pending-shift 1.2s linear infinite;
+}
+.wp-vram-pending-est { opacity: 0.55; outline: 1px dashed rgba(210, 153, 34, 0.7); outline-offset: -1px; }
+@keyframes wp-pending-shift { from { background-position: 0 0; } to { background-position: 12px 0; } }
+.wp-gpu-loading { margin-left: 6px; font-size: 0.85em; vertical-align: middle; }
 .wp-vram-encroach {
   position: absolute; top: 0; right: 0; height: 100%;
   background: repeating-linear-gradient(45deg,
