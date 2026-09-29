@@ -17,6 +17,7 @@ import {
 } from './constants'
 import { fmtBytes, fmtServed, midTrunc } from './formatters'
 import { ExternalLeases } from './ExternalLeases'
+import { TestFireButton, TestFireStrip, useTestFire } from './TestFire'
 import { ResidencyMenu } from './ResidencyMenu'
 import { ResourceStrip } from './ResourceStrip'
 import { ContextPreview } from './ContextPreview'
@@ -49,6 +50,9 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   // the same words the Models table and the Metrics picker use. Feature-
   // detected — an older central keeps the legacy pill below.
   const mstatus = useModelStatus()
+  // Per-worker TEST FIRE (operator ask 2026-09-29): random tiny calls at every
+  // text-gen model on this worker; button in the actions row, strip below.
+  const testFire = useTestFire(worker)
   const [pick, setPick]       = useState('')
   const [newSpill, setNewSpill] = useState({})   // allocation for the next assign
   const [allocMenu, setAllocMenu] = useState(null)   // model key whose in-place alloc menu is open
@@ -1317,6 +1321,9 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                 onClick={() => onRestart(worker)} disabled={restarting}>
           {restarting ? '↻ restarting…' : '↻ Restart'}
         </button>
+        {/* ⟳ Test fire — randomly call every text-gen model on this worker
+            (central background job; polled while running, Stop while live). */}
+        <TestFireButton tf={testFire} disabled={restarting || worker.status !== 'online'} />
         {/* ⬆ Update — converge this worker onto central's required version now
             instead of waiting for its next heartbeat. It pip-installs and
             restarts itself, so it shares the restart transient (and its flag). */}
@@ -1345,6 +1352,9 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       {/* External gpu_lease residents (batch jobs as pseudo-models) with live
           evictable/resume policy toggles; renders nothing when none exist. */}
       <ExternalLeases worker={worker} />
+
+      {/* Test-fire strip: round, done/planned, ok/failed, per-model last status. */}
+      <TestFireStrip tf={testFire} />
 
       {/* Two-tier resource governance: the box's OWN config (caps) is the hard
           ceiling; central-set limits are clamped to it server-side. */}

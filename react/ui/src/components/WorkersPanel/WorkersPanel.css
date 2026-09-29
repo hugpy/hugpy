@@ -393,6 +393,49 @@
   border-radius: var(--radius); color: #d9912f;
 }
 .wp-restart:hover:not(:disabled) { background: rgba(217, 145, 47, 0.22); }
+/* Test fire: same chip idiom, violet to read as "exercise" — not reclaim, not danger. */
+.wp-test-fire {
+  font-size: 11px; padding: 2px 8px;
+  background: rgba(184, 161, 232, 0.10); border: 1px solid rgba(184, 161, 232, 0.4);
+  border-radius: var(--radius); color: #b8a1e8;
+}
+.wp-test-fire:hover:not(:disabled) { background: rgba(184, 161, 232, 0.22); }
+.wp-test-fire-stop { color: var(--red); background: rgba(248, 113, 113, 0.1); border-color: rgba(248, 113, 113, 0.4); }
+.wp-test-fire-stop:hover:not(:disabled) { background: rgba(248, 113, 113, 0.2); }
+
+/* Test-fire strip under the row: head line (state + counters) and per-model chips. */
+.wp-tf-strip {
+  margin: 4px 0 2px; padding: 4px 8px; font-size: 11px;
+  border: 1px dashed rgba(184, 161, 232, 0.35); border-radius: var(--radius);
+  background: rgba(184, 161, 232, 0.04);
+}
+.wp-tf-running { border-style: solid; }
+.wp-tf-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wp-tf-title { color: #b8a1e8; font-weight: 600; }
+.wp-tf-state { color: var(--muted); }
+.wp-tf-state-running { color: #b8a1e8; }
+.wp-tf-stat { color: var(--muted); white-space: nowrap; }
+.wp-tf-ok { color: var(--green); }
+.wp-tf-fail { color: var(--red); }
+.wp-tf-skip { color: var(--muted); border-bottom: 1px dotted var(--muted); cursor: help; }
+.wp-tf-inflight { color: var(--yellow); overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
+.wp-tf-err { color: var(--red); overflow: hidden; text-overflow: ellipsis; max-width: 420px; white-space: nowrap; }
+.wp-tf-spacer { flex: 1; }
+.wp-tf-toggle { padding: 0 6px; color: var(--muted); background: none; border: none; cursor: pointer; }
+.wp-tf-toggle:hover { color: var(--text); }
+.wp-tf-models { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
+.wp-tf-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px;
+  border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--muted); white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; cursor: help;
+}
+.wp-tf-chip em { font-style: normal; opacity: 0.75; }
+.wp-tf-chip-ok   { color: var(--green); background: rgba(74, 222, 128, 0.08);  border-color: rgba(74, 222, 128, 0.35); }
+.wp-tf-chip-fail { color: var(--red);   background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.4); }
+.wp-tf-chip-pending { color: var(--muted); border-style: dashed; }
+.wp-tf-chip-skip { color: var(--muted); border-style: dotted; opacity: 0.8; }
+.wp-tf-chip-live { box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.6); }
+.wp-tf-last { flex-basis: 100%; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wp-restart:disabled { opacity: .6; cursor: default; }
 /* Update: same chip. Quiet/dimmed when the worker is already at central's
    required version (the call is a no-op); red-accented when it's skewed, to
