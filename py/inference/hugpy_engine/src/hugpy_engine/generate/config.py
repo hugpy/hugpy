@@ -8,6 +8,7 @@ from typing import Any, Optional
 from abstract_essentials import get_logFile
 from hugpy_engine.config.main import get_model_config, resolve_model_source
 from hugpy_engine.peft_adapters import AdapterBaseUnavailable, resolve_adapter_pair, standalone_load_refusal
+from hugpy_engine.serve.load_failure import MissingDependencyFailure
 from hugpy_engine.schemas.event_schemas import DoneEvent, ErrorEvent, TokenEvent
 from hugpy_engine.schemas.runner_schemas import StreamEvent
 from hugpy_platform.constants import DEFAULT_LOCAL_FILES_ONLY
@@ -76,6 +77,21 @@ class DeepCoderConfig:
         )
 
 
+def adapter_base_refusal(model_key: str, exc: AdapterBaseUnavailable) -> MissingDependencyFailure:
+    """The FINAL refusal for an adapter whose base is not in this store.
+
+    It used to be a plain ``RuntimeError(f"{model_key}: {exc}")`` — which
+    central's hold loop could not tell from a transient, so it retried the load
+    indefinitely ("retrying ... worker load state is not confirmed"). A
+    ``MissingDependencyFailure`` (load class ``missing_dependency``) carries
+    ``base_id`` and the FIX text on ``load_failure``; central reads the class
+    as final and marks the job terminal; the v1 envelope's ``error.type`` is
+    the class. Chain the original so nothing is lost."""
+    return MissingDependencyFailure(f"{model_key}: {exc}", base_id=exc.base_model,
+                                    fix=getattr(exc, "fix", None), model_key=model_key,
+                                    path=exc.adapter_dir)
+
+
 def pick_device_and_dtype(torch, device: Optional[str], dtype) -> tuple[str, Any]:
     chosen = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -142,7 +158,7 @@ def build_deepcoder_runtime(
     try:
         model_dir, adapter_dir = resolve_adapter_pair(model_dir)
     except AdapterBaseUnavailable as exc:
-        raise RuntimeError(f"{model_key}: {exc}") from exc
+        raise adapter_base_refusal(model_key, exc) from exc
     if adapter_dir:
         logger.info("%s is a PEFT adapter; base=%s adapter=%s",
                     model_key, model_dir, adapter_dir)

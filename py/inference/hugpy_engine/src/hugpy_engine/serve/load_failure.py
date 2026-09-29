@@ -36,8 +36,19 @@ HARD = "hard_load_failure"
 # (a slot child). When no slot could seat it, the load is REFUSED with this
 # class instead of silently loading the language weights text-only in-process.
 VISION_NEEDS_SLOT = "vision_needs_slot"
+# missing_dependency (2026-09-29): the model is on disk but something it
+# cannot load without is NOT — a PEFT adapter whose base model is absent from
+# the worker's store (veeraragavan410~Llama-3.2-3B-sentiment, base
+# unsloth/Llama-3.2-3B-Instruct). FINAL for this attempt and spends nothing:
+# no retry can conjure the base; central must mark the job terminal instead of
+# "retrying ... worker load state is not confirmed" forever. Repaired by a
+# download, so it is state-dependent (fast refusal, never a cached verdict).
+MISSING_DEPENDENCY = "missing_dependency"
 LOAD_FAILURE_CLASSES = (HARD, "vram_fit", "engine_unavailable", "unreachable",
-                        VISION_NEEDS_SLOT, "other")
+                        VISION_NEEDS_SLOT, MISSING_DEPENDENCY, "other")
+# Classes that are FINAL for the attempt by construction — central's hold loop
+# must never classify one as transient, whatever the prose says.
+FINAL_LOAD_CLASSES = frozenset((HARD, VISION_NEEDS_SLOT, MISSING_DEPENDENCY))
 # The slot agent's HARD wording (slot_agent.Slot.load); central's
 # remote._PERMANENT_LOAD_MARKERS family keys on the same phrase.
 HARD_MARKER = "hard load failure"
@@ -80,6 +91,25 @@ class ModelLoadFailure(RuntimeError):
         return {"class": self.load_class, "loader_stderr": self.loader_stderr,
                 "path": self.path, "model_key": self.model_key,
                 "log_ref": self.log_ref, "message": str(self) or None}
+
+
+class MissingDependencyFailure(ModelLoadFailure):
+    """``missing_dependency``: the model cannot load because a dependency it
+    names is not in this store. ``base_id`` is the thing to acquire; ``fix``
+    is the operator instruction, verbatim. Both ride ``load_failure``."""
+
+    def __init__(self, message: str = "", *, base_id: "str | None" = None,
+                 fix: "str | None" = None, **kw):
+        kw.setdefault("load_class", MISSING_DEPENDENCY)
+        super().__init__(message, **kw)
+        self.base_id = base_id
+        self.fix = fix
+
+    @property
+    def load_failure(self) -> dict:
+        out = super().load_failure
+        out.update({"base_id": self.base_id, "fix": self.fix})
+        return out
 
 
 class HardLoadFailure(ModelLoadFailure):
@@ -171,6 +201,13 @@ def load_failure_of(exc: BaseException, *, classify: bool = False,
             out = {"class": "engine_unavailable", "loader_stderr": None, "path": None}
         elif "LoadRefusal" in names and not classify:
             out = {"class": "vram_fit", "loader_stderr": None, "path": None}
+        elif "AdapterBaseUnavailable" in names:
+            # A bare adapter refusal that escaped without the structured
+            # wrapper (an older call site): still a missing dependency.
+            _ab = next(e for e in _chain(exc) if type(e).__name__ == "AdapterBaseUnavailable")
+            out = {"class": MISSING_DEPENDENCY, "loader_stderr": None, "path": None,
+                   "base_id": getattr(_ab, "base_model", None),
+                   "fix": getattr(_ab, "fix", None)}
         elif classify:
             text = " ".join(f"{type(e).__name__}: {e}" for e in _chain(exc))
             cls = classify_text(text)

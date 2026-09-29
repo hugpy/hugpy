@@ -83,10 +83,13 @@ class AdapterBaseUnavailable(RuntimeError):
     """
 
     def __init__(self, message: str, *, adapter_dir: str,
-                 base_model: Optional[str] = None):
+                 base_model: Optional[str] = None, fix: Optional[str] = None):
         super().__init__(message)
         self.adapter_dir = adapter_dir
         self.base_model = base_model
+        # The operator instruction, separately from the prose (2026-09-29), so
+        # the structured ``missing_dependency`` refusal can carry it as a field.
+        self.fix = fix
 
 
 # ---------------------------------------------------------------------------
@@ -282,5 +285,9 @@ def resolve_adapter_pair(model_dir: str, *,
     base = base_model or adapter_base_id(model_dir)
     reason = adapter_unserveable_reason(model_dir, base_model=base, root=root)
     if reason:
-        raise AdapterBaseUnavailable(reason, adapter_dir=model_dir, base_model=base)
+        raise AdapterBaseUnavailable(reason, adapter_dir=model_dir, base_model=base,
+                                     fix=(_fix_hint(base) if base else
+                                          "re-export the adapter with its base "
+                                          "recorded, or merge it into its base and "
+                                          "register the merged checkpoint"))
     return find_base_model_dir(base, root), model_dir

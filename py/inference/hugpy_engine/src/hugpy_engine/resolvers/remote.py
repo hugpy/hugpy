@@ -1853,6 +1853,14 @@ def _admit_cold_hold(model_key: str, worker: Optional[dict],
 # actually fails to load".
 _PERMANENT_LOAD_MARKERS = (
     "won't fit", "wont fit", "won’t fit", "loadrefusal", "budgetrefusal",
+    # missing_dependency (2026-09-29): a PEFT adapter whose base model is not
+    # in the worker's store. It reached here as a plain RuntimeError and was
+    # retried indefinitely ("retrying ... worker load state is not confirmed").
+    # No retry can conjure the base — FINAL for this attempt. The structured
+    # class is honoured by _is_final_load_class regardless of wording; these
+    # markers cover a worker still emitting the old prose.
+    "missing_dependency", "base model is not in this store",
+    "cannot be loaded without it",
     "insufficient storage", "out of memory", "cuda error", "cublas",
     "no capable worker", "no registered worker", "no worker is available",
     "no worker available", "local serving disabled", "hugpy_no_local_serving",
@@ -1951,7 +1959,23 @@ _PERMANENT_LOAD_MARKERS = (
 )
 
 
+def _is_final_load_class(lf: Any) -> bool:
+    """True when a STRUCTURED load_failure (dict, or an object carrying one)
+    names a class that is final by construction (serve.load_failure
+    FINAL_LOAD_CLASSES: hard_load_failure / vision_needs_slot /
+    missing_dependency). The hold loop consults this beside the prose markers
+    so a final verdict is never re-classified as transient by its wording."""
+    try:
+        from hugpy_engine.serve.load_failure import FINAL_LOAD_CLASSES
+    except Exception:  # noqa: BLE001
+        return False
+    d = lf if isinstance(lf, dict) else getattr(lf, "load_failure", None)
+    return isinstance(d, dict) and d.get("class") in FINAL_LOAD_CLASSES
+
+
 def _is_permanent_load_error(err: Any) -> bool:
+    if _is_final_load_class(err):
+        return True
     low = str(getattr(err, "message", None) or err or "").lower()
     return any(m in low for m in _PERMANENT_LOAD_MARKERS)
 
@@ -1988,6 +2012,8 @@ _STATE_DEPENDENT_LOAD_MARKERS = (
     "out of memory", "insufficient storage",
     # inventory / provisioning — resolved by a download or freed disk
     "could not provision", "could not fetch model", "not found on central",
+    # a missing PEFT base is repaired by acquiring it — fast refusal, no cache
+    "missing_dependency", "base model is not in this store",
     # routing / availability — resolved by a heartbeat or a policy flag
     "no capable worker", "no registered worker", "no worker is available",
     "no worker available", "requested worker",
@@ -2602,7 +2628,7 @@ def _cold_progress(model_key: str, worker: Optional[dict],
     if not ls:
         return False, None, None, None, False
     err = ls.get("error")
-    if err and _is_permanent_load_error(err):
+    if err and (_is_permanent_load_error(err) or _is_final_load_class(ls.get("load_failure"))):
         return (True, ls.get("progress"), ls.get("message"),
                 _HonestError(str(err), ls.get("load_failure")), False)
     moved = bool(ls.get("healthy") or ls.get("in_progress"))
@@ -3829,7 +3855,7 @@ def make_delegating_runner(framework: str, task: str):
                                                "running %s locally", worker.get("id"),
                                                ev.message, self.model_key)
                                 raise _RelayUnbuildable()
-                            if _is_permanent_load_error(ev.message):
+                            if _is_permanent_load_error(ev.message) or _is_final_load_class(_ev_lf):
                                 _record_load_verdict(worker.get("id"),
                                                      self.model_key, str(ev.message))
                                 raise _LoadFailed(_humanize_worker_error(wname, ev.message),
@@ -3925,7 +3951,7 @@ def make_delegating_runner(framework: str, task: str):
                         logger.warning("worker offload failed (%s); running %s locally",
                                        exc, self.model_key)
                         raise _RelayUnbuildable()
-                    if _is_permanent_load_error(exc):
+                    if _is_permanent_load_error(exc) or _is_final_load_class(structured_load_failure(exc)):
                         _record_load_verdict(worker.get("id"),
                                              self.model_key, str(exc))
                         raise _LoadFailed(f"worker {wname} failed for {self.model_key}: {exc}",
