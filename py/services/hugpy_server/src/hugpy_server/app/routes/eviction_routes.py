@@ -52,8 +52,28 @@ STREAM_MAX_S = 3600.0
 MAX_BATCH = 500
 
 
+def _batch_names_a_registered_worker() -> bool:
+    """Tokenless binding: every ``worker_id`` the batch carries must be a worker
+    central knows (the same binding a heartbeat has through its URL), and the
+    batch must carry at least one. Never raises."""
+    try:
+        body = request.get_json(silent=True) or {}
+        events = body.get("events") if isinstance(body, dict) else None
+        if not isinstance(events, list):
+            return False
+        ids = {str(e.get("worker_id")) for e in events
+               if isinstance(e, dict) and e.get("worker_id")}
+        if not ids:
+            return False
+        from hugpy_fleet.central.workers import worker_store
+        return all(worker_store.get(wid) is not None for wid in ids)
+    except Exception:  # noqa: BLE001 — an unreadable batch is not a credential
+        return False
+
+
 def _worker_authorized() -> bool:
-    """Ingest gate: the SAME enrollment credential register/heartbeat use.
+    """Ingest gate: EXACTLY the credential rule register/heartbeat apply
+    (``worker_routes._enrollment_ok``).
 
     Deliberately not a new scheme. A worker already holds exactly one central
     credential; making it hold a second one for telemetry would be a second
@@ -62,21 +82,31 @@ def _worker_authorized() -> bool:
     cannot be imported we fail CLOSED — an unauthenticated write endpoint is
     not an acceptable degradation.
 
-    STRICTER than register/heartbeat on purpose (keeper, 2026-07-29): those
-    keep the gradual-rollout allowance (no token -> allow while
-    HUGPY_WORKER_ENROLL_REQUIRED is off), but this central's public origin
-    proxies straight to Flask, so a tokenless WRITE endpoint here is writable
-    by the whole internet — a probe proved it. Ingest therefore requires a
-    PRESENT, VALID token always. The fleet was enrolled with per-box tokens
-    the same day, so no live worker regresses."""
+    F5 (core isolation step 2, 2026-09-29): this gate used to demand a
+    PRESENT token while the heartbeat gate followed the gradual-rollout rule
+    (tokenless allowed while HUGPY_WORKER_ENROLL_REQUIRED is off). Both
+    workers' relays therefore logged ``HTTP Error 401: UNAUTHORIZED (events
+    dropped)`` while their heartbeats — same box, same ``Authorization``
+    header — were accepted, and central's journal carried none of the fleet's
+    ``evict.start/done`` events. One credential, one rule: a batch
+    authenticates the way the beat carrying the same worker_id does. The
+    tokenless case keeps a defence-in-depth binding: the batch must name a
+    worker central already knows (``_batch_names_a_registered_worker``), the
+    same binding a heartbeat has through its URL."""
     try:
-        from hugpy_server.app.routes.worker_routes import _bearer_token
-        from hugpy_fleet.central.enrollment_tokens import verify_enrollment_token
-        tok = _bearer_token()
-        return tok is not None and bool(verify_enrollment_token(tok))
+        from hugpy_server.app.routes.worker_routes import _bearer_token, _enrollment_ok
     except Exception:  # noqa: BLE001
         logger.warning("eviction ingest: enrollment gate unavailable — refusing")
         return False
+    try:
+        if not _enrollment_ok():
+            return False                      # present-but-invalid, or required+absent
+        if _bearer_token() is not None:
+            return True                       # a VALID token (invalid ones failed above)
+    except Exception:  # noqa: BLE001
+        logger.warning("eviction ingest: enrollment gate failed — refusing")
+        return False
+    return _batch_names_a_registered_worker()
 
 
 def _operator_or_worker() -> bool:
