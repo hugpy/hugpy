@@ -8,7 +8,7 @@ import { useEffect, useRef } from 'react'
 // v3 final semantics (operator-locked): the POLICY axis has exactly two
 // tiers — on-demand (the default; no stored override) and static (locked
 // seat; permanent with 📌 pin). "Serving" is purely a STATE (a model in a
-// slot) — the live pills (🔥 serving / ⚡ answering / ○ cold) tell that
+// slot) — the live pills (🔥 serving / ⚡ answering / ○ not loaded) tell that
 // truth; no policy is ever called serving.
 export const RESIDENCY_OPTIONS = [
   ['on-demand', '⏲ on-demand', 'loads on call; holds its slot until another model needs the seat (default)'],

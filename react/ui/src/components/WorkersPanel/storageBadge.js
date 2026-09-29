@@ -2,8 +2,9 @@
 // state-pill palette. Protected models CANNOT be deleted; evictable ones can,
 // and any in the current proposal are flagged for freeing.
 export function storageBadge(m, proposed) {
-  // REFUSED (storage): the pull never started — even a full FIFO of the cold,
-  // unprotected models couldn't free enough room under this worker's budget.
+  // REFUSED (storage): the pull never started — even a full FIFO of the
+  // not-loaded, unprotected models couldn't free enough room under this
+  // worker's budget.
   // Doctrine "defaults are promises": a model that cannot fit must read as
   // MISSING with a reason, never as a pull stuck at 7%. `title` carries the
   // worker's own honest reason string (needs / budget / reclaimable / blocked).
@@ -38,5 +39,7 @@ export function storageBadge(m, proposed) {
   if (m.assigned) return { pill: 'wp-pill-idle', glyph: '📎 assigned', title: 'designated to this worker — protected in the operator-gated bulk reaper' }
   if (m.pinned) return { pill: 'wp-pill-loaded', glyph: '📌 pinned', title: 'this allocation survives restarts (routing to this worker is durable). Does NOT download the model and does NOT protect its files from eviction — bytes arrive on call and can be evicted to make room (routing is unaffected). Only 🔒 static keeps files on disk.' }
   if (m.protected) return { pill: 'wp-pill-idle', glyph: '🛡 protected', title: m.why || 'protected' }
-  return { pill: 'wp-pill-cold', glyph: '○ evictable', title: 'on disk, unassigned & cold — reclaimable' }
+  // Storage tier hot (this worker's own drive), residency not loaded, no
+  // attribution — the reaper's candidate. Same words as the picker/worker row.
+  return { pill: 'wp-pill-cold', glyph: '○ evictable', title: 'hot (on this worker\'s drive), not loaded, unassigned — reclaimable' }
 }

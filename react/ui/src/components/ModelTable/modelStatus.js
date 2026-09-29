@@ -10,6 +10,8 @@
 // NO GRADER FOR <task> / no failures recorded / ...) with the reason and the
 // action that would produce it — never a blank cell, never a fake 0.
 
+import { unifiedStatusView } from '../WorkersPanel/workerTier.js'
+
 export const WORTH_ORDER = ['ready', 'weak', 'no-grader', 'ungraded', 'unverified', 'unservable', 'held', 'broken']
 export const WORTH_META = {
   ready: { tone: 'ok', text: 'ready' },
@@ -28,8 +30,13 @@ export const BUCKETS = {
 }
 export const BUCKET_LABELS = { ready: 'ready', waste: 'wasting your time', unknown: 'unknown' }
 
-// The per-(model, worker) vocabulary — identical to the server's
-// model_worker_state (WORKER_STATES + the failed overlay).
+// The per-(model, worker) WIRE vocabulary — identical to the server's
+// model_worker_state (WORKER_STATES + the failed overlay). It is NOT what the
+// chips print: 'hot' here means loaded-idle and 'cold' means on-this-drive-but-
+// not-loaded, which conflates residency with storage. workerChips() renders
+// every entry through unifiedStatusView (workerTier.js) as
+// "<residency> · <tier>" so the Models table, the worker rows and the picker
+// share one vocabulary (hot / shared / central / none).
 export const WORKER_STATES = ['answering', 'serving', 'hot', 'loading', 'downloading from central', 'cold', 'on central', 'on another worker', 'unknown', 'not allocated', 'missing', 'n/a', 'failed']
 export const WORKER_STATE_META = {
   answering: { icon: '⚡', tone: 'ok' },
@@ -186,22 +193,29 @@ export function failureView(row) {
 export function servableView(row) {
   const s = row?.servable
   if (!s) return { text: 'UNKNOWN', tone: 'muted', title: 'status row has no servable block' }
-  if (s.now) return { text: `hot: ${s.where.join(', ')}`, tone: 'ok', title: s.reason }
+  if (s.now) return { text: `loaded: ${s.where.join(', ')}`, tone: 'ok', title: s.reason }
   if ((s.provisioning || []).length) {
     const p = s.provisioning[0]
     return { text: `provisioning ${p.worker}${p.frac != null ? ` ${Math.round(p.frac * 100)}%` : ''}`, tone: 'live', title: s.reason }
   }
-  if ((s.cold || []).length) return { text: `cold: ${s.cold.join(', ')}`, tone: 'warn', title: s.reason }
-  if ((s.fits || []).length) return { text: `fits: ${s.fits.join(', ')}`, tone: 'warn', title: s.reason }
+  // servable.cold = on that worker's drive (tier hot) and fits, just not loaded.
+  if ((s.cold || []).length) return { text: `not loaded · hot: ${s.cold.join(', ')}`, tone: 'warn', title: s.reason }
+  if ((s.fits || []).length) return { text: `fits, not on drive: ${s.fits.join(', ')}`, tone: 'warn', title: s.reason }
   return { text: 'not now', tone: 'bad', title: s.reason || 'servable block carries no reason' }
 }
 
-export function workerChips(row) {
+// `tierFor(w)` (optional) returns a tier string when the caller holds better
+// disk evidence than the status word — the worker row passes its own storage
+// survey (workerTierOf) so a model on this box's drive is 'hot' even when the
+// backend still says 'on central'. null → the backend word decides.
+export function workerChips(row, tierFor = null) {
   return (row?.workers || []).map(w => {
     const meta = WORKER_STATE_META[w.state] || WORKER_STATE_META.missing
-    return { worker: w.worker, state: w.state, label: w.label || w.state, icon: meta.icon,
+    const u = unifiedStatusView(w, tierFor ? tierFor(w) : null)
+    return { worker: w.worker, state: w.state, label: u.label, icon: meta.icon,
+      tier: u.tier, residency: u.residency,
       tone: w.held ? 'bad' : meta.tone, online: w.online !== false,
-      title: `${w.worker}: ${w.label || w.state}\n${w.detail || ''}` }
+      title: `${w.worker}: ${u.label}\n${w.detail || ''}\n(wire state: ${w.label || w.state})` }
   })
 }
 
@@ -244,6 +258,11 @@ export const STATUS_FILTER_OPTIONS = {
   grade: ['graded', 'not-graded', 'no-grader', 'lt50', 'ge50'],
   fail: ['any', 'none'],
   serv: ['now', 'cold', 'fits', 'no'],
+}
+// Display text for filter values whose URL token predates the unified
+// storage/residency vocabulary (the token stays for bookmarked URLs).
+export const STATUS_FILTER_LABELS = {
+  serv: { now: 'loaded now', cold: 'not loaded · hot', fits: 'fits, not on drive', no: 'not servable' },
 }
 
 export function parseStatusQuery(search) {

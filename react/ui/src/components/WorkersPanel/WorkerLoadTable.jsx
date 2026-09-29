@@ -63,7 +63,8 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
   const rowsByKey = useMemo(() => storageRowsByKey(worker), [worker])
   const tierOf = useCallback((m) => workerTierOf(m, worker, rowsByKey), [worker, rowsByKey])
   // Disk-presence on THIS worker — the hot tier. Deliberately not
-  // loaded_models: a model may be on disk while cold.
+  // loaded_models: a model may be on disk while not loaded (residency is a
+  // separate axis from storage tier).
   const onWorkerDrive = useCallback((m) => tierOf(m).tier === 'hot', [tierOf])
 
   // Pull the authoritative central-readiness map. Cheap + idempotent; polled
@@ -332,7 +333,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                   <td className="wp-cprov-cell">
                     {prov.state === 'ready' && (
                       <span className="wp-state-pill wp-cprov-ready"
-                            title="fully on central disk — allocatable">✓ on disk</span>
+                            title="central's copy is complete — allocatable from central">✓ ready</span>
                     )}
                     {prov.state === 'downloading' && (() => {
                       const job = prov.job || {}
@@ -360,7 +361,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                     {prov.state === 'absent' && (
                       <>
                         <span className="wp-state-pill wp-cprov-absent"
-                              title="not on central disk / not in the manifest">○ not on central</span>
+                              title="central has no copy (not on central's disk / not in the manifest)">○ absent</span>
                         {!m.ollama_model && m.worker_locations?.[workerId]
                           ? <button className="wp-cprov-dl" disabled={dlBusy.has(k)} onClick={() => copyFromWorker(k)}
                                    title={`Copy this worker's local files into Central's model store`}>

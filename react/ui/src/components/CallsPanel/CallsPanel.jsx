@@ -53,6 +53,20 @@ export default function CallsPanel() {
   const [paused, setPaused] = useState(false)
   const [cancelling, setCancelling] = useState({})
 
+  // Declared BEFORE cancelCall: its deps array names `load`, and a hook's deps
+  // array is evaluated during render — a `const` further down is still in its
+  // temporal dead zone there ("can't access lexical declaration 'load' before
+  // initialization", the live crash of 2026-09-29). Hooks that name each other
+  // must be declared in dependency order.
+  const load = useCallback(() => {
+    fetchJson('/api/llm/calls?limit=400')
+      .then(d => {
+        if (d && Array.isArray(d.calls)) { setRows(d.calls); setPath(d.path || ''); setNote(null) }
+        else setNote('call log reply was not a list (kept the last one)')
+      })
+      .catch(e => setNote(`call log refresh failed: ${e.message} (kept the last list)`))
+  }, [])
+
   const cancelCall = useCallback(async (row, event) => {
     event.stopPropagation()
     const requestId = row.client_request || row.request_id || row.id
@@ -68,15 +82,6 @@ export default function CallsPanel() {
       setCancelling(v => { const next = { ...v }; delete next[requestId]; return next })
     }
   }, [cancelling, load])
-
-  const load = useCallback(() => {
-    fetchJson('/api/llm/calls?limit=400')
-      .then(d => {
-        if (d && Array.isArray(d.calls)) { setRows(d.calls); setPath(d.path || ''); setNote(null) }
-        else setNote('call log reply was not a list (kept the last one)')
-      })
-      .catch(e => setNote(`call log refresh failed: ${e.message} (kept the last list)`))
-  }, [])
 
   useEffect(() => {
     load()
@@ -147,7 +152,11 @@ export default function CallsPanel() {
                 <td>{r.principal || '—'}</td>
                 <td className="cp-mono" title={r.kind || ''}>{r.kind || '—'}</td>
                 <td className="cp-model" title={r.model_key || ''}>{r.model || short(r.model_key, 42)}</td>
-                <td className={`cp-mono cp-loc cp-loc-${r.locality || 'na'}`} title="model weights already on the worker's local hot drive (hot) vs served off the shared array (cold), at job start">{r.locality || '—'}</td>
+                {/* Storage tier at job start, in the fleet's one vocabulary: the
+                    ledger's wire value 'cold' means "served off the shared
+                    array", i.e. tier `shared` (workerTier.js). Class keeps the
+                    wire value for the existing colours. */}
+                <td className={`cp-mono cp-loc cp-loc-${r.locality || 'na'}`} title="storage tier at job start: hot = weights already on the worker's own drive; shared = served off the shared/central array (wire value: cold)">{r.locality === 'cold' ? 'shared' : (r.locality || '—')}</td>
                 <td>{r.worker || '—'}</td>
                 <td className="cp-num" title={r.total_tokens != null ? `${r.input_tokens || 0} input + ${r.output_tokens || 0} output` : 'streamed token count'}>{r.total_tokens ?? r.tokens ?? 0}</td>
                 <td className="cp-num">{fmtDur(r.duration_ms)}</td>

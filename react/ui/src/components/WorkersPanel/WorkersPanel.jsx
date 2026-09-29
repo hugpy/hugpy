@@ -568,7 +568,7 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
     const freed = ((worker.storage && worker.storage.proposed_free_bytes) || 0) / 1e9
     const list = proposed.slice(0, 12).map(p => `  • ${p.model_key} (${(p.bytes / 1e9).toFixed(1)} GB)`).join('\n')
     const more = proposed.length > 12 ? `\n  …and ${proposed.length - 12} more` : ''
-    if (!confirm(`Approve eviction on ${worker.name}?\n\nFrees ~${freed.toFixed(1)} GB by deleting ${keys.length} cold, unprotected model(s):\n\n${list}${more}\n\nLoaded / 🔒static / assigned files are never touched. 📌 Pinned files ARE eligible — pin keeps the allocation, not the bytes (they re-pull on next call). Central re-checks this list and the worker re-proves each model before deleting.`)) return
+    if (!confirm(`Approve eviction on ${worker.name}?\n\nFrees ~${freed.toFixed(1)} GB by deleting ${keys.length} not-loaded, unprotected model(s):\n\n${list}${more}\n\nLoaded / 🔒static / assigned files are never touched. 📌 Pinned files ARE eligible — pin keeps the allocation, not the bytes (they re-pull on next call). Central re-checks this list and the worker re-proves each model before deleting.`)) return
     const url = `/api/llm/workers/${encodeURIComponent(worker.id)}/reap-approve`
     const body = JSON.stringify({ model_keys: keys })
     const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }
