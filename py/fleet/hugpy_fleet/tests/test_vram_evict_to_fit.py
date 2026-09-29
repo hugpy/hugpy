@@ -238,12 +238,19 @@ def test_full_evict_still_short_refuses_with_reasons(rig):
     rig.residents["idle2"] = {"vram_bytes": 5 * GIB, "host_mode": "subprocess"}
     plan = A._vram_evict_to_fit(_State(), "huge")
     assert plan["action"] == "refuse"
-    # It DID evict everything permissible (honest effort) but still short.
-    assert set(plan["evicted"]) == {"idle1", "idle2"}
+    # STABLE BUDGET (step 2, F1b): a refusing plan spends NO evictions — nothing
+    # would fit afterwards, so emptying the card is a wasted eviction. The
+    # refusal is honest about the effort it declined: it names what it
+    # considered and what that would have freed.
+    assert plan["evicted"] == []
+    assert set(rig.residents) == {"idle1", "idle2"}
     r = plan["reason"]
     assert r["needs_bytes"] == 30 * GIB
-    assert r["evicted_freed_bytes"] == 10 * GIB
+    assert r["evicted_freed_bytes"] == 0
+    assert set(r["evictions_considered"]) == {"idle1", "idle2"}
+    assert r["evictions_would_free_bytes"] == 10 * GIB
     assert "won't fit on GPU" in r["reason"]
+    assert "were NOT evicted" in r["reason"]
 
 
 # ── fail-open: unmeasurable never blocks a load ────────────────────────────
@@ -540,8 +547,12 @@ def test_k30_refusal_message_is_truthful_when_nothing_enumerable(rig, monkeypatc
 def test_k30_failed_eviction_is_counted_in_the_refusal(rig, monkeypatch):
     """An eviction attempt that frees nothing must surface in the refusal
     (evict_failed), never silently read as 'evicted 0 ... 0 protected'."""
+    # An EVICT plan (1 + 20 >= 10 GiB): the plan admits on the room 'stuck'
+    # frees, the eviction verb then fails to free it -> honest refusal naming
+    # the failed attempt. (A plan that refuses outright spends no evictions —
+    # step 2 F1b — so the failure must be provoked on an admitting plan.)
     rig.card["free"] = 1 * GIB
-    rig.card["need"] = 30 * GIB
+    rig.card["need"] = 10 * GIB
     rig.residents["stuck"] = {"vram_bytes": 20 * GIB, "host_mode": "subprocess"}
     monkeypatch.setattr(A, "_served_gguf_geometry", lambda mk: (None, None))
     monkeypatch.setattr(

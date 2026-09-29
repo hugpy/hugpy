@@ -115,13 +115,16 @@ def test_admission_gathers_once_and_decides_through_plan_fit(rig, monkeypatch):
     assert plan.action == "evict" and plan.evicted_keys == ["cold"]
 
 
-def test_refusal_re_plans_the_tail_from_a_fresh_snapshot_with_no_candidates(rig, monkeypatch):
-    """GUARD (step-2 slot): when the planned evictions leave the card short,
-    today's contract re-plans ONLY the offload/refusal tail from a FRESH free
-    read with NO remaining candidates; the refusal carries the plan's own
-    structured reason alongside the operator sentence. Making the first plan's
-    predicted budget authoritative ('stable budget') is the step-2 change and
-    will retire this second call. Established: core isolation step 1."""
+def test_stable_budget_plans_once_and_verifies_after_execution(rig, monkeypatch, caplog):
+    """INVARIANT (step 2, F1b — stable budget): one admission calls plan_fit
+    EXACTLY once and executes that plan from its one snapshot. A refusing plan
+    evicts nothing (nothing would fit afterwards — a wasted eviction); the
+    refusal is priced in the plan's basis and carries the plan's structured
+    reason. The card is read once more AFTER execution, by `plan_fit verify:`,
+    which only logs. Retires the step-1 guard that re-planned the tail from a
+    fresh read (S1b's second verdict line naming an already-gone victim).
+    Established: core isolation step 2 (2026-09-29)."""
+    import logging
     calls: list = []
     real = fit_plan_mod.plan_fit
 
@@ -135,17 +138,57 @@ def test_refusal_re_plans_the_tail_from_a_fresh_snapshot_with_no_candidates(rig,
     rig.residents.update({"idle": 2 * GIB})
     rig.lru.update({"idle": 100.0})
 
-    verdict = A._vram_evict_to_fit(_State(), "subject")
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        verdict = A._vram_evict_to_fit(_State(), "subject")
 
     assert verdict["action"] == "refuse"
-    assert verdict["evicted"] == ["idle"]
-    assert len(calls) == 2
-    assert calls[1][1] == ()                              # nothing left evictable
-    assert calls[1][0].free_bytes == 3 * GIB              # the fresh read (1G + 2G freed)
+    assert verdict["evicted"] == [] and rig.evicted == []       # a refuse plan evicts nothing
+    assert "idle" in rig.residents
+    assert len(calls) == 1, "one admission, one plan"
     reason = verdict["reason"]
     assert reason["state"] == "refused" and "won't fit on GPU" in reason["reason"]
-    assert reason["evicted_freed_bytes"] == 2 * GIB
+    assert reason["evicted_freed_bytes"] == 0
+    assert reason["free_vram_bytes"] == 1 * GIB                # the plan's basis
+    assert reason["free_vram_measured_bytes"] == 1 * GIB       # the verify read
     assert reason["plan_refuse_reason"].startswith("won't fit on GPU: needs 21474836480 B")
+    assert reason["fit_failure"]["kind"] == "vram_fit"
+    verdicts = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan_fit verdict:")]
+    verifies = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan_fit verify:")]
+    assert len(verdicts) == 1 and len(verifies) == 1
+    assert "mismatch=False" in verifies[0] and f"measured_free_bytes={GIB}" in verifies[0]
+
+
+def test_evict_plan_stops_on_the_snapshot_and_logs_a_verify_mismatch(rig, monkeypatch, caplog):
+    """INVARIANT (F1b): an `evict` plan's victims are walked from the snapshot
+    plus what each eviction REPORTED freeing — no live read decides. When the
+    card then measures differently from the plan's prediction (here the fake
+    device frees less than the victim's footprint), the admission still
+    returns the plan's verdict and the verify line says mismatch=True.
+    Established: core isolation step 2."""
+    import logging
+    rig.card["free"] = 1 * GIB
+    rig.card["need"] = 4 * GIB
+    rig.residents.update({"cold": 6 * GIB})
+    rig.lru.update({"cold": 100.0})
+
+    def _short_evict(state, mk, force=False):
+        rig.evicted.append(mk)
+        rig.residents.pop(mk, None)
+        rig.card["free"] += 2 * GIB              # the device frees only 2 GiB of the 6 recorded
+        return {"model_key": mk, "evicted": True, "vram_freed": 6 * GIB, "host_mode": "slot"}
+    monkeypatch.setattr(A, "_evict_model", _short_evict)
+
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        verdict = A._vram_evict_to_fit(_State(), "subject")
+
+    assert verdict["action"] == "evicted" and verdict["evicted"] == ["cold"]
+    assert verdict["freed_bytes"] == 6 * GIB
+    verifies = [r for r in caplog.records if r.getMessage().startswith("plan_fit verify:")]
+    assert len(verifies) == 1
+    assert verifies[0].levelno == logging.WARNING
+    msg = verifies[0].getMessage()
+    assert f"predicted_free_bytes={7 * GIB}" in msg and f"measured_free_bytes={3 * GIB}" in msg
+    assert "mismatch=True" in msg and "evicted=['cold']" in msg
 
 
 def test_fleet_flex_is_a_shim_over_the_engine_core():
