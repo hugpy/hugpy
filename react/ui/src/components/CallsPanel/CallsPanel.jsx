@@ -14,6 +14,27 @@ const POLL_MS = 5000
 const fmtClock = ts => (ts ? new Date(ts * 1000).toLocaleTimeString() : '—')
 const fmtDur = ms => (ms == null ? '—' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
 const short = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '—')
+// Stage stamps (2026-09-29): queued -> processing -> first token -> processed,
+// each written by central AT the transition (not reconstructed at the end), so
+// a call that is stuck shows WHERE it is stuck. Rendered as offsets from queued.
+const fmtOff = (ts, base) => (ts && base ? `+${(ts - base).toFixed(1)}s` : '—')
+function stagesText(r) {
+  const q = r.queued_ts || r.started_ts
+  const parts = [
+    `q ${fmtClock(q)}`,
+    `proc ${fmtOff(r.processing_ts, q)}`,
+    `tok1 ${fmtOff(r.first_token_ts, q)}`,
+    `${r.processed_status || 'done'} ${fmtOff(r.processed_ts || r.ended_ts, q)}`,
+  ]
+  return parts.join(' → ')
+}
+function liveStage(r) {
+  if (r.processed_ts || r.ended_ts) return null
+  if (r.stage === 'prefill') return 'prefill'
+  if (r.first_token_ts) return 'streaming'
+  if (r.processing_ts) return 'processing'
+  return 'queued'
+}
 
 function statusClass(s) {
   if (!s) return 'cp-st-unknown'
@@ -136,7 +157,7 @@ export default function CallsPanel() {
             <tr>
               <th aria-hidden="true" className="cp-expand-head" />
               <th>When</th><th>Status</th><th>Via</th><th>Client</th><th>User-agent</th><th>Who</th>
-              <th>Op</th><th>Model</th><th>Cache</th><th>Worker</th><th className="cp-num">Tokens</th><th className="cp-num">Took</th><th>Error</th><th>Action</th>
+              <th>Op</th><th>Model</th><th>Cache</th><th>Worker</th><th className="cp-num">Tokens</th><th className="cp-num">Took</th><th title="queued → processing → first token → processed (offsets from queued; stamped at each transition)">Stages</th><th>Error</th><th>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -145,7 +166,7 @@ export default function CallsPanel() {
               <tr className={`cp-call-row${r.error ? ' cp-row-bad' : ''}`} tabIndex={0} aria-expanded={!!expanded[r.id]} title="Click to show the full request" onClick={() => setExpanded(v => ({ ...v, [r.id]: !v[r.id] }))} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => ({ ...v, [r.id]: !v[r.id] })) } }}>
                 <td className="cp-expand">{expanded[r.id] ? '▾' : '▸'}</td>
                 <td className="cp-mono" title={r.started_ts ? new Date(r.started_ts * 1000).toISOString() : ''}>{fmtClock(r.started_ts)}</td>
-                <td><span className={`cp-st ${statusClass(r.status)}`}>{r.status || '—'}</span></td>
+                <td><span className={`cp-st ${statusClass(r.status)}`} title={r.processed_status ? `terminal: ${r.processed_status}` : (liveStage(r) ? `live: ${liveStage(r)}` : '')}>{r.status || '—'}{liveStage(r) && liveStage(r) !== r.status ? ` · ${liveStage(r)}` : ''}</span></td>
                 <td className="cp-mono" title={r.route || ''}>{r.transport || r.kind || '—'}{r.route ? ` ${short(r.route, 28)}` : ''}</td>
                 <td className="cp-mono">{r.client || '—'}</td>
                 <td className="cp-mono" title={r.ua || ''}>{short(r.ua, 34)}</td>
@@ -160,13 +181,14 @@ export default function CallsPanel() {
                 <td>{r.worker || '—'}</td>
                 <td className="cp-num" title={r.total_tokens != null ? `${r.input_tokens || 0} input + ${r.output_tokens || 0} output` : 'streamed token count'}>{r.total_tokens ?? r.tokens ?? 0}</td>
                 <td className="cp-num">{fmtDur(r.duration_ms)}</td>
+                <td className="cp-mono cp-stages" title={stagesText(r)}>{stagesText(r)}</td>
                 <td className="cp-err" title={r.error || ''}>{short(r.error, 60)}</td>
                 <td className="cp-action">{(r.status === 'active' || r.status === 'running' || r.status === 'answering' || r.status === 'processing') &&
                   <button onClick={e => cancelCall(r, e)} disabled={!!cancelling[r.client_request || r.request_id || r.id]}>
                     {cancelling[r.client_request || r.request_id || r.id] ? 'cancelling…' : 'cancel'}
                   </button>}</td>
               </tr>
-              {expanded[r.id] && <tr className="cp-request-row"><td colSpan={15}>
+              {expanded[r.id] && <tr className="cp-request-row"><td colSpan={16}>
                 <div className="cp-request-meta">
                   <div><b>Caller:</b> {r.client_process || 'process not reported'}{r.client_pid ? ` (pid ${r.client_pid})` : ''} · <b>OS user:</b> {r.client_user || 'not reported'} · <b>HugPy identity:</b> {r.principal || 'unauthenticated'}</div>
                   <div><b>Source:</b> {r.client || '—'} · <b>direct peer:</b> {r.peer || '—'} · <b>forwarded for:</b> {r.forwarded_for || '—'}</div>
@@ -180,7 +202,7 @@ export default function CallsPanel() {
               </td></tr>}
             </Fragment>
             ))}
-            {!filtered.length && <tr><td colSpan={15} className="cp-dim">no calls recorded yet{path ? ` (log: ${path})` : ''}</td></tr>}
+            {!filtered.length && <tr><td colSpan={16} className="cp-dim">no calls recorded yet{path ? ` (log: ${path})` : ''}</td></tr>}
           </tbody>
         </table>
       </div>

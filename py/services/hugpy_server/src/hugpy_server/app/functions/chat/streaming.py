@@ -77,6 +77,12 @@ def sse_event(payload: dict) -> bytes:
 # moves the job to `processing`/`awaiting-load` so it reads honestly and its
 # progressed_at is fed (never orphan-expired mid-load).
 _LOADING_STAGES = ("awaiting-load", "awaiting-capacity", "loading", "provision")
+# PREFILL (2026-09-29): the worker/relay says the engine is reading the prompt.
+# `n_prompt`/`n_past` are llama-server's own prompt_progress figures (a real
+# progress advance feeds the honest stall clock); `n_prompt_est` is the relay's
+# chars/4 estimate before the engine has reported (labelled as such, never
+# written into input_tokens).
+_PREFILL_STAGE = "prefill"
 
 
 def _feed_job_from_status(rid, event) -> None:
@@ -107,6 +113,22 @@ def _feed_job_from_status(rid, event) -> None:
                                                  "120") or 120))
             return
         stage = getattr(event, "stage", None)
+        if stage == _PREFILL_STAGE:
+            changes = {"status": "processing", "stage": _PREFILL_STAGE}
+            prog = getattr(event, "progress", None)
+            if isinstance(prog, (int, float)):
+                changes["progress"] = float(prog)
+            n_prompt = getattr(event, "n_prompt", None)
+            if isinstance(n_prompt, int) and n_prompt > 0:
+                changes["input_tokens"] = n_prompt      # engine-reported, real
+            msg = getattr(event, "message", None)
+            if msg:
+                changes["message"] = str(msg)
+            current = job_store.get(rid)
+            if current is not None and current.dispatch_started_at is not None:
+                job_store.renew_dispatch(rid)
+            job_store.update(rid, **changes)
+            return
         if stage in _LOADING_STAGES:
             changes = {"status": "processing", "stage": stage}
             prog = getattr(event, "progress", None)

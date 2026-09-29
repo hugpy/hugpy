@@ -11,7 +11,7 @@ from hugpy_engine.llama.runners.src.imports.utils import (
     resolve_top_p,
 )
 from hugpy_engine.schemas.chat_schemas import ChatRequest
-from hugpy_engine.schemas.event_schemas import DoneEvent, ErrorEvent, TokenEvent
+from hugpy_engine.schemas.event_schemas import DoneEvent, ErrorEvent, TokenEvent, StatusEvent
 from hugpy_engine.schemas.runner_schemas import StreamEvent
 from hugpy_platform.utils import messages_to_dicts
 import re
@@ -254,6 +254,41 @@ class LlamaCppBaseRunner(ABC):
     # untouched.
     _stream_timings: "Optional[dict]" = None
 
+    # --- prefill progress (2026-09-29) ---------------------------------------
+    # llama-server's `prompt_progress` {total, cache, processed, time_ms} of the
+    # CURRENT pass, stashed by _iter_stream on each progress chunk (take-once,
+    # same discipline as usage/timings). The stream drivers turn it into a
+    # StatusEvent(stage="prefill") so the worker -> relay -> job row -> queue
+    # view all say "prefill 12436/29451" instead of "answering, 0 tokens".
+    _stream_progress: "Optional[dict]" = None
+
+    def _take_stream_progress(self) -> "Optional[dict]":
+        p, self._stream_progress = self._stream_progress, None
+        return p if isinstance(p, dict) and p else None
+
+    @staticmethod
+    def _prefill_status(req, pp: dict, last: "Optional[int]") -> "Optional[StatusEvent]":
+        """One honest prefill StatusEvent from an engine progress dict, or None
+        when it carries no new processed count (dedupe: the engine repeats the
+        final figure on the first token chunks)."""
+        try:
+            total = int(pp.get("total") or 0)
+            processed = int(pp.get("processed") or 0)
+        except (TypeError, ValueError):
+            return None
+        if total <= 0 or (last is not None and processed <= last):
+            return None
+        ev = StatusEvent(request_id=req.request_id, stage="prefill",
+                         message=f"prefill {processed}/{total} prompt tokens",
+                         n_prompt=total, n_past=processed,
+                         progress=round(min(1.0, processed / float(total)), 4))
+        try:
+            ev.n_cache = int(pp.get("cache") or 0)
+            ev.prefill_ms = int(pp.get("time_ms") or 0)
+        except (TypeError, ValueError):
+            pass
+        return ev
+
     def _take_stream_timings(self) -> "Optional[dict]":
         t, self._stream_timings = self._stream_timings, None
         if isinstance(t, dict) and t and "served" not in t:
@@ -357,6 +392,8 @@ class LlamaCppBaseRunner(ABC):
         # after the caller was gone (incident 2026-09-25).
         it = self._iter_stream(messages, max_tokens, temp, top_p,
                                extras=extras or None)
+        self._stream_progress = None
+        _pp_last: Optional[int] = None
         try:
             async for text, fr in it:
                 if cancel_event and cancel_event.is_set():
@@ -364,6 +401,12 @@ class LlamaCppBaseRunner(ABC):
                     yield DoneEvent(request_id=req.request_id, input_tokens=0,
                                    output_chunks=output_chunks, finish_reason="cancelled")
                     return
+                _pp = self._take_stream_progress()
+                if _pp:
+                    _pev = self._prefill_status(req, _pp, _pp_last)
+                    if _pev is not None:
+                        _pp_last = _pev.n_past
+                        yield _pev
                 if text:
                     output_chunks += 1
                     full_text += text
@@ -457,6 +500,8 @@ class LlamaCppBaseRunner(ABC):
                 # stream_chat) — a fresh iterator per continuation pass.
                 _it = self._iter_stream(convo, chunk_tokens, temp,
                                         top_p, extras=extras or None)
+                self._stream_progress = None
+                _pp_last: Optional[int] = None
                 try:
                     async for text, fr in _it:
                         if cancel_event and cancel_event.is_set():
@@ -464,6 +509,12 @@ class LlamaCppBaseRunner(ABC):
                             yield DoneEvent(request_id=req.request_id, input_tokens=0,
                                            output_chunks=output_chunks, finish_reason="cancelled")
                             return
+                        _pp = self._take_stream_progress()
+                        if _pp:
+                            _pev = self._prefill_status(req, _pp, _pp_last)
+                            if _pev is not None:
+                                _pp_last = _pev.n_past
+                                yield _pev
                         if text:
                             output_chunks += 1
                             piece_text += text

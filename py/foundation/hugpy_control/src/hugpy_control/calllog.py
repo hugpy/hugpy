@@ -1,8 +1,13 @@
 """CALL-LOG-20260910: append-only call log (one JSON line per event) + tail reader.
 
 Events: phase "start" (job created; carries client/ua/route when a request
-context exists) and phase "end" (job finished; carries status, worker, tokens,
-duration_ms, error). The reader merges the two by job id, newest first.
+context exists), the STAGE STAMPS "processing" (a worker accepted the call /
+prefill started) and "first_token" (first streamed token) — each written AT the
+transition by the JobStore (operator 2026-09-29: a call written only on
+completion is invisible while it is stuck) — and phase "end" (job finished;
+carries the terminal status, worker, tokens, duration_ms, error). The reader
+merges them by job id, newest first, into one row carrying queued_ts /
+processing_ts / first_token_ts / processed_ts (+ processed_status).
 """
 from __future__ import annotations
 
@@ -96,11 +101,17 @@ def record(phase: str, job, **extra) -> None:
             "total_tokens": getattr(job, "total_tokens", None),
             "started_ts": getattr(job, "started_ts", None),
         }
+        # The request body rides ONLY on the start row: a 50 KB reducer prompt
+        # must not be re-appended on every stage stamp.
         request_body = getattr(job, "request", None)
-        if request_body is not None:
+        if request_body is not None and phase == "start":
             row["request"] = request_body
+        row["stage"] = getattr(job, "stage", None) or None
         if phase == "start":
             row.update(_request_context())
+        elif phase in ("processing", "first_token"):
+            # Stage stamp: what is known at the transition, nothing invented.
+            row["slot"] = getattr(job, "slot", None)
         else:
             st = getattr(job, "started_ts", None)
             row["duration_ms"] = int((time.time() - st) * 1000) if st else None
@@ -143,18 +154,32 @@ def read(limit: int = 300, since: float | None = None, tail_bytes: int = 4 * 102
             calls[jid] = {}
             order.append(jid)
         cur = calls[jid]
-        if ev.get("phase") == "start":
+        phase = ev.get("phase")
+        if phase == "start":
             cur.update({k: v for k, v in ev.items() if k != "phase"})
             cur.setdefault("started_ts", ev.get("ts"))
+            cur.setdefault("queued_ts", cur.get("started_ts"))
+        elif phase in ("processing", "first_token"):
+            # A stage stamp only ADVANCES the row: the phase's own timestamp
+            # plus the live facts known at that instant (status, worker, stage).
+            cur.update({k: v for k, v in ev.items()
+                        if k not in ("phase", "ts") and v is not None})
+            cur.setdefault(f"{phase}_ts", ev.get("ts"))
         else:
             cur.update({k: v for k, v in ev.items() if k not in ("phase", "ts") and v is not None})
             cur["ended_ts"] = ev.get("ts")
+            cur["processed_ts"] = ev.get("ts")
+            cur["processed_status"] = ev.get("status")
     rows = [calls[j] for j in order]
     for row in rows:
-        if (row.get("status") == "pending"
+        if (row.get("status") in ("pending", "processing", "streaming")
                 and (row.get("started_ts") or 0) < _PROCESS_STARTED_AT
                 and not row.get("ended_ts")):
+            # Honest terminal for a call the restart orphaned: it still gets a
+            # processed stamp (the process start) and a terminal status.
             row["status"] = "interrupted"
+            row["processed_status"] = "interrupted"
+            row.setdefault("processed_ts", _PROCESS_STARTED_AT)
             row["error"] = "central API restarted before this call completed"
     if since:
         rows = [r for r in rows if (r.get("started_ts") or r.get("ts") or 0) >= since]

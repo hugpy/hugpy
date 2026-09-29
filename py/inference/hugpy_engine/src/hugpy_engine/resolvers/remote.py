@@ -34,6 +34,9 @@ import asyncio
 import logging
 import threading
 import contextvars
+from asyncio import (ensure_future as _aio_ensure_future, wait as _aio_wait,
+                     FIRST_COMPLETED as _AIO_FIRST_COMPLETED,
+                     CancelledError as _AIO_CANCELLED)
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from hugpy_engine.schemas.event_schemas import TokenEvent, DoneEvent, ErrorEvent, StatusEvent
@@ -1636,6 +1639,165 @@ def _worker_busy_max_s() -> float:
     progress.  Its clock must not be reset by every heartbeat forever.
     """
     return _env_float("HUGPY_WORKER_BUSY_MAX_S", 120.0)
+
+
+# ---------------------------------------------------------------------------
+# RELAY SILENCE BUDGETS (2026-09-29, Coder-Next "stuck answering" incident).
+#
+# What the incident showed: a 29,451-token reducer prompt prefilled for 104 s
+# at 282 tok/s with NO event on the wire, the job row read "processing, 0
+# tokens", the honest-stall flag flipped true at 90 s while the engine was at
+# 85 %, and nothing bounded a slot that genuinely wedged: `_relay_attempt`
+# was a bare `async for` over the worker stream — no stall detector after the
+# first token, no prefill bound, and cancel_event was only read between hold
+# iterations (a cancel during prefill did nothing until the first token).
+#
+# Three clocks, one pump (_pump_bounded):
+#   * before any progress: base + prompt_tokens_est / min_prefill_rate
+#     (a bound that SCALES with the prompt, never a flat 90 s that calls a
+#     legitimate prefill a stall);
+#   * after a prefill progress event (workers that forward llama-server's
+#     prompt_progress): HUGPY_RELAY_PREFILL_STALL_S between progress events;
+#   * after the first token: HUGPY_RELAY_STREAM_STALL_S between tokens.
+# A budget that runs out is TERMINAL (ErrorEvent, relay closed) — never a
+# retry: re-dispatching a 30k-token prompt re-prefills it behind itself.
+# ---------------------------------------------------------------------------
+def _relay_first_token_base_s() -> float:
+    """Flat allowance before the first token/progress event (queueing inside
+    llama-server, template render, KV-cache load). Default 120 s."""
+    return _env_float("HUGPY_RELAY_FIRST_TOKEN_BASE_S", 120.0)
+
+
+def _relay_prefill_min_tok_s() -> float:
+    """The SLOWEST prefill rate a healthy seat is allowed: the prompt-size
+    term of the pre-token budget is prompt_tokens / this. Default 25 tok/s
+    (ae's CPU-offloaded Coder-Next measured 282 tok/s; a 10x margin)."""
+    return _env_float("HUGPY_RELAY_PREFILL_MIN_TOK_S", 25.0)
+
+
+def _relay_prefill_stall_s() -> float:
+    """Silence bound BETWEEN prefill progress events once the worker has
+    reported one (llama-server emits one per batch, ~2048 tokens). Default
+    180 s = a batch at the min rate, rounded up."""
+    return _env_float("HUGPY_RELAY_PREFILL_STALL_S", 180.0)
+
+
+def _relay_stream_stall_s() -> float:
+    """No-token bound after the first token. Default 90 s — mirrors the job
+    store's honest-stall clock (HUGPY_JOB_STALL_SECONDS)."""
+    return _env_float("HUGPY_RELAY_STREAM_STALL_S", 90.0)
+
+
+def _relay_silence_ceiling_s() -> float:
+    """Absolute cap on any single silence budget. Default 1800 s."""
+    return _env_float("HUGPY_RELAY_SILENCE_CEILING_S", 1800.0)
+
+
+def _estimate_prompt_tokens(payload: Optional[dict]) -> int:
+    """Rough (chars/4) prompt size of a worker payload — sizes the pre-token
+    budget only; the real count arrives on the worker's prefill status."""
+    if not isinstance(payload, dict):
+        return 0
+    n = 0
+    msgs = payload.get("messages")
+    if isinstance(msgs, list):
+        for m in msgs:
+            c = m.get("content") if isinstance(m, dict) else None
+            if isinstance(c, str):
+                n += len(c)
+            elif isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        n += len(part["text"])
+    p = payload.get("prompt")
+    if isinstance(p, str):
+        n += len(p)
+    return n // 4
+
+
+def _relay_silence_budget_s(*, produced_tokens: bool, progress_seen: bool,
+                            prompt_tokens_est: int) -> float:
+    if produced_tokens:
+        b = _relay_stream_stall_s()
+    elif progress_seen:
+        b = _relay_prefill_stall_s()
+    else:
+        b = _relay_first_token_base_s() + (
+            max(0, int(prompt_tokens_est)) / max(1.0, _relay_prefill_min_tok_s()))
+    return min(b, _relay_silence_ceiling_s())
+
+
+class _RelayStalled(Exception):
+    """The worker stream went silent past its budget. TERMINAL — the relay is
+    closed (the worker sees its socket drop and aborts the slot) and the
+    caller gets an ErrorEvent; never re-dispatched."""
+    def __init__(self, budget_s: float, what: str):
+        self.budget_s = float(budget_s)
+        self.what = what
+        super().__init__(f"no {what} for {int(budget_s)}s")
+
+
+class _RelayCancelled(Exception):
+    """cancel_event fired while the worker stream was live (including during
+    prefill, when nothing is on the wire). The pump closes the upstream
+    connection; the caller returns silently and the job store's finish()
+    resolves the row to `cancelled`."""
+
+
+async def _pump_bounded(ws, *, cancel_event, budget_fn):
+    """Drive an async event stream with a per-event silence budget and a live
+    cancel. Yields each upstream event. When the budget elapses with no event
+    the pending ``__anext__`` is cancelled — which injects CancelledError at the
+    stream's await point, i.e. INSIDE httpx's read, closing the upstream
+    connection deterministically — and _RelayStalled is raised. When
+    ``cancel_event`` fires the same teardown runs and _RelayCancelled is raised.
+    Uses the real asyncio primitives bound at import (the deterministic test
+    rig swaps the module's ``asyncio`` for a fake clock)."""
+    cancel_fut = None
+    try:
+        while True:
+            nxt = _aio_ensure_future(ws.__anext__())
+            waiters = {nxt}
+            if cancel_event is not None:
+                if cancel_fut is None or cancel_fut.done():
+                    cancel_fut = _aio_ensure_future(cancel_event.wait())
+                waiters.add(cancel_fut)
+            budget = float(budget_fn())
+            done, _ = await _aio_wait(waiters, timeout=budget,
+                                      return_when=_AIO_FIRST_COMPLETED)
+            if nxt in done:
+                try:
+                    ev = nxt.result()
+                except StopAsyncIteration:
+                    return
+                yield ev
+                continue
+            # No event inside the budget, or a cancel: tear the upstream down.
+            nxt.cancel()
+            try:
+                await nxt
+            except (_AIO_CANCELLED, StopAsyncIteration, Exception):  # noqa: BLE001
+                pass
+            if cancel_fut is not None and cancel_fut in done:
+                raise _RelayCancelled()
+            raise _RelayStalled(budget, "event")
+    finally:
+        if cancel_fut is not None and not cancel_fut.done():
+            cancel_fut.cancel()
+
+
+async def _worker_cancel_best_effort(worker: dict, request_id: str) -> None:
+    """Tell the worker to abort THIS request now (POST /infer/cancel/<id>).
+    Closing our side of the relay already makes the worker's next write fail,
+    but during prefill nothing is written for up to a batch; this shortens
+    that to the worker's next cancel check. Fire-and-forget, never raises."""
+    try:
+        worker_http = _placement.get_worker_transport()
+        url = (worker.get("url") or "").rstrip("/") + f"/infer/cancel/{request_id}"
+        async with worker_http.async_client("probe") as client:
+            await client.post(url)
+    except Exception:  # noqa: BLE001 — best effort
+        logger.debug("worker cancel relay skipped for %s", request_id, exc_info=True)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -3832,9 +3994,45 @@ def make_delegating_runner(framework: str, task: str):
                 # finally below — the worker then sees ITS connection drop and
                 # tears down its own runner→llama-server stream, freeing the slot.
                 _ws = _worker_stream(worker, payload, req.request_id)
+                # Silence budgets + live cancel (see _pump_bounded). The
+                # prompt estimate sizes the pre-token budget; the worker's own
+                # prefill status (n_prompt/n_past) replaces it on the wire.
+                _prompt_est = _estimate_prompt_tokens(payload)
+                _pump_state = {"progress": False}
+                _announced_prefill = False
+
+                def _budget():
+                    return _relay_silence_budget_s(
+                        produced_tokens=produced_tokens,
+                        progress_seen=_pump_state["progress"],
+                        prompt_tokens_est=_prompt_est)
                 try:
-                    async for ev in _ws:
+                    async for ev in _pump_bounded(_ws, cancel_event=cancel_event,
+                                                  budget_fn=_budget):
                         etype = getattr(ev, "type", None)
+                        if etype == "status" and getattr(ev, "stage", None) == "prefill":
+                            # Real engine progress: resets the silence clock
+                            # (a moving prefill is never a stall) and carries
+                            # the true prompt size for the job row.
+                            _pump_state["progress"] = True
+                            _announced_prefill = True
+                            ev.worker_name = wname
+                        elif (not _announced_prefill and not produced_tokens
+                              and etype not in ("error", "done", "token")):
+                            # The worker accepted the request (its first SSE
+                            # frame): the job is now in PREFILL, say so — with
+                            # the estimate labelled as such — instead of
+                            # "answering, 0 tokens". A worker that forwards
+                            # engine progress refines this within a batch.
+                            _announced_prefill = True
+                            yield ev
+                            yield StatusEvent(
+                                request_id=req.request_id, stage="prefill",
+                                message=(f"prefill on {wname}: ~{_prompt_est} prompt "
+                                         "tokens (estimate; awaiting engine progress)"),
+                                n_prompt_est=_prompt_est, worker_name=wname,
+                                silence_budget_s=round(_budget(), 1))
+                            continue
                         if etype == "error":
                             if produced_tokens:
                                 # Errored after tokens — can't replay; surface as
@@ -3935,8 +4133,39 @@ def make_delegating_runner(framework: str, task: str):
                                          f"(still loading?)", busy=False)
                 except (_ColdRetry, _LoadFailed, _RelayUnbuildable):
                     raise
-                except Exception as exc:
+                except _RelayCancelled:
+                    # Cancel during a live attempt (prefill included): the pump
+                    # already closed our upstream read; also tell the worker so
+                    # llama-server aborts before its next batch. Silent return —
+                    # the owner's finish() resolves the job to `cancelled`.
+                    logger.info("relay cancel: closing worker stream worker=%s "
+                                "model=%s req=%s (produced_tokens=%s)",
+                                worker.get("id"), self.model_key, req.request_id,
+                                produced_tokens)
+                    await _worker_cancel_best_effort(worker, req.request_id)
+                    return
+                except _RelayStalled as st:
+                    # TERMINAL, never retried. Say exactly what went silent.
                     if produced_tokens:
+                        what = f"no token for {int(st.budget_s)}s after streaming began"
+                    elif _pump_state["progress"]:
+                        what = f"prefill progress stopped for {int(st.budget_s)}s"
+                    else:
+                        what = (f"no first token or prefill progress within "
+                                f"{int(st.budget_s)}s for ~{_prompt_est} prompt tokens")
+                    logger.warning("relay stall: worker=%s model=%s req=%s: %s",
+                                   worker.get("id"), self.model_key, req.request_id, what)
+                    yield ErrorEvent(request_id=req.request_id,
+                                     message=(f"worker {wname}: stream stalled — {what}; "
+                                              "the relay was closed (the slot aborts on "
+                                              "disconnect) and the request was not retried"))
+                    return
+                except Exception as exc:
+                    if produced_tokens or _pump_state["progress"]:
+                        # Errored AFTER the engine was demonstrably working on
+                        # this request (tokens or prefill progress seen): a
+                        # re-dispatch would re-prefill the same prompt behind
+                        # itself. Terminal.
                         yield ErrorEvent(request_id=req.request_id,
                                          message=f"worker {wname}: stream interrupted: {exc}")
                         return

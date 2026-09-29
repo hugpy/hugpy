@@ -123,6 +123,16 @@ class LlamaCppRunner(LlamaCppBaseRunner):
         payload = {"messages": messages, "max_tokens": max_tokens,
                    "temperature": temp, "top_p": top_p, "stream": True,
                    "repeat_penalty": 1.1,
+                   # PREFILL PROGRESS (2026-09-29, Coder-Next "stuck answering"):
+                   # llama-server streams `prompt_progress` {total, cache,
+                   # processed, time_ms} chunks during prompt processing when
+                   # asked. A 30k-token prompt prefills for ~105 s with no
+                   # token; without this the whole fleet saw "answering, 0
+                   # tokens" and could not tell prefill from a wedged slot.
+                   # Older builds ignore the unknown key (verified: no chunk,
+                   # no harm). Surfaced as StatusEvent(stage="prefill") by
+                   # base_runner; the relay's silence budget resets on it.
+                   "return_progress": True,
                    "model": self.model_key}   # STALE-SLOT-FIX-20260910: lets the slot refuse a mismatch
         if extras:
             # t74: chat_template_kwargs / logit_bias, verbatim body keys —
@@ -160,6 +170,11 @@ class LlamaCppRunner(LlamaCppBaseRunner):
                                 # build -> stays None and nothing is recorded.
                                 if isinstance(data.get("timings"), dict):
                                     self._stream_timings = data["timings"]
+                                # Prefill progress rides on content-less chunks;
+                                # stash take-once (base_runner._take_stream_progress)
+                                # and let the empty-text yield below tick the loop.
+                                if isinstance(data.get("prompt_progress"), dict):
+                                    self._stream_progress = data["prompt_progress"]
                                 choice = data["choices"][0]
                                 delta = choice.get("delta") or {}
                                 fr    = choice.get("finish_reason")

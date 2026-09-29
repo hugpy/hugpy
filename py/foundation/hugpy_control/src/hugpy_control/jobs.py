@@ -244,6 +244,18 @@ class Job:
     started_ts: float = field(default_factory=time.time)
     first_output_ts: Optional[float] = None
     ended_ts: Optional[float] = None
+    # STAGE STAMPS (operator 2026-09-29, Coder-Next "stuck answering" incident):
+    # written AT the transition, never reconstructed at the end.
+    #   queued      = started_ts        (create: request received)
+    #   processing  = processing_ts     (first entry into `processing`: a worker
+    #                                    accepted it / prefill started)
+    #   first_token = first_output_ts   (first streamed token)
+    #   processed   = ended_ts          (terminal: done/failed/cancelled/expired,
+    #                                    with the terminal status)
+    # A call that is only written on completion is invisible while it is stuck;
+    # these are what make a live row say WHERE it is. Mirrored to the call log
+    # (calllog phases) at the same instant.
+    processing_ts: Optional[float] = None
     cancel_requested: bool = False
     # Download telemetry (was the flask job_schemas Job) — unused for chat.
     progress: float = 0.0                 # 0.0–1.0
@@ -310,6 +322,13 @@ class Job:
             "elapsed": round(ended - self.started_ts, 1),
             # seconds spent waiting before the first output (queue time).
             "wait": round((self.first_output_ts or ended) - self.started_ts, 1),
+            # Stage stamps (epoch seconds, None until that transition happened).
+            "queued_ts": self.started_ts,
+            "processing_ts": self.processing_ts,
+            "first_token_ts": self.first_output_ts,
+            "processed_ts": self.ended_ts,
+            "processed_status": (normalize_status(self.status)
+                                 if self.ended_ts is not None else None),
             "cancel_requested": self.cancel_requested,
             "progress": round(self.progress, 4),
             "total_bytes": self.total_bytes,
@@ -513,6 +532,7 @@ class JobStore:
     def update(self, job_id: str, **changes: Any) -> Optional[Job]:
         prior = None
         resurrected = False
+        entered_processing = False
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -535,7 +555,14 @@ class JobStore:
                         job.ended_ts = None
                         job.cancel_requested = False
                         job.first_output_ts = None
+                        job.processing_ts = None
                         resurrected = True
+                    if (new == "processing" and prior != "processing"
+                            and job.processing_ts is None):
+                        # The processing stamp: written HERE, at the transition
+                        # (begin_dispatch / a hold status), not at stream end.
+                        job.processing_ts = time.time()
+                        entered_processing = True
             if "error" in changes:
                 changes["error"] = JobError.coerce(changes["error"])
             # Forward-progress detection (the honest stalled clock): a status
@@ -567,6 +594,12 @@ class JobStore:
                 job.progressed_at = time.time()
         if normalize_status(job.status) != prior:
             self._emit(job, prior)
+        if entered_processing:
+            try:  # stage stamp -> call log, at the transition
+                from hugpy_control import calllog as _calllog
+                _calllog.record("processing", job)
+            except Exception:  # noqa: BLE001
+                pass
         if resurrected and self.mirror is not None:
             # upsert never lowers the shared cancel flag; a fresh run must.
             try:
@@ -585,12 +618,14 @@ class JobStore:
         noticing a sibling's cancel flag is the watcher thread's job."""
         emit = False
         sync = False
+        first_token = False
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.terminal:
                 return
             if job.first_output_ts is None:
                 job.first_output_ts = time.time()
+                first_token = True
             if normalize_status(job.status) != "streaming":
                 prior = normalize_status(job.status)
                 job.status = "streaming"
@@ -606,6 +641,12 @@ class JobStore:
                 sync = True
         if emit:
             self._emit(job, prior)
+        if first_token:
+            try:  # stage stamp -> call log, at the transition
+                from hugpy_control import calllog as _calllog
+                _calllog.record("first_token", job)
+            except Exception:  # noqa: BLE001
+                pass
         if sync:
             self._mirror_upsert(job)
 
@@ -837,6 +878,11 @@ class JobStore:
         if job is not None:
             self._emit(job, prior)
             self._mirror_upsert(job)
+            try:  # a force-cancelled row still gets its processed stamp
+                from hugpy_control import calllog as _calllog
+                _calllog.record("end", job)
+            except Exception:  # noqa: BLE001
+                pass
             return "cancelled"
         # No local row — force the MIRROR row terminal directly through the store
         # layer (never a raw sqlite side-channel). Only when a LIVE row exists to

@@ -6847,6 +6847,23 @@ class WorkerStore:
             for k in ("stamp_source", "stamp_missing"):
                 if stamp.get(k):
                     _cstate[k] = stamp[k]
+            # STAGE STAMPS on the durable ledger row (operator 2026-09-29):
+            # the job row's transition timestamps, written at the transition,
+            # copied here so model_calls.state carries queued -> processing ->
+            # first_token (-> processed when the relay recorded after the
+            # owner's finish(); else the call log's end row is the authority).
+            try:
+                from hugpy_control.jobs import job_store as _js
+                _j = _js.get(meta.get("request_id")) if meta.get("request_id") else None
+                if _j is not None:
+                    for _k, _v in (("queued_ts", _j.started_ts),
+                                   ("processing_ts", _j.processing_ts),
+                                   ("first_token_ts", _j.first_output_ts),
+                                   ("processed_ts", _j.ended_ts)):
+                        if _v is not None:
+                            _cstate[_k] = round(float(_v), 3)
+            except Exception:  # noqa: BLE001 — stamps never fail a serve
+                pass
             _cstate.setdefault("caller", "relay")
             record_call(model_key, str(_mx_worker), quant=_quant,
                         alloc_mode=_mode, tok_per_s=meta.get("call_tok_s"),

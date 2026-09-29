@@ -34,6 +34,7 @@ def test_queue_view_activity_shim(client):
     assert len(mine) == 1 and mine[0]["state"] == "processing", \
         "dispatched request visible as processing"
     assert set(mine[0]) == {"request_id", "model_key", "model", "kind", "state",
+        "stage", "progress", "input_tokens",   # prefill honesty, 2026-09-29
         "elapsed", "wait", "tokens", "prompt"}, "snapshot keys intact"
     activity.on_token("it-1"); activity.on_token("it-1")
     q = client.get("/llm/queue").get_json()

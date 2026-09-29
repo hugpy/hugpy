@@ -39,6 +39,7 @@ RESOLVED = "Qwen~Qwen3-Coder-Next-GGUF"
 JOB_ROW_FIELDS = {"id", "status", "stage", "elapsed", "progressed_at", "stalled",
                   "worker", "error"}
 QUEUE_ROW_FIELDS = {"request_id", "model_key", "model", "kind", "prompt", "state",
+                    "stage", "progress", "input_tokens",   # prefill honesty, 2026-09-29
                     "elapsed", "wait", "tokens"}
 
 
@@ -77,7 +78,9 @@ def _collect(agen):
 # ---------------------------------------------------------------------------
 def test_queue_snapshot_shape_and_state_transitions(store):
     """INVARIANT: the /api/llm/queue snapshot rows carry exactly
-    {request_id, model_key, model, kind, prompt, state, elapsed, wait, tokens};
+    {request_id, model_key, model, kind, prompt, state, stage, progress,
+    input_tokens, elapsed, wait, tokens} (stage/progress/input_tokens added
+    2026-09-29 so a processing row can say "prefill 12436/29451");
     state is 'waiting' (pending) → 'processing' (dispatched to a worker,
     pre-token) → 'active' (streaming); counts = {waiting, active, total} with
     processing counted in ``active``; terminal rows leave the live view;

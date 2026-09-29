@@ -95,6 +95,13 @@ def snapshot() -> list:
             "kind": d["kind"],
             "prompt": d.get("prompt") or "",
             "state": state,
+            # WHERE a processing call is (2026-09-29): "prefill" while the
+            # engine is still reading the prompt (n_past/n_prompt ride on
+            # progress/input_tokens), "" once tokens flow. Without this the
+            # queue read "answering, 0 tokens" for a 105 s legitimate prefill.
+            "stage": d.get("stage") or "",
+            "progress": d.get("progress"),
+            "input_tokens": d.get("input_tokens"),
             "elapsed": d["elapsed"],
             "wait": d["wait"],
             "tokens": d["tokens"],
