@@ -7746,6 +7746,54 @@ def _model_kv_geometry(model_key: str, cfg: dict | None = None) -> dict:
     return {}
 
 
+def _need_total(weights: int, kv: int, corr: "float | None") -> int:
+    """THE fit's need arithmetic (the only copy): (headroomed weights + KV) x
+    the learned calibration correction when one is adopted. Every fit path
+    prices ``total`` through this, and the whole-seat ctx bound searches it —
+    so the bound and the fit agree to the byte (S3b, second landing: the bound
+    ignored the x1.44 correction the fit applied and chose a ctx the fit then
+    split)."""
+    base = int(weights) + int(kv or 0)
+    return int(base * corr) if corr else base
+
+
+def _kv_at_ctx(geo: dict, ctx: int, dtype_bytes: float = 2.0) -> int:
+    """KV bytes at ``ctx`` over the KV-bearing layers — the same call
+    ``_kv_need_bytes`` prices with."""
+    from hugpy_engine import spill
+    return int(spill.kv_bytes(ctx_tokens=int(ctx),
+                              n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
+                              n_kv_heads=geo.get("n_kv_heads"), head_dim=geo.get("head_dim"),
+                              dtype_bytes=dtype_bytes) or 0)
+
+
+def _whole_seat_max_ctx(*, weights: int, corr: "float | None", geo: dict,
+                        room: int, upper: int, floor: int,
+                        dtype_bytes: float = 2.0) -> "tuple[int, bool]":
+    """(ctx, fits_whole): the LARGEST ctx (a 1024 multiple, in [floor, upper])
+    whose ``_need_total`` fits ``room`` (reachable free less the ceiling
+    reserve). KV is monotone in ctx, so a binary search over the SAME function
+    the fit uses is exact. Nothing fits even at the floor -> (floor, False):
+    the only unset-pct case that may partial-offload."""
+    def need(c):
+        return _need_total(weights, _kv_at_ctx(geo, c, dtype_bytes), corr)
+    upper = max(int(floor), int(upper))
+    top = upper if upper % 1024 == 0 or upper < 1024 else (upper // 1024) * 1024
+    if need(top) <= room:
+        return top, True
+    lo, hi = -(-int(floor) // 1024), top // 1024          # multiples of 1024
+    best = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if need(mid * 1024) <= room:
+            best, lo = mid * 1024, mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        return int(floor), need(int(floor)) <= room
+    return max(int(floor), best), True
+
+
 def _effective_ctx(model_key: str, cfg: dict | None = None, *,
                    free_hint: "int | None" = None, weights_bytes: "int | None" = None,
                    reserve_bytes: "int | None" = None) -> dict:
@@ -7787,12 +7835,54 @@ def _effective_ctx(model_key: str, cfg: dict | None = None, *,
         return {"ctx": int(ticket["ctx_effective"]), "pct": ticket.get("ctx_pct"),
                 "max": ticket.get("ctx_max"), "source": "ticket"}
     cfg = cfg if cfg is not None else get_model_config(model_key, dict_return=True)
-    ctx, pct, mx = _resolved_ctx(model_key, cfg, free_hint=free_hint,
-                                 weights_bytes=weights_bytes, reserve_bytes=reserve_bytes)
-    if ctx:
-        return {"ctx": int(ctx), "pct": pct, "max": mx, "source": "ctx_pct"}
+    pct = _ctx_pct(model_key)
+    mx = _model_max_ctx(model_key, cfg)
     framework = str((cfg or {}).get("framework") or "").lower()
-    if framework in ("gguf", "llama_cpp"):
+    is_gguf = framework in ("gguf", "llama_cpp")
+    # THE WHOLE-SEAT BOUND (keeper, 2026-09-30), in EXACTLY the fit's basis:
+    # _need_total(weights x headroom, KV(ctx), learned correction) against the
+    # reachable room (free + evictable + own seat, from the admission) less
+    # the ceiling reserve. No admission hint -> the live free read.
+    bound = None
+    if is_gguf:
+        try:
+            from hugpy_engine import spill
+            geo = _model_kv_geometry(model_key, cfg) or {}
+            ppath, _tl = _served_gguf_geometry(model_key)
+            if ppath and geo.get("n_kv_heads") and geo.get("head_dim"):
+                w = int(weights_bytes) if weights_bytes else _incoming_need_bytes(model_key)
+                total = _total_vram_bytes()
+                res = (int(reserve_bytes) if reserve_bytes is not None
+                       else _vram_ceiling_reserve_bytes(total))
+                reach = free_hint if free_hint is not None else _free_vram_bytes()
+                if w and reach is not None:
+                    floor = int(spill._ctx_floor())
+                    upper = int(geo.get("ctx_train") or mx or floor)
+                    room = max(0, int(reach) - int(res))
+                    corr = _calib_correction(model_key)
+                    c, whole = _whole_seat_max_ctx(weights=int(w), corr=corr, geo=geo,
+                                                   room=room, upper=upper, floor=floor)
+                    bound = {"ctx": c, "whole": whole, "room": room, "corr": corr,
+                             "weights": int(w), "need": _need_total(int(w), _kv_at_ctx(geo, c), corr)}
+        except Exception:  # noqa: BLE001 — unpriceable -> the fallbacks below
+            bound = None
+    if pct is not None and mx:
+        ctx = max(1, int(mx * pct / 100.0))
+        why = f"ctx_pct {pct}% honoured ({ctx} of {mx})"
+        if bound is not None:
+            why += (f"; whole-seat max ctx {bound['ctx']} on {bound['room']} B room"
+                    + (" — split if the pct exceeds it" if ctx > bound["ctx"] else ""))
+        return {"ctx": ctx, "pct": pct, "max": mx, "source": "ctx_pct", "reason": why}
+    if bound is not None:
+        why = (f"whole-seat max ctx {bound['ctx']} under need basis "
+               f"(weights {bound['weights']} B + KV) x {bound['corr'] or 1.0:g} = "
+               f"{bound['need']} B <= {bound['room']} B room (reachable - ceiling reserve)")
+        if not bound["whole"]:
+            why = (f"even the floor ctx {bound['ctx']} does not fit whole-seat "
+                   f"({bound['need']} B > {bound['room']} B room) — partial offload")
+        return {"ctx": int(bound["ctx"]), "pct": None, "max": mx,
+                "source": "loader-default", "reason": why}
+    if is_gguf:
         try:
             ppath, _tl = _served_gguf_geometry(model_key)
             if ppath:
@@ -7800,7 +7890,8 @@ def _effective_ctx(model_key: str, cfg: dict | None = None, *,
                                      weights_bytes=weights_bytes, reserve_bytes=reserve_bytes)
                 if fit:
                     return {"ctx": int(fit), "pct": None, "max": mx,
-                            "source": "loader-default"}
+                            "source": "loader-default",
+                            "reason": "geometry incomplete — spill.served_ctx_for_fit"}
         except Exception:  # noqa: BLE001 — fall through to the model max
             pass
     if mx:
@@ -7845,6 +7936,7 @@ def _kv_need_bytes(model_key: str, cfg: dict | None = None, *,
                         head_dim=geo.get("head_dim"), dtype_bytes=dtype_bytes)
     return int(kv or 0), {"ctx_pct": pct, "ctx_resolved": ctx, "ctx_max": mx,
                           "ctx_effective": ctx, "ctx_source": eff["source"],
+                          "ctx_reason": eff.get("reason"),
                           "geometry_source": source, "kv_bytes": int(kv or 0)}
 
 
@@ -7900,7 +7992,7 @@ def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
     # tracks the true base fudge instead of collapsing to a fixpoint at the
     # current correction. None correction -> total == base_total (byte-identical).
     corr = _calib_correction(model_key)
-    total = int(base_total * corr) if corr else base_total
+    total = _need_total(int(weights), int(kv or 0), corr)
     out = {"total": total, "base_total": base_total,
            "calibration_correction": (corr or 1.0),
            "weights": int(weights), "kv": int(kv or 0),
@@ -11251,7 +11343,11 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
                                 cand_rows, prot_rows)
     # The ticket carries THE ctx this admission priced (S3b): the seat's
     # resolver and the slot ceiling gate read it back instead of re-resolving.
+    if _det.get("ctx_effective"):
+        logger.info("VRAM admission for %s: effective ctx %s (%s): %s", model_key,
+                    _det.get("ctx_effective"), _det.get("ctx_source"), _det.get("ctx_reason"))
     if isinstance(verdict, dict) and _det.get("ctx_effective"):
+        verdict.setdefault("ctx_reason", _det.get("ctx_reason"))
         verdict.setdefault("ctx_effective", int(_det["ctx_effective"]))
         verdict.setdefault("ctx_pct", _det.get("ctx_pct"))
         verdict.setdefault("ctx_max", _det.get("ctx_max"))

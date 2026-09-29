@@ -529,6 +529,9 @@ def ctx_rig(monkeypatch):
     monkeypatch.setattr(A, "_served_gguf_geometry", lambda mk: (cells["gguf_path"], 36))
     monkeypatch.setattr(spill, "served_ctx_for_fit", lambda path, **kw: cells["served_fit"])
     monkeypatch.setattr(A, "_FLEX_CTX_FLOOR", {})
+    # no live card read: the unset-GGUF case exercises the geometry-incomplete
+    # fallback deterministically (the whole-seat bound has its own tests)
+    monkeypatch.setattr(A, "_free_vram_bytes", lambda: None)
     return cells
 
 
@@ -558,10 +561,11 @@ def test_effective_ctx_prices_pct_set_unset_and_clamped(ctx_rig):
     kv, det = A._kv_need_bytes("m", gg)
     assert det["ctx_effective"] == 131072 and det["ctx_source"] == "loader-default"
     assert kv == _kv_at(131072)
-    # pct set (GGUF) but the fit clamps below it: price the clamped value
+    # pct set (GGUF) above what the fit could hold: HONOURED verbatim, never
+    # clamped (keeper 2026-09-30 — the plan splits instead)
     ctx_rig.update(pct=100, served_fit=32768)
     kv, det = A._kv_need_bytes("m", gg)
-    assert det["ctx_effective"] == 32768 and det["ctx_pct"] == 100 and kv == _kv_at(32768)
+    assert det["ctx_effective"] == 262144 and det["ctx_pct"] == 100 and kv == _kv_at(262144)
     # pct set (GGUF), fit roomier than the pct: the pct governs
     ctx_rig.update(pct=10, served_fit=200000)
     kv, det = A._kv_need_bytes("m", gg)
@@ -598,108 +602,95 @@ def test_refusal_names_kv_at_the_effective_ctx(rig, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 2026-09-29 (S3b): ONE effective ctx per admission — dispatch == seat
+# 2026-09-30 (S3b, second landing): the loader default is the WHOLE-SEAT max
+# ctx in EXACTLY the fit's need basis; one ctx per admission
 # ---------------------------------------------------------------------------
 _REAL_NEED_DETAIL = A._incoming_need_detail          # captured before any rig stubs it
-PER_TOK = 2 * 36 * 8 * 128 * 2                        # 36 layers / 8 kv heads / 128 head_dim, fp16
+PER_TOK = 2 * 36 * 8 * 128 * 2                        # 147456 B/token: 36 kv layers x 8 heads x 128, fp16
+CORR = 1.4426                                         # the adopted correction live (32804534892 / 22739868912)
 
 
 @pytest.fixture
 def ctx_admission(rig, monkeypatch):
-    """The rig with the REAL need detail: a GGUF (framework via config), known
-    geometry, headroomed weights, and a served_ctx_for_fit fake that records
-    the free figure it was priced against and returns the fit bound exactly
-    as spill does: (free - weights - 512 MiB) // per_tok, rounded down to
-    1024, capped at the trained ctx. A call WITHOUT a free figure (a live
-    re-resolve) returns the trained max and is counted separately."""
-    spill = importlib.import_module("hugpy_engine.spill")
+    """The S3b card: the REAL need detail for a 4B GGUF (4.92 GB headroomed
+    weights, 36 KV layers, trained ctx 262144, correction x1.4426), 8.96 GB
+    free with a 14.96 GB 0.6B resident to evict; ctx_pct is a cell."""
     cfgmod = importlib.import_module("hugpy_engine.config.main")
-    MIB = 1 << 20
-    cells = {"pct": None, "raw": int(4.5 * GIB), "calls": [], "unhinted": 0}
+    cells = {"pct": None}
+    W = 4_922_465_520
     monkeypatch.setattr(A, "_incoming_need_detail", _REAL_NEED_DETAIL)
-    monkeypatch.setattr(A, "_incoming_need_bytes", lambda mk: int(cells["raw"] * A._WEIGHTS_HEADROOM))
-    monkeypatch.setattr(A, "_calib_correction", lambda mk: None)
+    monkeypatch.setattr(A, "_incoming_need_bytes", lambda mk: W if mk == "Qwen3.8_4B_Distilled_GGUF" else None)
+    monkeypatch.setattr(A, "_calib_correction", lambda mk: CORR)
     monkeypatch.setattr(A, "_moe_plan_for", lambda mk: None)
     monkeypatch.setattr(A, "_ctx_pct", lambda mk: cells["pct"])
     monkeypatch.setattr(A, "_model_max_ctx", lambda mk, cfg=None: 262144)
     monkeypatch.setattr(A, "_model_kv_geometry",
                         lambda mk, cfg=None: {"n_layers": 36, "n_kv_heads": 8, "head_dim": 128,
                                               "ctx_train": 262144})
-    # the subject's served quant only: a resident's own KV pricing (flex inputs,
-    # no admission hint) takes the model-max branch and never re-fits the card
     monkeypatch.setattr(A, "_served_gguf_geometry",
-                        lambda mk: ("/models/m/q4.gguf", 36) if mk == "m" else (None, None))
+                        lambda mk: ("/models/4b/q8.gguf", 36) if mk == "Qwen3.8_4B_Distilled_GGUF" else (None, None))
     monkeypatch.setattr(cfgmod, "get_model_config",
                         lambda mk, dict_return=False: {"framework": "gguf", "model_max_length": 262144})
-
-    def fake_served_ctx(path, *, free_vram=None, weights_on_gpu_bytes=None, **kw):
-        if free_vram is None:
-            cells["unhinted"] += 1
-            return 262144
-        cells["calls"].append((free_vram, weights_on_gpu_bytes))
-        w = weights_on_gpu_bytes or cells["raw"]
-        bound = (int(free_vram) - int(w) - 512 * MIB) // PER_TOK
-        return max(4096, min(262144, (bound // 1024) * 1024))
-    monkeypatch.setattr(spill, "served_ctx_for_fit", fake_served_ctx)
+    rig.card["total"] = 25_769_803_776
+    rig.card["free"] = 8_955_232_256
+    rig.residents["Qwen3-0.6B-GGUF"] = 14_963_179_520
+    rig.lru["Qwen3-0.6B-GGUF"] = 100.0
     A._ADMISSION_TICKETS.clear()
+    cells["W"] = W
     return cells
 
 
-def _expected_bound(free_hint, weights, reserve):
-    MIB = 1 << 20
-    b = (free_hint - reserve - weights - 512 * MIB) // PER_TOK
-    return (b // 1024) * 1024
+def test_s3b_unset_pct_seats_whole_at_the_whole_seat_max_ctx(ctx_admission, rig):
+    """INVARIANT (keeper 2026-09-30): with ctx_pct UNSET the loader-default
+    effective ctx is the LARGEST ctx at which the model fits WHOLE-SEAT on the
+    reachable room (free + evictable + own seat), computed with EXACTLY the
+    fit's arithmetic (_need_total: (weights x 1.15 + KV) x learned
+    correction, + the ceiling reserve) — so the admission EVICTS and seats
+    whole (no partial), the bound's need equals the verdict's need_bytes to
+    the byte, the ticket carries the ctx, the seat reads it back, and the
+    reason is logged. LIVE CASE: post8 S3b chose 120832 ignoring the x1.44
+    correction -> need 32.8 GB > 23.9 GB -> partial 25/36 at 27 tok/s.
+    Established: 2026-09-30."""
+    reserve = A._vram_ceiling_reserve_bytes(rig.card["total"])
+    room = 8_955_232_256 + 14_963_179_520 - reserve
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
+    assert v["action"] == "evicted", v.get("reason")
+    assert v["evicted"] == ["Qwen3-0.6B-GGUF"] and v.get("n_gpu_layers") is None
+    ctx = v["ctx_effective"]
+    need = A._need_total(ctx_admission["W"], ctx * PER_TOK, CORR)
+    assert need <= room < A._need_total(ctx_admission["W"], (ctx + 1024) * PER_TOK, CORR)
+    assert ctx % 1024 == 0 and 4096 < ctx < 120832
+    assert "whole-seat max ctx" in v["ctx_reason"]
+    det = A._incoming_need_detail("Qwen3.8_4B_Distilled_GGUF")    # the seat: ticket, same ctx
+    assert det["ctx_effective"] == ctx and det["ctx_source"] == "ticket"
+    assert det["total"] == need                                    # bound == fit, to the byte
+    assert A._seat_ctx_resolver("Qwen3.8_4B_Distilled_GGUF") == ctx
+    assert A._worker_slot_fit_check("Qwen3.8_4B_Distilled_GGUF") is True
 
 
-def test_one_effective_ctx_per_admission_dispatch_equals_seat(ctx_admission, rig):
-    """INVARIANT (S3b, 2026-09-29): an admission resolves the effective ctx
-    ONCE, against the room it can REACH (free + evictable + own seat, less the
-    ceiling reserve) in its own basis (headroomed weights), records it on the
-    ticket, and the seat's resolver (serve._ctx_for -> the child's -c) and the
-    slot ceiling gate read THAT value — never a re-resolve on the emptied
-    card. Holds for ctx_pct unset (loader default), a pct the fit clamps, and
-    a pct within the fit. And a model that fits whole-seat at its effective
-    ctx is admitted whole: evicted, no partial, ceiling gate green at the
-    same ctx. LIVE CASE: 4B priced at 27648 by dispatch, re-priced 129024 by
-    the seat -> partial 24/36, 25 tok/s (post4: whole seat, 138 tok/s).
-    Established: 2026-09-29."""
-    cells = ctx_admission
-    weights = int(cells["raw"] * A._WEIGHTS_HEADROOM)
-    reserve = A._vram_ceiling_reserve_bytes(24 * GIB)
-    for pct, label in ((None, "unset -> loader default"), (100, "pct clamped by the fit"),
-                       (5, "pct within the fit")):
-        cells["pct"] = pct
-        cells["calls"].clear(); cells["unhinted"] = 0
-        A._ADMISSION_TICKETS.clear()
-        rig.card["total"] = 24 * GIB
-        rig.card["free"] = 1 * GIB                             # a full card
-        rig.residents.clear(); rig.residents["squatter"] = 20 * GIB
-        rig.lru.clear(); rig.lru["squatter"] = 100.0
-        rig.evicted.clear()
-        free_hint = 1 * GIB + 20 * GIB                         # free + what it may evict
-        bound = _expected_bound(free_hint, weights, reserve)
-        expect = bound if pct is None else min(bound, int(262144 * pct / 100))
-        v = A._vram_evict_to_fit(_State(), "m")
-        assert v["action"] == "evicted" and v["evicted"] == ["squatter"], (label, v.get("reason"))
-        assert v["ctx_effective"] == expect, (label, v["ctx_effective"], expect)
-        # the ctx was priced against the REACHABLE room in the admission's basis
-        assert cells["calls"] and cells["calls"][0] == (free_hint - reserve, weights), label
-        assert cells["unhinted"] == 0, label
-        n_calls = len(cells["calls"])
-        # the seat reads the ticket: same ctx, no re-resolve
-        assert A._seat_ctx_resolver("m") == expect, label
-        assert A._effective_ctx("m", {"framework": "gguf"})["source"] == "ticket"
-        assert len(cells["calls"]) == n_calls and cells["unhinted"] == 0, label
-        # whole seat: the need at that ctx fits the emptied card under the gate
-        det = A._incoming_need_detail("m")
-        assert det["ctx_effective"] == expect and det["kv"] == expect * PER_TOK
-        assert rig.card["free"] == 21 * GIB
-        assert det["total"] <= rig.card["free"] - reserve, label
-        assert A._worker_slot_fit_check("m") is True, label
-        assert v.get("n_gpu_layers") is None and v["action"] != "partial", label
-    # a NEW admission drops the old ticket and re-resolves
-    A._ADMISSION_TICKETS["m"] = {"ts": 0.0, "verdict": {"ctx_effective": 4096}}   # stale (expired)
-    assert A._effective_ctx("m", {"framework": "gguf"})["source"] != "ticket"
+def test_s3b_pct_above_whole_seat_max_is_honoured_and_splits(ctx_admission, rig):
+    """INVARIANT: ctx_pct SET is honoured verbatim (pct x max, no clamp) even
+    above the whole-seat max; the plan then splits (partial) and the reason
+    says the pct was honoured and names the whole-seat max. Established:
+    2026-09-30."""
+    ctx_admission["pct"] = 50
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
+    assert v["ctx_effective"] == 131072
+    assert v["action"] == "partial", v.get("reason")
+    assert "ctx_pct 50% honoured" in v["ctx_reason"] and "split" in v["ctx_reason"]
+    assert A._seat_ctx_resolver("Qwen3.8_4B_Distilled_GGUF") == 131072
+
+
+def test_whole_seat_bound_partials_only_when_the_floor_cannot_fit():
+    """INVARIANT: the bound returns (floor, False) only when even the 4096
+    floor does not fit whole — the one unset-pct case that may split."""
+    geo = {"n_layers": 36, "n_kv_heads": 8, "head_dim": 128}
+    c, whole = A._whole_seat_max_ctx(weights=10 * GIB, corr=None, geo=geo,
+                                     room=5 * GIB, upper=262144, floor=4096)
+    assert (c, whole) == (4096, False)
+    c, whole = A._whole_seat_max_ctx(weights=1 * GIB, corr=None, geo=geo,
+                                     room=64 * GIB, upper=262144, floor=4096)
+    assert (c, whole) == (262144, True)
 
 
 # ---------------------------------------------------------------------------
