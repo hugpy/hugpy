@@ -44,6 +44,16 @@ class ErrorEvent(BaseModel):
     type: Literal["error"] = "error"
     request_id: str
     message: str
+    # STRUCTURED cause (core isolation step 2, F3), additive and None by
+    # default so every existing constructor call is unchanged. ``code`` is the
+    # producer's error code when it had one (``model_busy`` ...);
+    # ``load_failure`` is ``serve.load_failure.load_failure_of``'s dict
+    # ({class, message, path, loader_stderr, log_ref} + ``fit_failure`` /
+    # ``refusal`` when the chain carried a plan_fit verdict). The human
+    # ``message`` stays the message; consumers that want the numbers read
+    # these, never the prose.
+    code: Optional[str] = None
+    load_failure: Optional[dict] = None
 
 class StatusEvent(BaseModel):
     """Out-of-band passthrough event — provisioning progress, continuation

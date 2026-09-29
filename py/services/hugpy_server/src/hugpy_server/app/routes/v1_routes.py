@@ -68,15 +68,50 @@ v1_bp, logger = get_bp("v1_bp", __name__)
 from hugpy_server.app.auth_common import bearer_token as _bearer_token
 
 
+def _structured_error_fields(err: dict, source) -> dict:
+    """Add the STRUCTURED load failure behind ``source`` (an ErrorEvent, an
+    exception, or a load_failure dict) to an error envelope (step 2, F3):
+
+        error.type          = the load class ("vram_fit", "hard_load_failure",
+                              "engine_unavailable", ...) when one is known
+        error.load_failure  = {class, message, path, loader_stderr, log_ref,
+                               fit_failure, refusal}
+        error.fit_failure   = the plan_fit verdict hoisted into one object:
+                              kind / code / need_bytes / budget_bytes,
+                              blocked_by / protected, external_floor_bytes,
+                              free_vram_device_bytes, free_vram_bytes, evicted
+
+    ``error.message`` keeps the human sentence and ``error.code`` the HTTP
+    status, unchanged. No structure known -> the envelope is byte-identical."""
+    try:
+        from hugpy_engine.resolvers.remote import fit_failure_of, structured_load_failure
+        lf = source if isinstance(source, dict) else structured_load_failure(source)
+        if not isinstance(lf, dict):
+            return err
+        err["load_failure"] = lf
+        if lf.get("class"):
+            err["type"] = str(lf["class"])
+        ff = fit_failure_of(lf)
+        if ff:
+            err["fit_failure"] = ff
+    except Exception:   # noqa: BLE001 — an error body must never fail to render
+        pass
+    return err
+
+
 def _openai_error(message: str, status: int, err_type: str = "invalid_request_error",
-                  retry_after: "int | None" = None):
+                  retry_after: "int | None" = None, *, cause=None):
     """The OpenAI-shaped error body. ``retry_after`` adds the standard header so
     a 503 is an INSTRUCTION ("come back in N seconds") rather than a brush-off —
-    every OpenAI SDK and every well-behaved batch client honours it."""
+    every OpenAI SDK and every well-behaved batch client honours it.
+    ``cause`` (an ErrorEvent / exception / load_failure dict) adds the
+    structured ``load_failure`` / ``fit_failure`` beside the prose (F3)."""
     err = {"message": message, "type": err_type, "code": status}
     diag = _request_diagnostics()
     if diag is not None:
         err["diagnostics"] = diag     # the structured record the message came from
+    if cause is not None:
+        _structured_error_fields(err, cause)
     body = jsonify({"error": err})
     if retry_after is None:
         return body, status
@@ -736,6 +771,12 @@ def v1_chat_completions():
                             _d = _request_diagnostics(prompt_kwargs.get("request_id"))
                             if _d is not None:
                                 _err["hugpy_diagnostics"] = _d
+                            # F3: the structured cause rides the frame too.
+                            _sf = _structured_error_fields({}, ev)
+                            if _sf.get("load_failure"):
+                                _err["hugpy_load_failure"] = _sf["load_failure"]
+                            if _sf.get("fit_failure"):
+                                _err["hugpy_fit_failure"] = _sf["fit_failure"]
                             yield chunk(_err, finish="stop")
             except Exception as exc:
                 logger.exception("v1 stream failed")
@@ -773,6 +814,7 @@ def v1_chat_completions():
     status_events = []
     hugpy_meta = None
     timings = None
+    error_cause = None            # F3: the structured cause behind error_message
     try:
         for ev in chat_iter_sync(_v1_events(prompt_kwargs, call_data)):
             t = getattr(ev, "type", None)
@@ -787,6 +829,7 @@ def v1_chat_completions():
                 status_events.append(ev.model_dump())
             elif t == "error":
                 error_message = ev.message
+                error_cause = ev
     except KeyError as exc:
         # resolve() raises before the stream starts, e.g. unknown model
         return _openai_error(str(exc).strip("'\""), 404, "invalid_request_error")
@@ -807,7 +850,7 @@ def v1_chat_completions():
         # a 400, never a 500 the client is invited to retry.
         if _is_request_shape_message(f"{type(exc).__name__}: {exc}"):
             return _openai_error(f"{exc}", 400, "invalid_request_error")
-        return _openai_error(f"{type(exc).__name__}: {exc}", 500, "api_error")
+        return _openai_error(f"{type(exc).__name__}: {exc}", 500, "api_error", cause=exc)
 
     if error_message and not text_parts:
         # Cold-hold ADMISSION CAP: central is already holding its maximum number
@@ -836,7 +879,7 @@ def v1_chat_completions():
         if _is_request_shape_message(error_message):
             return _openai_error(error_message, 400, "invalid_request_error")
         status = 404 if "Unknown model" in error_message else 500
-        return _openai_error(error_message, status, "api_error")
+        return _openai_error(error_message, status, "api_error", cause=error_cause)
 
     content = "".join(text_parts)
     message = {"role": "assistant", "content": content}

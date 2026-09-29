@@ -2167,10 +2167,12 @@ class _ColdRetry(Exception):
     ``model_busy`` whose message lacks "is busy:"/"503" is still a busy hold,
     never a terminal "loaded and idle, but the request failed"."""
     def __init__(self, message: str, *, busy: Optional[bool] = None,
-                 code: Optional[str] = None):
+                 code: Optional[str] = None,
+                 load_failure: Optional[dict] = None):
         self.message = str(message or "")
         self.busy = busy
         self.code = code
+        self.load_failure = load_failure if isinstance(load_failure, dict) else None
         super().__init__(self.message)
 
     def is_busy(self) -> bool:
@@ -2182,10 +2184,111 @@ class _ColdRetry(Exception):
 
 
 class _LoadFailed(Exception):
-    """An HONEST pre-token load failure — surfaced to the caller, no retry."""
-    def __init__(self, message: str):
+    """An HONEST pre-token load failure — surfaced to the caller, no retry.
+
+    ``load_failure`` (step 2, F3) is the worker's STRUCTURED cause when it sent
+    one — ``serve.load_failure.load_failure_of``'s dict, with ``fit_failure``
+    (kind/code/need/budget) and ``refusal`` (protected residents, external
+    floor, device free) when a plan_fit verdict was behind it. The human
+    ``message`` is unchanged; the envelope carries both."""
+    def __init__(self, message: str, *, load_failure: Optional[dict] = None,
+                 code: Optional[str] = None):
         self.message = str(message or "")
+        self.load_failure = load_failure if isinstance(load_failure, dict) else None
+        self.code = code
         super().__init__(self.message)
+
+
+class RemoteLoadError(RuntimeError):
+    """The non-streaming twin of ``_LoadFailed``: a RuntimeError (every
+    existing ``except RuntimeError`` / prose consumer is unchanged) that ALSO
+    carries the worker's structured ``load_failure`` for the error envelope."""
+    def __init__(self, message: str, *, load_failure: Optional[dict] = None):
+        self.load_failure = load_failure if isinstance(load_failure, dict) else None
+        super().__init__(message)
+
+
+class _HonestError(str):
+    """A load-state honest error as a ``str`` (every consumer formats it) that
+    also carries the worker's structured ``load_failure`` when the load report
+    had one."""
+    load_failure: Optional[dict] = None
+
+    def __new__(cls, text, load_failure=None):
+        obj = super().__new__(cls, text)
+        obj.load_failure = load_failure if isinstance(load_failure, dict) else None
+        return obj
+
+
+def structured_load_failure(obj) -> Optional[dict]:
+    """The structured ``load_failure`` dict behind an event / exception, or
+    None (step 2, F3). Walks the exception chain for: a ``load_failure``
+    attribute (ErrorEvent, _LoadFailed, _ColdRetry, RemoteLoadError,
+    ModelLoadFailure.load_failure), a worker error body (``_WorkerHTTPError
+    .body["load_failure"]``), or a local ``LoadRefusal.reason`` (rebuilt with
+    ``load_failure_of``). Never raises."""
+    if obj is None:
+        return None
+    try:
+        seen = set()
+        cur = obj
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            lf = getattr(cur, "load_failure", None)
+            if isinstance(lf, dict) and lf.get("class"):
+                return dict(lf)
+            body = getattr(cur, "body", None)
+            if isinstance(body, dict) and isinstance(body.get("load_failure"), dict):
+                return dict(body["load_failure"])
+            reason = getattr(cur, "reason", None)
+            if isinstance(reason, dict) and isinstance(cur, BaseException):
+                try:
+                    from hugpy_engine.serve.load_failure import load_failure_of
+                    out = load_failure_of(cur)
+                    if out:
+                        return out
+                except Exception:  # noqa: BLE001
+                    pass
+            if not isinstance(cur, BaseException):
+                break
+            cur = cur.__cause__ or cur.__context__
+    except Exception:  # noqa: BLE001 — an error body must never fail to render
+        return None
+    return None
+
+
+def fit_failure_of(load_failure: Optional[dict]) -> Optional[dict]:
+    """Hoist the plan_fit verdict out of a structured ``load_failure`` into
+    ONE object for the client envelope (step 2, F3): ``kind`` / ``code`` /
+    ``need_bytes`` / ``budget_bytes`` (+ the basis N's) from ``fit_failure``,
+    and from ``refusal`` the holders (``blocked_by`` = the protected keys,
+    ``protected`` rows with why), ``external_floor_bytes``,
+    ``free_vram_device_bytes``, ``free_vram_bytes``, ``evicted``. None when
+    the failure carried no fit verdict."""
+    if not isinstance(load_failure, dict):
+        return None
+    ff = load_failure.get("fit_failure")
+    ref = load_failure.get("refusal")
+    if not isinstance(ff, dict) and not isinstance(ref, dict):
+        return None
+    out: dict = {}
+    if isinstance(ff, dict):
+        out.update({k: ff.get(k) for k in (
+            "kind", "code", "need_bytes", "budget_bytes", "plan_n_cpu_moe",
+            "contract_n_cpu_moe", "permanent", "state_dependent") if ff.get(k) is not None})
+    if isinstance(ref, dict):
+        for k in ("external_floor_bytes", "free_vram_device_bytes", "free_vram_bytes",
+                  "fit_budget_bytes", "total_vram_bytes", "ceiling_reserve_bytes",
+                  "subject_resident_bytes", "evicted", "no_evict"):
+            if ref.get(k) is not None:
+                out[k] = ref[k]
+        prot = ref.get("protected")
+        if isinstance(prot, list):
+            out["protected"] = prot
+            out["blocked_by"] = [p.get("model_key") for p in prot
+                                 if isinstance(p, dict) and p.get("model_key")]
+    out.setdefault("kind", load_failure.get("class"))
+    return out or None
 
 
 class _RelayUnbuildable(Exception):
@@ -2485,6 +2588,8 @@ def _cold_progress(model_key: str, worker: Optional[dict],
             continue
         if not (wanted & _slot_match_keys(str(slot["model_key"]))):
             continue
+        if slot.get("materialized") is False:
+            continue                       # F3/F4: a seat measured hollow is not a resident
         if slot.get("healthy") or slot.get("serving"):
             wname = (worker or {}).get("name") or (worker or {}).get("id") or "worker"
             if slot.get("busy"):
@@ -2498,8 +2603,12 @@ def _cold_progress(model_key: str, worker: Optional[dict],
         return False, None, None, None, False
     err = ls.get("error")
     if err and _is_permanent_load_error(err):
-        return True, ls.get("progress"), ls.get("message"), str(err), False
+        return (True, ls.get("progress"), ls.get("message"),
+                _HonestError(str(err), ls.get("load_failure")), False)
     moved = bool(ls.get("healthy") or ls.get("in_progress"))
+    # `healthy` is the provider's MATERIALIZED-gated verdict (workers.
+    # load_state_for_model consults the allocation row's `materialized`): a
+    # hollow loaded_models entry never reads ready here.
     return moved, ls.get("progress"), ls.get("message"), None, bool(ls.get("healthy"))
 
 
@@ -2738,7 +2847,10 @@ def _event_from_worker_line(d: dict, request_id: str):
             # "simplify" it to DoneEvent(**d).
             return StatusEvent(**{**d, "request_id": request_id})
     if t == "error":
-        return ErrorEvent(request_id=request_id, message=d.get("message", "worker error"))
+        _lf = d.get("load_failure")
+        return ErrorEvent(request_id=request_id, message=d.get("message", "worker error"),
+                          code=(str(d.get("code")) if d.get("code") else None),
+                          load_failure=(_lf if isinstance(_lf, dict) and _lf else None))
     return StatusEvent(**{**d, "request_id": d.get("request_id", request_id)})
 
 
@@ -3366,6 +3478,7 @@ def make_delegating_runner(framework: str, task: str):
             last_move = start
             last_err = ""
             last_err_busy = False   # structured verdict of the last failed attempt
+            last_lf = None          # its structured load_failure (F3)
             # Retry pacing: base poll while the load PROGRESSES, exponential
             # backoff (doubling to a cap) while it does not — a failing attempt
             # must not be re-fired at storm rate. See _retry_backoff_next.
@@ -3521,13 +3634,15 @@ def make_delegating_runner(framework: str, task: str):
                             if _is_permanent_load_error(exc):
                                 _record_load_verdict(worker.get("id"),
                                                      self.model_key, str(exc))
-                            raise RuntimeError(
+                            raise RemoteLoadError(
                                 f"worker {worker.get('name') or worker.get('id')} "
                                 f"failed for {self.model_key}: {exc} (local fallback "
                                 f"disabled for worker-assigned models; set "
-                                f"HUGPY_LOCAL_FALLBACK=always to allow)") from exc
+                                f"HUGPY_LOCAL_FALLBACK=always to allow)",
+                                load_failure=structured_load_failure(exc)) from exc
                         else:
                             last_err = str(exc)
+                            last_lf = structured_load_failure(exc)
                             # Structured verdict from the REAL exception (code /
                             # HTTP status), decided here, not re-derived from prose.
                             last_err_busy = _is_worker_busy_signal(exc)
@@ -3547,9 +3662,10 @@ def make_delegating_runner(framework: str, task: str):
                         # it so queued/re-submitted calls fail fast (see
                         # _LOAD_VERDICTS) instead of re-driving the same load.
                         _record_load_verdict(worker.get("id"), self.model_key, honest)
-                        raise RuntimeError(
+                        raise RemoteLoadError(
                             f"worker {worker.get('name') or worker.get('id')} failed to "
-                            f"load {self.model_key}: {honest}")
+                            f"load {self.model_key}: {honest}",
+                            load_failure=getattr(honest, "load_failure", None))
                     if _msg:
                         last_progress = _msg
                     # A healthy/idle resident is a routing decision, not a
@@ -3557,10 +3673,11 @@ def make_delegating_runner(framework: str, task: str):
                     # failed, surface that worker error immediately; only a
                     # genuinely busy/working resident remains retryable.
                     if ready and last_err and not last_err_busy:
-                        raise RuntimeError(
+                        raise RemoteLoadError(
                             f"worker {worker.get('name') or worker.get('id')} "
                             f"reported {self.model_key} loaded and idle, but "
-                            f"the request failed: {last_err}")
+                            f"the request failed: {last_err}",
+                            load_failure=last_lf)
                     # A structured busy/503 from this worker is the worker
                     # WORKING, not the worker silent — see _is_worker_busy_signal.
                     if moved or last_err_busy:
@@ -3701,10 +3818,12 @@ def make_delegating_runner(framework: str, task: str):
                             # not be reachable by the local-fallback or the
                             # permanent-error branch.
                             _ev_code = getattr(ev, "code", None)
+                            _ev_lf = getattr(ev, "load_failure", None)
                             if (_ev_code and str(_ev_code) in _BUSY_CODES) \
                                     or _is_worker_busy_signal(ev.message):
                                 raise _ColdRetry(ev.message, busy=True,
-                                                 code=str(_ev_code) if _ev_code else None)
+                                                 code=str(_ev_code) if _ev_code else None,
+                                                 load_failure=_ev_lf)
                             if _local_fallback_allowed():
                                 logger.warning("worker %s errored before output (%s); "
                                                "running %s locally", worker.get("id"),
@@ -3713,8 +3832,11 @@ def make_delegating_runner(framework: str, task: str):
                             if _is_permanent_load_error(ev.message):
                                 _record_load_verdict(worker.get("id"),
                                                      self.model_key, str(ev.message))
-                                raise _LoadFailed(_humanize_worker_error(wname, ev.message))
-                            raise _ColdRetry(ev.message, busy=False)   # transient — hold + retry
+                                raise _LoadFailed(_humanize_worker_error(wname, ev.message),
+                                                  load_failure=_ev_lf,
+                                                  code=str(_ev_code) if _ev_code else None)
+                            raise _ColdRetry(ev.message, busy=False,   # transient — hold + retry
+                                             load_failure=_ev_lf)
                         if etype == "done":
                             # Stamp the terminal done BEFORE it leaves: engine
                             # counts as usage when the worker sent none, and
@@ -3806,7 +3928,8 @@ def make_delegating_runner(framework: str, task: str):
                     if _is_permanent_load_error(exc):
                         _record_load_verdict(worker.get("id"),
                                              self.model_key, str(exc))
-                        raise _LoadFailed(f"worker {wname} failed for {self.model_key}: {exc}")
+                        raise _LoadFailed(f"worker {wname} failed for {self.model_key}: {exc}",
+                                          load_failure=structured_load_failure(exc))
                     raise _ColdRetry(str(exc), busy=False)   # transient — hold + retry
                 except GeneratorExit:
                     logger.info("relay client-disconnect: closing worker stream "
@@ -3830,6 +3953,7 @@ def make_delegating_runner(framework: str, task: str):
             last_move = start
             last_err = ""
             last_err_busy = False   # structured verdict of the last _ColdRetry
+            last_lf = None          # its structured load_failure (F3)
             # Retry pacing — the streaming twin of run()'s: base poll while the
             # load progresses, exponential backoff while it does not.
             retry_wait = _cold_hold_poll_s()
@@ -3993,10 +4117,12 @@ def make_delegating_runner(framework: str, task: str):
                     except _RelayUnbuildable:
                         action = "local"                # oversized payload / opted-in local
                     except _LoadFailed as lf:
-                        yield ErrorEvent(request_id=req.request_id, message=lf.message)
+                        yield ErrorEvent(request_id=req.request_id, message=lf.message,
+                                         load_failure=lf.load_failure, code=lf.code)
                         return
                     except _ColdRetry as cr:
                         last_err = cr.message
+                        last_lf = cr.load_failure
                         last_err_busy = cr.is_busy()
                         if not hold:
                             # Feature disabled → today's behavior: surface, no retry.
@@ -4032,7 +4158,8 @@ def make_delegating_runner(framework: str, task: str):
                         _record_load_verdict(wid, self.model_key, honest)
                         yield ErrorEvent(request_id=req.request_id,
                                          message=_humanize_worker_error(
-                                             worker.get("name") or wid, honest))
+                                             worker.get("name") or wid, honest),
+                                         load_failure=getattr(honest, "load_failure", None))
                         return
                     if msg:
                         last_progress = msg
@@ -4044,7 +4171,8 @@ def make_delegating_runner(framework: str, task: str):
                             request_id=req.request_id,
                             message=(f"worker {worker.get('name') or wid} "
                                      f"reported {self.model_key} loaded and idle, "
-                                     f"but the request failed: {last_err}"))
+                                     f"but the request failed: {last_err}"),
+                            load_failure=last_lf)
                         return
                     busy_waiting = bool(ready and msg and
                                         "waiting for its current request" in msg)

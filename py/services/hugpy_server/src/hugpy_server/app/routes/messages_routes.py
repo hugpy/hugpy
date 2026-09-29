@@ -67,9 +67,16 @@ def _messages_token() -> "str | None":
 
 
 def _anthropic_error(message: str, status: int, err_type: str = "invalid_request_error",
-                     retry_after: "int | None" = None):
-    """The Anthropic-shaped error body. Never a 500 traceback to the client."""
+                     retry_after: "int | None" = None, *, cause=None):
+    """The Anthropic-shaped error body. Never a 500 traceback to the client.
+    ``cause`` adds the structured ``load_failure`` / ``fit_failure`` (F3)."""
     err = {"type": err_type, "message": message}
+    if cause is not None:
+        try:
+            from hugpy_server.app.routes.v1_routes import _structured_error_fields
+            _structured_error_fields(err, cause)
+        except Exception:  # noqa: BLE001 — an error body must never fail to render
+            pass
     try:
         from flask import g
         from hugpy_engine.routing_diagnostics import lookup
@@ -214,6 +221,7 @@ def _non_stream(prompt_kwargs, tools_preamble, model_echo, input_tokens):
     finish = "stop"
     usage = None
     error_message = None
+    error_cause = None            # F3: the structured cause behind error_message
     try:
         for ev in chat_iter_sync(_v1_events(prompt_kwargs)):
             t = getattr(ev, "type", None)
@@ -224,6 +232,7 @@ def _non_stream(prompt_kwargs, tools_preamble, model_echo, input_tokens):
                 usage = getattr(ev, "usage", None)
             elif t == "error":
                 error_message = ev.message
+                error_cause = ev
     except KeyError as exc:
         return _anthropic_error(str(exc).strip("'\""), 404, "not_found_error")
     except Exception as exc:  # noqa: BLE001
@@ -233,7 +242,7 @@ def _non_stream(prompt_kwargs, tools_preamble, model_echo, input_tokens):
         logger.exception("/v1/messages completion failed")
         if _is_request_shape_message(f"{type(exc).__name__}: {exc}"):
             return _anthropic_error(f"{exc}", 400, "invalid_request_error")
-        return _anthropic_error(f"{type(exc).__name__}: {exc}", 500, "api_error")
+        return _anthropic_error(f"{type(exc).__name__}: {exc}", 500, "api_error", cause=exc)
 
     if error_message and not text_parts:
         if _is_capacity_message(error_message):
@@ -245,7 +254,7 @@ def _non_stream(prompt_kwargs, tools_preamble, model_echo, input_tokens):
             return _anthropic_error(error_message, 400, "invalid_request_error")
         status, etype = ((404, "not_found_error") if "Unknown model" in error_message
                          else (500, "api_error"))
-        return _anthropic_error(error_message, status, etype)
+        return _anthropic_error(error_message, status, etype, cause=error_cause)
 
     content = "".join(text_parts)
     reasoning = ""

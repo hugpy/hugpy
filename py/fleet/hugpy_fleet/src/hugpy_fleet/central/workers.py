@@ -3551,6 +3551,33 @@ def _prefs_scope(candidates: List[Dict[str, Any]], prefs: List[str],
     return kept
 
 
+def _resident_materialized(worker: Dict[str, Any], model_key: str) -> Optional[bool]:
+    """MEASURED residency of ``model_key`` on ``worker`` from its allocation
+    rows (step 2, F3/F4): True when a matching row says ``materialized`` (a
+    healthy slot child, a probed in-process handle), False when a matching row
+    says it is NOT (a hollow runner, a seat mid-load), None when no row speaks.
+    ``loaded_models`` membership is never consulted here — a hollow wrapper is
+    exactly what made central say "loaded and idle" for a model with no child
+    (coder-next, 2026-09-29)."""
+    wanted = _match_keys(model_key)
+    verdict: Optional[bool] = None
+    for row in (worker.get("allocations") or []):
+        if not isinstance(row, dict):
+            continue
+        mk = row.get("model_key")
+        if not mk or not (mk == model_key or (_match_keys(str(mk)) & wanted)):
+            continue
+        m = row.get("materialized")
+        if m is None and row.get("kind") == "slot":
+            m = row.get("healthy")
+        if m is None:
+            continue
+        if bool(m):
+            return True                 # any live row wins
+        verdict = False
+    return verdict
+
+
 def _polite_admits(worker: Dict[str, Any], model_key: str) -> tuple:
     """Would a POLITE load of ``model_key`` land on ``worker`` without evicting?
 
@@ -3581,11 +3608,19 @@ def _polite_admits(worker: Dict[str, Any], model_key: str) -> tuple:
     # (which intentionally leaves little free VRAM) answered once and then the
     # next request was refused as though it needed a second admission.
     wanted = _match_keys(model_key)
-    for resident in (worker.get("loaded_models") or []):
-        if resident and wanted & _match_keys(str(resident)):
-            return True, "already resident on worker"
+    # F3 (step 2): membership is not residency. A loaded_models entry whose
+    # allocation row says materialized:false (a hollow runner) does NOT admit
+    # — that stamped the load polite/no_evict and then "loaded and idle, but
+    # the request failed" (coder-next, 2026-09-29).
+    _mat = _resident_materialized(worker, model_key)
+    if _mat is not False:
+        for resident in (worker.get("loaded_models") or []):
+            if resident and wanted & _match_keys(str(resident)):
+                return True, "already resident on worker"
     for slot in (worker.get("slots") or []):
         if not isinstance(slot, dict) or not slot.get("healthy"):
+            continue
+        if slot.get("materialized") is False:
             continue
         seated = slot.get("model_key")
         if seated and wanted & _match_keys(str(seated)):
@@ -7540,6 +7575,12 @@ def load_state_for_model(model_key: str, worker_id: str,
             return None
 
         loaded = _member(w.get("loaded_models"))
+        # F3 (step 2): the allocation row's MEASURED residency outranks
+        # loaded_models membership — a hollow runner (materialized:false)
+        # never reads healthy, so the hold never says "loaded and idle".
+        materialized = _resident_materialized(w, model_key)
+        if loaded and materialized is False:
+            loaded = None
         # HOT (canonical STATE-MODEL.md): weights on the worker's hot drive,
         # not necessarily in VRAM. disk-truth = models_local (UTIL-08). Lets the
         # cold-hold gate tell a t_load (HOT->VRAM) from a t_pull (download).
@@ -7567,7 +7608,7 @@ def load_state_for_model(model_key: str, worker_id: str,
         # hold exactly as blind as it was before, never blinder.
         hb = _live_health(w)
         if isinstance(hb, dict):
-            if _member(hb.get("loaded_models")):
+            if _member(hb.get("loaded_models")) and materialized is not False:
                 loaded = loaded or model_key
             if _member(hb.get("provisioning")):
                 pulling_now = True
@@ -7582,6 +7623,7 @@ def load_state_for_model(model_key: str, worker_id: str,
                         break
 
         error = None
+        load_failure = None
         reports = w.get("load_reports") or {}
         if isinstance(reports, dict):
             for k, v in reports.items():
@@ -7595,6 +7637,8 @@ def load_state_for_model(model_key: str, worker_id: str,
                     fresh = False
                 if v.get("ok") is False and fresh:
                     error = str(v.get("error") or "load failed")
+                    if isinstance(v.get("load_failure"), dict):
+                        load_failure = dict(v["load_failure"])   # F3: the structure rides
                 break
 
         # STORAGE REFUSAL is an honest, STANDING verdict, not a load_report: the
@@ -7623,6 +7667,7 @@ def load_state_for_model(model_key: str, worker_id: str,
 
         return {
             "healthy": bool(loaded),
+            "materialized": materialized,       # F3: the measured verdict (None = no row)
             "on_disk": on_disk,
             "pulling": pulling_now,
             "loading": loading_now,
@@ -7630,6 +7675,7 @@ def load_state_for_model(model_key: str, worker_id: str,
             "progress": progress,
             "message": message,
             "error": error,
+            "load_failure": load_failure,       # F3: the worker's structured cause
         }
     except Exception:  # noqa: BLE001 — advisory only, never break the hold
         return None

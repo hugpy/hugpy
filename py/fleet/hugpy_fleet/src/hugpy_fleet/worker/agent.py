@@ -2893,7 +2893,16 @@ def _event_to_dict(ev) -> dict:
             out["timings"] = timings
         return out
     if t == "error":
-        return {"type": "error", "message": getattr(ev, "message", "run failed")}
+        out = {"type": "error", "message": getattr(ev, "message", "run failed")}
+        # F3 (step 2): the structured cause rides beside the prose when the
+        # engine attached one (an older central ignores the keys).
+        _lf = getattr(ev, "load_failure", None)
+        if isinstance(_lf, dict) and _lf:
+            out["load_failure"] = _lf
+        _code = getattr(ev, "code", None)
+        if _code:
+            out["code"] = str(_code)
+        return out
     try:
         return ev.model_dump()
     except Exception:
