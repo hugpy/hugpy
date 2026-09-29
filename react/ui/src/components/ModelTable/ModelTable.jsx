@@ -13,6 +13,7 @@ import { useModelStatus, refreshModelStatus } from './useModelStatus'
 import {
   BUCKETS, BUCKET_LABELS, EMPTY_STATUS_FILTERS, STATUS_FILTER_OPTIONS, STATUS_SORTS, WORTH_META, WORTH_ORDER,
   hasStatusFilters, matchesStatusFilters, parseStatusQuery, statusFor, summaryCounts, writeStatusQuery,
+  STATUS_FILTER_LABELS,
 } from './modelStatus'
 import {
   AdmissionCell, FailureCell, GradeCell, ServableCell, ThroughputCell, VerificationCell, WorkerStateChips, WorthCell,
@@ -950,7 +951,7 @@ function renderModelDetail(model, colSpan) {
             <select key={k} value={sfilters[k]} title={`status filter: ${k}`}
                     onChange={e => setSfilters(f => ({ ...f, [k]: e.target.value }))}>
               <option value="">{{ ver: 'Any verification', adm: 'Any admission', grade: 'Any grade', fail: 'Any failures', serv: 'Any servability' }[k]}</option>
-              {opts.map(o => <option key={o} value={o}>{o}</option>)}
+              {opts.map(o => <option key={o} value={o}>{STATUS_FILTER_LABELS[k]?.[o] || o}</option>)}
             </select>
           ))}
         </div>

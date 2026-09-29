@@ -103,3 +103,69 @@ export function compareByWorkerTier(a, b, ta, tb, sizeOf, dir = 1) {
   if (sa !== sb) return (sb - sa) * dir
   return String(a?.name || keyOf(a)).localeCompare(String(b?.name || keyOf(b))) * dir
 }
+
+// ── ONE vocabulary for storage locality (operator 2026-09-29: "shouldn't be
+// split nomenclature"). Two AXES, never conflated:
+//   storage tier (above)   hot / shared / central / none — WHERE the bytes sit
+//                          relative to this worker.
+//   residency              answering / serving / loaded / loading / pulling /
+//                          not loaded / failed — whether the weights are IN
+//                          VRAM/RAM on this worker right now.
+// GET /llm/models/status speaks an older per-worker vocabulary that mixes the
+// two ('hot' = loaded-idle, 'cold' = on this drive but not loaded, 'on central'
+// = central only). The mapping below is how every chip/pill renders it so the
+// picker's HOT group and the worker row's allocation rows say the same word
+// for the same disk fact.
+export const STATUS_BASE_TIER = {
+  answering: 'hot', serving: 'hot', hot: 'hot', loading: 'hot', cold: 'hot',
+  'downloading from central': 'central', 'on central': 'central',
+  'on another worker': 'none', missing: 'none', 'not allocated': 'none',
+}
+
+// Backend status word (`base`, else `state`) → tier, or null when the word
+// carries no storage fact ('unknown', 'n/a', 'failed' without a base).
+export function tierFromStatusBase(base) {
+  return STATUS_BASE_TIER[String(base ?? '')] ?? null
+}
+
+// Residency words + the existing state-pill classes they render with.
+export const RESIDENCY_VIEW = {
+  answering:   { word: 'answering',  icon: '⚡', pill: 'wp-pill-answering', tone: 'ok' },
+  serving:     { word: 'serving',    icon: '🔥', pill: 'wp-pill-serving',   tone: 'ok' },
+  loaded:      { word: 'loaded',     icon: '📌', pill: 'wp-pill-loaded',    tone: 'ok' },
+  loading:     { word: 'loading',    icon: '🔶', pill: 'wp-pill-heating',   tone: 'live' },
+  pulling:     { word: 'pulling',    icon: '⏳', pill: 'wp-pill-pulling',   tone: 'live' },
+  'not loaded': { word: 'not loaded', icon: '○', pill: 'wp-pill-cold',     tone: 'muted' },
+  failed:      { word: 'failed',     icon: '✗', pill: 'wp-pill-refused',   tone: 'bad' },
+}
+
+// Backend status word → residency key. Every storage-only word ('cold', 'on
+// central', 'on another worker', 'missing', 'not allocated', 'unknown') is
+// simply NOT LOADED here; the storage fact lives in the tier, not the word.
+export function residencyFromStatus(state) {
+  switch (String(state ?? '')) {
+    case 'answering': return 'answering'
+    case 'serving': return 'serving'
+    case 'hot': return 'loaded'
+    case 'loading': return 'loading'
+    case 'downloading from central': return 'pulling'
+    case 'failed': return 'failed'
+    default: return 'not loaded'
+  }
+}
+
+// One per-(model, worker) status entry → { tier, residency, label } in the
+// unified vocabulary. `tierOverride` lets a caller that holds better disk
+// evidence (the worker's own storage survey) win over the backend's word.
+export function unifiedStatusView(w, tierOverride = null) {
+  const state = w?.state
+  const base = w?.base || state
+  const tier = tierOverride || tierFromStatusBase(base) || tierFromStatusBase(state)
+  const residency = residencyFromStatus(state)
+  const rv = RESIDENCY_VIEW[residency]
+  // 'failed: <class>' keeps the class the backend put in the label.
+  const resWord = residency === 'failed' && w?.label ? w.label : rv.word
+  const tierWord = tier ? tier : (state === 'n/a' ? 'n/a' : 'unknown')
+  return { tier, residency, icon: rv.icon, tone: rv.tone, pill: rv.pill,
+           label: state === 'n/a' ? 'n/a' : `${resWord} · ${tierWord}` }
+}

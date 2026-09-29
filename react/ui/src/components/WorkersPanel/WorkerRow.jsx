@@ -22,6 +22,7 @@ import { ResourceStrip } from './ResourceStrip'
 import { SpillBadge } from './SpillBadge'
 import { useNarrowContainer } from './useNarrowContainer'
 import { isMeasuredResident } from './workerMetrics'
+import { TIER_VIEW, storageRowsByKey, workerTierOf } from './workerTier'
 import { findCatalogRow } from './catalogRow'
 import { getServing } from '../ModelTable/servingCache'
 import { WorkerLoadTable } from './WorkerLoadTable'
@@ -348,8 +349,12 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   // Live attribution: models whose slot is mid-request RIGHT NOW.
   const slotBusy    = new Set((worker.slots || [])
     .filter(s => s && s.model_key && s.busy).map(s => s.model_key))
-  // UTIL-08 disk-truth: null until the worker reports it (older agents).
-  const localSet = worker.models_local ? new Set(worker.models_local) : null
+  // STORAGE TIER per model, the SAME function the "load a model" picker uses
+  // (workerTier.js): the worker's reaper survey (storage.models, not
+  // assignment-scoped) first, then models_local / hot_workers, then central's
+  // catalog. One vocabulary — hot / shared / central / none — so a model
+  // allocated from the picker's HOT group never re-labels itself on this row.
+  const rowsByKey = useMemo(() => storageRowsByKey(worker), [worker])
 
   // Per-model live-state derivation for THIS worker. Lifted verbatim out of the
   // Serving row render so the serving TABLE can BOTH sort by the derived state
@@ -375,7 +380,8 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     //   heating     — weights loading into VRAM/RAM right now
     //   serving     — hosted in a SLOT (routable supervised child)
     //   loaded      — resident IN-PROCESS on this machine (no slot)
-    //   cold        — assigned; loads on the first request for it (or an explicit Load)
+    //   not loaded  — assigned; loads on the first request for it (or an explicit Load)
+    //                 (storage tier — hot/shared/central — is a separate pill)
     // Residency KIND, engine-agnostic: prefer the unified allocations
     // view (a slot occupant OR an in-RAM transformers resident both count
     // as "resident"); fall back to the legacy slots+loaded_models sets.
@@ -410,7 +416,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     // sitting safely in central's store all along (discovery catalogs from
     // llm_storage; the worker store is a lazy cache of it):
     //   🌡 hot     — files on THIS WORKER's drive; loads on first request.
-    //   ○ cold    — files on CENTRAL storage only (catalog status:installed);
+    //   central   — files on CENTRAL storage only (catalog status:installed);
     //               they transfer to the worker on first call (lazy doctrine —
     //               assignment is attribution, not a transfer order).
     //   ○ missing — files NOWHERE (no central files either): a stale catalog
@@ -421,17 +427,19 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     // bytes-moving), so a dead/queued entry correctly FALLS THROUGH to these
     // states instead of masking as a phantom ⏳ pulling forever.
     const catRow = findCatalogRow(models, key)
-    const centralHas = !!catRow
-      && (catRow.status === 'installed' || (catRow.dir_bytes ?? 0) > 0)
-    const onWorkerDisk = localSet != null && localSet.has(key)
+    const tier = workerTierOf(catRow || { model_key: key }, worker, rowsByKey)
+    const centralHas = tier.tier !== 'none'
     const notResident = !isPulling && !isHeating && !isServing && !isIdleResident
     // DISK TRUTH ONLY (operator ruling 2026-09-10: "the ui needs to simply
     // reflect whats actually going on. if the model is not on the disk, then
     // its missing, if its on the disk, then its not"). "The disk" means
     // ANYWHERE REAL: this worker's drive OR central's llm_storage. So:
-    //   🌡 hot      — on THIS worker's drive
-    //   ○ central  — on central storage; copies to the worker on first call
-    //   ○ missing  — files NOWHERE. The only state that needs an operator.
+    //   hot      — on THIS worker's drive (tier pill 🌡 hot, residency ○ not loaded)
+    //   shared   — on a shared store this worker reads through (🔗 shared)
+    //   central  — on central storage; copies to the worker on first call
+    //   missing  — files NOWHERE. The only state that needs an operator.
+    // The State cell renders TWO pills from this: residency (○ not loaded …)
+    // and the storage tier from workerTierOf — never one word for both.
     // 'missing' may NEVER show for files that exist somewhere — that was the
     // sam749~flux-klein-q4 complaint (on llm_storage, displayed as missing).
     // This fallback has only this worker + central catalog; it cannot prove
@@ -441,8 +449,9 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     const state = isPulling ? 'pulling' : isHeating ? 'heating'
       : isServing ? (inSlot ? (isAnswering ? 'answering' : 'serving') : 'loaded')
       : isIdleResident ? 'idle'
-      : onWorkerDisk ? 'hot'
-      : centralHas ? 'central' : 'unknown'
+      : tier.tier === 'hot' ? 'hot'
+      : tier.tier === 'shared' ? 'shared'
+      : tier.tier === 'central' ? 'central' : 'unknown'
     const stateTitle = isPulling ? `downloading files from central/HF${pct != null ? ` — ${pct}%` : ''}`
       : isHeating ? 'weights loading into VRAM/RAM right now'
       : isServing ? (inSlot
@@ -452,6 +461,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         : 'resident in this worker\'s own process — dedicated to this machine, not in a slot')
       : isIdleResident ? 'a runner is cached on this worker but holds NO measured VRAM/RAM and hasn\'t served recently — not actually resident (its weights were freed, e.g. by an evict/unload). Its measured residency is the truth here, not the runner-cache membership.'
       : state === 'hot' ? 'files on THIS worker\'s drive, not loaded — weights lift into VRAM/RAM on the first request'
+      : state === 'shared' ? 'files on a SHARED store this worker reads through (no local copy), not loaded — weights lift into VRAM/RAM on the first request'
       : state === 'central'
         ? 'files on CENTRAL storage (llm_storage), not on this worker\'s drive yet — they copy to this worker on the FIRST CALL (lazy download). Not missing: the files exist.'
         : 'inventory unknown — this worker row cannot prove whether the files exist elsewhere in the fleet.'
@@ -463,7 +473,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     // measured residency (doctrine above) — this is an annotation, not a state.
     const loadReport = worker.load_reports?.[key]
     const showLoadWhy = !!loadReport
-      && (state === 'hot' || state === 'central' || state === 'missing' || state === 'unknown' || state === 'idle' || state === 'heating')
+      && (state === 'hot' || state === 'shared' || state === 'central' || state === 'missing' || state === 'unknown' || state === 'idle' || state === 'heating')
     // failed = the probe reported not-ok OR reported it won't fit; ok-stale = the
     // last warm succeeded yet the model has since gone non-resident (cold again).
     // A failure older than a day is history, not a warning: a "worker
@@ -473,15 +483,15 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     const loadStale  = showLoadWhy && !loadFailed && loadReport?.ok === true
     return { isPulling, isHeating, override, isPinned, alloc, inSlot, derivedMode,
              isAnswering, isServing, isIdleResident, pct, isMissing, state, stateTitle,
-             centralHas, loadReport, loadFailed, loadStale }
+             centralHas, tier, loadReport, loadFailed, loadStale }
   }
 
   // Severity order for the State column sort: the more "live" a model is, the
   // higher it ranks (answering ▸ serving ▸ loaded ▸ heating ▸ pulling ▸ idle ▸
-  // hot ▸ cold ▸ missing) — the same ladder the pills read top-to-bottom.
+  // hot ▸ shared ▸ central ▸ missing) — the same ladder the pills read top-to-bottom.
   // missing ranks LAST now: it is the only state that needs an operator, and
   // the "worst" sort surfaces it at the bottom edge either direction.
-  const SERV_STATE_RANK = { answering: 8, serving: 7, loaded: 6, heating: 5, pulling: 4, idle: 3, hot: 2, central: 1, unknown: 0, missing: -1 }
+  const SERV_STATE_RANK = { answering: 9, serving: 8, loaded: 7, heating: 6, pulling: 5, idle: 4, hot: 3, shared: 2, central: 1, unknown: 0, missing: -1 }
   // ONE unified, ORDERED column model — the single source both the <th> row and
   // every <td> render from, so a column can be dragged anywhere across the whole
   // set (the data columns and the control columns are no longer two frozen
@@ -629,25 +639,40 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       label: 'State', sortable: true, cls: 'wp-servtable-state',
       render: ({ d, key }) => {
         const { isPulling, isHeating, isServing, inSlot, isAnswering, isIdleResident,
-                isMissing, centralHas, pct, state, stateTitle, loadFailed, loadReport, loadStale } = d
+                isMissing, pct, state, stateTitle, tier, loadFailed, loadReport, loadStale } = d
         const srow = mstatus.index.available ? statusFor(mstatus.index, key) : null
+        // Storage-tier pill: the picker's vocabulary (hot / shared / central),
+        // from the SAME function. Shown beside the residency word so "not
+        // loaded" never has to double as a storage label. Omitted for 'none'
+        // (the residency pill already says missing/unknown).
+        const tv = tier && tier.tier !== 'none' ? TIER_VIEW[tier.tier] : null
+        const tierPill = tv ? (
+          <span className={`wp-state-pill wp-tier-pill ${tv.pill}`}
+                title={`${tv.title}${tier.row ? ` · ${fmtBytes(tier.row.bytes)} on this worker` : ''} (source: ${tier.source || 'catalog'})`}>
+            {tv.glyph}
+          </span>
+        ) : null
         if (srow && (srow.workers || []).some(w => w.worker === worker.name)) {
-          return <WorkerStateChips row={srow} only={worker.name} />
+          // Status feed present: its residency word + OUR survey's tier (the
+          // survey outranks the backend's storage word when it has evidence).
+          const tierOf = () => (tier && tier.source && tier.source !== 'catalog' ? tier.tier : null)
+          return <WorkerStateChips row={srow} only={worker.name} tierOf={tierOf} />
         }
+        const residencyPill = state === 'hot' || state === 'shared' || state === 'central' ? 'cold' : state
         return (
           <>
-            <span className={`wp-state-pill wp-pill-${state}`} title={stateTitle}>
+            <span className={`wp-state-pill wp-pill-${residencyPill}`} title={stateTitle}>
               {isPulling ? `⏳ pulling${pct != null ? ` ${pct}%` : ''}`
                 : isHeating ? '🔶 heating'
                 : isServing ? (inSlot ? (isAnswering ? '⚡ answering' : '🔥 serving') : '📌 loaded')
                 : isIdleResident ? '◍ idle'
-                : state === 'hot' ? '🌡 hot'
-                : state === 'central' ? '○ central'
+                : state === 'hot' || state === 'shared' || state === 'central' ? '○ not loaded'
                 : state === 'missing' ? '○ missing' : '◌ unknown'}
               {/* FixDoc only on true missing — 'central' self-heals on first
                   call, no operator needed. */}
               {isMissing && <FixDoc doc="worker-model-missing" />}
             </span>
+            {tierPill}
             {loadFailed && (
               <span className="wp-loadwhy wp-loadwhy-bad"
                     title={`${loadReport?.error || (loadReport?.fit === false ? 'probe: fit=false' : 'warm failed — the model never became resident')}${loadReport?.ts ? ` · ${fmtServed(loadReport?.ts)}` : ''}`}>
@@ -969,7 +994,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
               <button className="wp-activate wp-chat-model" title={`Chat with ${key} in Compute`}
                       onClick={e => { e.stopPropagation(); onChat(key) }}>💬 chat</button>
             )}
-            {onLoad && (state === 'hot' || state === 'central') && (
+            {onLoad && (state === 'hot' || state === 'shared' || state === 'central') && (
               <button className="wp-activate" disabled={activating === key}
                       title={activating === key
                         ? 'seating this model on the worker…'
@@ -1385,7 +1410,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                    onChange={e => setLimitsForm(f => ({ ...f, ram_max_gib: e.target.value }))} />
             <input type="number" step="1" min="0" placeholder="VRAM GiB" value={limitsForm.gpu_mem_gib}
                    onChange={e => setLimitsForm(f => ({ ...f, gpu_mem_gib: e.target.value }))} />
-            <input type="number" step="1" min="0" placeholder="disk cache GiB" title="Local model-cache ceiling for this worker. Over it, cold local models become eviction candidates in the storage proposal. Clamped to the box's own caps.disk_cache_gib — the worker's stated delegation wins."
+            <input type="number" step="1" min="0" placeholder="disk cache GiB" title="Local model-cache ceiling for this worker. Over it, not-loaded local models become eviction candidates in the storage proposal. Clamped to the box's own caps.disk_cache_gib — the worker's stated delegation wins."
                    value={limitsForm.disk_cache_gib}
                    onChange={e => setLimitsForm(f => ({ ...f, disk_cache_gib: e.target.value }))} />
             <input type="number" step="1" min="1" placeholder="threads" value={limitsForm.threads}

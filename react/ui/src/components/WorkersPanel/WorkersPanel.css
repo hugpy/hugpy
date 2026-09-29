@@ -1275,6 +1275,11 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
    serving-row palette: .wp-pill-hot / -shared / -central / -missing. */
 .wp-lt-tier { white-space: nowrap; }
 .wp-lt-tier .wp-state-pill { cursor: help; }
+/* Worker-row State cell: residency pill (○ not loaded / 🔥 serving …) followed
+   by the storage-tier pill in the picker's vocabulary — same classes, one
+   vocabulary (2026-09-29). .wp-pill-cold is the residency "not loaded" style;
+   the word "cold" no longer appears as a label. */
+.wp-tier-pill { margin-left: 3px; cursor: help; }
 .wp-loadtable-t tbody tr.wp-lt-group td {
   padding: 3px 8px; background: var(--surface-2); border-bottom: 1px solid var(--border);
   font-size: 10px; color: var(--muted);

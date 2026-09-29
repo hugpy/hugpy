@@ -70,11 +70,14 @@ export function ServableCell({ row }) {
   </div>
 }
 
-// One chip per worker, the shared vocabulary (missing / cold / downloading from
-// central / loading / hot / serving / answering / failed: <class>, + held).
-export function WorkerStateChips({ row, only }) {
+// One chip per worker in the unified vocabulary "<residency> · <tier>"
+// (residency: answering / serving / loaded / loading / pulling / not loaded /
+// failed: <class>; tier: hot / shared / central / none) + held.
+// `tierOf(w)` (optional) → tier string | null: the worker row passes its own
+// storage-survey verdict so the chip's tier word matches the picker's.
+export function WorkerStateChips({ row, only, tierOf = null }) {
   if (!row) return <span className="ms-none">no status for this model</span>
-  const chips = workerChips(row).filter(c => !only || c.worker === only)
+  const chips = workerChips(row, tierOf).filter(c => !only || c.worker === only)
   if (!chips.length) return <span className="ms-none">no workers registered</span>
   return <span className="ms-wchips">{chips.map(c =>
     <span key={c.worker} className={`ms-wchip ms-${c.tone}${c.online ? '' : ' ms-offline'}`} title={c.title}>

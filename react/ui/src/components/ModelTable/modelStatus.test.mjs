@@ -74,15 +74,16 @@ test('explicit missing: never a blank cell, never a fake 0', () => {
   assert.equal(gradeView(ready).text, '25/27 (93%)')
   assert.equal(throughputView(ready).text, '71.2 tok/s · avg of 20')
   assert.equal(throughputView(unverified).text, 'no calls recorded')
-  assert.equal(servableView(ready).text, 'hot: aeb')
+  assert.equal(servableView(ready).text, 'loaded: aeb')
   assert.equal(servableView(unverified).text, 'not now')
 })
 
 test('worker chips use the shared vocabulary; held turns the chip red', () => {
   const c = workerChips(ready)
-  assert.deepEqual(c.map(x => [x.worker, x.label]), [['aeb', 'hot'], ['computron', 'missing']])
+  // unified vocabulary: '<residency> · <tier>' — backend 'hot' = loaded on this drive
+  assert.deepEqual(c.map(x => [x.worker, x.label]), [['aeb', 'loaded · hot'], ['computron', 'not loaded · none']])
   const f = workerChips(unverified)[0]
-  assert.equal(f.label, 'failed: hard_load_failure')
+  assert.equal(f.label, 'failed: hard_load_failure · hot')   // base 'cold' = on this drive
   assert.equal(f.tone, 'bad')
 })
 

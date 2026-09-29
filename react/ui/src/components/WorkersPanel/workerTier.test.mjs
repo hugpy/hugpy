@@ -75,3 +75,53 @@ test('sort: hot first, then shared, then central; within hot the bigger on-worke
   const desc = [...rows].sort((a, b) => compareByWorkerTier(a, b, tiers.get(a), tiers.get(b), sizeOf, -1))
   assert.deepEqual(desc.map(m => m.model_key), sorted.map(m => m.model_key).reverse())
 })
+
+// ── ONE vocabulary: GET /llm/models/status words → (tier, residency) ──────────
+import { RESIDENCY_VIEW, residencyFromStatus, tierFromStatusBase, unifiedStatusView } from './workerTier.js'
+
+test('status base word → storage tier: cold and hot both mean THIS drive; on central → central', () => {
+  assert.equal(tierFromStatusBase('cold'), 'hot')
+  assert.equal(tierFromStatusBase('hot'), 'hot')
+  assert.equal(tierFromStatusBase('serving'), 'hot')
+  assert.equal(tierFromStatusBase('on central'), 'central')
+  assert.equal(tierFromStatusBase('downloading from central'), 'central')
+  assert.equal(tierFromStatusBase('missing'), 'none')
+  assert.equal(tierFromStatusBase('on another worker'), 'none')
+  assert.equal(tierFromStatusBase('unknown'), null)
+  assert.equal(tierFromStatusBase('n/a'), null)
+})
+
+test('status state word → residency: backend "hot" is loaded, "cold"/"on central" are simply not loaded', () => {
+  assert.equal(residencyFromStatus('hot'), 'loaded')
+  assert.equal(residencyFromStatus('cold'), 'not loaded')
+  assert.equal(residencyFromStatus('on central'), 'not loaded')
+  assert.equal(residencyFromStatus('downloading from central'), 'pulling')
+  assert.equal(residencyFromStatus('loading'), 'loading')
+  assert.equal(residencyFromStatus('failed'), 'failed')
+  for (const k of Object.keys(RESIDENCY_VIEW)) assert.ok(RESIDENCY_VIEW[k].pill.startsWith('wp-pill-'))
+})
+
+test('unified label never says "cold" or "on central" (live shapes from /llm/models/status)', () => {
+  const cold = { worker: 'ae-worker', state: 'cold', base: 'cold', label: 'cold', detail: 'on disk, not loaded' }
+  const onc = { worker: 'a-brain', state: 'on central', base: 'on central', label: 'on central' }
+  const loaded = { worker: 'ae-worker', state: 'hot', base: 'hot', label: 'hot', detail: 'loaded in-process · idle' }
+  const failed = { worker: 'computron', state: 'failed', base: 'cold', label: 'failed: vram_fit' }
+  assert.equal(unifiedStatusView(cold).label, 'not loaded · hot')
+  assert.equal(unifiedStatusView(onc).label, 'not loaded · central')
+  assert.equal(unifiedStatusView(loaded).label, 'loaded · hot')
+  assert.equal(unifiedStatusView(failed).label, 'failed: vram_fit · hot')
+  assert.equal(unifiedStatusView({ state: 'n/a', base: 'n/a' }).label, 'n/a')
+  for (const w of [cold, onc, loaded, failed]) {
+    const l = unifiedStatusView(w).label
+    assert.ok(!/\bcold\b/.test(l) && !l.includes('on central'), l)
+  }
+})
+
+test('the worker row\'s own survey outranks the backend storage word (comfy-sd-turbo on computron: survey reapable, status "on central")', () => {
+  const w = { worker: 'computron', state: 'on central', base: 'on central', label: 'on central' }
+  assert.equal(unifiedStatusView(w, 'hot').label, 'not loaded · hot')
+  assert.equal(unifiedStatusView(w, 'hot').tier, 'hot')
+  // and a survey-derived tier for the same row agrees with the picker
+  const computron = { name: 'computron', models_local: [], storage: { models: [{ model_key: 'comfy-sd-turbo', store: 'reapable', bytes: 1 }] } }
+  assert.equal(workerTierOf(cat('comfy-sd-turbo'), computron).tier, 'hot')
+})

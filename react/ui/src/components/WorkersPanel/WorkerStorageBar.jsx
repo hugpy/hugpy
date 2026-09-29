@@ -120,7 +120,7 @@ export function WorkerStorageBar({ worker, onApproveEvictions, sizeByKey, detail
   }))
 
   // List order: refused FIRST (missing + actionable — the operator asked for it
-  // and it isn't there), then proposed/evictable-cold (what they act on next),
+  // and it isn't there), then proposed/evictable (what they act on next),
   // protected last; within a tier, least-recently-served first.
   const rows = [...refusedRows, ...models].sort((a, b) => {
     const ap = a.refused ? -1 : (proposedKeys.has(a.model_key) ? 0 : (a.protected ? 2 : 1))
@@ -190,7 +190,7 @@ export function WorkerStorageBar({ worker, onApproveEvictions, sizeByKey, detail
       {refusedRows.length > 0 && (
         <div className="wp-storage-warn wp-storage-warn-solo"
              title={'These models were REQUESTED but could not be downloaded: even after '
-               + 'evicting every cold, unprotected model, they would not fit under this '
+               + 'evicting every not-loaded, unprotected model, they would not fit under this '
                + "worker's storage allocation. The pulls were refused BEFORE they started, "
                + 'so no partial files and no wasted disk. Hover a row for its exact numbers.'}>
           ⊘ {refusedRows.length} model{refusedRows.length === 1 ? '' : 's'} missing — won&apos;t fit under this worker&apos;s storage budget
@@ -268,7 +268,7 @@ export function WorkerStorageBar({ worker, onApproveEvictions, sizeByKey, detail
       {over && proposed.length > 0 && (
         <div className="wp-storage-review">
           <div className="wp-storage-review-head">
-            Eviction proposal — frees {fmtBytes(s.proposed_free_bytes)} by deleting {proposed.length} cold,
+            Eviction proposal — frees {fmtBytes(s.proposed_free_bytes)} by deleting {proposed.length} not-loaded,
             unprotected model{proposed.length === 1 ? '' : 's'} (least-recently-served first):
           </div>
           <div className="wp-storage-review-list">
