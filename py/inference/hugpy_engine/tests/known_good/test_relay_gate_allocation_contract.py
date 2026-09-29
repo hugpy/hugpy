@@ -89,15 +89,20 @@ def test_inflight_cap_admits_up_to_cap_then_refuses_and_release_frees_a_slot():
     assert remote._inflight_try_acquire(wid, mk, cap, worker_idle=False) is True
 
 
-def test_effective_cap_is_none_for_a_slot_served_model_and_advertised_otherwise():
-    """INVARIANT: a model seated in a healthy SLOT child is NOT centrally capped
-    (its llama-server schedules its own concurrency -> _effective_cap None); an
-    in-process model uses the worker's advertised in_process_max_concurrency,
-    defaulting to the crash-safe 1 when the field is absent.
-    Established: _effective_cap / _advertised_cap / _model_slot_served
-    (remote.py:1077-1153)."""
+def test_effective_cap_is_none_for_a_slot_served_model_and_advertised_otherwise(monkeypatch):
+    """INVARIANT (revised 2026-09-29, keeper for the operator): a model seated in
+    a healthy SLOT child is capped at ONE in-flight per native slot by default
+    (HUGPY_CENTRAL_SLOT_CONCURRENCY unset -> 1 x seats); ``off`` restores the
+    pre-2026-09-29 uncapped None; an in-process model uses the worker's
+    advertised in_process_max_concurrency, defaulting to the crash-safe 1.
+    Established: _effective_cap / _advertised_cap / _model_slot_served;
+    per-slot default from the Coder-Next co-running prefills incident."""
+    monkeypatch.delenv("HUGPY_CENTRAL_SLOT_CONCURRENCY", raising=False)
     slot_worker = {"id": "w1", "slots": [{"model_key": A, "healthy": True}]}
+    assert remote._effective_cap(slot_worker, A) == 1
+    monkeypatch.setenv("HUGPY_CENTRAL_SLOT_CONCURRENCY", "off")
     assert remote._effective_cap(slot_worker, A) is None
+    monkeypatch.delenv("HUGPY_CENTRAL_SLOT_CONCURRENCY", raising=False)
 
     inproc = {"id": "w2", "serving_limits": {"in_process_max_concurrency": 3}}
     assert remote._effective_cap(inproc, A) == 3

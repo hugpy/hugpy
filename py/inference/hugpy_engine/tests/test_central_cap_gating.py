@@ -74,8 +74,8 @@ def test_central_cap_gating():
           remote._advertised_cap({"serving_limits": {"in_process_max_concurrency": 0}}) == 1)
     check("higher cap honored",
           remote._advertised_cap({"serving_limits": {"in_process_max_concurrency": 4}}) == 4)
-    check("slot-served model is uncapped centrally (child schedules itself)",
-          remote._effective_cap(W_SLOT, MODEL) is None)
+    check("slot-served model is capped at 1 per native slot by default (2026-09-29)",
+          remote._effective_cap(W_SLOT, MODEL) == 1)
     check("in-process model uses the advertised cap",
           remote._effective_cap(W1, MODEL) == 1)
 
@@ -93,11 +93,11 @@ def test_central_cap_gating():
     check("slot seated under BARE key -> ~-qualified request classifies slot-served",
           remote._model_slot_served(W_SLOT_BARE, "Qwen~Qwen3-Coder-Next-GGUF") is True)
     check("slot seated under BARE key -> ~-qualified request is UNCAPPED (None)",
-          remote._effective_cap(W_SLOT_BARE, "Qwen~Qwen3-Coder-Next-GGUF") is None)
+          remote._effective_cap(W_SLOT_BARE, "Qwen~Qwen3-Coder-Next-GGUF") == 1)
     check("REVERSE: slot seated under ~-qualified key -> bare request slot-served",
           remote._model_slot_served(W_SLOT_QUAL, "Qwen3-Coder-Next-GGUF") is True)
     check("REVERSE: slot seated under ~-qualified key -> bare request UNCAPPED",
-          remote._effective_cap(W_SLOT_QUAL, "Qwen3-Coder-Next-GGUF") is None)
+          remote._effective_cap(W_SLOT_QUAL, "Qwen3-Coder-Next-GGUF") == 1)
     check("exact-key slot match still classifies slot-served (regression)",
           remote._model_slot_served(W_SLOT_BARE, "Qwen3-Coder-Next-GGUF") is True)
     check("a DIFFERENT model is NOT slot-served here (no false positive)",
@@ -181,14 +181,28 @@ def test_central_cap_gating():
     s.release()
 
 
-    # --- slot-served primary: admitted uncapped, not counted -------------------
+    # --- slot-served primary: ONE in flight per native slot (2026-09-29) --------
     _reset()
     remote.set_worker_candidates_provider(lambda mk, pool=None: [W_SLOT])
     s = remote._acquire_relay_slot(MODEL, None, W_SLOT, {}, wait_s=0)
-    check("slot-served primary admitted without a cap", s.worker["id"] == "ws")
-    check("slot-served relay is NOT counted (uncapped)",
+    check("slot-served primary admitted (cap 1 per seat)", s.worker["id"] == "ws")
+    check("slot-served relay IS counted (one per native slot)",
+          remote._inflight_count("ws", MODEL) == 1)
+    busy_slot = None
+    try:
+        remote._acquire_relay_slot(MODEL, None, W_SLOT, {}, wait_s=0)
+    except remote.WorkerBusyError as exc:
+        busy_slot = exc
+    check("2nd concurrent relay onto the same seat is refused (not co-run)",
+          busy_slot is not None)
+    s.release()
+    check("release frees the seat", remote._inflight_count("ws", MODEL) == 0)
+    os.environ["HUGPY_CENTRAL_SLOT_CONCURRENCY"] = "off"
+    s = remote._acquire_relay_slot(MODEL, None, W_SLOT, {}, wait_s=0)
+    check("HUGPY_CENTRAL_SLOT_CONCURRENCY=off restores the uncapped slot relay",
           remote._inflight_count("ws", MODEL) == 0)
     s.release()
+    os.environ.pop("HUGPY_CENTRAL_SLOT_CONCURRENCY", None)
 
 
     # --- global disable escape hatch -------------------------------------------

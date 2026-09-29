@@ -182,6 +182,13 @@ class ChatRequest(BaseModel):
     # predating CHAT_EXTRAS_MIN_PKG_VERSION, never a silent no-op.
     chat_template_kwargs: Optional[dict] = None
     logit_bias: Optional[dict] = None
+    # OpenAI response_format (2026-09-29): {"type": "json_object"} or
+    # {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}.
+    # Forwarded to the engine verbatim (llama-server honours both; the
+    # in-process runner maps it or REJECTS — never silently drops it). Was
+    # dropped at /v1 intake before, so the B-reducer's JSON mode never
+    # reached the model.
+    response_format: Optional[dict] = None
     # k96 NO-EVICT GUARANTEE for agent-brain calls (operator ruling
     # 2026-08-06). When true, serving this request must never cost the fleet a
     # resident model: a WARM model serves exactly as today, but a cold load may

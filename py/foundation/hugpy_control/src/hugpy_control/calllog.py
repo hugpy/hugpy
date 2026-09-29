@@ -11,6 +11,7 @@ processing_ts / first_token_ts / processed_ts (+ processed_status).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -71,6 +72,37 @@ def _request_context() -> dict:
         return {}
 
 
+def prompt_hash(request_body, prompt=None) -> "tuple[str | None, int | None]":
+    """A STABLE short digest of what the caller asked (sha256 of the ordered
+    role/content pairs, 16 hex) plus its size in chars — so an identical-prompt
+    loop (the same reducer slice re-submitted every turn, the same probe fired
+    in a tight loop) is detectable from the call log WITHOUT storing prompts.
+    Falls back to the formatted prompt text when no messages ride the request.
+    (None, None) when neither exists."""
+    try:
+        msgs = request_body.get("messages") if isinstance(request_body, dict) else None
+        if isinstance(msgs, list) and msgs:
+            pairs = []
+            for m in msgs:
+                if isinstance(m, dict):
+                    c = m.get("content")
+                    if not isinstance(c, str):
+                        c = json.dumps(c, sort_keys=True, default=str, ensure_ascii=True)
+                    pairs.append([str(m.get("role") or ""), c])
+                else:
+                    pairs.append(["", str(m)])
+            blob = json.dumps(pairs, ensure_ascii=True, separators=(",", ":"))
+        elif isinstance(request_body, dict) and isinstance(request_body.get("prompt"), str):
+            blob = request_body["prompt"]
+        elif isinstance(prompt, str) and prompt:
+            blob = prompt
+        else:
+            return None, None
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16], len(blob)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
 def _err_text(err) -> str | None:
     if err is None:
         return None
@@ -106,6 +138,9 @@ def record(phase: str, job, **extra) -> None:
         request_body = getattr(job, "request", None)
         if request_body is not None and phase == "start":
             row["request"] = request_body
+        if phase == "start":
+            row["prompt_hash"], row["prompt_chars"] = prompt_hash(
+                request_body, getattr(job, "prompt", None))
         row["stage"] = getattr(job, "stage", None) or None
         if phase == "start":
             row.update(_request_context())

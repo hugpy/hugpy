@@ -221,7 +221,7 @@ class LlamaCppBaseRunner(ABC):
         yields {} — the directive+strip seam (utils/no_think.py) still applies.
         """
         extras = {}
-        for k in ("chat_template_kwargs", "logit_bias"):
+        for k in ("chat_template_kwargs", "logit_bias", "response_format"):
             v = getattr(req, k, None)
             if isinstance(v, dict) and v:
                 extras[k] = v

@@ -121,3 +121,44 @@ def test_restart_orphan_reads_interrupted_with_a_processed_stamp(log, monkeypatc
     m = calllog.read()[0]
     assert m["status"] == "interrupted" and m["processed_status"] == "interrupted"
     assert m["processed_ts"] == old + 10_000 and m["processing_ts"]
+
+
+def test_start_row_carries_client_headers_and_a_stable_prompt_hash(log):
+    """INVARIANT: the start row records the caller from the documented
+    X-Hugpy-Client-* headers + User-Agent of the live Flask request (the
+    Calls panel's "Caller / OS user / HugPy identity" block reads these), and
+    a stable ``prompt_hash`` (sha256 of the ordered role/content pairs, 16
+    hex) + ``prompt_chars`` — identical prompts hash equal, a changed prompt
+    differs, no prompt text is needed to see a loop. Both survive the merged
+    /llm/calls reader. Established: 2026-09-29 (verified live: a /v1 call with
+    User-Agent hugpy-grade/1 + X-Hugpy-Client-Process: grade lands as
+    client_process="grade")."""
+    from flask import Flask
+    app = Flask(__name__)
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "x" * 50}]
+    hdrs = {"User-Agent": "hugpy-grade/1", "X-Hugpy-Client-Process": "grade",
+            "X-Hugpy-Client-User": "vm_mgr", "X-Hugpy-Client-Task": "liveness",
+            "X-Hugpy-Client-Session": "s1"}
+    js = JobStore(mirror=None)
+    with app.test_request_context("/v1/chat/completions", method="POST", headers=hdrs):
+        js.create("m", id="h1", kind="v1", transport="v1", request={"messages": msgs})
+        js.create("m", id="h2", kind="v1", transport="v1", request={"messages": msgs})
+        js.create("m", id="h3", kind="v1", transport="v1",
+                  request={"messages": msgs[:1] + [{"role": "user", "content": "y" * 50}]})
+    rows = {r["id"]: r for r in _lines(log)}
+    r = rows["h1"]
+    assert (r["ua"], r["client_process"], r["client_user"], r["client_task"], r["client_session"]) == \
+        ("hugpy-grade/1", "grade", "vm_mgr", "liveness", "s1")
+    assert r["route"] == "/v1/chat/completions" and r["method"] == "POST"
+    assert len(r["prompt_hash"]) == 16 and r["prompt_chars"] > 50
+    assert rows["h2"]["prompt_hash"] == r["prompt_hash"]
+    assert rows["h3"]["prompt_hash"] != r["prompt_hash"]
+    merged = {m["id"]: m for m in calllog.read()}
+    assert merged["h1"]["client_process"] == "grade" and merged["h1"]["prompt_hash"] == r["prompt_hash"]
+    # No request context (a job created off the request thread): fields absent,
+    # hash still derived from the request body.
+    js.create("m", id="h4", kind="v1", request={"messages": msgs})
+    r4 = {r["id"]: r for r in _lines(log)}["h4"]
+    assert "client_process" not in r4 and r4["prompt_hash"] == r["prompt_hash"]
+    assert calllog.prompt_hash({"prompt": "abc"}) == calllog.prompt_hash(None, "abc")
+    assert calllog.prompt_hash(None) == (None, None)

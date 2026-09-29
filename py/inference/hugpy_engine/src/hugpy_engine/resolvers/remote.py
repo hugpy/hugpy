@@ -1026,11 +1026,69 @@ def _gate_disabled() -> bool:
 
 
 def _gate_wait_s() -> float:
-    """Optional admission wait ceiling; zero means wait until capacity/cancel."""
+    """Admission wait ceiling. UNSET -> HUGPY_WORKER_BUSY_MAX_S (120 s): a
+    request queued behind a busy native slot waits FIFO for at most that long
+    and is then released with a structured worker_busy (keeper 2026-09-29 —
+    the previous default of 0 meant "wait forever"). An explicit ``0`` keeps
+    the wait-until-capacity/cancel behaviour for a deployment that wants it."""
+    raw = (os.environ.get("HUGPY_CENTRAL_GATE_WAIT_S") or "").strip()
+    if not raw:
+        return _worker_busy_max_s()
     try:
-        return max(0.0, float(os.environ.get("HUGPY_CENTRAL_GATE_WAIT_S", "0")))
+        return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 0.0
+        return _worker_busy_max_s()
+
+
+def _gate_idle_grace_s() -> float:
+    """How old a saturated in-flight count must be before the worker's
+    heartbeat saying "idle" may reconcile it as a leak. A permit acquired a
+    moment ago is NOT a leak just because the 15 s heartbeat has not beaten
+    yet — without this grace the per-slot cap admitted the second concurrent
+    prefill within seconds of the first. Default 30 s (two beats)."""
+    try:
+        return max(0.0, float(os.environ.get("HUGPY_CENTRAL_GATE_IDLE_GRACE_S", "30")))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _slot_concurrency() -> Optional[int]:
+    """In-flight relays central admits PER NATIVE SLOT per model.
+
+    Default 1 (keeper on the operator's behalf, 2026-09-29): a llama-server
+    child batches concurrent requests and two 30k-token prefills on the same
+    seat halve each other (measured: 37 tok/s alone -> ~20 tok/s each, 15:15Z
+    and 16:33Z pairs on ae). FIFO for the rest, bounded by _gate_wait_s().
+    HUGPY_CENTRAL_SLOT_CONCURRENCY=N raises it; ``off``/``0`` restores the
+    pre-2026-09-29 uncapped behaviour (the child schedules itself)."""
+    raw = (os.environ.get("HUGPY_CENTRAL_SLOT_CONCURRENCY") or "").strip().lower()
+    if raw in ("off", "0", "false", "no", "none", "unlimited"):
+        return None
+    if not raw:
+        return 1
+    try:
+        return max(1, int(float(raw)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _slot_count(worker: Optional[dict], model_key: str) -> int:
+    """Native slots seating ``model_key`` on this worker (alias-tolerant,
+    healthy slots + slot allocations), at least 1 when slot-served."""
+    wanted = _slot_match_keys(model_key)
+    seen = set()
+    for s in (worker or {}).get("slots") or []:
+        if isinstance(s, dict) and s.get("model_key") and s.get("healthy") \
+                and (wanted & _slot_match_keys(str(s["model_key"]))):
+            seen.add(("slot", str(s.get("slot_id") or s.get("id") or s["model_key"])))
+    for a in (worker or {}).get("allocations") or []:
+        if isinstance(a, dict) and a.get("kind") == "slot" and a.get("model_key") \
+                and (wanted & _slot_match_keys(str(a["model_key"]))):
+            seen.add(("alloc", str(a.get("slot_id") or a["model_key"])))
+    # A slot reported on both surfaces is one seat; count the larger surface.
+    n_slots = sum(1 for k in seen if k[0] == "slot")
+    n_alloc = sum(1 for k in seen if k[0] == "alloc")
+    return max(1, n_slots, n_alloc)
 
 
 def _gate_stale_s() -> float:
@@ -1161,10 +1219,17 @@ def _model_slot_served(worker: Optional[dict], model_key: str) -> bool:
 
 
 def _effective_cap(worker: Optional[dict], model_key: str) -> Optional[int]:
-    """The in-process concurrency cap to enforce for (worker, model), or None to
-    NOT gate (the model is slot-served — its child schedules itself)."""
+    """The concurrency cap to enforce for (worker, model).
+
+    Slot-served (native llama-server child): ONE in-flight per native slot by
+    default (_slot_concurrency x seats), FIFO for the rest — None only when
+    HUGPY_CENTRAL_SLOT_CONCURRENCY=off (uncapped, pre-2026-09-29).
+    In-process: the worker's advertised in_process_max_concurrency (1 absent)."""
     if _model_slot_served(worker, model_key):
-        return None
+        per = _slot_concurrency()
+        if per is None:
+            return None
+        return per * _slot_count(worker, model_key)
     return _advertised_cap(worker)
 
 
@@ -1242,7 +1307,7 @@ def _inflight_try_acquire(worker_id: str, model_key: str, cap: int,
             #   * TIME-BASED (2026-09-10): no acquire activity for the stale
             #     window, the backstop when no live worker state is available.
             age = time.monotonic() - _INFLIGHT_TS.get(key, time.monotonic())
-            if worker_idle:
+            if worker_idle and age > _gate_idle_grace_s():
                 logger.warning(
                     "relay gate: in-flight counter for %s/%s stuck at %d but the "
                     "worker reports the model IDLE — reconciling the leaked count "
@@ -2244,6 +2309,12 @@ _REQUEST_SHAPE_MARKERS = (
     "chat template",
     "only user and assistant roles are supported",
     "conversation roles must",
+    # A worker whose frozen ChatRequest (extra="forbid") predates a field we
+    # forwarded (response_format, 2026-09-29) rejects at ITS intake — before
+    # any prefill. That is a request-shape verdict: honest, never held, never
+    # retried, never blamed on box size.
+    "extra inputs are not permitted", "extra fields not permitted",
+    "response_format",
 )
 
 
@@ -2262,6 +2333,12 @@ def _request_shape_message(model_key: str, worker: Optional[dict],
     """
     wname = (worker or {}).get("name") or (worker or {}).get("id") or "worker"
     raw = str(getattr(err, "message", None) or err or "").strip()
+    if "response_format" in raw.lower():
+        return (f"worker {wname} cannot honour response_format for {model_key}: "
+                f"its package predates the field, so the request was rejected at "
+                f"the worker's intake (nothing was generated, the field was NOT "
+                f"silently dropped). Update the worker or omit response_format. "
+                f"Worker said: {raw[:300]}")
     detail = f": {raw}" if raw else ""
     return (f"'{model_key}' on '{wname}' rejected the REQUEST SHAPE{detail} — "
             f"this model's chat template will not render the message sequence "

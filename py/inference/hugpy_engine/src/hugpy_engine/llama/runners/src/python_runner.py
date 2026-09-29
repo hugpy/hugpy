@@ -357,7 +357,42 @@ class LlamaCppPythonRunner(LlamaCppBaseRunner):
             logger.info("in-process llama_cpp cannot apply chat_template_kwargs "
                         "%s for %s — relying on the /no_think directive + strip",
                         extras["chat_template_kwargs"], self.model_key)
+        rf = extras.get("response_format")
+        if rf:
+            kw["response_format"] = self._map_response_format(rf)
         return kw
+
+    def _map_response_format(self, rf: dict) -> dict:
+        """OpenAI response_format -> llama_cpp create_chat_completion's
+        ``response_format`` ({"type":"json_object"[, "schema": {...}]}). A
+        build whose create_chat_completion has no such parameter REJECTS the
+        request with a clear error — a selected JSON mode is never a silent
+        no-op (2026-09-29)."""
+        try:
+            import inspect as _inspect
+            accepts = "response_format" in _inspect.signature(
+                self.llm.create_chat_completion).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if not accepts:
+            raise RuntimeError(
+                f"in-process llama_cpp build serving {self.model_key} does not "
+                f"accept response_format; the request was rejected rather than "
+                f"the field silently dropped (serve the model on a native "
+                f"llama-server slot, or omit response_format)")
+        t = rf.get("type")
+        if t == "json_object":
+            out = {"type": "json_object"}
+            if isinstance(rf.get("schema"), dict):
+                out["schema"] = rf["schema"]
+            return out
+        if t == "json_schema":
+            js = rf.get("json_schema") if isinstance(rf.get("json_schema"), dict) else {}
+            schema = js.get("schema") if isinstance(js.get("schema"), dict) else rf.get("schema")
+            if not isinstance(schema, dict):
+                raise ValueError("response_format json_schema needs json_schema.schema")
+            return {"type": "json_object", "schema": schema}
+        raise ValueError(f"unsupported response_format type {t!r}")
 
     async def _iter_stream(self, messages, max_tokens, temp, top_p, extras=None):
         messages, max_tokens = self._fit_chat(messages, max_tokens)

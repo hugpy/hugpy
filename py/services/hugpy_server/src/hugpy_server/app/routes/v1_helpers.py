@@ -53,6 +53,36 @@ def _fleet_status_text(status: dict) -> str:
     return "[hugpy fleet] " + text
 
 
+_RESPONSE_FORMAT_TYPES = ("text", "json_object", "json_schema")
+
+
+def normalize_response_format(rf) -> "Optional[dict]":
+    """Validate an OpenAI ``response_format``; return the dict to forward, or
+    None for ``text`` (the default). Raises ValueError (-> 400) on any shape
+    the engines cannot honour, so JSON mode is never silently dropped."""
+    if not isinstance(rf, dict):
+        raise ValueError("'response_format' must be an object with a 'type'")
+    t = rf.get("type")
+    if t not in _RESPONSE_FORMAT_TYPES:
+        raise ValueError(f"'response_format.type' must be one of {list(_RESPONSE_FORMAT_TYPES)}, got {t!r}")
+    if t == "text":
+        return None
+    if t == "json_object":
+        out = {"type": "json_object"}
+        if isinstance(rf.get("schema"), dict):
+            out["schema"] = rf["schema"]
+        return out
+    js = rf.get("json_schema")
+    if not isinstance(js, dict) or not isinstance(js.get("schema"), dict):
+        raise ValueError("'response_format' of type json_schema needs json_schema.schema (an object)")
+    out = {"type": "json_schema", "json_schema": {"schema": js["schema"]}}
+    if isinstance(js.get("name"), str):
+        out["json_schema"]["name"] = js["name"]
+    if isinstance(js.get("strict"), bool):
+        out["json_schema"]["strict"] = js["strict"]
+    return out
+
+
 def _completion_kwargs(payload: dict) -> dict:
     """Translate an OpenAI chat.completions payload into engine prompt_kwargs.
 
@@ -125,6 +155,12 @@ def _completion_kwargs(payload: dict) -> dict:
     for k in ("chat_template_kwargs", "logit_bias"):
         if isinstance(payload.get(k), dict) and payload[k]:
             kwargs[k] = payload[k]
+    # response_format (2026-09-29): validated here, forwarded to the engine —
+    # a malformed one is a 400 at intake, never a silent drop.
+    if payload.get("response_format") is not None:
+        rf = normalize_response_format(payload["response_format"])
+        if rf is not None:
+            kwargs["response_format"] = rf
     # k96 no-evict guarantee (agent brains): forwarded only when truthy so
     # ordinary traffic stays byte-identical; dispatch runs the load politely
     # and fails fast instead of evicting (see dispatch.ensure_headroom_for_load
