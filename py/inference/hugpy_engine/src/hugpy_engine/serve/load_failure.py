@@ -241,7 +241,8 @@ def load_failure_of(exc: BaseException, *, classify: bool = False,
         if isinstance(ff, dict) and ff.get("kind"):
             out["fit_failure"] = {k: ff.get(k) for k in (
                 "kind", "code", "need_bytes", "budget_bytes", "plan_n_cpu_moe",
-                "contract_n_cpu_moe", "permanent", "state_dependent")}
+                "contract_n_cpu_moe", "permanent", "state_dependent",
+                "ctx_effective", "kv_bytes", "ctx_pct")}
         numbers = {k: r.get(k) for k in (
             "needs_bytes", "free_vram_bytes", "free_vram_device_bytes",
             "external_floor_bytes", "ceiling_reserve_bytes", "fit_budget_bytes",

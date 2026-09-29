@@ -558,7 +558,11 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                          need_bytes=int(need), budget_bytes=max(0, fv_eff - reserve),
                          plan_n_cpu_moe=(split.n_cpu_moe if split else None),
                          contract_n_cpu_moe=contract_n,
-                         permanent=False, state_dependent=True)
+                         permanent=False, state_dependent=True,
+                         ctx_effective=_int_or_none(det.get("ctx_effective")
+                                                    or det.get("ctx_resolved")),
+                         kv_bytes=_int_or_none(det.get("kv")),
+                         ctx_pct=_int_or_none(det.get("ctx_pct")))
     return FitPlan(action="refuse", partial=(partial.as_dict() if partial is not None else None),
                    partial_kind=None, budget_bytes=budget, refuse_reason=why,
                    failure=failure, split=split,

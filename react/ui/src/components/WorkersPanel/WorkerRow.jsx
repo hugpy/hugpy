@@ -19,6 +19,7 @@ import { fmtBytes, fmtServed, midTrunc } from './formatters'
 import { ExternalLeases } from './ExternalLeases'
 import { ResidencyMenu } from './ResidencyMenu'
 import { ResourceStrip } from './ResourceStrip'
+import { ContextPreview } from './ContextPreview'
 import { SpillBadge } from './SpillBadge'
 import { useNarrowContainer } from './useNarrowContainer'
 import { isMeasuredResident } from './workerMetrics'
@@ -267,7 +268,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     Promise.resolve(onAssign(worker, key, next)).catch(() => {})
   }, [onAssign, worker])
 
-  const ContextMenu = ({ maxContext, spill, anchorRef, onApply, onClose }) => {
+  const ContextMenu = ({ maxContext, spill, anchorRef, onApply, onClose, modelKey }) => {
     const initial = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
     const [pct, setPct] = useState(Math.max(1, Math.min(100, initial)))
     const tokens = Math.max(1, Math.round(Number(maxContext || 0) * pct / 100))
@@ -285,6 +286,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         <input type="range" min="1" max="100" step="1" value={pct}
                onChange={e => setPct(Number(e.target.value))} />
         <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens</span>
+        <ContextPreview workerId={worker.id} modelKey={modelKey} pct={pct} />
         <div className="wp-context-actions">
           <button type="button" onClick={() => onApply(pct)}>Apply</button>
           <button type="button" onClick={() => onApply(null)}>Auto</button>
@@ -626,7 +628,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                     onClick={() => setCtxMenu(open ? null : key)}>
               {value.toLocaleString()}
             </button>
-            {open && <ContextMenu maxContext={max} spill={spill} anchorRef={ctxAnchorRef}
+            {open && <ContextMenu maxContext={max} spill={spill} anchorRef={ctxAnchorRef} modelKey={key}
                                   onApply={next => applyContext(key, spill, next)}
                                   onClose={() => setCtxMenu(null)} />}
           </span>

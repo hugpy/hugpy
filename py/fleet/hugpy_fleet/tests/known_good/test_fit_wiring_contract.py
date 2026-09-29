@@ -504,3 +504,94 @@ def test_refusal_reports_device_occupancy_composition_and_the_weights_prior(rig,
     assert f"~{hb(0)} measured UNATTRIBUTED" in msg
     assert f"~{hb(unaccounted)} in no compute process" in msg
     assert "nothing evictable left" in msg
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-29: the fit never prices KV at zero — the EFFECTIVE context
+# ---------------------------------------------------------------------------
+def _geo():
+    return {"n_layers": 36, "n_kv_heads": 8, "head_dim": 128, "ctx_train": 262144}
+
+
+def _kv_at(ctx):
+    return 2 * 36 * ctx * 8 * 128 * 2
+
+
+@pytest.fixture
+def ctx_rig(monkeypatch):
+    """A model whose geometry is known and whose ctx_pct / max / served-fit
+    are cells the test sets. No config lookup, no GGUF header, no GPU."""
+    spill = importlib.import_module("hugpy_engine.spill")
+    cells = {"pct": None, "max": 262144, "gguf_path": None, "served_fit": None}
+    monkeypatch.setattr(A, "_ctx_pct", lambda mk: cells["pct"])
+    monkeypatch.setattr(A, "_model_max_ctx", lambda mk, cfg=None: cells["max"])
+    monkeypatch.setattr(A, "_model_kv_geometry", lambda mk, cfg=None: _geo())
+    monkeypatch.setattr(A, "_served_gguf_geometry", lambda mk: (cells["gguf_path"], 36))
+    monkeypatch.setattr(spill, "served_ctx_for_fit", lambda path, **kw: cells["served_fit"])
+    monkeypatch.setattr(A, "_FLEX_CTX_FLOOR", {})
+    return cells
+
+
+def test_effective_ctx_prices_pct_set_unset_and_clamped(ctx_rig):
+    """INVARIANT (operator 2026-09-29): need = weights + KV at the EFFECTIVE
+    context, never 'unknown -> 0'. ctx_pct set -> pct x max; unset -> what the
+    loader will actually run with (GGUF: the fit-bounded trained ctx the slot
+    launches -c with, serve._ctx_for; other engines: the model max); a GGUF
+    pct that the VRAM fit clamps is priced at the CLAMPED value; nothing
+    readable -> the 4096 floor, still > 0. The detail records ctx_effective,
+    ctx_source and kv_bytes. LIVE CASE: "KV 0 (ctx_pct unset)" while the slot
+    came up at n_ctx 262144. Established: 2026-09-29."""
+    tf = {"framework": "transformers"}
+    gg = {"framework": "gguf"}
+    # pct set (transformers): 25% of 262144 = 65536
+    ctx_rig["pct"] = 25
+    kv, det = A._kv_need_bytes("m", tf)
+    assert det["ctx_effective"] == 65536 and det["ctx_source"] == "ctx_pct" and det["ctx_pct"] == 25
+    assert kv == det["kv_bytes"] == _kv_at(65536) > 0
+    # unset (transformers): the model max — the cache grows to whatever is used
+    ctx_rig["pct"] = None
+    kv, det = A._kv_need_bytes("m", tf)
+    assert det["ctx_effective"] == 262144 and det["ctx_source"] == "model-max"
+    assert kv == _kv_at(262144) > 0
+    # unset (GGUF): the slot's own -c — served_ctx_for_fit (trained ctx, fit-bounded)
+    ctx_rig.update(gguf_path="/models/m/q4.gguf", served_fit=131072)
+    kv, det = A._kv_need_bytes("m", gg)
+    assert det["ctx_effective"] == 131072 and det["ctx_source"] == "loader-default"
+    assert kv == _kv_at(131072)
+    # pct set (GGUF) but the fit clamps below it: price the clamped value
+    ctx_rig.update(pct=100, served_fit=32768)
+    kv, det = A._kv_need_bytes("m", gg)
+    assert det["ctx_effective"] == 32768 and det["ctx_pct"] == 100 and kv == _kv_at(32768)
+    # pct set (GGUF), fit roomier than the pct: the pct governs
+    ctx_rig.update(pct=10, served_fit=200000)
+    kv, det = A._kv_need_bytes("m", gg)
+    assert det["ctx_effective"] == 26214 and kv == _kv_at(26214)
+    # nothing readable: the floor, never zero
+    ctx_rig.update(pct=None, max=None, gguf_path=None, served_fit=None)
+    kv, det = A._kv_need_bytes("m", tf)
+    assert det["ctx_effective"] == 4096 and det["ctx_source"] == "floor" and kv == _kv_at(4096)
+
+
+def test_refusal_names_kv_at_the_effective_ctx(rig, monkeypatch):
+    """INVARIANT: a refusal's need line reads "... weights + KV <bytes> at ctx
+    <N> (<pct>%)" (or "(loader default)" when no pct is set), and fit_failure
+    carries ctx_effective / kv_bytes / ctx_pct so the wire says which context
+    was refused. Established: 2026-09-29."""
+    weights, kv = 20 * GIB, int(3.2 * GIB)
+    rig.card["total"] = int(23.6 * GIB)
+    rig.card["free"] = int(22.3 * GIB)
+    rig.card["need"] = weights + kv
+    det = {"total": weights + kv, "weights": weights, "kv": kv, "ctx_pct": 25,
+           "ctx_resolved": 65536, "ctx_effective": 65536, "ctx_source": "ctx_pct",
+           "ctx_max": 262144, "geometry_source": "geometry", "kv_bytes": kv}
+    monkeypatch.setattr(A, "_incoming_need_detail", lambda mk: dict(det))
+    r = A._vram_evict_to_fit(_State(), "m")["reason"]
+    hb = A._human_bytes
+    assert f"weights + KV {hb(kv)} at ctx 65,536 (25%)" in r["reason"]
+    assert r["fit_failure"]["ctx_effective"] == 65536
+    assert r["fit_failure"]["kv_bytes"] == kv and r["fit_failure"]["ctx_pct"] == 25
+    assert r["needs_kv_bytes"] == kv and r["ctx_resolved"] == 65536
+    det.update(ctx_pct=None, ctx_source="loader-default", ctx_resolved=262144, ctx_effective=262144)
+    r = A._vram_evict_to_fit(_State(), "m")["reason"]
+    assert f"KV {hb(kv)} at ctx 262,144 (loader default)" in r["reason"]
+    assert r["fit_failure"]["ctx_effective"] == 262144 and r["fit_failure"]["ctx_pct"] is None

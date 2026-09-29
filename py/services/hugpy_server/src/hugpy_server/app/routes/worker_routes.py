@@ -4285,6 +4285,114 @@ def _worker_fit(model_key, worker):
             "moe_expert_bytes": expert_bytes}
 
 
+# ── CONTEXT PREVIEW (operator, 2026-09-29): the size per context setting ────
+# The Ctx slider used to show only "pct% · N tokens"; the operator had to guess
+# what that costs. This prices, for a requested pct, weights + KV at that ctx
+# against the worker's per-device free VRAM (less the worker's default 512 MiB
+# compute cushion, spill._CTX_COMPUTE_RESERVE_BYTES), and marks the largest pct
+# that fits. Same weights term as the placement preflight (_worker_fit: raw x
+# HUGPY_VRAM_HEADROOM x calibration), same KV arithmetic as the worker's need
+# (spill.kv_bytes over the model's own geometry). Read-only; never assigns.
+_CTX_PREVIEW_STEPS = tuple(range(5, 101, 5))
+
+
+def _model_ctx_geometry(model_key):
+    """``{geometry, ctx_max, dtype_bytes, source}`` for KV pricing on central:
+    GGUF -> the served quant's header; transformers -> config.json; ctx_max =
+    registry model_max_length else the trained ctx. ``geometry`` may be {} (the
+    KV heuristic then applies — never zero)."""
+    out = {"geometry": {}, "ctx_max": None, "dtype_bytes": 2.0, "source": None}
+    try:
+        from hugpy_engine import spill
+        cfg = get_model_config(model_key, dict_return=True) or {}
+        fw = str(cfg.get("framework") or "").lower()
+        geo = {}
+        if fw in ("gguf", "llama_cpp"):
+            mf = _model_file_for(model_key, get_model_config(model_key))
+            if mf and os.path.isfile(mf):
+                geo = spill._gguf_kv_geometry(mf) or {}
+                out["source"] = "gguf-header"
+        else:
+            path = route_destination(cfg)
+            cj = os.path.join(path, "config.json") if path and os.path.isdir(path) else ""
+            if cj and os.path.isfile(cj):
+                import json as _json
+                with open(cj, "r", encoding="utf-8") as fh:
+                    geo = spill._transformers_kv_geometry(_json.load(fh)) or {}
+                out["source"] = "config.json"
+                out["dtype_bytes"] = float(spill._kv_dtype_bytes(geo.get("dtype")) or 2.0)
+        out["geometry"] = geo
+        mml = cfg.get("model_max_length") or cfg.get("tokenizer_model_max_length")
+        try:
+            mml = int(mml) if mml else 0
+        except (TypeError, ValueError):
+            mml = 0
+        out["ctx_max"] = mml or (int(geo.get("ctx_train") or 0) or None)
+    except Exception:  # noqa: BLE001 — unknown geometry -> heuristic pricing
+        logger.debug("ctx geometry for %s unreadable", model_key, exc_info=True)
+    return out
+
+
+def _context_preview(model_key, worker, pct):
+    """The priced need at ``pct`` (and at every 5% step) against the worker's
+    budget. Pure w.r.t. its inputs except the model facts it reads."""
+    from hugpy_engine import spill
+    verdict = _worker_fit(model_key, worker) or {}
+    weights = verdict.get("need")
+    gpu_free = verdict.get("gpu_vram_free")
+    geo_info = _model_ctx_geometry(model_key)
+    geo, ctx_max = geo_info["geometry"], geo_info["ctx_max"]
+    reserve = int(spill._CTX_COMPUTE_RESERVE_BYTES)
+    budget = (max(0, int(gpu_free) - reserve) if gpu_free is not None else None)
+    try:
+        pct = max(1, min(100, int(pct))) if pct not in (None, "") else None
+    except (TypeError, ValueError):
+        pct = None
+
+    def _row(p):
+        ctx = max(1, int(round((ctx_max or 0) * p / 100))) if ctx_max else None
+        kv = (spill.kv_bytes(ctx_tokens=ctx,
+                             n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
+                             n_kv_heads=geo.get("n_kv_heads"), head_dim=geo.get("head_dim"),
+                             dtype_bytes=geo_info["dtype_bytes"]) if ctx else None)
+        total = (int(weights) + int(kv or 0)) if weights is not None else None
+        fits = (total <= budget) if (total is not None and budget is not None) else None
+        return {"pct": p, "ctx": ctx, "kv_bytes": kv, "need_bytes": total, "fits": fits}
+
+    steps = [_row(p) for p in _CTX_PREVIEW_STEPS]
+    fitting = [r["pct"] for r in steps if r["fits"]]
+    out = {
+        "worker_id": worker.get("id"), "model_key": model_key,
+        "ctx_max": ctx_max, "weights_bytes": weights,
+        "weights_raw_bytes": verdict.get("need_raw"), "headroom": verdict.get("headroom"),
+        "calibration_correction": verdict.get("calibration_correction"),
+        "gpu_vram_free": gpu_free, "reserve_bytes": reserve, "budget_bytes": budget,
+        "geometry_source": geo_info["source"],
+        "max_fitting_pct": (max(fitting) if fitting else None),
+        "requested": (_row(pct) if pct is not None else None),
+        "steps": steps,
+    }
+    if weights is None:
+        out["reason"] = verdict.get("reason") or "model size unknown — not priced"
+    elif not ctx_max:
+        out["reason"] = "model max context unknown — KV not priced"
+    return out
+
+
+@worker_bp.route("/llm/workers/<worker_id>/context-preview", methods=["GET"])
+def workers_context_preview(worker_id):
+    """GET ?model_key=&pct= -> the priced need (weights, kv_bytes, total) at
+    that context setting and the budget, plus every 5% step and the largest
+    pct that fits — what the Ctx slider shows live as it moves."""
+    model_key = (request.args.get("model_key") or "").strip()
+    if not model_key:
+        return jsonify({"error": "model_key is required"}), 400
+    worker = get_worker(worker_id)
+    if worker is None:
+        return jsonify({"error": f"no worker {worker_id!r} in the central worker registry"}), 404
+    return jsonify(_context_preview(model_key, worker, request.args.get("pct")))
+
+
 # k56: hand the store THE fit function (not a copy of its arithmetic) so a
 # polite model's central-side "does this land in genuinely free room?" test and
 # the console's placement preflight are one and the same verdict. Registered at

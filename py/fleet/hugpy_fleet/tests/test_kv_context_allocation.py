@@ -231,8 +231,8 @@ def test_refusal_reports_weights_kv_split(monkeypatch):
     assert r["needs_kv_bytes"] == 3 * GIB
     assert r["ctx_pct"] == 50
     assert r["ctx_resolved"] == 16384
-    # the human string carries "= 21.0 GB weights + 3.0 GB kv@50%ctx"
-    assert "weights +" in r["reason"] and "kv@50%ctx" in r["reason"]
+    # the human string carries "= 21.0 GB weights + KV 3.0 GB at ctx N (50%)"
+    assert "weights + KV" in r["reason"] and "(50%)" in r["reason"]
 
 
 def test_admission_evicts_against_kv_inclusive_need(monkeypatch):

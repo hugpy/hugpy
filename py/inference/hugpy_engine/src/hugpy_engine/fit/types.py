@@ -313,6 +313,10 @@ class FitFailure:
                       ``ram_budget``).
     ``plan_n_cpu_moe`` / ``contract_n_cpu_moe``  the split N the plan derived
                       vs the contract's, so a basis mismatch is visible.
+    ``ctx_effective`` / ``kv_bytes`` / ``ctx_pct``  (2026-09-29) the context
+                      the need was priced at and the KV term it carried — the
+                      fit never prices KV at zero, so a refusal always says
+                      which ctx it refused.
     """
     kind: str
     code: str
@@ -323,6 +327,9 @@ class FitFailure:
     contract_n_cpu_moe: Optional[int] = None
     permanent: bool = False
     state_dependent: bool = True
+    ctx_effective: Optional[int] = None
+    kv_bytes: Optional[int] = None
+    ctx_pct: Optional[int] = None
 
     def as_dict(self) -> dict:
         return asdict(self)

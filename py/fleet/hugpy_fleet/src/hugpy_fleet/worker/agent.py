@@ -7725,17 +7725,67 @@ def _model_kv_geometry(model_key: str, cfg: dict | None = None) -> dict:
     return {}
 
 
-def _kv_need_bytes(model_key: str, cfg: dict | None = None) -> "tuple[int, dict]":
-    """KV-cache bytes for this model at its RESOLVED ctx, plus a detail dict for
-    honest reporting. Returns (0, {...}) when ctx_pct is unset (no ctx term —
-    today's behavior). Never silently zero when ctx_pct IS set: geometry-missing
-    falls to spill.kv_bytes' conservative heuristic (logged)."""
+def _effective_ctx(model_key: str, cfg: dict | None = None) -> dict:
+    """THE context the fit prices KV at (operator, 2026-09-29: never zero).
+
+    ``{"ctx", "pct", "max", "source"}``. The rule mirrors what the loader will
+    ACTUALLY run with (serve._ctx_for, the single source of truth for the
+    slot's ``-c``), so the need and the seat agree:
+
+      * ``ctx_pct`` set -> pct x model max (``_resolved_ctx``; for a GGUF the
+        resolver already bounds it by the real VRAM fit, ``served_ctx_for_fit``,
+        so a clamped value is priced as the clamped value).  source ``ctx_pct``.
+      * unset, GGUF -> ``spill.served_ctx_for_fit(served quant)``: the trained
+        ctx, reduced only as far as the fit needs — exactly the slot's ``-c``.
+        source ``loader-default``.
+      * unset, other engines -> the model's max (``_model_max_ctx``: registry
+        model_max_length, else the trained ctx from its own metadata) — a
+        transformers runner grows its cache to whatever the caller uses, so
+        the max is the honest ceiling.  source ``model-max``.
+      * nothing readable -> ``spill._ctx_floor()`` (HUGPY_LLAMA_CTX_FLOOR,
+        4096), the same floor serve falls to.  source ``floor``.
+
+    The live defect: "KV 0 (ctx_pct unset)" while the slot came up at
+    n_ctx 262144 — the whole KV cache was missing from the need and the
+    failure moved to load time."""
     from hugpy_engine.config.main import get_model_config
     cfg = cfg if cfg is not None else get_model_config(model_key, dict_return=True)
     ctx, pct, mx = _resolved_ctx(model_key, cfg)
-    if ctx is None:
-        return 0, {"ctx_pct": None, "ctx_resolved": None, "ctx_max": mx,
-                   "geometry_source": None}
+    if ctx:
+        return {"ctx": int(ctx), "pct": pct, "max": mx, "source": "ctx_pct"}
+    framework = str((cfg or {}).get("framework") or "").lower()
+    if framework in ("gguf", "llama_cpp"):
+        try:
+            from hugpy_engine import spill
+            ppath, _tl = _served_gguf_geometry(model_key)
+            if ppath:
+                fit = spill.served_ctx_for_fit(ppath)
+                if fit:
+                    return {"ctx": int(fit), "pct": None, "max": mx,
+                            "source": "loader-default"}
+        except Exception:  # noqa: BLE001 — fall through to the model max
+            pass
+    if mx:
+        return {"ctx": int(mx), "pct": None, "max": mx, "source": "model-max"}
+    try:
+        from hugpy_engine import spill
+        floor = int(spill._ctx_floor())
+    except Exception:  # noqa: BLE001
+        floor = 4096
+    return {"ctx": max(1, floor), "pct": None, "max": None, "source": "floor"}
+
+
+def _kv_need_bytes(model_key: str, cfg: dict | None = None) -> "tuple[int, dict]":
+    """KV-cache bytes for this model at its EFFECTIVE ctx (``_effective_ctx``),
+    plus a detail dict for honest reporting. NEVER (0, ...) for a real model
+    (operator, 2026-09-29): an unset ctx_pct prices the context the loader
+    will actually use; missing geometry falls to spill.kv_bytes' conservative
+    heuristic (logged). ``ctx_resolved`` keeps its old meaning for existing
+    consumers (== the effective ctx); ``ctx_effective``/``ctx_source`` name it."""
+    from hugpy_engine.config.main import get_model_config
+    cfg = cfg if cfg is not None else get_model_config(model_key, dict_return=True)
+    eff = _effective_ctx(model_key, cfg)
+    ctx, pct, mx = eff["ctx"], eff["pct"], eff["max"]
     from hugpy_engine import spill
     geo = _model_kv_geometry(model_key, cfg)
     framework = str((cfg or {}).get("framework") or "").lower()
@@ -7749,10 +7799,11 @@ def _kv_need_bytes(model_key: str, cfg: dict | None = None) -> "tuple[int, dict]
         logger.warning("kv: no full geometry for %s — using conservative "
                        "heuristic for the ctx reserve (%s tok @ %s%%)",
                        model_key, ctx, pct)
-    kv = spill.kv_bytes(ctx_tokens=ctx, n_layers=geo.get("n_layers"),
+    kv = spill.kv_bytes(ctx_tokens=ctx, n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
                         n_kv_heads=geo.get("n_kv_heads"),
                         head_dim=geo.get("head_dim"), dtype_bytes=dtype_bytes)
     return int(kv or 0), {"ctx_pct": pct, "ctx_resolved": ctx, "ctx_max": mx,
+                          "ctx_effective": ctx, "ctx_source": eff["source"],
                           "geometry_source": source, "kv_bytes": int(kv or 0)}
 
 
@@ -9970,8 +10021,13 @@ def _need_split_str(det: dict) -> str:
     if kv <= 0:
         return f" = {w}" if wfile and hr else ""
     pct = det.get("ctx_pct")
-    tag = f"@{pct}%ctx" if pct else ""
-    return f" = {w} + {_human_bytes(kv)} kv{tag}"
+    ctx = det.get("ctx_effective") or det.get("ctx_resolved")
+    # "KV 3.2 GB at ctx 65536 (25%)" — the ctx the need was priced at is on
+    # the line (operator, 2026-09-29), with the pct when one was set, else the
+    # loader's own default.
+    tag = (f" at ctx {int(ctx):,}" if ctx else "") + (
+        f" ({pct}%)" if pct else (" (loader default)" if ctx else ""))
+    return f" = {w} + KV {_human_bytes(kv)}{tag}"
 
 
 def _actively_replying(model_key: str, slot_busy: "set | None" = None) -> bool:

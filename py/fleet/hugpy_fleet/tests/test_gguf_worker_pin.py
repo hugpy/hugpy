@@ -166,7 +166,12 @@ def test_worker_selector_uses_free_vram_budget():
     d = _mkgguf(SIZES)
     orig_fv = A._free_vram_bytes
     orig_reserve = A._vram_ceiling_reserve_bytes
+    orig_kv = A._kv_need_bytes
     try:
+        # ...and since the fit never prices KV at zero (2026-09-29), a toy
+        # model with no geometry would be charged a heuristic KV at the floor
+        # ctx that dwarfs these byte-sized quants. The selector is under test.
+        A._kv_need_bytes = lambda mk, cfg=None: (0, {})
         # A synthetic 8000-byte card: the selector is under test, not the
         # admission reserve. Since 2026-09-29 the default reserve is the full
         # 512 MiB compute cushion (no external floor to un-stack against), and
@@ -180,6 +185,7 @@ def test_worker_selector_uses_free_vram_budget():
     finally:
         A._free_vram_bytes = orig_fv
         A._vram_ceiling_reserve_bytes = orig_reserve
+        A._kv_need_bytes = orig_kv
 
 
 # --------------------------------------------------------------------------- #
