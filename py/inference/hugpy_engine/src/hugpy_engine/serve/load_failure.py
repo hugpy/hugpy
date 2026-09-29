@@ -183,6 +183,45 @@ def load_failure_of(exc: BaseException, *, classify: bool = False,
                                                 "ReadTimeout", "ConnectionError")):
                     cls = "unreachable"
             out = {"class": cls, "loader_stderr": _stderr_from_text(text), "path": None}
+    # STRUCTURED REFUSAL (fit-hotfix 2026-09-29): a LoadRefusal carries the
+    # worker's typed verdict on ``.reason`` — the plan_fit ``fit_failure``
+    # (kind/code + the two figures in ONE basis) and the refusal numbers
+    # (budgetable free, device free, external floor, reserve, protected
+    # count). Until now only the prose sentence reached load_reports / the
+    # inference error, so a 'vram_fit' on a card the heartbeat still showed
+    # ~1 GiB free could not be told apart from a mis-priced need. Additive:
+    # every existing key keeps its meaning; ``fit_failure`` / ``refusal`` are
+    # present only when the chain carries a typed reason.
+    for e in _chain(exc):
+        r = getattr(e, "reason", None)
+        if not isinstance(r, dict):
+            continue
+        ff = r.get("fit_failure")
+        if not (isinstance(ff, dict) or r.get("state") == "refused"):
+            continue
+        if out is None:
+            out = {"class": "vram_fit", "loader_stderr": None, "path": None}
+        if isinstance(ff, dict) and ff.get("kind"):
+            out["fit_failure"] = {k: ff.get(k) for k in (
+                "kind", "code", "need_bytes", "budget_bytes", "plan_n_cpu_moe",
+                "contract_n_cpu_moe", "permanent", "state_dependent")}
+        numbers = {k: r.get(k) for k in (
+            "needs_bytes", "free_vram_bytes", "free_vram_device_bytes",
+            "external_floor_bytes", "ceiling_reserve_bytes", "fit_budget_bytes",
+            "total_vram_bytes", "subject_resident_bytes", "free_vram_effective_bytes",
+            "evicted_freed_bytes", "no_evict") if r.get(k) is not None}
+        prot = r.get("protected")
+        if isinstance(prot, list):
+            numbers["protected_count"] = len(prot)
+            numbers["protected"] = [
+                {"model_key": p.get("model_key"), "why": p.get("why"),
+                 "vram_bytes": p.get("vram_bytes")}
+                for p in prot if isinstance(p, dict)]
+        if r.get("evicted") is not None:
+            numbers["evicted"] = list(r.get("evicted") or [])
+        if numbers:
+            out["refusal"] = numbers
+        break
     if out is not None and (message or not out.get("loader_stderr")):
         out["message"] = f"{type(exc).__name__}: {exc}"
     return out

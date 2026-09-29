@@ -454,3 +454,167 @@ def test_snapshot_and_resident_carry_measured_facts_for_step_two():
     assert fit.Resident("x").materialized is None
     d = plan.as_dict()
     assert d["ram_budget_bytes"] is None and d["split"] is None
+
+
+# ---------------------------------------------------------------------------
+# fit-hotfix 2026-09-29: the operator's "15.7 MiB failed vram_fit" case, pinned
+# ---------------------------------------------------------------------------
+MIB = 1 << 20
+EXTERNAL_FLOOR = 1 * GIB                     # HUGPY_VRAM_RESERVE_GIB default
+
+
+def _default_reserve(total):
+    """agent._vram_ceiling_reserve_bytes default arithmetic, in bytes:
+    max(0, min(512 MiB cushion, 10% of the card) - external floor)."""
+    return max(0, min(512 * MIB, int(total * 0.10)) - EXTERNAL_FLOOR)
+
+
+def _tiny_request(need=int(18.0 * MIB)):
+    weights = int(15.7 * MIB)
+    return fit.FitRequest(model_key="test-save-tiny-random-llama3-smashed-pro",
+                          need_bytes=need,
+                          need_detail={"total": need, "weights": weights,
+                                       "kv": need - weights, "ctx_pct": 100},
+                          planned_gpu_bytes=need)
+
+
+def test_live_computron_2026_09_29_tiny_model_refused_on_a_full_card_is_honest():
+    """LIVE CASE (computron, 2026-09-29 13:26:35, RTX 4060 Laptop 8 GiB): the
+    operator's 15.7 MiB transformers model was refused 'vram_fit'. The worker
+    gathered total=8585740288 B, BUDGETABLE free=12451840 B (device free
+    1086324736 B less the 1 GiB external floor), ceiling reserve 0 B, one
+    PROTECTED static max-gpu resident (Qwen2.5-VL-7B, 6578765824 B). INVARIANT:
+    plan_fit reproduces that verdict byte-for-byte — refuse, kind=vram_fit,
+    code=wont_fit, need 18874368 B vs budget 12451840 B — because the card
+    genuinely had 11.9 MiB of budgetable room; the refusal is honest, not a
+    units error, and the protected resident is never proposed for eviction.
+    Established: fit-hotfix 2026-09-29 (evidence in load_reports on central)."""
+    total, free = 8_585_740_288, 12_451_840
+    snap = fit.ResourceSnapshot(total_bytes=total, free_bytes=free,
+                                external_floor_bytes=EXTERNAL_FLOOR,
+                                ram_free_bytes=6_306_209_792, ram_total_bytes=16 * GIB,
+                                devices=(fit.DeviceVram(0, total, free),),
+                                target_device=0, now=NOW)
+    policy = fit.FitPolicy(ceiling_reserve_bytes=_default_reserve(total),
+                           empty_card_budget_bytes=total - EXTERNAL_FLOOR)
+    assert policy.ceiling_reserve_bytes == 0                # "0 B ceiling reserve"
+    static_vl7b = fit.Resident("Qwen2.5-VL-7B-Instruct-GGUF", vram_bytes=6_578_765_824,
+                               host_mode="slot", protected=True, why="static residency",
+                               materialized=True)
+    plan = fit.plan_fit(_tiny_request(), snap, [static_vl7b], policy)
+    assert plan.action == "refuse" and plan.fits_now is False
+    assert plan.failure is not None
+    assert plan.failure.kind == "vram_fit" and plan.failure.code == "wont_fit"
+    assert plan.failure.need_bytes == 18_874_368
+    assert plan.failure.budget_bytes == 12_451_840
+    assert plan.free_bytes == free and plan.free_effective_bytes == free
+    assert plan.subject_held_bytes == 0 and plan.ceiling_reserve_bytes == 0
+    assert plan.evictions == ()                             # protected: never proposed
+    assert "12451840 B free of 8585740288 B" in plan.refuse_reason
+    assert "1073741824 B external floor" in plan.refuse_reason
+    assert "1 protected resident(s)" in plan.refuse_reason
+
+
+def test_live_ae_worker_2026_09_29_same_tiny_model_proceeds_with_1_gib_budgetable():
+    """LIVE CASE (ae-worker, 2026-09-29 13:26:59, RTX 3090): the SAME 15.7 MiB
+    model against 1185284096 B budgetable free (Coder-Next 18.8 GB resident)
+    proceeds without touching any resident — which is what happened (probe
+    ok=True, fit=True, 315949056 B used). INVARIANT: a MiB-scale need against a
+    GiB-scale free figure is 'proceed' with fits_now=True and no evictions.
+    Established: fit-hotfix 2026-09-29."""
+    total, free = 25_769_803_776, 1_185_284_096
+    snap = fit.ResourceSnapshot(total_bytes=total, free_bytes=free,
+                                external_floor_bytes=EXTERNAL_FLOOR, now=NOW)
+    policy = fit.FitPolicy(ceiling_reserve_bytes=_default_reserve(total))
+    coder_next = fit.Resident("Qwen3-Coder-Next-GGUF", vram_bytes=18_820_000_000,
+                              host_mode="slot", last_call=NOW - 10.0, materialized=True)
+    plan = fit.plan_fit(_tiny_request(), snap, [coder_next], policy)
+    assert plan.action == "proceed" and plan.fits_now is True
+    assert plan.evictions == () and plan.failure is None
+    assert plan.need_bytes == 18_874_368 and plan.free_bytes == free
+
+
+@pytest.mark.parametrize("free_gib", [1, 2, 8, 24])
+def test_units_sanity_every_field_is_bytes_and_15_7_mib_fits_1_gib_free(free_gib):
+    """UNITS SANITY: ResourceSnapshot/FitRequest/FitPolicy/FitPlan carry BYTES
+    (plain ints, no MiB/GiB mixing). A 15.7 MiB need against >= 1 GiB budgetable
+    free must proceed with fits_now=True under the default reserve, and the
+    plan echoes the inputs unchanged (no rescaling anywhere in the core).
+    Established: fit-hotfix 2026-09-29."""
+    total, free = 24 * GIB, free_gib * GIB
+    snap = fit.ResourceSnapshot(total_bytes=total, free_bytes=free,
+                                external_floor_bytes=EXTERNAL_FLOOR, now=NOW)
+    req = _tiny_request()
+    policy = fit.FitPolicy(ceiling_reserve_bytes=_default_reserve(total))
+    for v in (snap.total_bytes, snap.free_bytes, snap.external_floor_bytes,
+              req.need_bytes, req.planned_gpu_bytes, policy.ceiling_reserve_bytes):
+        assert type(v) is int, (v, type(v))
+    assert req.need_bytes < 32 * MIB < GIB <= snap.free_bytes
+    plan = fit.plan_fit(req, snap, [], policy)
+    assert plan.action == "proceed" and plan.fits_now is True
+    assert plan.need_bytes == req.need_bytes == 18_874_368
+    assert plan.free_bytes == free and plan.total_bytes == total
+    assert plan.free_effective_bytes == free           # no subject credit
+    assert plan.ceiling_reserve_bytes == policy.ceiling_reserve_bytes
+    assert plan.failure is None and plan.evictions == ()
+
+
+def test_load_refusal_reaches_the_wire_structured_not_as_prose_only():
+    """INVARIANT (fit-hotfix 2026-09-29): when the worker refuses through
+    plan_fit, the LoadRefusal it raises carries the typed verdict, and
+    ``serve.load_failure.load_failure_of`` surfaces it STRUCTURED — class
+    'vram_fit' plus ``fit_failure`` (kind/code/need/budget in one basis) and
+    ``refusal`` (budgetable free, device free, external floor, reserve,
+    protected residents) — so load_reports / the inference error can show WHY a
+    15.7 MiB need failed on a card the heartbeat still reports ~1 GiB free.
+    The prose sentence is kept in ``message``. Established: fit-hotfix
+    2026-09-29 (computron live case)."""
+    LF = importlib.import_module("hugpy_engine.serve.load_failure")
+    D = importlib.import_module("hugpy_engine.dispatch.dispatch")
+    total, free = 8_585_740_288, 12_451_840
+    plan = fit.plan_fit(
+        _tiny_request(),
+        fit.ResourceSnapshot(total_bytes=total, free_bytes=free,
+                             external_floor_bytes=EXTERNAL_FLOOR, now=NOW),
+        [fit.Resident("Qwen2.5-VL-7B-Instruct-GGUF", vram_bytes=6_578_765_824,
+                      host_mode="slot", protected=True, why="static residency")],
+        fit.FitPolicy(ceiling_reserve_bytes=0))
+    assert plan.action == "refuse"
+    # The worker's verdict dict, as _execute_fit_plan builds it (subset).
+    reason = {"state": "refused", "model_key": "test-save-tiny-random-llama3-smashed-pro",
+              "reason": "won't fit on GPU: needs 18.0 MB, 11.9 MB free of 7.6 GB (...)",
+              "needs_bytes": plan.need_bytes, "free_vram_bytes": free,
+              "external_floor_bytes": EXTERNAL_FLOOR,
+              "free_vram_device_bytes": free + EXTERNAL_FLOOR,
+              "fit_budget_bytes": free, "ceiling_reserve_bytes": 0,
+              "total_vram_bytes": total, "evicted": [], "evicted_freed_bytes": 0,
+              "protected": [{"model_key": "Qwen2.5-VL-7B-Instruct-GGUF",
+                             "vram_bytes": 6_578_765_824, "host_mode": "slot",
+                             "why": "static residency"}],
+              "fit_failure": plan.failure.as_dict()}
+    exc = D.LoadRefusal(reason)
+    out = LF.load_failure_of(exc)
+    assert out["class"] == "vram_fit"
+    assert out["fit_failure"]["kind"] == "vram_fit" and out["fit_failure"]["code"] == "wont_fit"
+    assert out["fit_failure"]["need_bytes"] == 18_874_368
+    assert out["fit_failure"]["budget_bytes"] == 12_451_840
+    ref = out["refusal"]
+    assert ref["free_vram_bytes"] == 12_451_840
+    assert ref["free_vram_device_bytes"] == 12_451_840 + EXTERNAL_FLOOR
+    assert ref["external_floor_bytes"] == EXTERNAL_FLOOR and ref["fit_budget_bytes"] == 12_451_840
+    assert ref["protected_count"] == 1
+    assert ref["protected"][0]["model_key"] == "Qwen2.5-VL-7B-Instruct-GGUF"
+    assert out["message"].startswith("LoadRefusal: won't fit on GPU")
+    # A refusal WITHOUT a typed verdict (slot-path prose) is unchanged: class only.
+    plain = LF.load_failure_of(D.LoadRefusal({"reason": "won't fit on a slot: ...",
+                                              "model_key": "m", "no_makeroom": True}))
+    assert plain["class"] == "vram_fit" and "fit_failure" not in plain and "refusal" not in plain
+    # Wrapped one level (the probe's RuntimeError) still resolves via the chain.
+    try:
+        try:
+            raise exc
+        except D.LoadRefusal as inner:
+            raise RuntimeError("m: in-process load failed") from inner
+    except RuntimeError as wrapped:
+        chained = LF.load_failure_of(wrapped, classify=True)
+    assert chained["class"] == "vram_fit" and chained["fit_failure"]["kind"] == "vram_fit"

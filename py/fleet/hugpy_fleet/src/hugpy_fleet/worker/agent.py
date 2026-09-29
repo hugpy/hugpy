@@ -10866,6 +10866,28 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     plan = plan_fit(request, snap, residents, policy)
     for _why in plan.reasons:
         logger.info("VRAM admission for %s: %s", model_key, _why)
+    # ONE structured verdict line per admission (fit-hotfix 2026-09-29): the
+    # FitPlan's action + FitFailure kind/code + every figure the decision was
+    # priced in, ALL IN BYTES, so a refusal can be audited from the journal
+    # alone (the operator's "15.7 MiB failed vram_fit" needed the worker's
+    # load_reports to reconstruct: budgetable free 12451840 B = device free
+    # 1086324736 B - 1073741824 B external floor on a card a static max-gpu
+    # resident had filled). `free` is the BUDGETABLE figure (floor already
+    # out); `device_free` puts the floor back so the two bases are visible.
+    _fl = plan.failure
+    logger.info(
+        "plan_fit verdict: model=%s action=%s fits_now=%s kind=%s code=%s "
+        "need_bytes=%s free_bytes=%s device_free_bytes=%s free_effective_bytes=%s "
+        "subject_held_bytes=%s ceiling_reserve_bytes=%s external_floor_bytes=%s "
+        "total_bytes=%s evictions=%d protected=%d note=%r",
+        model_key, plan.action, plan.fits_now,
+        (_fl.kind if _fl is not None else None), (_fl.code if _fl is not None else None),
+        plan.need_bytes, snap.free_bytes,
+        (None if snap.free_bytes is None
+         else int(snap.free_bytes) + int(snap.external_floor_bytes or 0)),
+        plan.free_effective_bytes, plan.subject_held_bytes, plan.ceiling_reserve_bytes,
+        int(snap.external_floor_bytes or 0), snap.total_bytes,
+        len(plan.evictions), sum(1 for r in residents if r.protected), plan.note)
     # ── EXECUTE (the only impure part) ──────────────────────────────────────
     return _execute_fit_plan(state, model_key, plan, request, snap, policy,
                              cand_rows, prot_rows)
@@ -11229,6 +11251,14 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         "free_vram_bytes": fv,
         "total_vram_bytes": total,
         "ceiling_reserve_bytes": reserve,
+        # BASIS FIELDS (fit-hotfix 2026-09-29, additive): `free_vram_bytes`
+        # above is the BUDGETABLE free (external floor already out — what the
+        # gate prices against); `free_vram_device_bytes` is the raw device
+        # free the heartbeat/central quote, so the console can show why a
+        # tiny need "failed" on a card that still reports ~1 GiB free.
+        "external_floor_bytes": _ext_floor,
+        "free_vram_device_bytes": (None if fv is None else int(fv) + _ext_floor),
+        "fit_budget_bytes": (None if fv_eff is None else max(0, int(fv_eff) - reserve)),
         "evicted": evicted,
         "evicted_freed_bytes": freed,
         "evict_failed": evict_failed,

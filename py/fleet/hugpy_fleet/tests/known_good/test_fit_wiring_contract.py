@@ -160,3 +160,75 @@ def test_fleet_flex_is_a_shim_over_the_engine_core():
         assert getattr(fleet_flex, name) is getattr(engine_flex, name), name
     assert A._shared_evict_order.__module__ == A.__name__
     assert fit.evict_order.__module__ == "hugpy_engine.fit.plan"
+
+
+def test_refusal_logs_one_structured_verdict_and_names_both_free_bases(rig, monkeypatch, caplog):
+    """LIVE CASE (computron 2026-09-29): a 15.7 MiB model refused on a card whose
+    BUDGETABLE free is 12451840 B behind a static resident. INVARIANT: the
+    worker (a) emits exactly ONE `plan_fit verdict:` line per admission carrying
+    action/kind/code and every figure in BYTES, and (b) the refusal reason names
+    BOTH free bases — `free_vram_bytes` (budgetable, floor already out) and
+    `free_vram_device_bytes` (= budgetable + `external_floor_bytes`) — plus the
+    `fit_budget_bytes` the need was compared against, so the console can show
+    why a tiny need failed on a card the heartbeat still reports ~1 GiB free.
+    Established: fit-hotfix 2026-09-29."""
+    import logging
+    MIB = 1 << 20
+    rig.card["total"] = 8_585_740_288
+    rig.card["free"] = 12_451_840                 # budgetable (floor already out)
+    rig.card["need"] = int(18.0 * MIB)
+    rig.residents.update({"Qwen2.5-VL-7B-Instruct-GGUF": 6_578_765_824})
+    rig.lru.update({"Qwen2.5-VL-7B-Instruct-GGUF": 100.0})
+    monkeypatch.setattr(A, "_residency",
+                        lambda mk: "static" if mk == "Qwen2.5-VL-7B-Instruct-GGUF" else "on-demand")
+    monkeypatch.setattr(A, "_external_vram_floor_bytes", lambda: 1 * GIB)
+    monkeypatch.setattr(A, "_vram_ceiling_reserve_bytes", lambda total: 0)
+
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        verdict = A._vram_evict_to_fit(_State(), "test-save-tiny-random-llama3-smashed-pro")
+
+    assert verdict["action"] == "refuse" and verdict["evicted"] == []
+    assert rig.evicted == []                                    # static: never touched
+    reason = verdict["reason"]
+    assert reason["state"] == "refused"
+    assert reason["needs_bytes"] == 18_874_368
+    assert reason["free_vram_bytes"] == 12_451_840
+    assert reason["external_floor_bytes"] == 1 * GIB
+    assert reason["free_vram_device_bytes"] == 12_451_840 + 1 * GIB
+    assert reason["fit_budget_bytes"] == 12_451_840
+    assert reason["ceiling_reserve_bytes"] == 0
+    assert reason["fit_failure"]["kind"] == "vram_fit"
+    assert reason["fit_failure"]["code"] == "wont_fit"
+    assert reason["fit_failure"]["need_bytes"] == 18_874_368
+    assert reason["fit_failure"]["budget_bytes"] == 12_451_840
+    assert "1 protected resident(s) still hold the card" in reason["reason"]
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan_fit verdict:")]
+    assert len(lines) >= 1, "the admission must log a structured verdict"
+    first = lines[0]
+    for token in ("action=refuse", "fits_now=False", "kind=vram_fit", "code=wont_fit",
+                  "need_bytes=18874368", "free_bytes=12451840",
+                  f"device_free_bytes={12_451_840 + GIB}", "ceiling_reserve_bytes=0",
+                  f"external_floor_bytes={GIB}", "total_bytes=8585740288", "protected=1"):
+        assert token in first, (token, first)
+
+
+def test_tiny_model_against_a_gib_of_budgetable_free_proceeds_and_logs_fits_now(rig, caplog):
+    """LIVE CASE (ae-worker 2026-09-29 13:26:59): the same 15.7 MiB model with
+    1185284096 B budgetable free proceeds — no eviction, no refusal — and the
+    structured verdict line says so (action=proceed fits_now=True kind=None).
+    Established: fit-hotfix 2026-09-29."""
+    import logging
+    MIB = 1 << 20
+    rig.card["free"] = 1_185_284_096
+    rig.card["need"] = int(18.0 * MIB)
+    rig.residents.update({"Qwen3-Coder-Next-GGUF": 18_820_000_000})
+    rig.lru.update({"Qwen3-Coder-Next-GGUF": 900.0})
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        verdict = A._vram_evict_to_fit(_State(), "test-save-tiny-random-llama3-smashed-pro")
+    assert verdict["action"] == "proceed" and verdict["evicted"] == [] and verdict["reason"] is None
+    assert rig.evicted == []
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan_fit verdict:")]
+    assert len(lines) == 1
+    for token in ("action=proceed", "fits_now=True", "kind=None", "need_bytes=18874368",
+                  "free_bytes=1185284096"):
+        assert token in lines[0], (token, lines[0])
