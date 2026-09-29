@@ -80,12 +80,19 @@ watcher) judges it:
     ``CENTRAL_GRACE_S`` of the pin, else FAIL;
   * each worker ONLINE at pin time (baseline snapshot): back online with a fresh
     heartbeat (< ``HEARTBEAT_FRESH_S``), ``pkg_version`` == V (and, for a reuse-tag
-    promotion, pkg_drift's verdict not ``drift`` when that module is present), then one tiny real
-    inference through central ``/v1/chat/completions`` pinned to it with
-    ``alloc.worker`` on a model that was HOT on it at pin time (max_tokens 4).
-    No hot model at pin time = smoke skipped (recorded; never cold-downloads).
-    one smoke attempt is made per worker. A failed/empty response is retained
-    as ``unjudged`` and is never retried by the minute watcher;
+    promotion, pkg_drift's verdict not ``drift`` when that module is present), then
+    the model that was HOT on it at pin time is judged ALIVE by
+    ``model_liveness`` (tooling/model_liveness.py) — DERIVED from the calls
+    record (a processed call inside the window) or the worker's GPU state
+    (resident on a fresh heartbeat). NO inference is spent on the watcher path
+    (operator ruling 2026-09-29: ~216 "Reply with: OK" smokes a day were
+    landing on the Coder-Next slot). A real generation (max_tokens 1, recorded
+    as a normal call from ``grade``) happens only with ``--probe`` (an explicit
+    operator action), only when neither record exists, and never while the
+    queue holds that model. No hot model at pin time = judged on convergence
+    alone (recorded; never cold-downloads). One liveness verdict is kept per
+    worker; an unknown verdict is retained as ``unjudged`` and never re-asked
+    by the minute watcher;
   * workers offline at pin time (or never seen) are info, never a failure.
 
 All judged online workers pass -> ``healthy``. Any FAIL -> automatic rollback:
@@ -138,6 +145,7 @@ from psycopg.types.json import Jsonb
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pkg_src as S  # noqa: E402  (sibling: DB mirror, versions, configs)
+import model_liveness as ML  # noqa: E402  (sibling: derived liveness, no inference by default)
 import build_wheels as BW  # noqa: E402  (py/build_wheels.py: the one release builder)
 
 try:                                                   # PEP 440 ordering + specifiers
@@ -615,31 +623,24 @@ class LiveFleet:
                  "last_seen": w.get("last_seen"), "hot": list(w.get("loaded_models") or [])}
                 for w in ws]
 
-    def smoke(self, worker: str, model: str) -> dict:
+    def liveness(self, worker: str, model: str, allow_probe: bool = False) -> dict:
+        """Is ``model`` alive on ``worker``? Derived (calls record, then GPU
+        state) — see tooling/model_liveness.py. ``allow_probe`` is the only
+        way inference is spent, and only when nothing is on record; the watcher
+        never passes it. ``ok`` mirrors ``alive is True`` for the verdict JSON."""
         key = api_key()
-        if not key:
-            return {"ok": False, "transient": True, "no_key": True, "error": "no API key"}
-        t0 = time.monotonic()
-        st, body = _http("POST", f"{self.central}/v1/chat/completions",
-                         {"model": model, "max_tokens": 4, "temperature": 0,
-                          "messages": [{"role": "user", "content": "Reply with: OK"}],
-                          "alloc": {"worker": worker}},
-                         headers={
-                             "Authorization": f"Bearer {key}",
-                             "X-Hugpy-Client-Process": "pkg-src-watch/pkg-promote",
-                             "X-Hugpy-Client-Pid": str(os.getpid()),
-                             "X-Hugpy-Client-User": getpass.getuser(),
-                             "X-Hugpy-Client-Request": str(uuid.uuid4()),
-                             "X-Hugpy-Client-Task": f"worker-rollout-smoke:{worker}:{model}",
-                             "X-Hugpy-Client-Platform": "worker-package-rollout",
-                         }, timeout=SMOKE_TIMEOUT_S)
-        secs = round(time.monotonic() - t0, 1)
-        ok = st == 200 and isinstance(body, dict) and bool(body.get("choices"))
-        out = {"ok": ok, "http": st, "seconds": secs, "model": model,
-               "transient": st in (0, 429, 502, 503, 504)}
-        if not ok:
-            out["error"] = (json.dumps(body) if isinstance(body, dict) else str(body))[-500:]
-        return out
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        if allow_probe and not key:
+            allow_probe = False                    # a probe needs /v1 auth; derive only
+        r = ML.model_liveness(_http, self.central, worker, model, allow_probe=allow_probe,
+                              headers={**headers,
+                                       "X-Hugpy-Client-Pid": str(os.getpid()),
+                                       "X-Hugpy-Client-User": getpass.getuser(),
+                                       "X-Hugpy-Client-Request": str(uuid.uuid4())})
+        r["ok"] = r["alive"] is True
+        if not key and r["source"] == "unknown":
+            r["no_key"] = True
+        return r
 
     def _headers(self) -> dict:
         key = api_key()
@@ -769,10 +770,11 @@ def fleet_bad(cur, config: str, members: dict[str, int]) -> int | None:
     return r[0] if r else None
 
 
-def baseline(fleet) -> dict:
-    """Who is online at pin time, what is hot, and which hot model ANSWERED before the pin.
-    Only that model is the smoke target afterwards: a model that was already broken (too big
-    for the box, bad file) must never count as the new version's regression."""
+def baseline(fleet, probe: bool = False) -> dict:
+    """Who is online at pin time, what is hot, and which hot model was ALIVE before the pin
+    (by record or GPU state — never by a generation on the watcher path). Only that model
+    is judged afterwards: a model that was already broken (too big for the box, bad file)
+    must never count as the new version's regression."""
     ws = fleet.workers() or []
     now = time.time()
     out = {}
@@ -780,8 +782,9 @@ def baseline(fleet) -> dict:
         online = w["status"] == "online" and now - float(w.get("last_seen") or 0) < HEARTBEAT_FRESH_S
         smoke_model, tried = None, []
         for m in (w["hot"] or [])[:3] if online else []:
-            r = fleet.smoke(w["name"], m)
-            tried.append({"model": m, "ok": r["ok"], **({} if r["ok"] else {"error": str(r.get("error"))[:300]})})
+            r = fleet.liveness(w["name"], m, allow_probe=probe)
+            tried.append({"model": m, "ok": r["ok"], "source": r.get("source"), "why": str(r.get("why"))[:300],
+                          **({} if r["ok"] else {"error": str(r.get("error") or r.get("why"))[:300]})})
             if r["ok"] or r.get("no_key"):             # no key: judged 'unjudged' later, as before
                 smoke_model = m
                 break
@@ -793,7 +796,7 @@ def baseline(fleet) -> dict:
 def api_promote(conn, config: str, apply: bool = False, pin: bool = False,
                 index_dir=DEFAULT_INDEX_DIR, central: str = DEFAULT_CENTRAL,
                 by: str | None = None, fleet=None, python: str | None = None,
-                now: bool = False) -> dict:
+                now: bool = False, probe: bool = False) -> dict:
     """Promote ``config`` (the dev tree as recorded) to the fleet as ONE lockstep version.
 
     Not gated on ``configs.known_good`` (that gates PyPI uploads). Default: dry run — the plan
@@ -833,7 +836,7 @@ def api_promote(conn, config: str, apply: bool = False, pin: bool = False,
             log(f"promotion {waiting}: {config} -> {plan['version']} retries its pin (was waiting)")
             return plan | {"dry_run": False, "promotion": waiting,
                            "wheels_sha256": index_wheels(index_dir, plan["version"])} \
-                | start_rollout(conn, waiting, fleet, index_dir, now=now)
+                | start_rollout(conn, waiting, fleet, index_dir, now=now, probe=probe)
     wheels = index_wheels(index_dir, plan["version"])
     if plan["build_needed"]:
         if not os.access(index_dir, os.W_OK) and shutil.which("sudo") is None:
@@ -852,7 +855,7 @@ def api_promote(conn, config: str, apply: bool = False, pin: bool = False,
     log(f"promotion {pid}: {config} -> {plan['version']} ({plan['mode']}, {len(wheels)} wheels)")
     out = plan | {"dry_run": False, "promotion": pid, "wheels_sha256": wheels}
     if pin:
-        out |= start_rollout(conn, pid, fleet, index_dir, now=now)
+        out |= start_rollout(conn, pid, fleet, index_dir, now=now, probe=probe)
     return out
 
 
@@ -911,7 +914,8 @@ def quiet_gate(row: dict, fleet, now: bool = False, wait_s: float | None = None,
             "quiet_wait": state | {"expired_at": t}}
 
 
-def start_rollout(conn, pid: int, fleet, index_dir: Path, now: bool = False) -> dict:
+def start_rollout(conn, pid: int, fleet, index_dir: Path, now: bool = False,
+                  probe: bool = False) -> dict:
     """Snapshot the fleet, move the pin, open the rollout on promotion ``pid``
     — once central is quiet (``quiet_gate``); while it is busy the row stays
     ``published`` with a ``waiting: ...`` note and this returns ``waiting``."""
@@ -930,7 +934,7 @@ def start_rollout(conn, pid: int, fleet, index_dir: Path, now: bool = False) -> 
         return {"pinned": False, "waiting": gate["note"], "quiet_wait": gate["quiet_wait"]}
     if gate["note"]:
         log(f"promotion {pid}: {gate['note']}")
-    base = baseline(fleet)
+    base = baseline(fleet, probe=probe)
     res = fleet.pin(row["version"], index_dir)
     if gate["quiet_wait"] is not None:
         res = dict(res) | {"quiet_wait": gate["quiet_wait"]}
@@ -1004,7 +1008,7 @@ def _drift_verdicts(conn, central: str, config: str | None) -> dict[str, str]:
 
 
 def judge_worker(fleet, name: str, target: str, base: dict, live: dict | None, prev: dict,
-                 drift: str | None, now: float, past_deadline: bool) -> dict:
+                 drift: str | None, now: float, past_deadline: bool, probe: bool = False) -> dict:
     """One worker's verdict: pass | fail | pending | info (+ evidence)."""
     v = dict(prev)
     if not base.get("online"):
@@ -1020,27 +1024,30 @@ def judge_worker(fleet, name: str, target: str, base: dict, live: dict | None, p
         if not model:
             v.update(verdict="pass", smoke="skipped: no hot model answered before the pin")
             return v
-        # The watcher runs every minute. Repeating a model request after a
-        # timeout/empty answer cannot make the already-converged package more
-        # correct, and can hammer a model whose provider/session is unavailable.
-        # Persist the first result in the rollout verdict and stop probing.
+        # The watcher runs every minute. Repeating the question after an unknown
+        # answer cannot make the already-converged package more correct, and a
+        # generation per tick hammers the model's slot. Persist the first verdict
+        # in the rollout verdict and stop asking.
         previous_smoke = v.get("smoke")
         if isinstance(previous_smoke, dict):
             if previous_smoke.get("ok"):
                 v["verdict"] = "pass"
             else:
-                detail = previous_smoke.get("error") or f"HTTP {previous_smoke.get('http', 'unknown')}"
-                v.update(verdict="unjudged", why=f"single smoke attempt did not pass; not retried: {detail}")
+                detail = previous_smoke.get("error") or previous_smoke.get("why") or "unknown"
+                v.update(verdict="unjudged", why=f"single liveness check did not pass; not retried: {detail}")
             return v
-        r = fleet.smoke(name, model)
+        # Derived liveness: calls record, then GPU state; NO inference on the watcher
+        # path (probe=False). A probe (max_tokens 1, recorded as a 'grade' call) is an
+        # explicit operator action and only when nothing is on record.
+        r = fleet.liveness(name, model, allow_probe=probe)
         v["smoke"] = r
         if r["ok"]:
             v["verdict"] = "pass"
             return v
         if r.get("no_key"):
             v["no_key"] = True
-        detail = r.get("error") or f"HTTP {r.get('http', 'unknown')}"
-        v.update(verdict="unjudged", why=f"single smoke attempt did not pass; not retried: {detail}")
+        detail = r.get("error") or r.get("why") or "unknown"
+        v.update(verdict="unjudged", why=f"single liveness check did not pass; not retried: {detail}")
         return v
     if past_deadline:
         if v.get("no_key"):
@@ -1055,9 +1062,12 @@ def judge_worker(fleet, name: str, target: str, base: dict, live: dict | None, p
 
 
 def rollout_tick(conn, central: str = DEFAULT_CENTRAL, fleet=None,
-                 index_dir=DEFAULT_INDEX_DIR) -> dict:
+                 index_dir=DEFAULT_INDEX_DIR, probe: bool = False) -> dict:
     """Judge the open rollout once (idempotent; the watcher calls it periodically).
-    Returns {} when nothing is open, else the rollout's state after this tick."""
+    Returns {} when nothing is open, else the rollout's state after this tick.
+    ``probe`` (CLI ``tick --probe`` only — never the watcher) permits ONE
+    max_tokens-1 generation per worker when neither the calls record nor the
+    GPU state can answer."""
     fleet = fleet or LiveFleet(central)
     with conn.cursor() as cur:
         ensure_promotions(cur)
@@ -1084,7 +1094,7 @@ def rollout_tick(conn, central: str = DEFAULT_CENTRAL, fleet=None,
         now = time.time()
         for name, base in (row["baseline"] or {}).items():
             v = judge_worker(fleet, name, target, base, live.get(name), verdict.get(name, {}),
-                             drift.get(name), now, bool(past))
+                             drift.get(name), now, bool(past), probe=probe)
             verdict[name] = v
             if v["verdict"] == "fail":
                 failures.append(f"{name}: {v.get('why')}")
@@ -1184,7 +1194,11 @@ def main(argv=None) -> int:
     x = sub.add_parser("apply"); x.add_argument("config"); x.add_argument("--pin", action="store_true")
     x.add_argument("--now", action="store_true",
                    help="restart central even while a benchmark/admission job runs (skip the quiet wait)")
-    sub.add_parser("tick")
+    probe_help = ("permit ONE max_tokens-1 generation per worker (recorded as a 'grade' call) when "
+                  "neither the calls record nor the GPU state answers; explicit action only — the "
+                  "watcher never probes")
+    x.add_argument("--probe", action="store_true", help=probe_help)
+    sub.add_parser("tick").add_argument("--probe", action="store_true", help=probe_help)
     sub.add_parser("ls")
     a = ap.parse_args(argv)
     with psycopg.connect(a.dsn) as conn:
@@ -1192,9 +1206,10 @@ def main(argv=None) -> int:
             return S.print_json(api_promote(conn, a.config, index_dir=a.index_dir, central=a.central))
         if a.cmd == "apply":
             return S.print_json(api_promote(conn, a.config, apply=True, pin=a.pin,
-                                            index_dir=a.index_dir, central=a.central, now=a.now))
+                                            index_dir=a.index_dir, central=a.central, now=a.now,
+                                            probe=a.probe))
         if a.cmd == "tick":
-            return S.print_json(rollout_tick(conn, a.central, index_dir=a.index_dir))
+            return S.print_json(rollout_tick(conn, a.central, index_dir=a.index_dir, probe=a.probe))
         return S.print_json(api_promotions(conn))
 
 
