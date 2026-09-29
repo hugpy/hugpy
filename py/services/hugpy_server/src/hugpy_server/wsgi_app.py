@@ -324,6 +324,22 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
         _logging.getLogger(__name__).warning(
             "eviction telemetry routes not mounted under /api: %s", _exc)
 
+    # Same /api dual-mount for the per-worker TEST FIRE (test_fire_routes): the
+    # console POSTs /api/llm/workers/<id>/test-fire and polls the job under the
+    # same prefix as every other worker action. The bare /llm/workers/<id>/
+    # test-fire mount (auto-discovered via routes/__init__) serves the proxied
+    # path unchanged.
+    try:
+        from hugpy_server.app.routes.test_fire_routes import test_fire_bp
+        app.register_blueprint(test_fire_bp, url_prefix="/api",
+                               name="test_fire_bp_api")
+    except (ValueError, AssertionError):
+        pass
+    except Exception as _exc:  # noqa: BLE001 — a test button must never break boot
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "test-fire routes not mounted under /api: %s", _exc)
+
     # Same /api dual-mount for MODEL GROUPS, so the Models tab reads
     # /api/llm/groups on the same prefix as every other panel read. Read-only —
     # the tick WRITES go through /settings/model_groups/..., which the operator

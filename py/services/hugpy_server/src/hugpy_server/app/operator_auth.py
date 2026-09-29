@@ -139,6 +139,11 @@ _SENSITIVE = [
     # with a hyphen, so it needs its own rule (the single-segment worker-verb rule
     # above does not match it).
     ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/boot-prewarm$")),
+    # Per-worker TEST FIRE (2026-09-29, test_fire_routes): start/stop a
+    # background sweep that calls EVERY text-gen model on one worker — GPU time
+    # spent on operator intent, the same tier as the studio tester sweep above.
+    # The status GETs on the same paths stay open like every other roster read.
+    ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/test-fire(/[^/]+/stop)?$")),
     # Per-worker WILDCARD routing opt-in ("take all comers", operator doctrine
     # 2026-07-23) — a routing-registry write, same tier as assign/boot-prewarm.
     # The GET map (/llm/workers/wildcard) and the roster surfacing stay open —
