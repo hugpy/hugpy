@@ -1270,6 +1270,18 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-cprov-dl:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .wp-cprov-dl:disabled { opacity: 0.5; cursor: wait; }
 .wp-cprov-err { font-size: 10px; color: var(--red, #f85149); cursor: help; white-space: nowrap; }
+/* Hot (this worker) tier cell + the group header rows shown while the picker is
+   sorted by that column (hot → shared → central → none). Pills reuse the
+   serving-row palette: .wp-pill-hot / -shared / -central / -missing. */
+.wp-lt-tier { white-space: nowrap; }
+.wp-lt-tier .wp-state-pill { cursor: help; }
+.wp-loadtable-t tbody tr.wp-lt-group td {
+  padding: 3px 8px; background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font-size: 10px; color: var(--muted);
+}
+.wp-loadtable-t tbody tr.wp-lt-group:hover { background: transparent; }
+.wp-lt-group-count { margin-left: 8px; color: var(--text); font-variant-numeric: tabular-nums; }
+.wp-lt-group-why { margin-left: 8px; }
 
 /* ── Serving TABLE ───────────────────────────────────────────────────────────
    The per-worker Serving list rendered as a sortable table — same visual system

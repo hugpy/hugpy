@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
 import { modelTask, modelTasks } from '../ModelTable/ModelTable'
 import useSessionState from '../../hooks/useSessionState'
@@ -6,6 +6,7 @@ import { fmtBytes } from './formatters'
 import { findCatalogRow } from './catalogRow'
 import { archiveMark, archiveText } from '../ModelTable/archiveMark'
 import { sizeView } from '../ModelTable/modelSize'
+import { TIER_VIEW, compareByWorkerTier, storageRowsByKey, workerTierOf } from './workerTier'
 
 // Per-worker "load a model" as a SORTABLE, MULTI-SELECT table. Columns assort
 // (click a header to sort); a checkbox column allocates a GROUP of models to
@@ -52,14 +53,18 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
     return holders.filter(h => h.id !== workerId)
   }, [allocation, workerId])
 
-  // The worker heartbeat's local inventory is the disk-presence signal. This
-  // deliberately does not use loaded_models: a model may be on disk while
-  // cold, or loaded in RAM without the inventory being a serving assertion.
-  const onWorkerDrive = useCallback((m) => {
-    const local = Array.isArray(worker?.models_local) ? worker.models_local : []
-    const key = keyOf(m)
-    return local.includes(key) || local.includes(m.name)
-  }, [worker])
+  // STORAGE TIER of each model RELATIVE TO THIS WORKER (workerTier.js): hot =
+  // on this box's own drive, shared = read through a shared store, central =
+  // on llm_storage only, none. Indexed once per roster tick. This replaces the
+  // old models_local-only "Drive" test: models_local is ASSIGNMENT-scoped
+  // (assigned ∩ on-disk), so for a picker whose candidates are by definition
+  // unassigned it said "off" for models sitting right on the worker's hot
+  // drive. worker.storage.models (the reaper survey) is not assignment-scoped.
+  const rowsByKey = useMemo(() => storageRowsByKey(worker), [worker])
+  const tierOf = useCallback((m) => workerTierOf(m, worker, rowsByKey), [worker, rowsByKey])
+  // Disk-presence on THIS worker — the hot tier. Deliberately not
+  // loaded_models: a model may be on disk while cold.
+  const onWorkerDrive = useCallback((m) => tierOf(m).tier === 'hot', [tierOf])
 
   // Pull the authoritative central-readiness map. Cheap + idempotent; polled
   // slowly (a finished download only needs to flip to selectable eventually)
@@ -168,6 +173,10 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
 
   const COLUMNS = [
     { key: 'name', label: 'Model', get: m => m.name || keyOf(m) },
+    // HOT (THIS WORKER) — operator ask 2026-09-29: sort the picker by where the
+    // bytes sit relative to THIS box. Rank ascending = hot, shared, central,
+    // none; the comparator adds size-desc + name inside a tier (see `filtered`).
+    { key: 'hot', label: 'Hot (this worker)', get: m => tierOf(m).rank, num: true, tier: true },
     // Central-provisioning readiness — sortable by state string. Sort is
     // point-in-time (provMap/jobs are intentionally NOT in `filtered` deps, so
     // the fast job poll doesn't reshuffle rows under the operator); the pills
@@ -192,12 +201,18 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
     if (driveFilter === 'off') rows = rows.filter(m => !onWorkerDrive(m))
     const col = COLUMNS.find(c => c.key === sortKey) || COLUMNS[0]
     const dir = sortDir === 'asc' ? 1 : -1
+    if (col.tier) {
+      // Tier first, then the on-worker copy's bytes (or catalog size) DESC,
+      // then name — a group of equals reads biggest-first, like the storage bar.
+      const tiers = new Map(rows.map(m => [m, tierOf(m)]))
+      return [...rows].sort((a, b) => compareByWorkerTier(a, b, tiers.get(a), tiers.get(b), sizeOf, dir))
+    }
     return [...rows].sort((a, b) => {
       const va = col.get(a), vb = col.get(b)
       if (col.num) return (Number(va) - Number(vb)) * dir
       return String(va).localeCompare(String(vb)) * dir
     })
-  }, [models, q, taskFilter, driveFilter, sortKey, sortDir, allocation, workerId, onWorkerDrive])
+  }, [models, q, taskFilter, driveFilter, sortKey, sortDir, allocation, workerId, onWorkerDrive, tierOf])
 
   // Selectable only when central fully holds the model (ready) AND the
   // anti-duplicate breaker permits it. A not-ready model's checkbox is disabled;
@@ -239,10 +254,10 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
         </select>
         <select className="wp-loadtable-task" value={driveFilter}
                 onChange={e => { setDriveFilter(e.target.value); setSel(new Set()) }}
-                title="Filter by whether the model files are reported on this worker's drive">
+                title="Filter by whether the model's files are on THIS worker's own drive (the hot tier — from the worker's storage survey, not assignment-scoped)">
           <option value="">Drive: all</option>
-          <option value="on">Drive: on this worker</option>
-          <option value="off">Drive: elsewhere / not reported</option>
+          <option value="on">Drive: hot on this worker</option>
+          <option value="off">Drive: not on this worker</option>
         </select>
         <label className="wp-breaker" title="Anti-duplicate is ON by default: models already on another worker are locked. Flip this to deliberately allocate a duplicate (replicate across workers — e.g. scene fan-out).">
           <input type="checkbox" checked={breaker} onChange={e => { setBreaker(e.target.checked); setSel(new Set()) }} />
@@ -268,16 +283,37 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
             {filtered.length === 0 && (
               <tr><td colSpan={COLUMNS.length + 1} className="wp-none">No models to allocate.</td></tr>
             )}
-            {filtered.map(m => {
+            {filtered.map((m, i) => {
               const k = keyOf(m)
               const elsewhere = elsewhereOf(m)
               const locked = elsewhere.length > 0 && !breaker
               const prov = provStateOf(m)
               const arch = archiveMark(m)
+              const tier = tierOf(m)
+              const tv = TIER_VIEW[tier.tier]
+              // When sorted by the hot tier, a small group header names each
+              // tier block so the boundary hot → shared → central is visible.
+              const groupStart = sortKey === 'hot'
+                && (i === 0 || tierOf(filtered[i - 1]).tier !== tier.tier)
+              const groupCount = groupStart ? filtered.filter(x => tierOf(x).tier === tier.tier).length : 0
+              const tierTitle = tv.title
+                + (tier.row ? ` · ${fmtBytes(tier.row.bytes)} on this worker${tier.row.last_picked
+                  ? `, last used ${new Date(tier.row.last_picked * 1000).toLocaleString()}` : ', never used here'}` : '')
+                + (tier.source ? ` (via ${tier.source})` : '')
               return (
-                // Only the anti-duplicate lock (and an archive mark) grays the
-                // row; not-ready rows stay legible so their Download button is usable.
-                <tr key={k} className={arch ? 'wp-lt-locked wp-lt-archived' : locked ? 'wp-lt-locked' : ''}
+                <Fragment key={k}>
+                {groupStart && (
+                  <tr className="wp-lt-group">
+                    <td colSpan={COLUMNS.length + 1}>
+                      <span className={`wp-state-pill ${tv.pill}`}>{tv.glyph}</span>
+                      <span className="wp-lt-group-count">{groupCount} model{groupCount === 1 ? '' : 's'}</span>
+                      <span className="wp-lt-group-why">{tv.title}</span>
+                    </td>
+                  </tr>
+                )}
+                {/* Only the anti-duplicate lock (and an archive mark) grays the
+                    row; not-ready rows stay legible so their Download button is usable. */}
+                <tr className={arch ? 'wp-lt-locked wp-lt-archived' : locked ? 'wp-lt-locked' : ''}
                     title={arch ? archiveText(arch) : undefined}>
                   <td className="wp-lt-check">
                     <input type="checkbox" checked={sel.has(k)} disabled={!isEligible(m)}
@@ -285,6 +321,10 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                            onChange={() => toggle(k)} />
                   </td>
                   <td>{m.name || k}{arch && <div className="wp-lt-archive-note">🗄 {archiveText(arch)}</div>}</td>
+                  {/* Storage tier relative to THIS worker (hot / shared / central / none). */}
+                  <td className="wp-lt-tier">
+                    <span className={`wp-state-pill ${tv.pill}`} title={tierTitle}>{tv.glyph}</span>
+                  </td>
                   {/* Central-provisioning readiness pill (+ Download when the
                       model needs pulling; ⏳ progress while a pull runs). This is
                       what makes post-hoc "central doesn't have X on disk"
@@ -356,6 +396,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                     {elsewhere.length ? `${breaker ? '⚡ ' : ''}${elsewhere.map(h => h.name).join(', ')}` : '—'}
                   </td>
                 </tr>
+                </Fragment>
               )
             })}
           </tbody>
