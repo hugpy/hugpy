@@ -157,6 +157,13 @@ class WorkerHeartbeat(WireDTO):
     # Worker-discovered (system/external) models: {model_key: row} — mirrors
     # WorkerStore.heartbeat's `models_discovered` param (lockstep: test_wire_dtos).
     models_discovered: Optional[Dict[str, Dict[str, Any]]] = None
+    # Measured weights margins (2026-09-29): {model_key: {file, file_bytes,
+    # backend, device_class, margin, samples, weights_measured_bytes, ...}} —
+    # mirrors WorkerStore.heartbeat's `weights_margins` (lockstep: test_wire_dtos).
+    weights_margins: Optional[Dict[str, Any]] = None
+    # On-demand dependency acquisitions (2026-09-29): {adapter_key: {base_id,
+    # stage: "acquiring_dependency", status, done_bytes, total_bytes, frac, ...}}
+    dependency_acquisitions: Optional[Dict[str, Any]] = None
 
 
 @dataclass
