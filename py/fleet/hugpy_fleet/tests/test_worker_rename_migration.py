@@ -78,7 +78,7 @@ def test_overrides_migration_rewrites_stale_token(monkeypatch, tmp_path):
     monkeypatch.setattr(OV, "_OVERRIDES_PATH", path)
     OV.set_override(MK, {"worker_prefs": ["aeb"]})
     OV.set_override("Some-Other", {"worker_prefs": ["computron"],
-                                   "no_evict_by_worker": {"aeb": True}})
+                                   "gguf_file_by_worker": {"aeb": "q8_0"}})
 
     def resolve(tok):
         return AE_ID if str(tok).lower() == "aeb" else None
@@ -88,7 +88,7 @@ def test_overrides_migration_rewrites_stale_token(monkeypatch, tmp_path):
     prefs, _polite, by_worker = OV.placement_policy(MK)
     assert prefs == [AE_ID]
     # a token that already resolves (computron) is untouched; the aeb key is healed
-    _p, _po, bw = OV.placement_policy("Some-Other")
+    bw = OV.get_override("Some-Other")["gguf_file_by_worker"]
     assert AE_ID in bw and "aeb" not in bw
     # idempotent: a second run rewrites nothing (the token is now an id)
     assert OV.migrate_worker_tokens(resolve) == {}

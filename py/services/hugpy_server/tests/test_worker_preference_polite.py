@@ -85,22 +85,12 @@ def test_an_empty_list_clears_the_preference(ov):
     assert "worker_prefs" not in ov.get_override(MK)
 
 
-def test_no_evict_off_removes_the_key(ov):
-    """Absent must unambiguously mean the ordinary declare-then-evict rule."""
-    ov.set_override(MK, {"no_evict": True})
-    assert ov.placement_prefs(MK)[1] is True
-    ov.set_override(MK, {"no_evict": False})
-    assert "no_evict" not in ov.get_override(MK)
-    assert ov.placement_prefs(MK)[1] is False
-
-
 def test_placement_prefs_is_tilde_tolerant(ov):
     """A placement set under the registry key must apply to the bare spelling —
     the k30 invisible-mismatch class, in the one place that decides where a
     call goes."""
-    ov.set_override("black-forest-labs~" + MK, {"worker_prefs": ["ae"],
-                                                "no_evict": True})
-    assert ov.placement_prefs(MK) == (["ae"], True)
+    ov.set_override("black-forest-labs~" + MK, {"worker_prefs": ["ae"]})
+    assert ov.placement_prefs(MK) == (["ae"], False)
 
 
 def test_an_unset_model_reads_as_pre_k56(ov):
@@ -111,72 +101,6 @@ def test_an_unset_model_reads_as_pre_k56(ov):
 # ---------------------------------------------------------------------------
 # k62 — politeness individualized per (model × worker)
 # ---------------------------------------------------------------------------
-
-def test_the_per_worker_map_persists_both_verdicts(ov):
-    """Unlike the model-wide boolean, an explicit ``false`` is STORED: "polite
-    on ae, ordinary eviction rights on computron" is the whole point."""
-    ov.set_override(MK, {"no_evict_by_worker": {"ae": True, "computron": False}})
-    assert ov.get_override(MK)["no_evict_by_worker"] == {"ae": True,
-                                                         "computron": False}
-    assert ov.placement_policy(MK)[2] == {"ae": True, "computron": False}
-
-
-def test_the_map_accepts_the_curl_spelling(ov):
-    ov.set_override(MK, {"no_evict_by_worker": "ae=yes,computron=no"})
-    assert ov.get_override(MK)["no_evict_by_worker"] == {"ae": True,
-                                                         "computron": False}
-
-
-def test_the_map_dedupes_names_like_worker_prefs_does(ov):
-    """Two spellings of one box would be two different verdicts for it."""
-    ov.set_override(MK, {"no_evict_by_worker": {"ae": True, " AE ": False,
-                                                "": True}})
-    assert ov.get_override(MK)["no_evict_by_worker"] == {"ae": True}
-
-
-def test_an_empty_map_clears_the_key(ov):
-    ov.set_override(MK, {"no_evict_by_worker": {"ae": True}})
-    ov.set_override(MK, {"no_evict_by_worker": {}})
-    assert "no_evict_by_worker" not in ov.get_override(MK)
-
-
-def test_a_junk_map_is_ignored_not_stored(ov):
-    ov.set_override(MK, {"no_evict_by_worker": 17})
-    assert "no_evict_by_worker" not in ov.get_override(MK)
-
-
-def test_the_map_beats_the_boolean_and_the_boolean_is_the_default(ov):
-    """THE resolution rule: map[W] if present, else the model-wide boolean,
-    else not polite."""
-    ov.set_override(MK, {"no_evict": True,
-                         "no_evict_by_worker": {"computron": False}})
-    assert ov.polite_on_worker(MK, "computron") is False   # map beats the bool
-    assert ov.polite_on_worker(MK, "ae") is True           # bool is the default
-    ov.set_override(MK, {"no_evict": False})
-    assert ov.polite_on_worker(MK, "ae") is False          # absent = not polite
-    assert ov.polite_on_worker(MK, "computron") is False
-
-
-def test_a_map_alone_makes_only_the_listed_worker_polite(ov):
-    ov.set_override(MK, {"no_evict_by_worker": {"ae": True}})
-    assert ov.polite_on_worker(MK, "ae") is True
-    assert ov.polite_on_worker(MK, "computron") is False
-
-
-def test_polite_resolution_matches_id_or_name(ov):
-    """The console posts ids, a hand-edited file carries names — a politeness
-    that failed to match would evict on a box marked polite."""
-    ov.set_override(MK, {"no_evict_by_worker": {"AE": True}})
-    assert ov.polite_on_worker(MK, "abc123", "ae") is True
-    assert ov.polite_on_worker(MK, None, "computron") is False
-
-
-def test_the_per_worker_map_is_tilde_tolerant_too(ov):
-    ov.set_override("black-forest-labs~" + MK,
-                    {"no_evict_by_worker": {"ae": True}})
-    assert ov.placement_policy(MK)[2] == {"ae": True}
-    assert ov.polite_on_worker(MK, "ae") is True
-
 
 def test_resolve_polite_is_pure(ov):
     """The routing loop reads the policy ONCE and resolves per candidate."""
@@ -340,41 +264,6 @@ def _probe(fits: dict):
     return probe
 
 
-def test_polite_takes_the_first_candidate_with_free_room(store, ov, monkeypatch):
-    """THE flux2 case: ae if the card is genuinely free, else computron."""
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    _admit(store, "computron", gpus=_gpus(20 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"], "no_evict": True})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": False, "computron": True}))
-    assert store.pick_for_model(MK)["name"] == "computron"
-
-
-def test_polite_prefers_ae_the_moment_its_card_frees_up(store, ov, monkeypatch):
-    _admit(store, "ae", gpus=_gpus(20 * GIB))
-    _admit(store, "computron", gpus=_gpus(20 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"], "no_evict": True})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": True, "computron": True}))
-    assert store.pick_for_model(MK)["name"] == "ae"
-
-
-def test_polite_refuses_when_no_candidate_admits_without_eviction(store, ov,
-                                                                  monkeypatch):
-    from hugpy_fleet.central import evictions
-    evictions.reset_for_tests()
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    _admit(store, "computron", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"], "no_evict": True})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": False, "computron": False}))
-    assert store.pick_for_model(MK) is None
-    evs = [e for e in evictions.recent(50) if e.get("stage") == "route.refuse"]
-    assert len(evs) == 1
-    assert evs[0]["reason"] == "no candidate admits without eviction"
-    assert {a["worker"] for a in evs[0]["alternatives"]} == {"ae", "computron"}
-
-
 def test_the_same_worker_still_evicts_for_an_UNFLAGGED_model(store, ov,
                                                              monkeypatch):
     """The doctrine is unchanged for everyone else: no free room is not a
@@ -384,139 +273,13 @@ def test_the_same_worker_still_evicts_for_an_UNFLAGGED_model(store, ov,
     assert store.pick_for_model(MK)["name"] == "ae"
 
 
-def test_polite_fails_open_when_free_room_is_unprovable(store, ov, monkeypatch):
-    """Central can only ever prove the NEGATIVE. An unsizable model must reach
-    the worker, whose measured admission makes the real call — refusing on an
-    unproven guess would strand a model that would have fitted."""
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"no_evict": True})
-    monkeypatch.setattr(W, "_free_room_probe", _probe({}))   # returns no numbers
-    assert store.pick_for_model(MK)["name"] == "ae"
-    monkeypatch.setattr(W, "_free_room_probe", None)         # nothing registered
-    assert store.pick_for_model(MK)["name"] == "ae"
-
-
-def test_a_polite_model_is_not_routed_to_a_worker_that_predates_the_flag(
-        store, ov, monkeypatch):
-    """The LOUD downgrade: an old worker would evict residents, so it is not a
-    candidate at all rather than silently dropping the promise."""
-    _admit(store, "ae", pkg=OLD, gpus=_gpus(20 * GIB))
-    ov.set_override(MK, {"no_evict": True})
-    monkeypatch.setattr(W, "_free_room_probe", _probe({"ae": True}))
-    assert store.pick_for_model(MK) is None
-    ok, why = W._polite_admits({"name": "ae", "pkg_version": OLD}, MK)
-    assert ok is False and NEW in why
-
-
 # ---------------------------------------------------------------------------
 # k62 — per-worker politeness in the resolution
 # ---------------------------------------------------------------------------
 
-def test_polite_on_ae_assertive_on_computron_lands_on_computron(store, ov,
-                                                                monkeypatch):
-    """THE k62 case. Neither card has free room; ae is polite so it is skipped,
-    computron keeps ordinary eviction rights so it takes the model."""
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    _admit(store, "computron", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"],
-                         "no_evict_by_worker": {"ae": True, "computron": False}})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": False, "computron": False}))
-    assert store.pick_for_model(MK)["name"] == "computron"
-
-
-def test_the_polite_worker_still_wins_when_its_own_card_is_free(store, ov,
-                                                                monkeypatch):
-    _admit(store, "ae", gpus=_gpus(20 * GIB))
-    _admit(store, "computron", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"],
-                         "no_evict_by_worker": {"ae": True}})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": True, "computron": False}))
-    assert store.pick_for_model(MK)["name"] == "ae"
-
-
-def test_a_per_worker_exemption_overrides_the_all_workers_toggle(store, ov,
-                                                                 monkeypatch):
-    """The boolean says polite everywhere; the map exempts computron, so a full
-    computron still takes the model rather than holding."""
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    _admit(store, "computron", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"], "no_evict": True,
-                         "no_evict_by_worker": {"computron": False}})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": False, "computron": False}))
-    assert store.pick_for_model(MK)["name"] == "computron"
-
-
-def test_it_still_holds_when_every_candidate_is_polite_and_full(store, ov,
-                                                                monkeypatch):
-    from hugpy_fleet.central import evictions
-    evictions.reset_for_tests()
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    _admit(store, "computron", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"worker_prefs": ["ae", "computron"],
-                         "no_evict_by_worker": {"ae": True, "computron": True}})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": False, "computron": False}))
-    assert store.pick_for_model(MK) is None
-    evs = [e for e in evictions.recent(50) if e.get("stage") == "route.refuse"]
-    # The hold names the WORKER whose politeness caused each skip.
-    assert all("polite on" in a["reason"] for a in evs[0]["alternatives"])
-    assert {a["worker"] for a in evs[0]["alternatives"]} == {"ae", "computron"}
-
-
-def test_the_reroute_walk_keeps_the_exempt_worker(store, ov, monkeypatch):
-    """A reroute that dropped computron would be a re-decision: the operator
-    never asked it to be polite."""
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    _admit(store, "computron", gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"no_evict": True,
-                         "no_evict_by_worker": {"computron": False}})
-    monkeypatch.setattr(W, "_free_room_probe",
-                        _probe({"ae": False, "computron": False}))
-    assert [w["name"] for w in store.candidates_for_model(MK)] == ["computron"]
-
-
-def test_an_old_worker_is_only_excluded_where_it_is_polite(store, ov,
-                                                           monkeypatch):
-    """The version gate is part of the POLITE path, so a worker the model is
-    not polite on is unaffected by it — it was never promised anything."""
-    _admit(store, "ae", pkg=OLD, gpus=_gpus(1 * GIB))
-    ov.set_override(MK, {"no_evict": True})
-    monkeypatch.setattr(W, "_free_room_probe", _probe({"ae": True}))
-    assert store.pick_for_model(MK) is None
-    ov.set_override(MK, {"no_evict_by_worker": {"ae": False}})
-    assert store.pick_for_model(MK)["name"] == "ae"
-
-
-def test_no_map_and_no_flag_routes_byte_identically(store, ov, monkeypatch):
-    """The compatibility argument, re-stated for k62: an unconfigured model
-    never enters the polite walk at all."""
-    _admit(store, "ae", gpus=_gpus(1 * GIB))
-    monkeypatch.setattr(W, "_free_room_probe", _probe({"ae": False}))
-    before = store.pick_for_model(MK)["name"]
-    ov.set_override(MK, {"no_evict_by_worker": {"computron": True}})
-    assert store.pick_for_model(MK)["name"] == before
-
-
 # ---------------------------------------------------------------------------
 # The wire — version-gated emission
 # ---------------------------------------------------------------------------
-
-def test_the_flag_rides_the_spill_to_a_new_worker(store, ov):
-    wid = _admit(store, "ae", gpus=_gpus())
-    store.assign_model(wid, MK, spill={})
-    ov.set_override(MK, {"no_evict": True})
-    assert store.spill_for(wid, MK).get("no_evict") is True
-
-
-def test_the_flag_never_reaches_an_old_worker(store, ov):
-    wid = _admit(store, "ae", pkg=OLD, gpus=_gpus())
-    store.assign_model(wid, MK, spill={})
-    ov.set_override(MK, {"no_evict": True})
-    assert "no_evict" not in store.spill_for(wid, MK)
-
 
 def test_an_unflagged_model_emits_a_byte_identical_spill(store, ov):
     wid = _admit(store, "ae", gpus=_gpus())
@@ -524,29 +287,6 @@ def test_an_unflagged_model_emits_a_byte_identical_spill(store, ov):
     before = store.spill_for(wid, MK)
     ov.set_override(MK, {"worker_prefs": ["ae"]})      # order alone changes nothing
     assert store.spill_for(wid, MK) == before
-
-
-def test_the_spill_carries_the_flag_only_to_the_polite_worker(store, ov):
-    """k62 at the wire: central includes/omits the key PER CANDIDATE; the
-    worker side and the wire key itself are exactly as k56 left them."""
-    ae = _admit(store, "ae", gpus=_gpus())
-    comp = _admit(store, "computron", gpus=_gpus())
-    store.assign_model(ae, MK, spill={})
-    store.assign_model(comp, MK, spill={})
-    ov.set_override(MK, {"no_evict": True,
-                         "no_evict_by_worker": {"computron": False}})
-    assert store.spill_for(ae, MK).get("no_evict") is True
-    assert "no_evict" not in store.spill_for(comp, MK)
-
-
-def test_a_map_only_model_ships_the_flag_to_its_listed_worker(store, ov):
-    ae = _admit(store, "ae", gpus=_gpus())
-    comp = _admit(store, "computron", gpus=_gpus())
-    store.assign_model(ae, MK, spill={})
-    store.assign_model(comp, MK, spill={})
-    ov.set_override(MK, {"no_evict_by_worker": {"ae": True}})
-    assert store.spill_for(ae, MK).get("no_evict") is True
-    assert "no_evict" not in store.spill_for(comp, MK)
 
 
 def test_the_gate_strips_no_evict_loudly_and_keeps_the_placement():
@@ -715,3 +455,79 @@ def _routes():
 def test_background_warm_gate_is_retired(ov, monkeypatch):
     R = _routes()
     assert not hasattr(R, "_polite_warm_ok")
+
+
+# ---------------------------------------------------------------------------
+# d1136 (2026-09-29) — per-model politeness is RETIRED. No model-specific
+# backend behaviour: residency (static / on-demand) is the only protection
+# vocabulary. The per-REQUEST no_makeroom -> spill no_evict (k96) is untouched.
+# ---------------------------------------------------------------------------
+
+def test_a_post_with_no_evict_is_ignored_and_never_stored(ov, caplog):
+    """The console controls are gone; the backend no longer accepts the
+    fields. A POST carrying them is IGNORED (warned), nothing is stored, and
+    the rest of the body still applies."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        ov.set_override(MK, {"worker_prefs": ["ae"], "no_evict": True,
+                             "no_evict_by_worker": {"ae": True}})
+    row = ov.get_override(MK)
+    assert row == {"worker_prefs": ["ae"]}
+    assert "no_evict" not in row and "no_evict_by_worker" not in row
+    assert any("retired" in r.getMessage() and "no_evict" in r.getMessage()
+               for r in caplog.records)
+    assert "no_evict" not in ov.ALLOWED_FIELDS
+    assert "no_evict_by_worker" not in ov.ALLOWED_FIELDS
+
+
+def test_placement_policy_no_longer_reads_politeness(ov):
+    """Even a hand-edited file carrying the fields yields (prefs, False, {}) —
+    no model is polite by policy any more."""
+    import json
+    with open(ov._OVERRIDES_PATH, "w", encoding="utf-8") as fh:
+        json.dump({MK: {"worker_prefs": ["ae", "computron"], "no_evict": True,
+                        "no_evict_by_worker": {"ae": True, "computron": False}}}, fh)
+    assert ov.placement_policy(MK) == (["ae", "computron"], False, {})
+    assert ov.placement_prefs(MK) == (["ae", "computron"], False)
+    assert ov.polite_on_worker(MK, "ae") is False
+
+
+def test_a_stored_entry_with_the_retired_field_still_loads(ov, caplog):
+    """A serve_overrides.json written before the retirement loads without
+    error: the retired field is dropped (logged once), every other field is
+    intact, and the next save writes it out."""
+    import json, logging
+    ov._RETIRED_LOGGED.clear()                       # the once-per-(model, field) log
+    with open(ov._OVERRIDES_PATH, "w", encoding="utf-8") as fh:
+        json.dump({MK: {"worker_prefs": ["ae"], "gpu_mem_gib": 8.0,
+                        "no_evict": True, "no_evict_by_worker": {"ae": True}},
+                   "Other": {"strict": True}}, fh)
+    with caplog.at_level(logging.WARNING):
+        assert ov.get_override(MK) == {"worker_prefs": ["ae"], "gpu_mem_gib": 8.0}
+        assert ov.get_override("Other") == {"strict": True}
+    assert any("retired" in r.getMessage() for r in caplog.records)
+    # a write on any model rewrites the file without the retired keys
+    ov.set_override("Other", {"strict": False})
+    with open(ov._OVERRIDES_PATH, encoding="utf-8") as fh:
+        on_disk = json.load(fh)
+    assert on_disk == {MK: {"worker_prefs": ["ae"], "gpu_mem_gib": 8.0}}
+
+
+def test_the_retired_field_never_makes_a_route_or_a_spill_polite(store, ov, monkeypatch):
+    """Routing and the spill wire read the SAME retired policy: a full card is
+    not a refusal and no per-model flag rides the spill (the per-request
+    no_makeroom path is the only remaining source of spill no_evict)."""
+    wid = _admit(store, "ae", gpus=_gpus(1 * GIB))
+    store.assign_model(wid, MK, spill={})
+    monkeypatch.setattr(W, "_free_room_probe", _probe({"ae": False}))
+    before = store.pick_for_model(MK)["name"]
+    ov.set_override(MK, {"no_evict": True, "no_evict_by_worker": {"ae": True}})
+    assert store.pick_for_model(MK)["name"] == before == "ae"
+    assert "no_evict" not in store.spill_for(wid, MK)
+
+
+def test_polite_admits_version_gate_is_unchanged():
+    """The wire-level gate a per-request polite load still relies on: an old
+    worker that would silently evict is not a polite candidate."""
+    ok, why = W._polite_admits({"name": "ae", "pkg_version": OLD}, MK)
+    assert ok is False and NEW in why

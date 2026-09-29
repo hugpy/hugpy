@@ -69,23 +69,14 @@ ALLOWED_FIELDS = {
                       # designation SoT (worker["models"] membership, one set per
                       # WORKER) can express "designated to both" but has nowhere
                       # to put a cross-worker ORDER.
-    "no_evict",       # POLITE LOAD: admission may spend only genuinely free
-                      # headroom (free VRAM after the tolerance-band flex) and
-                      # never evicts a resident to land. The deliberate inverse
-                      # of declare-need-then-evict, which stays the rule for
-                      # every unflagged load. Composes with worker_prefs: try
-                      # each candidate politely, refuse honestly if none admits.
-                      # k62: this boolean is now the ALL-WORKERS DEFAULT — the
-                      # per-worker map below overrides it per candidate.
-    "no_evict_by_worker",  # k62 — politeness INDIVIDUALIZED per (model ×
-                      # worker): {"ae": true, "computron": false}. Politeness is
-                      # a statement about ONE box's contention, not about the
-                      # model (flux2 is polite on ae's contended 3090 and holds
-                      # ordinary eviction rights on computron), so it belongs at
-                      # the same grain as the decision it changes. Central
-                      # resolves map[W] if W is in it, else ``no_evict``, and
-                      # simply includes/omits the spill key for THAT worker —
-                      # the wire and the worker's admission are untouched.
+    # RETIRED (direction d1136, 2026-09-29 — no model-specific backend
+    # behaviour): the per-model politeness fields ``no_evict`` and
+    # ``no_evict_by_worker`` are no longer accepted; residency (static /
+    # on-demand) is the ONLY protection vocabulary. A POST carrying them is
+    # ignored with a warning; a stored entry still carrying them loads with
+    # the field dropped (logged). See _RETIRED_FIELDS. The per-REQUEST
+    # ``no_makeroom`` (k96) is untouched — it is request-scoped, not a model
+    # policy.
     "strict",         # k-dist (operator ruling 2026-09-24): keep the HARD
                       # designation fence for THIS model even under the fleet
                       # "feasible" distribution default. True -> worker_prefs /
@@ -105,15 +96,40 @@ _INT_FIELDS = {"n_gpu_layers", "n_cpu_moe", "threads", "llama_ctx", "ttl_seconds
                "priority"}
 _FLOAT_FIELDS = {"gpu_mem_gib", "cpu_mem_gib", "leniency_pct"}
 # NOTE: "strict" is a boolean but is handled in _coerce with the OFF-clears
-# discipline (like "no_evict"), so it is deliberately NOT in _BOOL_FIELDS.
+# discipline, so it is deliberately NOT in _BOOL_FIELDS.
 _BOOL_FIELDS = {"always_on"}
+# Fields the store USED to accept and now drops on read (logged once per
+# model+field) and ignores on write (warned): the per-model politeness levers.
+_RETIRED_FIELDS = ("no_evict", "no_evict_by_worker")
+_RETIRED_LOGGED: set = set()
+
+
+def _strip_retired(data: dict) -> dict:
+    """Drop retired fields from a loaded overrides map IN PLACE (so the next
+    save writes them out). Logged once per (model, field); never raises — a
+    stored entry carrying a retired field must load like any other."""
+    try:
+        for mk, ov in list(data.items()):
+            if not isinstance(ov, dict):
+                continue
+            for field in _RETIRED_FIELDS:
+                if field in ov:
+                    ov.pop(field, None)
+                    if (mk, field) not in _RETIRED_LOGGED:
+                        _RETIRED_LOGGED.add((mk, field))
+                        logger.warning("serve override %s.%s is retired (per-model "
+                                       "politeness; residency static/on-demand is the "
+                                       "only protection vocabulary) — ignored", mk, field)
+    except Exception:  # noqa: BLE001 — a read must never fail over a retired key
+        pass
+    return data
 
 
 def _load() -> dict:
     try:
         with open(_OVERRIDES_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return data if isinstance(data, dict) else {}
+        return _strip_retired(data) if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -699,55 +715,16 @@ def _coerce(field: str, value):
             seen.add(name.lower())
             out.append(name)
         return out or None
-    if field == "no_evict":
-        # OFF removes the key rather than storing false (same discipline as the
-        # bnb lever): the file then holds only real operator opt-ins, and an
-        # absent entry unambiguously means the normal declare-need-then-evict.
-        return True if _truthy(value) else None
     if field == "strict":
-        # k-dist (operator ruling 2026-09-24): same OFF-clears discipline as
-        # no_evict above — the file holds only real fences, and an absent entry
+        # k-dist (operator ruling 2026-09-24): OFF-clears discipline — the
+        # file holds only real fences, and an absent entry
         # unambiguously means "follow the fleet distribution default". The
         # PlacementControl posts strict on every save, so a cleared toggle drops
         # the key rather than littering the store with strict:false rows.
         return True if _truthy(value) else None
-    if field == "no_evict_by_worker":
-        # k62. Accept the console's {"ae": true} or a curl/script string
-        # ("ae=yes,computron=no"). Name handling mirrors worker_prefs — strip,
-        # drop blanks, dedupe case-insensitively keeping the FIRST spelling —
-        # because both keys are matched against the same worker id/name forms
-        # and two spellings of one box would be two different verdicts.
-        #
-        # Unlike the model-wide boolean, ``false`` is STORED here: an explicit
-        # no is how a worker opts OUT of a polite default, which is a different
-        # statement from "unset, follow the default". Removing the entry is how
-        # you go back to the default; an empty map clears the key entirely.
-        if isinstance(value, str):
-            items = []
-            for part in value.split(","):
-                if not part.strip():
-                    continue
-                name, sep, val = part.partition("=")
-                if not sep:
-                    name, sep, val = part.partition(":")
-                items.append((name, val if sep else "yes"))
-        elif isinstance(value, dict):
-            items = list(value.items())
-        else:
-            logger.warning("ignoring no_evict_by_worker of type %s (want a map)",
-                           type(value).__name__)
-            return None
-        out, seen = {}, set()
-        for name, val in items:
-            name = str(name).strip()
-            if not name or name.lower() in seen:
-                continue
-            seen.add(name.lower())
-            out[name] = _truthy(val)
-        return out or None
     if field == "gguf_file_by_worker":
-        # Per-worker quant pin — same accepted shapes and name discipline as
-        # no_evict_by_worker (the console's {"ae": "q8_0"} or a curl string
+        # Per-worker quant pin — accepted shapes and name discipline mirror
+        # worker_prefs (the console's {"ae": "q8_0"} or a curl string
         # "ae=q8_0,computron=m.q4_k_m.gguf"), except the VALUE is a basename or
         # quant token rather than a boolean. An empty value drops that worker's
         # entry (back to the model-wide pin / election); an empty map clears
@@ -797,6 +774,12 @@ def set_override(model_key: str, fields: dict) -> dict:
         data = _load()
         current = dict(data.get(model_key, {}) or {})
         for key, raw in (fields or {}).items():
+            if key in _RETIRED_FIELDS:
+                logger.warning("serve override %s.%s is retired (per-model politeness; "
+                               "residency static/on-demand is the only protection "
+                               "vocabulary) — ignored", model_key, key)
+                current.pop(key, None)
+                continue
             if key not in ALLOWED_FIELDS:
                 continue
             coerced = _coerce(key, raw)
@@ -846,13 +829,14 @@ def placement_prefs(model_key: str) -> tuple:
 
 
 def placement_policy(model_key: str) -> tuple:
-    """k62: ``(ordered worker preference, model-wide polite, per-worker polite)``.
+    """``(ordered worker preference, model-wide polite, per-worker polite)``.
 
     The full placement statement, and the superset :func:`placement_prefs`
-    returns the first two of. The third element is the ``no_evict_by_worker``
-    map: politeness individualized per (model × worker), because contention is
-    a property of a BOX, not of a model — flux2 is polite on ae's contended
-    3090 and keeps ordinary eviction rights on computron.
+    returns the first two of. Since d1136 (2026-09-29) the two polite halves
+    are ALWAYS ``False`` / ``{}``: the per-model politeness levers
+    (``no_evict`` / ``no_evict_by_worker``) are retired — no model-specific
+    backend behaviour; residency (static / on-demand) is the only protection
+    vocabulary. The shape is kept so every reader is untouched.
 
     Same total guarding as placement_prefs: an unreadable overrides file
     degrades to ``([], False, {})``, which is pre-k56 behaviour exactly.
@@ -883,10 +867,10 @@ def placement_policy(model_key: str) -> tuple:
             prefs = list(get_priority_groups().workers_for_key(model_key))
         except Exception:  # noqa: BLE001 — the group half must never break placement
             prefs = []
-    by_worker = ov.get("no_evict_by_worker")
-    by_worker = ({str(k): bool(v) for k, v in by_worker.items() if str(k).strip()}
-                 if isinstance(by_worker, dict) else {})
-    return prefs, bool(ov.get("no_evict")), by_worker
+    # d1136 (2026-09-29): the per-model politeness levers are RETIRED — the
+    # tuple keeps its shape for every reader, and the polite halves are always
+    # (False, {}): no model is polite by policy; residency is the protection.
+    return prefs, False, {}
 
 
 def model_strict(model_key: str) -> bool:
@@ -1018,9 +1002,9 @@ def migrate_worker_tokens(resolve) -> dict:
     """Rewrite STALE worker-name references in the placement overrides to a stable
     worker id (operator incident 2026-09-25).
 
-    Placement is stored by NAME in three per-model fields — ``worker_prefs`` (a
-    list), and the ``no_evict_by_worker`` / ``gguf_file_by_worker`` maps (keyed by
-    worker) — so a worker rename ("aeb" -> "ae-worker", same id) strands every
+    Placement is stored by NAME in per-model fields — ``worker_prefs`` (a
+    list) and the ``gguf_file_by_worker`` map (keyed by worker; the retired
+    ``no_evict_by_worker`` is dropped on read) — so a worker rename ("aeb" -> "ae-worker", same id) strands every
     token written under the old name and central logs "ordered worker preference
     ['aeb'] but NONE of them is an eligible candidate" every few minutes.
 
@@ -1052,7 +1036,7 @@ def migrate_worker_tokens(resolve) -> dict:
                         new_prefs.append(use)
                 if new_prefs != prefs:
                     ov["worker_prefs"] = new_prefs
-            for field in ("no_evict_by_worker", "gguf_file_by_worker"):
+            for field in ("gguf_file_by_worker",):
                 m = ov.get(field)
                 if not isinstance(m, dict):
                     continue
