@@ -497,7 +497,7 @@
 .mt-serve-ep { font-size: 11px; color: var(--accent); }
 .mt-serve-msg { font-size: 11px; color: var(--muted); }
 
-/* k56 placement: the ordered worker preference + the polite-load toggle. The
+/* k56 placement: the ordered worker preference. The
    chips read as a RANKED list (the number is part of the chip, not a bullet),
    so the order is legible without reading the buttons. */
 .mt-place { display: flex; flex-direction: column; gap: 8px; }
@@ -517,23 +517,6 @@
 }
 .mt-place-chip > button:hover:not(:disabled) { color: var(--text); }
 .mt-place-chip > button:disabled { opacity: 0.3; cursor: default; }
-/* k62 — the worker × polite grid. A two-column table, not chips: the operator
-   asked for a per-worker TICKER ("worker0 | yes"), and a table is the only shape
-   where the second column reads as one answer per row at a glance. */
-.mt-place-grid { border-collapse: collapse; font-size: 12px; width: auto; }
-.mt-place-grid th {
-  text-align: left; font-weight: 500; color: var(--muted);
-  font-size: 11px; padding: 1px 12px 1px 0;
-}
-.mt-place-grid td { padding: 1px 12px 1px 0; }
-.mt-place-tick {
-  background: transparent; border: 1px solid var(--muted);
-  color: var(--muted); font: inherit; font-size: 11px;
-  padding: 0 7px; border-radius: 8px; cursor: pointer; min-width: 46px;
-}
-.mt-place-tick.on { color: var(--accent); border-color: var(--accent); }
-.mt-place-tick.inherited { border-style: dashed; opacity: 0.75; }
-.mt-place-note { font-size: 10px; color: var(--muted); }
 .mt-place-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .mt-place-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
 .mt-place-effective { font-size: 11px; color: var(--accent); }

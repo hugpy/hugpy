@@ -4,7 +4,7 @@ import { getServing, invalidateServing, getShardFlag, primeShardFlag } from './s
 import { LiveWorkerChip } from '../ModelLiveState/ModelLiveState'
 import { archiveText } from './archiveMark'
 
-// k56 — per-model PLACEMENT: the ordered worker preference + the polite load.
+// k56 — per-model PLACEMENT: the ordered worker preference.
 //
 // Designation used to be one hard worker binding; it is now an ORDERED
 // candidate list. Resolution tries the workers in the stated order and takes
@@ -12,26 +12,15 @@ import { archiveText } from './archiveMark'
 // off it. A single entry is the degenerate case and behaves exactly as one
 // designation always did — which is also why an EMPTY list is a real state
 // (no preference: routing ranks by residency/capability as before), not a
-// half-filled form.
+// half-filled form. MODEL-scoped, so it persists through the same
+// /api/llm/serving/<key> overrides call the sibling ServingControl uses —
+// self-contained, no wiring through App state.
 //
-// The polite toggle (`no_evict`) is the deliberate inverse of
-// declare-need-then-evict: the load may spend only genuinely free headroom and
-// never displaces a resident. Both are MODEL-scoped, so they persist through
-// the same /api/llm/serving/<key> overrides call the sibling ServingControl
-// uses — self-contained, no wiring through App state.
-//
-// k62 — politeness is INDIVIDUALIZED per (model × worker), rendered as the
-// operator's sketch:
-//
-//     worker   | polite
-//     worker0  | yes
-//     worker1  | no
-//
-// …because contention is a property of a BOX, not of a model: flux2 is polite
-// on ae's contended 3090 and keeps ordinary eviction rights on computron. Each
-// row's ticker cycles default → yes → no → default, writing `no_evict_by_worker`;
-// the compact master toggle below stays the all-workers default (`no_evict`),
-// which every row without an explicit verdict follows.
+// d1136 (2026-09-29): the per-model / per-worker "polite load" controls
+// (`no_evict`, `no_evict_by_worker`) were REMOVED from the console — no
+// model-specific backend behaviour. Whether a model stays seated is the
+// worker-side RESIDENCY policy (static | on-demand, ResidencyMenu), not a
+// per-model eviction flag.
 //
 // Ranking is ↑/↓ buttons rather than drag: every other control in this detail
 // panel is a plain button/select, and a drag affordance nobody else here has
@@ -50,10 +39,8 @@ function LiveState({ modelKey, name, byName }) {
 // every disabled control carries the recorded mark as its title.
 export default function PlacementControl({ modelKey, workers = [], archived = null }) {
   const [prefs, setPrefs] = useState(null)      // null until the GET lands
-  const [polite, setPolite] = useState(false)   // the ALL-WORKERS default
-  const [byWorker, setByWorker] = useState({})  // per-worker verdicts (k62)
   const [strict, setStrict] = useState(false)   // k-dist: hard-fence this model
-  const [saved, setSaved] = useState({ prefs: [], polite: false, byWorker: {}, strict: false })
+  const [saved, setSaved] = useState({ prefs: [], strict: false })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [shardOn, setShardOn] = useState(null)   // multi-GPU shard-eligible (persisted setting)
@@ -63,10 +50,8 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
   // screen is exactly what a reload would show.
   const adopt = (ov) => {
     const list = Array.isArray(ov.worker_prefs) ? ov.worker_prefs : []
-    const map = (ov.no_evict_by_worker && typeof ov.no_evict_by_worker === 'object')
-      ? { ...ov.no_evict_by_worker } : {}
-    setPrefs(list); setPolite(!!ov.no_evict); setByWorker(map); setStrict(!!ov.strict)
-    setSaved({ prefs: list, polite: !!ov.no_evict, byWorker: map, strict: !!ov.strict })
+    setPrefs(list); setStrict(!!ov.strict)
+    setSaved({ prefs: list, strict: !!ov.strict })
   }
 
   const load = useCallback(async () => {
@@ -128,11 +113,10 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
       const r = await hugpyFetch(`/api/llm/serving/${encodeURIComponent(modelKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // All three keys go every time: an empty list, a false flag and an empty
-        // map are how the operator CLEARS them, and omitting a key would
-        // silently keep the old value (the overrides layer merges).
-        body: JSON.stringify({ worker_prefs: prefs, no_evict: polite,
-                               no_evict_by_worker: byWorker, strict }),
+        // Both keys go every time: an empty list and a false flag are how the
+        // operator CLEARS them, and omitting a key would silently keep the old
+        // value (the overrides layer merges).
+        body: JSON.stringify({ worker_prefs: prefs, strict }),
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
@@ -160,58 +144,7 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
 
   const unlisted = workers.filter(w => !prefs.includes(w.name) && !prefs.includes(w.id))
   const dirty = (JSON.stringify(prefs) !== JSON.stringify(saved.prefs)
-                 || polite !== saved.polite
-                 || strict !== saved.strict
-                 || JSON.stringify(byWorker) !== JSON.stringify(saved.byWorker))
-
-  // ── k62: the worker × polite grid ────────────────────────────────────────
-  // Rows: every worker on the preference list (in its order), then every worker
-  // this model is DESIGNATED to, then any name the map still carries — an
-  // orphaned verdict (the box was renamed or dropped from the list) must stay
-  // visible and clearable rather than deciding routing invisibly.
-  const mapKey = (name) => Object.keys(byWorker).find(
-    k => k.toLowerCase() === String(name).toLowerCase())
-  const explicit = (name) => {            // true | false | null (= follow default)
-    const k = mapKey(name)
-    return k === undefined ? null : !!byWorker[k]
-  }
-  const effective = (name) => {
-    const e = explicit(name)
-    return e === null ? polite : e
-  }
-  // default → yes → no → default. Three states because "follows the all-workers
-  // toggle" is a real answer, distinct from an explicit no that pins this box.
-  const cyclePolite = (name) => {
-    const e = explicit(name)
-    const k = mapKey(name) || name
-    const next = { ...byWorker }
-    if (e === null) next[k] = true
-    else if (e === true) next[k] = false
-    else delete next[k]
-    setByWorker(next)
-  }
-
-  const gridRows = []
-  const seen = new Set()
-  const pushRow = (name) => {
-    const low = String(name).toLowerCase()
-    if (!name || seen.has(low)) return
-    seen.add(low)
-    gridRows.push(name)
-  }
-  prefs.forEach(pushRow)
-  workers.filter(w => (w.models || []).includes(modelKey))
-         // Skip a box already listed under its OTHER spelling — the backend
-         // matches id and name alike, so two rows would be two tickers for one
-         // worker (and the second would silently lose).
-         .filter(w => !seen.has(String(w.id || '').toLowerCase()))
-         .forEach(w => pushRow(w.name || w.id))
-  Object.keys(byWorker).forEach(k => {
-    const w = byName(k)                       // same id-or-name tolerance again
-    if (w && (seen.has(String(w.id || '').toLowerCase())
-              || seen.has(String(w.name || '').toLowerCase()))) return
-    pushRow(k)
-  })
+                 || strict !== saved.strict)
 
   // EFFECTIVE PLACEMENT — which candidate actually served last. Read off the
   // one ledger central already keeps (model_call_stats, stamped on the pick),
@@ -223,8 +156,7 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
     const at = row && row.last_call
     if (at && at > servedAt) { servedAt = at; servedBy = w.name || w.id }
   }
-  // …and, when a load was refused, WHY. A polite refusal is the expected
-  // outcome of this panel's own toggle, so it belongs beside it.
+  // …and, when a load was refused, WHY — the worker's own reason string.
   const refusals = workers
     .map(w => [w, ((w.load_reports || {})[modelKey] || {})])
     .filter(([, rep]) => rep && rep.ok === false && rep.error)
@@ -259,45 +191,6 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
         })}
       </div>
 
-      {gridRows.length > 0 && (
-        <table className="mt-place-grid">
-          <thead>
-            <tr><th>worker</th><th>state (live)</th><th>polite</th></tr>
-          </thead>
-          <tbody>
-            {gridRows.map(name => {
-              const w = byName(name)
-              const e = explicit(name)
-              const on = effective(name)
-              return (
-                <tr key={name}>
-                  <td className={w && w.status === 'online' ? '' : 'mt-place-off'}
-                      title={w ? `${name} — ${w.status || 'unknown'}`
-                               : `${name} is not a registered worker right now`}>
-                    {name}
-                  </td>
-                  <td><LiveState modelKey={modelKey} name={name} byName={byName} /></td>
-                  <td>
-                    <button className={`mt-place-tick${on ? ' on' : ''}${e === null ? ' inherited' : ''}`}
-                            onClick={() => cyclePolite(name)}
-                            title={e === null
-                              ? `follows the all-workers default (${polite ? 'yes' : 'no'}) — click to pin this worker`
-                              : `pinned ${on ? 'yes' : 'no'} for this worker — click to ${on ? 'pin no' : 'follow the all-workers default'}`}>
-                      {on ? 'yes' : 'no'}{e === null ? ' *' : ''}
-                    </button>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      )}
-      {gridRows.some(n => explicit(n) === null) && (
-        <div className="mt-place-note">
-          * follows the all-workers default below
-        </div>
-      )}
-
       <div className="mt-place-actions">
         <select value="" disabled={!!archived || !unlisted.length}
                 title={archived ? archText
@@ -311,13 +204,6 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
             </option>
           ))}
         </select>
-
-        <label className="mt-place-toggle"
-               title="Polite load, ALL WORKERS: on every worker without its own verdict above, this model may take only genuinely free VRAM and will NEVER evict a resident to make space. If no candidate has room, the load is refused honestly instead of displacing someone.">
-          <input type="checkbox" checked={polite}
-                 onChange={e => setPolite(e.target.checked)} />
-          all workers: load only into free room (never evict)
-        </label>
 
         <label className="mt-place-toggle"
                title="Strict fences unallocated feasible workers to this preference list. Explicit worker allocations remain the routing scope; this setting cannot make an allocated model unroutable just because its preference list is stale.">

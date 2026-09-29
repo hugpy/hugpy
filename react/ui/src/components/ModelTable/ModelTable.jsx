@@ -798,11 +798,12 @@ function renderModelDetail(model, colSpan) {
             <QuantControl modelKey={modelKey} framework={model.framework} onChanged={onRefresh} />
           </div>
 
-          {/* k56 — WHERE it runs (ordered worker preference) and HOW politely
-              (never evict). Model-scoped, so it sits beside the per-model
-              serving config rather than inside a single worker's row. */}
+          {/* k56 — WHERE it runs (ordered worker preference). Model-scoped, so
+              it sits beside the per-model serving config rather than inside a
+              single worker's row. Residency (static | on-demand) is the
+              worker-side seat policy, set in the worker row (d1097/d1136). */}
           <div className="mt-serve-section">
-            <div className="mt-serve-title">🖧 Worker preference &amp; polite load</div>
+            <div className="mt-serve-title">🖧 Worker preference</div>
             <PlacementControl modelKey={modelKey} workers={workers} archived={arch} />
           </div>
 
