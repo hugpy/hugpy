@@ -5,6 +5,7 @@ from typing import Dict
 import httpx
 
 from hugpy_engine.config.main import get_gguf_file, get_model_config
+from hugpy_engine.fit.types import key_equivalent
 from hugpy_engine.llama.runners.src.base_runner import LlamaCppBaseRunner
 from hugpy_engine.llama.runners.src.ccp_runner import LlamaCppRunner
 from hugpy_engine.llama.runners.src.python_runner import LlamaCppPythonRunner
@@ -156,6 +157,12 @@ def slot_backed_model_keys() -> "set[str]":
     }
 
 
+def _bare_tail(key) -> str:
+    """The key without its ``Owner~`` qualifier (the k67 alias; unchanged)."""
+    k = str(key or "")
+    return k.split("~", 1)[1] if "~" in k else k
+
+
 def _slot_still_holds(runner, model_key: str) -> bool:
     """STALE-SLOT-FIX-20260910: one cheap local GET to confirm a slot-backed runner's seat still
     holds `model_key`. Unknown/unreachable -> True (the request path's own
@@ -180,15 +187,23 @@ def _slot_still_holds(runner, model_key: str) -> bool:
                                     and "slot_id" not in st):
         return True
     held = st.get("model_key")
-    if held and held != model_key:
+    if held and not key_equivalent(held, model_key):
         # serve_endpoint seats under the CANONICAL key (resolved with the
         # resident preferred — the ambiguous-key rule, unchanged); compare
         # against that resolution, not the spelling this cache is keyed by.
+        # Identity is ``key_equivalent`` (operator rule 2026-09-29): ``X`` and
+        # ``X-GGUF`` are one seat; ``X-Distill-GGUF`` never answers for
+        # ``X-GGUF`` even when it mmaps the same file (S3/F7).
         try:
             canonical = get_model_config(model_key, prefer=[held]).model_key
         except Exception:  # noqa: BLE001
             canonical = model_key
-        if canonical != held:
+        # The resident-preferring resolve may bridge an OWNER qualifier
+        # (``AtomicChat~X`` seated for a request ``X``); it can never make the
+        # seat a different model than the request named, so both halves must
+        # hold: canonical == held AND canonical's tail == the request's tail.
+        if not (key_equivalent(canonical, held)
+                and key_equivalent(_bare_tail(canonical), _bare_tail(model_key))):
             return False
     # Same model is not necessarily the same seat.  Explicit placement and
     # quant selection are load-time properties; reusing a healthy child with a

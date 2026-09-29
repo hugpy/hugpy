@@ -30,8 +30,41 @@ immutable; ``plan_fit`` never mutates its inputs.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Optional
+
+
+# ── model-key identity (operator rule, board 2026-09-29) ─────────────────────
+# ``X-GGUF`` and ``X`` are NECESSARILY the same model: the ``-GGUF`` suffix is a
+# FORMAT variant of ONE key. Any other differing name token (``-Distill``, a
+# quant marker, a finetune tag, an ``-i1``, anything) makes a DIFFERENT model
+# that must not be loaded or served unless that exact key was called — even
+# when both keys are backed by the same file on the worker's drive. Same-file
+# residency never implies key equivalence. This is THE single definition; the
+# resolver, central routing, the worker's resident match, the slot seat
+# match and plan_fit's Resident identity all consult it (S3 / F7 eviction
+# test 2026-09-29: a request for ``Qwen3.8-9B-GGUF`` was served by the
+# resident ``Qwen3.8-9B-Distill-GGUF`` because both name the same GGUF file).
+#
+# Case is not a name token (the routing alias union already folds it); the
+# separator before the suffix may be ``-`` or ``_`` (``Qwen3.8_4B_Distilled_GGUF``
+# is a live key) — nothing else is folded.
+_FORMAT_SUFFIX_RE = re.compile(r"[-_]gguf$", re.IGNORECASE)
+
+
+def canonical_key(model_key: Any) -> str:
+    """``model_key`` with ONLY the trailing format suffix (``-GGUF``) removed.
+    Every other token is identity and is kept verbatim."""
+    s = str(model_key or "").strip()
+    return _FORMAT_SUFFIX_RE.sub("", s, count=1)
+
+
+def key_equivalent(a: Any, b: Any) -> bool:
+    """True iff ``a`` and ``b`` name the same model: equal after stripping only
+    the ``-GGUF`` format suffix (case-insensitive). Empty never matches."""
+    ca = canonical_key(a)
+    return bool(ca) and ca.lower() == canonical_key(b).lower()
 
 
 @dataclass(frozen=True)
@@ -151,6 +184,15 @@ class Resident:
     mid_generation: bool = False
     resident_since: Optional[float] = None
     gpu_index: Optional[int] = None
+
+    @property
+    def identity(self) -> str:
+        """The resident's CANONICAL identity (``canonical_key``): the key with
+        only the ``-GGUF`` format suffix removed. Two residents are the same
+        model iff their identities are equal — a ``…-Distill-GGUF`` seat is a
+        distinct resident from a ``…-GGUF`` seat even when both mmap the same
+        file; a load of the plain key is a separate admission / seat."""
+        return canonical_key(self.model_key)
 
 
 @dataclass(frozen=True)

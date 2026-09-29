@@ -51,6 +51,14 @@ def _resolve_model_key(model_key, registry, prefer=None):
         return k.split("~", 1)[1] if "~" in k else k
     candidates = sorted(k for k in registry if _bare(k) == model_key)
     if not candidates:
+        # FORMAT EQUIVALENCE (operator rule 2026-09-29): ``X`` and ``X-GGUF``
+        # are one key, so either spelling resolves to the row on record under
+        # the other. Nothing else is folded — ``X-Distill-GGUF`` is a different
+        # model and never answers for ``X-GGUF`` (S3/F7). Lazy import keeps the
+        # config module's import graph unchanged.
+        from hugpy_engine.fit.types import key_equivalent
+        candidates = sorted(k for k in registry if key_equivalent(_bare(k), model_key))
+    if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]

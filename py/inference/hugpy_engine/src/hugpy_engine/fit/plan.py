@@ -25,7 +25,7 @@ from hugpy_engine import eviction as _ev
 from hugpy_engine.fit import flex as _flex
 from hugpy_engine.fit.types import (
     Eviction, FitFailure, FitPlan, FitPolicy, FitRequest, MoeSplit, Resident,
-    ResourceSnapshot,
+    ResourceSnapshot, key_equivalent,
 )
 from hugpy_engine.spill import moe_dense_first_plan as _moe_dense_first_plan
 
@@ -279,6 +279,18 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                        **common)
 
     # Over the ceiling.
+    # SUBJECT IDENTITY (operator rule 2026-09-29): a resident whose canonical
+    # identity equals the subject's (``X`` vs ``X-GGUF``: one key) IS the
+    # subject — it is never a victim of its own admission. A resident that
+    # differs by any other token (``X-Distill-GGUF``) is a DISTINCT resident
+    # even when it mmaps the same file: it stays a candidate and the subject
+    # is admitted as a new load, never served from that seat.
+    same_seat = [r for r in residents if key_equivalent(r.model_key, mk)]
+    if same_seat:
+        reasons.append("subject identity: %d resident(s) are the subject itself "
+                       "(%s) — excluded from eviction"
+                       % (len(same_seat), ", ".join(r.model_key for r in same_seat)))
+        residents = tuple(r for r in residents if not key_equivalent(r.model_key, mk))
     candidates = [r for r in residents if not r.protected]
     protected = [r for r in residents if r.protected]
 

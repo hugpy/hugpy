@@ -1875,15 +1875,22 @@ def _canonical_registry_key(model_key: str) -> str:
         md = get_models_dict(dict_return=True) or {}
     except Exception:  # noqa: BLE001 — key resolution must never break a read
         return model_key
-    if model_key in md or "~" not in str(model_key):
+    if model_key in md:
         return model_key
     try:
         from hugpy_engine.resolvers.assure_model_key import _bare_tail, _slugify
     except Exception:  # noqa: BLE001 — no resolver, keep the raw key (fail-open)
         return model_key
-    want = _slugify(_bare_tail(model_key))
+    if "~" in str(model_key):
+        want = _slugify(_bare_tail(model_key))
+        for k in md:
+            if _slugify(_bare_tail(k)) == want:
+                return k
+    # FORMAT EQUIVALENCE (operator rule 2026-09-29): ``X`` and ``X-GGUF`` are
+    # one key, so the size / marker facts of the row on record under the other
+    # spelling apply. Deterministic and identity-only: no other token is folded.
     for k in md:
-        if _slugify(_bare_tail(k)) == want:
+        if _key_equivalent(_bare_tail(k), _bare_tail(model_key)):
             return k
     return model_key
 
@@ -3256,6 +3263,18 @@ def storage_proposal(worker: Dict[str, Any]) -> Dict[str, Any]:
 
 
 from hugpy_platform.model_keys import model_key_forms as _match_keys
+# THE model-key identity rule (operator, board 2026-09-29): ``X-GGUF`` and ``X``
+# are one key; ``X-Distill-GGUF`` (any other differing token) is a different
+# model. Routing must never credit a worker with holding ``X-GGUF`` because it
+# holds ``X-Distill-GGUF`` — even when both are the same file on its drive.
+from hugpy_engine.fit.types import canonical_key as _canonical_key
+from hugpy_engine.fit.types import key_equivalent as _key_equivalent
+
+
+def _canon_forms(forms) -> set:
+    """The alias forms of a key reduced to their canonical identity (lower-cased,
+    ``-GGUF`` stripped) — the set two keys must intersect on to be ONE model."""
+    return {_canonical_key(f).lower() for f in (forms or ()) if f}
 
 
 # ── Representation (gguf vs transformers) of a serving endpoint ───────────────
@@ -3308,10 +3327,16 @@ def _serveable_match(model_key: str, wanted: set, serveable) -> bool:
     ONLY for alias-matched (never literal-matched) advertised keys, keeping
     the hot path cheap.
     """
+    want_c = _canon_forms(wanted)
     for m in serveable:
         if m == model_key:
             return True
-        if wanted & _match_keys(m):
+        # Alias match = the "~"/"/"-tail union (k67) OR the ``-GGUF`` format
+        # equivalence (operator rule 2026-09-29). Both are IDENTITY: nothing
+        # here ever matches a key carrying an extra name token (``-Distill``,
+        # a quant marker…), so a worker holding ``X-Distill-GGUF`` is never
+        # credited with ``X-GGUF`` — not as resident, allocated, or on-disk.
+        if (wanted & _match_keys(m)) or (want_c & _canon_forms(_match_keys(m))):
             if _model_blocked(m):
                 continue     # blocked sibling — an alias never launders a block
             return True

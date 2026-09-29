@@ -674,3 +674,44 @@ def test_ctx_cap_knob_is_off_by_default_and_proposes_a_reduced_ctx_seat_when_on(
     # eviction stands.
     tight = fit.plan_fit(_req(8 * GIB, detail=det), _snap(3 * GIB), residents, on_policy)
     assert tight.action == "evict" and tight.evicted_keys == ["cold"]
+
+
+# ---------------------------------------------------------------------------
+# Resident identity is the canonical key (operator rule, board 2026-09-29)
+# ---------------------------------------------------------------------------
+def test_resident_identity_is_the_canonical_key_and_same_file_residents_stay_distinct():
+    """INVARIANT: ``Resident.identity`` is the key with only ``-GGUF`` stripped.
+    ``Qwen3.8-9B-Distill-GGUF`` and ``Qwen3.8-9B-GGUF`` are DISTINCT residents
+    (same file on ae's drive notwithstanding): a load of the plain key is a new
+    admission that may evict the Distill seat; it is never "already resident".
+    ``Qwen3.8-9B`` and ``Qwen3.8-9B-GGUF`` are ONE identity: the subject is never
+    a victim of its own admission.
+    Established: eviction test S3 / F7 + operator rule 2026-09-29."""
+    distill = _res("Qwen3.8-9B-Distill-GGUF", 10 * GIB, last_call=100.0)
+    plain = _res("Qwen3.8-9B-GGUF", 10 * GIB, last_call=200.0)
+    assert distill.identity == "Qwen3.8-9B-Distill"
+    assert plain.identity == "Qwen3.8-9B" == _res("Qwen3.8-9B", 1).identity
+    assert fit.key_equivalent(plain.model_key, "Qwen3.8-9B")
+    assert not fit.key_equivalent(plain.model_key, distill.model_key)
+
+    # S3 shape: resident Distill, request the plain key -> a NEW load that
+    # evicts the distinct Distill seat (not served by it, not credited by it).
+    req = dataclasses.replace(_req(11 * GIB), model_key="Qwen3.8-9B-GGUF")
+    plan = fit.plan_fit(req, _snap(2 * GIB), [distill], POLICY)
+    assert plan.action == "evict" and plan.evicted_keys == ["Qwen3.8-9B-Distill-GGUF"]
+    assert plan.model_key == "Qwen3.8-9B-GGUF"
+
+    # Same identity under another spelling: the subject itself, never evicted.
+    own = _res("Qwen3.8-9B", 10 * GIB, last_call=100.0)
+    plan = fit.plan_fit(req, _snap(2 * GIB), [own], POLICY)
+    assert plan.action == "refuse" and plan.evicted_keys == []
+    assert any("subject identity" in r for r in plan.reasons)
+
+    # Two same-file siblings are two residents in one plan: both may be named.
+    heretic = _res("Qwen3.8-9B-heretic-uncensored-GGUF", 10 * GIB, last_call=150.0)
+    plan = fit.plan_fit(dataclasses.replace(req, need_bytes=20 * GIB,
+                                            need_detail={"total": 20 * GIB, "weights": 20 * GIB,
+                                                         "kv": 0, "ctx_pct": None}),
+                        _snap(1 * GIB), [distill, heretic], POLICY)
+    assert sorted(plan.evicted_keys) == ["Qwen3.8-9B-Distill-GGUF",
+                                         "Qwen3.8-9B-heretic-uncensored-GGUF"]

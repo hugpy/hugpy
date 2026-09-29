@@ -19,6 +19,8 @@ import logging
 import os
 import time
 
+from hugpy_engine.fit.types import key_equivalent
+
 logger = logging.getLogger("abstract_hugpy_dev.slots")
 
 
@@ -176,6 +178,19 @@ def _ngl(value):
         return int(value)
     except (TypeError, ValueError):
         return value
+
+
+def seat_serves(status: dict | None, model_key: str) -> bool:
+    """Whether a slot status row's seated key IS ``model_key``.
+
+    THE seat identity test (operator rule 2026-09-29): equal after stripping
+    only the ``-GGUF`` format suffix (``key_equivalent``). A seat holding
+    ``Qwen3.8-9B-Distill-GGUF`` does NOT serve a request for
+    ``Qwen3.8-9B-GGUF`` even though both name the same file on disk — a
+    request for key A is never answered by resident B (S3/F7). A seat holding
+    ``X`` does serve ``X-GGUF`` (one key, two spellings)."""
+    held = (status or {}).get("model_key")
+    return bool(held) and key_equivalent(held, model_key)
 
 
 def status_satisfies_opts(status: dict, opts: dict | None) -> bool:
@@ -518,7 +533,7 @@ class SlotPool:
         #    healthy (coalescing concurrent requests onto the one load), just like
         #    loading into a fresh slot blocks. A down slot reports model_key=None.
         for s in statuses:
-            if s.get("model_key") != model_key:
+            if not seat_serves(s, model_key):
                 continue
             ep = s.get("endpoint") or s["_control"]
             if s.get("healthy"):

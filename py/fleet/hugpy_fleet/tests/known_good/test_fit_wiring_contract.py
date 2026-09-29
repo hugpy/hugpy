@@ -396,3 +396,44 @@ def test_slot_evict_verb_counts_and_telemeters_like_the_plan_executor(rig, monke
     assert A._VRAM_EVICTIONS["last"]["victim"] == "cold" and A._VRAM_EVICTIONS["last"]["subject"] == "NEW"
     assert [e[0] for e in events] == ["evict.start", "evict.done"]
     assert events[1][1]["freed_bytes"] == 3 * GIB and events[0][1]["tier"] == "slot-child"
+
+
+def test_s3_shape_plain_key_is_a_new_admission_never_served_by_the_distill_resident(rig, monkeypatch):
+    """INVARIANT (eviction test S3 / F7, 2026-09-29): with
+    ``Qwen3.8-9B-Distill-GGUF`` resident and a request for ``Qwen3.8-9B-GGUF``
+    (same GGUF file on the drive, DIFFERENT key), the admission is for the
+    plain key as a NEW load: the Distill seat is a distinct, evictable
+    resident (it is evicted to make room) and the request's model_key reaches
+    plan_fit unchanged. A resident under the same canonical key
+    (``Qwen3.8-9B``) is the subject itself and is never evicted.
+    Established: operator rule 2026-09-29 (key_equivalent at every layer)."""
+    calls: list = []
+    real = fit_plan_mod.plan_fit
+
+    def spy(request, snapshot, residents, policy):
+        calls.append((request, tuple(residents)))
+        return real(request, snapshot, residents, policy)
+    monkeypatch.setattr(fit, "plan_fit", spy)
+
+    rig.card["free"] = 4 * GIB
+    rig.card["need"] = 11 * GIB
+    rig.residents.update({"Qwen3.8-9B-Distill-GGUF": 10 * GIB})
+    rig.lru.update({"Qwen3.8-9B-Distill-GGUF": 100.0})
+
+    verdict = A._vram_evict_to_fit(_State(), "Qwen3.8-9B-GGUF")
+
+    assert verdict["action"] == "evicted"
+    assert verdict["evicted"] == ["Qwen3.8-9B-Distill-GGUF"] == rig.evicted
+    request, residents = calls[0]
+    assert request.model_key == "Qwen3.8-9B-GGUF"
+    assert [r.model_key for r in residents] == ["Qwen3.8-9B-Distill-GGUF"]
+    assert residents[0].identity == "Qwen3.8-9B-Distill" != request.model_key
+
+    # same canonical key under another spelling: the subject, never a victim
+    rig.evicted.clear()
+    rig.card["free"] = 4 * GIB
+    rig.residents.clear()
+    rig.residents.update({"Qwen3.8-9B": 10 * GIB})
+    rig.lru.update({"Qwen3.8-9B": 100.0})
+    verdict = A._vram_evict_to_fit(_State(), "Qwen3.8-9B-GGUF")
+    assert verdict["evicted"] == [] and rig.evicted == [] and "Qwen3.8-9B" in rig.residents

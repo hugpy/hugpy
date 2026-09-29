@@ -202,3 +202,117 @@ def test_unknown_key_resolves_to_none_and_intake_error_names_it(registry):
     with pytest.raises(ValueError) as ei:
         MR.resolve_model_key(model_key="zzz-nonexistent-model-xyz-999")
     assert "Unknown model_key" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# Key equivalence: ``-GGUF`` is a format suffix, everything else is identity
+# (operator rule, board 2026-09-29; eviction test S3 / F7)
+# ---------------------------------------------------------------------------
+def _fw(framework, hub_id=None, tasks=("text-generation",)):
+    return types.SimpleNamespace(framework=framework, hub_id=hub_id, folder=None,
+                                 tasks=list(tasks), meta={}, name=hub_id)
+
+
+def test_key_equivalent_strips_only_the_gguf_format_suffix():
+    """INVARIANT: ``X-GGUF`` == ``X`` (case-insensitive suffix, ``-`` or ``_``
+    separator); ANY other differing token — ``-Distill``, a quant marker, an
+    ``-i1``, a finetune tag — is a different model. Same-file residency is
+    not consulted: the rule is purely about the key.
+    Established: operator rule 2026-09-29 (key_equivalent / canonical_key)."""
+    eq, canon = AMK.key_equivalent, AMK.canonical_key
+    assert eq("Qwen3.8-9B-GGUF", "Qwen3.8-9B")
+    assert eq("Qwen3.8-9B", "Qwen3.8-9B-gguf")
+    assert eq("Qwen3.8_4B_Distilled_GGUF", "Qwen3.8_4B_Distilled")
+    assert eq("Qwen3.8-9B-Distill-GGUF", "Qwen3.8-9B-Distill")
+    assert canon("Qwen3.8-9B-GGUF") == "Qwen3.8-9B"
+    assert canon("Qwen3.8-9B-Distill-GGUF") == "Qwen3.8-9B-Distill"
+    # the S3 pair: same file on ae's drive, DIFFERENT keys
+    assert not eq("Qwen3.8-9B-GGUF", "Qwen3.8-9B-Distill-GGUF")
+    assert not eq("Qwen3.8-9B", "Qwen3.8-9B-Distill")
+    # quant / variant markers are identity, not format
+    assert not eq("Qwen3.8-9B-GGUF", "Qwen3.8-9B-GGUF-Q8_0")
+    assert not eq("Qwen3.8-9B-GGUF", "Qwen3.8-9B-Q4_K_M-GGUF")
+    assert not eq("Qwen3.8-9B-heretic-uncensored-GGUF", "Qwen3.8-9B-heretic-uncensored-i1-GGUF")
+    assert not eq("Qwen3-Coder-Next-GGUF", "Qwen3-Coder-Next-AWQ")
+    # the suffix is stripped once, at the end only
+    assert canon("GGUF-Something-GGUF") == "GGUF-Something"
+    assert not eq("", "") and not eq(None, "X")
+
+
+def test_format_equivalence_tier_resolves_across_the_gguf_suffix_never_to_a_sibling(registry):
+    """INVARIANT: a request for ``X`` resolves to the ``X-GGUF`` row (and
+    ``X-GGUF`` to ``X``) DETERMINISTICALLY, ahead of the fuzzy tier — so the
+    presence of ``X-Distill-GGUF`` in the same registry can never win. The
+    format tier is weaker than the bare-tail tier: an exact-tail row still
+    beats a format sibling.
+    Established: operator rule 2026-09-29 (_TIER_FORMAT)."""
+    plain, distill = "Qwen3.8-9B-GGUF", "Qwen3.8-9B-Distill-GGUF"
+    registry({plain: _cfg(hub_id="empero-ai/Qwen3.8-9B-GGUF"),
+              distill: _cfg(hub_id="empero-ai/Qwen3.8-9B-Distill-GGUF")})
+    assert AMK.assure_model_key("Qwen3.8-9B") == plain
+    assert AMK.assure_model_key("Qwen3.8-9B-Distill") == distill
+    assert AMK.assure_model_key(plain) == plain and AMK.assure_model_key(distill) == distill
+    # the mirror: only the plain (transformers-style) row is on record
+    registry({"Qwen3.8-9B": _cfg(hub_id="Qwen/Qwen3.8-9B"), distill: _cfg()})
+    assert AMK.assure_model_key("Qwen3.8-9B-GGUF") == "Qwen3.8-9B"
+    # exact tail outranks the format sibling when both exist
+    registry({"Qwen3.8-9B": _cfg(), plain: _cfg()})
+    assert AMK.assure_model_key("Qwen3.8-9B") == "Qwen3.8-9B"
+    assert AMK.assure_model_key(plain) == plain
+
+
+def test_s3_shape_a_request_for_the_plain_key_never_resolves_to_the_distill_sibling(registry):
+    """INVARIANT (eviction test S3 / F7, 2026-09-29): with ONLY
+    ``Qwen3.8-9B-Distill-GGUF`` on record (ae-worker's registry), a request for
+    ``Qwen3.8-9B-GGUF`` resolves to None — for the default resolver (the
+    request is package-specific, so the fuzzy tier is skipped) and for the
+    identity-only mode a worker uses (``fuzzy=False``). Intake refuses with an
+    honest "did you mean" naming the sibling; nothing is silently substituted.
+    Established: operator rule 2026-09-29."""
+    distill = "Qwen3.8-9B-Distill-GGUF"
+    registry({distill: _cfg(hub_id="empero-ai/Qwen3.8-9B-Distill-GGUF")})
+    assert AMK.assure_model_key("Qwen3.8-9B-GGUF") is None
+    assert AMK.assure_model_key("Qwen3.8-9B-GGUF", fuzzy=False) is None
+    assert AMK.assure_model_key("Qwen3.8-9B", fuzzy=False) is None, \
+        "identity-only mode never binds a bare name to a superset sibling"
+    with pytest.raises(ValueError) as ei:
+        MR.resolve_model_key(model_key="Qwen3.8-9B-GGUF")
+    assert "Qwen3.8-9B-GGUF" in str(ei.value) and distill in str(ei.value)
+    # the worker's catalog seam (ensure_model_registered -> _assure_local_key)
+    # is identity-only by construction
+    from hugpy_engine.catalog_bridge import EngineCatalogSource
+    assert EngineCatalogSource().canonical_key("Qwen3.8-9B-GGUF") is None
+    assert EngineCatalogSource().canonical_key(distill) == distill
+
+
+def test_qualified_owner_keys_are_unchanged_by_format_equivalence(registry):
+    """INVARIANT: the format tier honours the owner discipline exactly as the
+    bare-tail tier does — ``unsloth~X`` never resolves to ``Qwen~X-GGUF``; the
+    same-owner and unqualified spellings do.
+    Established: operator rule 2026-09-29 on top of frontier handoff 2026-09-28."""
+    registry({GGUF: _cfg(hub_id="Qwen/Qwen3-Coder-Next-GGUF")})
+    assert AMK.assure_model_key("unsloth~Qwen3-Coder-Next") is None
+    assert AMK.assure_model_key("Qwen~Qwen3-Coder-Next") == GGUF
+    assert AMK.assure_model_key("Qwen3-Coder-Next") == GGUF
+    assert AMK.assure_model_key(UNSLOTH) is None
+    bare = "Qwen3-Coder-Next"
+    registry({bare: _cfg(hub_id="unsloth/Qwen3-Coder-Next")})
+    assert AMK.assure_model_key("unsloth~Qwen3-Coder-Next-GGUF") == bare
+    assert AMK.assure_model_key("Qwen~Qwen3-Coder-Next-GGUF") is None
+
+
+def test_format_redirect_pairs_only_gguf_suffix_siblings(registry, facts):
+    """INVARIANT: an explicit model_format redirect pairs representation
+    siblings by ``key_equivalent`` (owner-stripped): ``X-GGUF`` <-> ``X`` only.
+    ``-AWQ`` / a quant tag are NOT format variants, so with no plain row the
+    resolved key is kept (warning), never an AWQ/quant sibling.
+    Established: operator rule 2026-09-29 (replaces the _logical_id strip)."""
+    g, awq, tf = "Qwen~Qwen3-Coder-Next-GGUF", "Qwen~Qwen3-Coder-Next-AWQ", "Qwen~Qwen3-Coder-Next"
+    registry({g: _fw("gguf", hub_id="Qwen/Qwen3-Coder-Next-GGUF"),
+              awq: _fw("transformers", hub_id="Qwen/Qwen3-Coder-Next-AWQ")})
+    assert AMK.assure_model_key(g, fmt="transformers") == g
+    registry({g: _fw("gguf", hub_id="Qwen/Qwen3-Coder-Next-GGUF"),
+              awq: _fw("transformers", hub_id="Qwen/Qwen3-Coder-Next-AWQ"),
+              tf: _fw("transformers", hub_id="Qwen/Qwen3-Coder-Next")})
+    assert AMK.assure_model_key(g, fmt="transformers") == tf
+    assert AMK.assure_model_key(tf, fmt="gguf") == g

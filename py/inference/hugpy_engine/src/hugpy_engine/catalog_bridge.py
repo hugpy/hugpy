@@ -52,7 +52,14 @@ class EngineCatalogSource:
     def canonical_key(self, model_key: str) -> Optional[str]:
         from hugpy_engine.resolvers.assure_model_key import assure_model_key
 
-        return assure_model_key(model_key)
+        # IDENTITY resolution only (operator rule 2026-09-29): this is the
+        # storage/provision seam a WORKER uses to re-resolve a key central
+        # already resolved (ensure_model_registered -> _assure_local_key). The
+        # shorthand fuzzy tier must never answer here — on ae it turned
+        # ``Qwen3.8-9B-GGUF`` into the resident ``Qwen3.8-9B-Distill-GGUF``
+        # (same file, different model) and served it (S3/F7). None means
+        # "learn the row from central", never "use the nearest sibling".
+        return assure_model_key(model_key, fuzzy=False)
 
     def resolve_dir(self, model_key: str) -> Optional[str]:
         from hugpy_engine.config.main import get_model_path

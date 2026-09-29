@@ -61,6 +61,11 @@ from hugpy_fleet.worker.imports import (  # explicit, lazy engine/storage seams
     describe, execute_chat_stream, execute_prompt, get_model_config, get_models_dict, runner_for,
 )
 from hugpy_platform.central import central_base_url
+# THE model-key identity rule (operator, board 2026-09-29): ``X-GGUF`` and ``X``
+# are one key; any other differing token (``-Distill``…) is a different model
+# that this worker never serves from another key's seat, even when both mmap
+# the same file (S3/F7 2026-09-29). Single definition in the pure fit core.
+from hugpy_engine.fit.types import key_equivalent as _key_equivalent
 # Per-model in-process generation gate (concurrency hardening). Light module —
 # no heavy deps at import; slot-awareness imports the runner stack lazily. It
 # serializes entry into an in-process llama.cpp/transformers runner per model so
@@ -834,19 +839,27 @@ def _model_key_refusal(payload: dict, central_url: str | None) -> "str | None":
 def _worker_has_resident(model_key: str) -> bool:
     """Whether this worker already has a live copy that can serve the key."""
     key = str(model_key or "")
+    if not key:
+        return False
+
+    def _holds(keys) -> bool:
+        # Identity is ``key_equivalent`` (operator rule 2026-09-29): a resident
+        # ``X`` serves ``X-GGUF``; a resident ``X-Distill-GGUF`` never serves
+        # ``X-GGUF`` — same file on disk or not.
+        return any(_key_equivalent(k, key) for k in keys)
     try:
-        if key in set(loaded_model_keys()):
+        if _holds(loaded_model_keys()):
             return True
     except Exception:
         pass
     try:
-        if key in set(_slot_occupants()):
+        if _holds(_slot_occupants()):
             return True
     except Exception:
         pass
     try:
         from hugpy_fleet.worker import external_residents
-        if key in set(external_residents.keys()):
+        if _holds(external_residents.keys()):
             return True
     except Exception:
         pass
@@ -856,7 +869,7 @@ def _worker_has_resident(model_key: str) -> bool:
         from hugpy_fleet.worker import pid_registry
         snap = pid_registry.snapshot_for_heartbeat()
         if any(isinstance(row, dict) and row.get("alive") is not False
-               and str(row.get("model_key") or "") == key
+               and _key_equivalent(row.get("model_key"), key)
                for row in (snap.get("models") or [])):
             return True
     except Exception:
@@ -8461,7 +8474,7 @@ def _resolve_slot_handle(model_key: str) -> "dict | None":
     try:
         from hugpy_engine.serve.slots import SlotPool
         for s in SlotPool().statuses():
-            if s.get("model_key") == model_key and s.get("child_pid"):
+            if _key_equivalent(s.get("model_key"), model_key) and s.get("child_pid"):
                 return {"control_url": s.get("_control"),
                         "child_pid": s.get("child_pid"),
                         "endpoint": s.get("endpoint")}
@@ -10209,8 +10222,8 @@ def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, l
         _multi_gpu = False
     for r in _vram_residents(state):
         mk = r["model_key"]
-        if mk == model_key:
-            continue
+        if _key_equivalent(mk, model_key):
+            continue                 # the subject itself (``X`` == ``X-GGUF``)
         if _multi_gpu and _target_dev is not None and r.get("gpu_index") is not None \
                 and int(r["gpu_index"]) != int(_target_dev):
             protected.append({**r, "why": (f"on GPU {r['gpu_index']}, target is "
@@ -10298,7 +10311,11 @@ def _subject_resident_vram_bytes(state: "WorkerState", model_key: str) -> int:
         return 0
     total = 0
     for r in rows:
-        if r.get("model_key") != model_key:
+        # Credit ONLY the subject's own seat (``key_equivalent``): a resident
+        # that differs by any other token — ``X-Distill-GGUF`` for a subject
+        # ``X-GGUF`` — is a different model even when it mmaps the same file,
+        # and its bytes are not superseded by this admission (S3/F7).
+        if not _key_equivalent(r.get("model_key"), model_key):
             continue
         if str(r.get("host_mode")) == "comfy":
             continue

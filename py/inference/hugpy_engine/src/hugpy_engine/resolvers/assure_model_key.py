@@ -7,6 +7,10 @@ from pathlib import PurePosixPath
 from typing import Optional
 
 from hugpy_engine.config.models.models_config import MODEL_REGISTRY
+# THE single model-key identity rule (operator, board 2026-09-29): ``-GGUF`` vs
+# no suffix is one key; any other differing token is a different model. Defined
+# once in the pure fit core and re-exported here for every resolver caller.
+from hugpy_engine.fit.types import canonical_key, key_equivalent  # noqa: F401
 from hugpy_engine.name_match import Candidate, _distance, resolve_name
 from hugpy_engine.name_match import _tokens as _nm_tokens
 from hugpy_engine.placement import get_blocklist, get_model_metrics, get_worker_registry
@@ -300,10 +304,11 @@ def _pipeline_pick(requested: str, keys: list[str]) -> Optional[str]:
 # and a same-tier multi-match is broken by a total order (see _pick_by_total_order)
 # so resolution never depends on registry iteration order — the source of the
 # old "always one wrinkle" first-match bug.
-_TIER_SLUG = 4
-_TIER_HUBID = 3
-_TIER_FOLDER = 2
-_TIER_BARE = 1
+_TIER_SLUG = 5
+_TIER_HUBID = 4
+_TIER_FOLDER = 3
+_TIER_BARE = 2
+_TIER_FORMAT = 1     # same model, other format suffix: ``X`` <-> ``X-GGUF``
 
 # Coarse quant-quality rank, used ONLY to break a tie between variants of the
 # same logical model (Q8 > Q6 > … > Q2; f16/bf16 high). Advisory, fail-open 0.
@@ -321,9 +326,11 @@ def _quant_rank(key: str) -> int:
 
 
 # Packaging / quant / framework markers — a name carrying any of these named a
-# representation, not merely a base-name family. Single source for both the
-# serving-override gate (_package_specific) and the logical-identity strip
-# (_logical_id) so the two never drift.
+# representation, not merely a base-name family: the SPECIFICITY gate
+# (_package_specific — such a request is never redirected by serving facts and
+# never enters the fuzzy tier). NOT an equivalence list: per the operator rule
+# (2026-09-29) only the ``-GGUF`` suffix is a format variant of one key
+# (``key_equivalent``); ``-AWQ`` / ``-GPTQ`` / a quant tag name a different model.
 _FORMAT_TOKENS = frozenset({
     "gguf", "transformers", "transformer", "safetensors", "pytorch",
     "awq", "gptq", "exl2", "exl3", "mlx", "bnb", "4bit", "8bit",
@@ -366,12 +373,14 @@ def _representation_of(key: str):
     return "gguf" if str(fw).strip().lower() in _GGUF_ENGINES else "transformers"
 
 
-def _logical_id(key: str) -> str:
-    """Base-name identity of a key with packaging/quant tokens dropped, so the
-    GGUF and Transformers rows of one model share it (``…-Coder-Next-GGUF`` and
-    ``…-Coder-Next`` -> ``coder next``). Used ONLY to pair representation
-    siblings under an explicit model_format."""
-    return " ".join(t for t in _tokens(_bare_tail(key)) if t not in _FORMAT_TOKENS)
+def _same_model(a: str, b: str) -> bool:
+    """Owner-stripped key equivalence: the two keys name ONE model iff their
+    bare tails are equal after removing only the ``-GGUF`` format suffix
+    (``key_equivalent``). Used to pair representation siblings under an
+    explicit model_format and for the format-equivalence resolution tier.
+    Quant / packaging tokens (``-AWQ``, ``-Q4_K_M``, ``-4bit``…) are NOT
+    stripped: per the operator rule they name a different model."""
+    return key_equivalent(_bare_tail(a), _bare_tail(b))
 
 
 def _owner_of(key: str) -> str:
@@ -398,12 +407,11 @@ def _redirect_to_format(resolved: str, model_key: str, fmt: str, *, strict: bool
     resolver cannot invent a row that is not on record."""
     if not resolved or _representation_of(resolved) == fmt:
         return resolved
-    want_logical = _logical_id(resolved)
     want_owner = _owner_of(resolved)
     siblings = [
         k for k in MODEL_REGISTRY
         if _representation_of(k) == fmt
-        and _logical_id(k) == want_logical
+        and _same_model(k, resolved)
         and (not want_owner or _owner_of(k) == want_owner)
     ]
     if not siblings:
@@ -416,6 +424,29 @@ def _redirect_to_format(resolved: str, model_key: str, fmt: str, *, strict: bool
     return _pick_by_total_order(siblings, strict=strict) or siblings[0]
 
 
+def _owner_compatible(key, hub_id, model_key) -> bool:
+    """A qualified request names a publisher, not merely a base-name family.
+    Never let a tail tier silently turn an explicit
+    ``unsloth~Qwen3-Coder-Next-GGUF`` request into the Qwen variant (or vice
+    versa) when one qualified registry row is absent.  The qualified owner
+    may be represented by the registry key or by the model's Hub ID while
+    the registry key itself remains bare.  An unqualified request is
+    compatible with every owner."""
+    requested_owner = ""
+    if "~" in str(model_key):
+        requested_owner = str(model_key).split("~", 1)[0].strip()
+    elif "/" in str(model_key):
+        requested_owner = str(model_key).split("/", 1)[0].strip()
+    if not requested_owner:
+        return True
+    candidate_owner = ""
+    if "~" in str(key):
+        candidate_owner = str(key).split("~", 1)[0].strip()
+    elif hub_id and "/" in str(hub_id):
+        candidate_owner = str(hub_id).split("/", 1)[0].strip()
+    return _slugify(candidate_owner) == _slugify(requested_owner)
+
+
 def _match_tier(key, values, slug, bare_slug, model_key) -> int:
     """The strongest identity tier at which ``key`` matches the request, or 0."""
     if _slugify(key) == slug:
@@ -426,27 +457,14 @@ def _match_tier(key, values, slug, bare_slug, model_key) -> int:
     folder = getattr(values, "folder", None)
     if folder and _path_suffix_matches(folder, model_key):
         return _TIER_FOLDER
-    # A qualified request names a publisher, not merely a base-name family.
-    # Never let the bare-tail tier silently turn an explicit
-    # ``unsloth~Qwen3-Coder-Next-GGUF`` request into the Qwen variant (or vice
-    # versa) when one qualified registry row is absent.  The qualified owner
-    # may be represented by the registry key or by the model's Hub ID while
-    # the registry key itself remains bare.
     if _slugify(_bare_tail(key)) == bare_slug:
-        requested_owner = ""
-        if "~" in str(model_key):
-            requested_owner = str(model_key).split("~", 1)[0].strip()
-        elif "/" in str(model_key):
-            requested_owner = str(model_key).split("/", 1)[0].strip()
-        if requested_owner:
-            candidate_owner = ""
-            if "~" in str(key):
-                candidate_owner = str(key).split("~", 1)[0].strip()
-            elif hub_id and "/" in str(hub_id):
-                candidate_owner = str(hub_id).split("/", 1)[0].strip()
-            if _slugify(candidate_owner) != _slugify(requested_owner):
-                return 0
-        return _TIER_BARE
+        return _TIER_BARE if _owner_compatible(key, hub_id, model_key) else 0
+    # FORMAT EQUIVALENCE (operator rule 2026-09-29): ``X`` and ``X-GGUF`` are one
+    # key, so a request for either resolves to the row on record under the
+    # other spelling — deterministically, never through the fuzzy tier (which
+    # would also admit ``X-Distill-GGUF``). Same owner discipline as bare-tail.
+    if _slugify(canonical_key(_bare_tail(key))) == _slugify(canonical_key(_bare_tail(model_key))):
+        return _TIER_FORMAT if _owner_compatible(key, hub_id, model_key) else 0
     return 0
 
 
@@ -467,8 +485,18 @@ def _pick_by_total_order(keys, *, strict):
 
 
 def assure_model_key(model_key, *, strict: bool = False, fmt: str = "auto",
-                     _expand_aliases: bool = True):
+                     fuzzy: bool = True, _expand_aliases: bool = True):
     """Resolve a model reference to a canonical registry key.
+
+    ``fuzzy=False`` restricts resolution to the IDENTITY tiers (exact / slug /
+    hub_id / folder / owner-aware bare tail / ``-GGUF`` format equivalence):
+    the loose token-subset shorthand tier never runs, so a key that names a
+    model this registry does not hold resolves to None instead of a sibling
+    that merely carries the requested tokens plus more (``Qwen3.8-9B-GGUF`` ->
+    ``Qwen3.8-9B-Distill-GGUF``, S3/F7 2026-09-29). A worker resolving a key
+    that central already resolved MUST use this mode. Independently of the
+    flag, a package-specific request (one naming ``-GGUF`` / a quant / a
+    packaging) never enters the fuzzy tier: it named an exact representation.
 
     ``fmt`` (model_format: "auto" | "gguf" | "transformers") is the EXPLICIT
     representation override (operator 2026-09-29). "auto" (default) is
@@ -479,7 +507,7 @@ def assure_model_key(model_key, *, strict: bool = False, fmt: str = "auto",
     Transformers special-casing downstream keys off the RESOLVED key's framework,
     so nothing beyond the returned key needs to know about ``fmt``.
     """
-    resolved = _assure_model_key_base(model_key, strict=strict,
+    resolved = _assure_model_key_base(model_key, strict=strict, fuzzy=fuzzy,
                                       _expand_aliases=_expand_aliases)
     if resolved and fmt and str(fmt).strip().lower() not in ("", "auto"):
         return _redirect_to_format(resolved, model_key, str(fmt).strip().lower(),
@@ -487,7 +515,7 @@ def assure_model_key(model_key, *, strict: bool = False, fmt: str = "auto",
     return resolved
 
 
-def _assure_model_key_base(model_key, *, strict: bool = False,
+def _assure_model_key_base(model_key, *, strict: bool = False, fuzzy: bool = True,
                            _expand_aliases: bool = True):
     """
     Resolve a user-provided model key, repo id, manifest slug, folder name,
@@ -524,7 +552,8 @@ def _assure_model_key_base(model_key, *, strict: bool = False,
     if _expand_aliases:
         target = _alias_target(model_key)
         if target and target != model_key:
-            resolved = _assure_model_key_base(target, strict=strict, _expand_aliases=False)
+            resolved = _assure_model_key_base(target, strict=strict, fuzzy=fuzzy,
+                                              _expand_aliases=False)
             if resolved is not None:
                 _log.debug("assure_model_key: alias %r -> %r -> %s",
                            model_key, target, resolved)
@@ -568,6 +597,19 @@ def _assure_model_key_base(model_key, *, strict: bool = False,
     # a true tie or no candidates -> None (resolve_model_key fails with the
     # list). The usage/tie-pick reads are guarded to the >1 case so an exact
     # or single-candidate resolve never pays a metrics DB round-trip.
+    #
+    # KEY DISCIPLINE (operator rule 2026-09-29): the fuzzy tier is SHORTHAND
+    # resolution — a superset candidate is, by the rule, a DIFFERENT model, so
+    # it is only ever offered to a caller that asked for shorthand. It never
+    # runs for a package-specific request (the caller named an exact
+    # representation: ``Qwen3.8-9B-GGUF`` must not become
+    # ``Qwen3.8-9B-Distill-GGUF``), and never when the caller resolves with
+    # ``fuzzy=False`` (a worker re-resolving central's already-canonical key).
+    if not fuzzy or _package_specific(model_key):
+        _log.debug("assure_model_key: %r matched no identity tier; fuzzy tier "
+                   "skipped (%s)", model_key,
+                   "fuzzy=False" if not fuzzy else "package-specific request")
+        return None
     candidates = fuzzy_model_candidates(model_key)
     if not candidates:
         return None
