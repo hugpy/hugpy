@@ -344,6 +344,24 @@ def _drop_runner(model_key) -> None:
         logger.debug("drop runner for %s failed", model_key, exc_info=True)
 
 
+def _drop_resident(model_key) -> None:
+    """A slot VICTIM (bumped / evicted from its seat) leaves the dispatch runner
+    cache as well as the llama runner cache (step 2, F4b). ``_drop_runner``
+    alone left a hollow ``LlamaCppChatRunner`` wrapper behind, which the
+    worker reported as an in-process resident ("loaded and idle") for a model
+    with no child. ``dispatch.evict`` cascades into ``evict_llama_runner``, so
+    this is a superset of ``_drop_runner``; the subject of a same-model seat
+    RELOAD keeps using ``_drop_runner`` (its wrapper is the caller)."""
+    if not model_key:
+        return
+    try:
+        from hugpy_engine.dispatch.dispatch import evict as _evict
+        _evict(model_key)
+    except Exception:  # noqa: BLE001
+        logger.debug("drop resident for %s failed", model_key, exc_info=True)
+        _drop_runner(model_key)
+
+
 def _alloc_body(requested: dict, source: dict | None, reload_reason: str | None) -> dict:
     """Additive /load body keys (an older slot agent ignores unknown keys)."""
     out = {"alloc_requested": dict(requested), "alloc_source": dict(source or {})}
@@ -408,7 +426,7 @@ class SlotPool:
                 logger.warning("ceiling evict failed on %s: %s",
                                victim["_control"], exc)
                 continue
-            _drop_runner(victim.get("model_key"))   # STALE-SLOT-FIX-20260910
+            _drop_resident(victim.get("model_key"))   # STALE-SLOT-FIX-20260910 + F4b
             return victim
         return None
 
@@ -694,7 +712,7 @@ class SlotPool:
                     logger.warning("promotion evict failed on %s: %s",
                                    victim["_control"], exc)
                     continue
-                _drop_runner(victim.get("model_key"))   # STALE-SLOT-FIX-20260910
+                _drop_resident(victim.get("model_key"))   # STALE-SLOT-FIX-20260910 + F4b
                 body = {"model_key": model_key, **eff_opts,
                         **_alloc_body(requested, source, reload_reason)}
                 resp = _post(victim["_control"] + "/load", body, load_timeout)

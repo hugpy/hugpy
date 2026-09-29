@@ -2266,6 +2266,13 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
             "last_used": _slot_last_used(s),
             "serving": _slot_serving(s, now),
         }
+        # F4 (step 2): the slot row's MEASURED residency, same key the ram rows
+        # carry, so central's readers consult ONE field for every kind. A
+        # healthy slot child answered its probe this beat; a seat mid-load
+        # (model_key set, healthy False) is not yet resident. Omitted when the
+        # slot did not say.
+        if s.get("healthy") is not None:
+            row["materialized"] = bool(s.get("healthy"))
         if device_source is not None:
             # omit-when-unset: an old central/UI never sees the key, and a row
             # with no device basis at all carries no provenance to mislabel.
@@ -3039,7 +3046,41 @@ def _ollama_live_model_keys(running: "dict | None" = None) -> set[str]:
     return keys
 
 
+# Hollow keys the materialisation gate has already reported, so a persistent
+# hollow wrapper is logged once per appearance, not once per beat.
+_HOLLOW_LOGGED: set = set()
+
+
+def _hollow_model_keys(keys: "set | list") -> "list[str]":
+    """The keys among ``keys`` whose residency is MEASURED ABSENT
+    (``_is_materialized`` False): a dispatch wrapper with no weights behind it
+    — a lazy shell whose load never ran, an in-process load still in flight, a
+    slot-served model whose seat was evicted under it. Unknown (None) is NOT
+    hollow: degrade-not-guess keeps an unintrospectable but genuinely resident
+    model reported."""
+    out = []
+    for mk in keys:
+        try:
+            if _is_materialized(mk) is False:
+                out.append(mk)
+        except Exception:  # noqa: BLE001 — an unreadable probe is unknown, not hollow
+            continue
+    return sorted(out)
+
+
 def loaded_model_keys() -> list[str]:
+    """Genuine IN-PROCESS residents this worker holds (plus live ollama keys).
+
+    MATERIALISATION GATE (core isolation step 2, F4a/F4c): membership in the
+    dispatch runner cache is NOT residency. A key is reported only when its
+    weights are measured present or unknowable — never when ``_is_materialized``
+    says False (a hollow ``LlamaCppChatRunner`` whose slot seat was evicted, a
+    transformers load still in flight, a lazy shell whose load never ran). The
+    coder-next incident (2026-09-29): a hollow wrapper made central say
+    "loaded and idle" for a model with no child and ``materialized:false`` in
+    the SAME heartbeat. An in-flight load shows in ``loading`` until it
+    materialises; a re-exec starts with an empty cache, so nothing survives it
+    unless re-probed live. Slot occupants are reported by their slot rows."""
     from hugpy_fleet.worker import ollama_adapter
     ollama_keys = _ollama_live_model_keys(ollama_adapter.running())
     try:
@@ -3060,9 +3101,45 @@ def loaded_model_keys() -> list[str]:
             keys -= slot_backed_model_keys()
         except Exception:
             pass
+        hollow = _hollow_model_keys(keys)
+        if hollow:
+            keys -= set(hollow)
+            fresh = [mk for mk in hollow if mk not in _HOLLOW_LOGGED]
+            if fresh:
+                _HOLLOW_LOGGED.update(fresh)
+                logger.warning("loaded_models: %d hollow runner(s) NOT reported as "
+                               "resident (dispatch wrapper present, weights measured "
+                               "absent): %s", len(fresh), fresh)
+        _HOLLOW_LOGGED.intersection_update(set(hollow))
         return sorted(keys | ollama_keys)
     except Exception:
         return sorted(ollama_keys)
+
+
+def _loaded_models_live_check(loaded_keys: "list[str]",
+                              slot_statuses: "list | None") -> "list[str]":
+    """HEARTBEAT ASSERTION (step 2, F4c): every ``loaded_models`` entry must be
+    backed by a live runner (measured or unknowable materialisation) or by a
+    healthy slot child. Returns the violators — keys whose in-process
+    residency is measured ABSENT and that no healthy slot with a child pid
+    seats. The caller drops them from the beat and logs; the assertion is the
+    contract, the drop is the safety net."""
+    seated = set()
+    for s in (slot_statuses or []):
+        if not isinstance(s, dict):
+            continue
+        if s.get("model_key") and s.get("healthy") and s.get("child_pid"):
+            seated.add(s["model_key"])
+    bad = []
+    for mk in (loaded_keys or []):
+        if mk in seated:
+            continue
+        try:
+            if _is_materialized(mk) is False:
+                bad.append(mk)
+        except Exception:  # noqa: BLE001 — unknown is not a violation
+            continue
+    return bad
 
 
 def _loading_model_keys() -> list[str]:
@@ -8429,6 +8506,25 @@ def _is_inprocess_resident(model_key: str) -> bool:
     return False
 
 
+def _forget_resident(model_key: str) -> None:
+    """Drop ``model_key`` from every in-memory membership list that is NOT a
+    measurement: the dispatch runner cache (+ the llama singleton cascade), the
+    watched-materialized flag, the pid registry record. Idempotent, never
+    raises. Weights are freed by the eviction verb that calls this; this only
+    makes the bookkeeping agree with the card."""
+    try:
+        from hugpy_engine.dispatch.dispatch import evict as _evict
+        _evict(model_key)
+    except Exception:  # noqa: BLE001
+        pass
+    _forget_materialized(model_key)
+    try:
+        from hugpy_fleet.worker import pid_registry as _pidreg
+        _pidreg.forget(model_key)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _drop_inprocess_model(model_key: str) -> bool:
     """Drop the in-process refs for ``model_key`` and free its weights WITHOUT
     killing the worker PID (siblings share it). dispatch.evict cascades through
@@ -8962,6 +9058,14 @@ def _evict_model(state: "WorkerState", model_key: str,
     ram_before = _free_ram_bytes()
 
     def _result(host_mode, evicted, reason, footprint=None, **extra):
+        if evicted:
+            # F4b (step 2): a victim leaves EVERY membership list at eviction
+            # time — the dispatch wrapper, the materialized flag, the pid
+            # registry — whichever path freed it. Before this only the
+            # in-process branch cascaded; a slot victim kept a hollow wrapper
+            # (-> "loaded and idle") and a stale registry row (-> the next
+            # plan naming an already-gone victim, S1b).
+            _forget_resident(model_key)
         vram_after = _free_vram_bytes()
         ram_after = _free_ram_bytes()
         vram_freed = (vram_after - vram_before) if (
@@ -13384,6 +13488,17 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             # reads the same loading view this beat reports.
             _loaded_keys = loaded_model_keys()
             _loading_keys = _loading_model_keys()
+            # F4c: the beat never claims a resident it cannot back with a live
+            # runner or a healthy slot child (see _loaded_models_live_check).
+            try:
+                _hollow = _loaded_models_live_check(_loaded_keys, _slots)
+            except Exception:  # noqa: BLE001 — the check must never skip a beat
+                _hollow = []
+            if _hollow:
+                logger.error("heartbeat: loaded_models carried %d entry(ies) with no "
+                             "live runner or slot child — dropped from the beat: %s",
+                             len(_hollow), _hollow)
+                _loaded_keys = [mk for mk in _loaded_keys if mk not in set(_hollow)]
             try:
                 _collect_calibration_from_allocations(_allocs,
                                                       loading=_loading_keys)
