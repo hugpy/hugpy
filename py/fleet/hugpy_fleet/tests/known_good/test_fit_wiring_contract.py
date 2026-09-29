@@ -331,3 +331,68 @@ def test_ctx_cap_knob_reaches_the_policy_and_the_executor_honours_the_proposal(r
     A._FLEX_CTX_FLOOR.pop("subject", None)
     monkeypatch.setenv("HUGPY_CTX_CAP_ON_EVICT_PCT", "garbage")
     assert A._fit_policy(rig.card["total"]).ctx_cap_on_evict_pct is None
+
+
+def test_slot_hook_reuses_a_fresh_admission_ticket_instead_of_replanning(rig, monkeypatch):
+    """INVARIANT (step 2, F1 — one plan per load): dispatch's admission records
+    its verdict as a short-lived ticket; the slot pool's hook reuses it when it
+    still describes the card (a `partial`, or an admission the ceiling gate now
+    passes) and re-plans otherwise. S1b's second verdict line — naming a victim
+    the first had evicted — is exactly the re-plan this removes.
+    Established: core isolation step 2 (2026-09-29)."""
+    calls: list = []
+    real = fit_plan_mod.plan_fit
+
+    def spy(request, snapshot, residents, policy):
+        calls.append(request.model_key)
+        return real(request, snapshot, residents, policy)
+    monkeypatch.setattr(fit, "plan_fit", spy)
+    A._ADMISSION_TICKETS.clear()
+
+    # A partial admission: the ceiling gate (full need) can never pass, so the
+    # slot hook must reuse the ticket rather than plan a second time.
+    monkeypatch.setattr(A, "_served_gguf_geometry", lambda mk: ("/m.gguf", 40))
+    monkeypatch.setattr(A, "_gguf_ngl_intent", lambda mk: ("auto", None))
+    monkeypatch.setattr(A, "_moe_detail_for", lambda mk: None)
+    rig.card["free"] = 8 * GIB
+    rig.card["need"] = 20 * GIB
+    rig.card["total"] = 24 * GIB
+    first = A._vram_evict_to_fit(_State(), "subject")
+    assert first["action"] == "partial" and first.get("n_gpu_layers")
+    assert calls == ["subject"]
+    again = A._slot_make_room(_State(), "subject")
+    assert again is first and calls == ["subject"]          # reused, not re-planned
+
+    # An `evicted` ticket is reused only while the ceiling gate agrees now.
+    A._ADMISSION_TICKETS["subject"] = {"ts": A.time.time(),
+                                       "verdict": {"action": "evicted", "evicted": ["x"]}}
+    monkeypatch.setattr(A, "_worker_slot_fit_check", lambda mk: True)
+    assert A._slot_make_room(_State(), "subject")["action"] == "evicted" and calls == ["subject"]
+    monkeypatch.setattr(A, "_worker_slot_fit_check", lambda mk: False)
+    monkeypatch.setattr(A, "_served_gguf_geometry", lambda mk: (None, None))
+    rig.card["need"] = 4 * GIB
+    fresh = A._slot_make_room(_State(), "subject")            # the card moved: re-plan
+    assert calls == ["subject", "subject"] and fresh["action"] == "proceed"
+    # A stale ticket is dropped.
+    A._ADMISSION_TICKETS["subject"] = {"ts": A.time.time() - 3600,
+                                       "verdict": {"action": "partial", "n_gpu_layers": 3}}
+    A._slot_make_room(_State(), "subject")
+    assert calls == ["subject", "subject", "subject"]
+    A._ADMISSION_TICKETS.clear()
+
+
+def test_slot_evict_verb_counts_and_telemeters_like_the_plan_executor(rig, monkeypatch):
+    """INVARIANT (step 2, F1): a seat promotion's eviction goes through the ONE
+    verb: vram_evictions bumps, evict.start/done stream, the victim's ticket
+    is void. Established: step 2."""
+    events: list = []
+    monkeypatch.setattr(A, "_evt_emit", lambda stage, **f: events.append((stage, f)))
+    rig.residents.update({"cold": 3 * GIB})
+    A._ADMISSION_TICKETS["cold"] = {"ts": A.time.time(), "verdict": {"action": "proceed"}}
+    before = A._VRAM_EVICTIONS["count"]
+    res = A._slot_evict_verb(_State(), "cold", "NEW")
+    assert res["evicted"] is True and rig.evicted == ["cold"]
+    assert A._VRAM_EVICTIONS["count"] == before + 1
+    assert A._VRAM_EVICTIONS["last"]["victim"] == "cold" and A._VRAM_EVICTIONS["last"]["subject"] == "NEW"
+    assert [e[0] for e in events] == ["evict.start", "evict.done"]
+    assert events[1][1]["freed_bytes"] == 3 * GIB and events[0][1]["tier"] == "slot-child"

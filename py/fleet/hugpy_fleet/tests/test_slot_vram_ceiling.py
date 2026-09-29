@@ -12,9 +12,10 @@ This slice adds a real-VRAM ceiling gate:
     need is unknown (no GPU / can't measure) — NEVER blocks a load because we
     couldn't read the card. HUGPY_VRAM_CEILING_FRAC overrides the 0.90 default.
   * slots.SlotPool.endpoint_for: with a registered fit-check that says "over
-    ceiling", it evicts the LRU idle on-demand occupant (via the SAME mechanism
-    the all-busy promotion branch uses) BEFORE loading, re-checking each round;
-    nothing evictable + still over ceiling -> proceeds anyway (honest-degrade).
+    ceiling", it asks the registered make-room hook (the worker's plan_fit
+    admission) ONCE before loading — step 2 F1 (2026-09-29): the pool never
+    evicts a seat itself on this path; no hook registered -> proceeds anyway
+    (honest-degrade, nothing evicted outside plan_fit).
   * No fit-check registered (bare central / no-GPU) -> occupancy-only routing,
     byte-identical to before.
 
@@ -243,14 +244,17 @@ def _post_recorder(pool):
 
 
 _ep_saved = (slots._EVICTION_POLICY, slots._FIT_CHECK, slots._RESIDENCY_LOOKUP,
-             slots._post, slots._get)
+             slots._MAKE_ROOM, slots._post, slots._get)
 try:
     # on-demand eviction policy (as the worker registers): A is on-demand.
     slots.set_eviction_policy(lambda mk: True)      # every occupant is on-demand
     slots.set_residency_lookup(lambda mk: "on-demand")
     slots._get = lambda url, timeout=3.0: {}        # unused (we override statuses)
 
-    # (i) OVER CEILING then FITS after evicting A ---------------------------
+    # (i) OVER CEILING then FITS after the ADMISSION evicts A ------------------
+    # step 2 F1: the pool asks the registered make-room hook (the worker's
+    # plan_fit admission) exactly once; THAT evicts A (through the worker's
+    # eviction verb, here: the pool's unload) and answers "evicted".
     st = [
         {"_control": "http://s0", "model_key": "A", "healthy": True,
          "busy": False, "last_used": 100.0, "endpoint": "http://s0"},
@@ -259,6 +263,13 @@ try:
     ]
     pool = FakePool(st)
     slots._post = _post_recorder(pool)
+    admissions = []
+
+    def admission_evicts_A(mk):
+        admissions.append(mk)
+        pool.unload("http://s0")
+        return {"action": "evicted", "evicted": ["A"], "freed_bytes": 6 * GIB, "reason": None}
+    slots.set_make_room(admission_evicts_A)
 
     # gate: over ceiling while A is resident; fits once A is gone.
     def gate_needs_A_gone(mk):
@@ -267,11 +278,13 @@ try:
     slots.set_fit_check(gate_needs_A_gone)
 
     ep = pool.endpoint_for("NEW", load_timeout=1.0)
-    check("(i) endpoint_for evicted the LRU on-demand occupant A before loading",
+    check("(i) endpoint_for consulted the admission exactly once", admissions == ["NEW"])
+    check("(i) the admission (not the pool) evicted A before loading",
           pool.unloaded == ["http://s0"])
     check("(i) then loaded NEW into a freed idle slot",
           any(mk == "NEW" for (_u, mk) in pool.loaded))
     check("(i) returned a usable endpoint", isinstance(ep, str) and ep)
+    slots.set_make_room(None)
 
     # (ii) ALREADY UNDER CEILING -> no eviction, just load into the idle slot ---
     st = [
@@ -303,7 +316,7 @@ try:
     slots.set_eviction_policy(lambda mk: mk != "STAT")   # STAT is not on-demand
     slots.set_fit_check(lambda mk: False)                # ALWAYS over ceiling
     ep = pool.endpoint_for("NEW", load_timeout=1.0)
-    check("(iii) honest-degrade: nothing evictable -> STAT never evicted",
+    check("(iii) honest-degrade: no admission registered -> the pool evicts nobody",
           pool.unloaded == [])
     check("(iii) honest-degrade: the load STILL proceeds (never hangs)",
           pool.loaded and pool.loaded[0][1] == "NEW" and isinstance(ep, str))
@@ -325,7 +338,7 @@ try:
           pool.loaded and pool.loaded[0][1] == "NEW")
 finally:
     (slots._EVICTION_POLICY, slots._FIT_CHECK, slots._RESIDENCY_LOOKUP,
-     slots._post, slots._get) = _ep_saved
+     slots._MAKE_ROOM, slots._post, slots._get) = _ep_saved
 
 
 # ===========================================================================

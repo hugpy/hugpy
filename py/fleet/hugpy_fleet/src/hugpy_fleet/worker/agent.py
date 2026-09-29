@@ -9059,6 +9059,7 @@ def _evict_model(state: "WorkerState", model_key: str,
 
     def _result(host_mode, evicted, reason, footprint=None, **extra):
         if evicted:
+            _ADMISSION_TICKETS.pop(model_key, None)
             # F4b (step 2): a victim leaves EVERY membership list at eviction
             # time — the dispatch wrapper, the materialized flag, the pid
             # registry — whichever path freed it. Before this only the
@@ -11022,8 +11023,79 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         len(plan.evictions), sum(1 for r in residents if r.protected),
         plan.evicted_keys, [r.model_key for r in residents if r.protected], plan.note)
     # ── EXECUTE (the only impure part) ──────────────────────────────────────
-    return _execute_fit_plan(state, model_key, plan, request, snap, policy,
-                             cand_rows, prot_rows)
+    verdict = _execute_fit_plan(state, model_key, plan, request, snap, policy,
+                                cand_rows, prot_rows)
+    _ADMISSION_TICKETS[model_key] = {"ts": time.time(), "verdict": verdict}
+    return verdict
+
+
+# ── step 2 (F1): the seat path shares the ONE admission ─────────────────────
+# One load can ask for admission twice: dispatch's ensure_headroom_for_load
+# (before the runner is built) and the slot pool's ceiling gate (when the seat
+# is resolved). S1b (2026-09-29) showed the cost: two `plan_fit verdict:` lines
+# for one load, the second naming a victim the first had already evicted. The
+# admission RECORDS its verdict as a short-lived TICKET; the slot pool's hook
+# reuses a fresh ticket instead of re-planning when the ticket still describes
+# the card: a `partial` (the ceiling gate fails by construction — the plan
+# admitted less than the full need) or any admission the ceiling gate now
+# passes (the eviction-aware size-up already ran). Anything else re-plans.
+_ADMISSION_TICKETS: "dict[str, dict]" = {}
+_ADMISSION_TICKET_TTL_S = 60.0
+
+
+def _fresh_admission_ticket(model_key: str) -> "dict | None":
+    t = _ADMISSION_TICKETS.get(model_key)
+    if not t:
+        return None
+    if (time.time() - float(t.get("ts") or 0)) > _ADMISSION_TICKET_TTL_S:
+        _ADMISSION_TICKETS.pop(model_key, None)
+        return None
+    return t.get("verdict")
+
+
+def _slot_make_room(state: "WorkerState", model_key: str) -> dict:
+    """The slot pool's make-room hook (slots.set_make_room): the ONE admission
+    (``_vram_evict_to_fit``), with a fresh ticket reused when it still
+    describes the card — see ``_ADMISSION_TICKETS``."""
+    v = _fresh_admission_ticket(model_key)
+    if isinstance(v, dict):
+        action = v.get("action")
+        reuse = action == "partial"
+        if not reuse and action in ("proceed", "evicted"):
+            try:
+                reuse = bool(_worker_slot_fit_check(model_key))
+            except Exception:  # noqa: BLE001 — unmeasurable -> re-plan
+                reuse = False
+        if reuse:
+            logger.info("VRAM admission for %s: reusing the verdict issued %.1fs ago "
+                        "(action=%s, evicted=%s) — one plan per load",
+                        model_key,
+                        time.time() - float(_ADMISSION_TICKETS[model_key]["ts"]),
+                        action, v.get("evicted") or [])
+            return v
+    return _vram_evict_to_fit(state, model_key)
+
+
+def _slot_evict_verb(state: "WorkerState", victim: str, subject: str) -> dict:
+    """The slot pool's eviction verb (slots.set_evict_verb) for a seat
+    PROMOTION: the same ``_evict_model`` the plan executor uses, with the same
+    telemetry and the same ``vram_evictions`` bump, so no eviction on this
+    worker happens un-named or un-counted."""
+    _evt_emit("evict.start", model_key=victim, tier="slot-child",
+              incoming_model=subject, reason="seat promotion (all seats occupied)")
+    t0 = time.time()
+    res = _evict_model(state, victim)
+    if res.get("evicted"):
+        _note_vram_eviction(victim, subject, res.get("vram_freed"),
+                            res.get("host_mode") or "slot")
+        _evt_emit("evict.done", model_key=victim, tier="slot-child",
+                  incoming_model=subject, freed_bytes=res.get("vram_freed"),
+                  duration_ms=int((time.time() - t0) * 1000))
+    else:
+        _evt_emit("evict.fail", model_key=victim, tier="slot-child",
+                  incoming_model=subject, duration_ms=int((time.time() - t0) * 1000),
+                  error=str(res.get("reason") or "eviction freed nothing"))
+    return res
 
 
 # Post-execution verify tolerance: a measured/predicted gap wider than this is a
@@ -13949,9 +14021,12 @@ def main(argv: list[str] | None = None) -> int:
             set_residency_lookup,
             set_fit_check as set_slot_fit_check,
             set_make_room as set_slot_make_room,
+            set_evict_verb as set_slot_evict_verb,
         )
         set_eviction_policy(lambda mk: _residency(mk) == "on-demand")
         set_residency_lookup(_residency)
+        # step 2 (F1): a seat promotion evicts through the ONE verb.
+        set_slot_evict_verb(lambda victim, subject: _slot_evict_verb(state, victim, subject))
         # Real-VRAM ceiling gate (Fix A): the slot load/evict path now consults
         # REAL device free VRAM (ComfyUI-visible), not slot-occupancy count, so a
         # card topped out by an out-of-band process (ComfyUI) triggers an LRU
@@ -13959,10 +14034,10 @@ def main(argv: list[str] | None = None) -> int:
         # offloading into a "free" seat on a full card. Degrades to allow when
         # unmeasurable (no-GPU / can't read VRAM) — byte-identical to today.
         set_slot_fit_check(_worker_slot_fit_check)
-        # CROSS-TIER make-room (slice 10): once slot-side eviction is exhausted,
-        # this reclaims VRAM held by an IN-PROCESS resident (invisible to the slot
-        # scheduler) so a slot load isn't OOM'd by a sibling transformers model.
-        set_slot_make_room(lambda mk: _vram_evict_to_fit(state, mk))
+        # THE admission on the seat path (slice 10; step 2 F1): plan_fit over
+        # ALL measured residents, executed once, ticket-deduplicated against
+        # dispatch's admission for the same load.
+        set_slot_make_room(lambda mk: _slot_make_room(state, mk))
     except Exception as _exc:  # noqa: BLE001
         logger.warning("slot eviction policy not registered: %s", _exc)
 

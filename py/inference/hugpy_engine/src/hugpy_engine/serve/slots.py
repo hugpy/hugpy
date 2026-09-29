@@ -45,12 +45,12 @@ _RESIDENCY_LOOKUP = None
 # (ComfyUI) would happily /load into the seat, then the child silently offloads
 # fewer layers or OOMs — because slot routing keyed on slot-OCCUPANCY, never on
 # real device pressure. When registered and it says NO (would breach ceiling),
-# endpoint_for evicts the coldest on-demand occupant(s) via the SAME LRU
-# mechanism the all-busy branch uses and re-checks, until the gate passes or
-# nothing is evictable (then it proceeds anyway — honest-degrade, never HANG a
-# legitimate request; the child's autofit does its best). None (bare central,
-# no-GPU box, or a gate that can't measure) => byte-identical to today: the
-# gate is skipped, occupancy-only routing stands.
+# endpoint_for asks the registered make-room hook (the worker's plan_fit
+# admission, step 2 F1) ONCE: it evicts only the plan's named victims, logs the
+# verdict, bumps the counters, or refuses honestly. Nothing on the seat path
+# evicts outside plan_fit any more. None (bare central, no-GPU box, or a gate
+# that can't measure) => byte-identical to today: the gate is skipped,
+# occupancy-only routing stands.
 _FIT_CHECK = None
 
 
@@ -73,20 +73,38 @@ def set_fit_check(fn) -> None:
     _FIT_CHECK = fn
 
 
-# CROSS-TIER make-room (slice 10): the slot ceiling loop above evicts only SLOT
-# occupants — it is blind to an IN-PROCESS transformers resident squatting the
-# card. This hook (registered by the worker) evicts ALL permissible residents
-# (in-process included) from the pid-registry measured truth. Called once the
-# slot-side eviction is exhausted, so a slot load can also reclaim VRAM held by a
-# sibling in-process model. None -> the historical slot-only path.
+# THE admission (slice 10 cross-tier make-room; step 2 F1 the ONLY evictor on
+# the seat path): registered by the worker, it plans over ALL measured
+# residents (slot children AND in-process) with hugpy_engine.fit.plan_fit and
+# executes only the plan's named evictions. None -> an over-ceiling seat
+# proceeds with a warning; nothing is evicted.
 _MAKE_ROOM = None
 
 
 def set_make_room(fn) -> None:
-    """Register the cross-tier VRAM make-room (slice 10): ``fn(model_key) -> dict``.
-    None -> slot-only ceiling eviction, byte-identical to before."""
+    """Register the VRAM admission (slice 10; step 2 F1 THE ONLY evictor on
+    the seat path): ``fn(model_key) -> dict`` — the worker's plan_fit-backed
+    ``_vram_evict_to_fit`` verdict ``{"action": proceed|evicted|partial|refuse,
+    "evicted": [...], "freed_bytes": int, "reason": {...}|None, ...}``. None ->
+    an over-ceiling seat proceeds with a warning (bare engine: nothing can
+    measure the residents, so nothing is evicted)."""
     global _MAKE_ROOM
     _MAKE_ROOM = fn
+
+
+# ONE eviction verb (step 2, F1/F4b): the worker registers its ``_evict_model``
+# wrapper ``fn(victim_model_key, subject_model_key) -> dict`` (the /ops/evict
+# contract: ``evicted``, ``vram_freed``, ``host_mode``, ``reason``) so a seat
+# PROMOTION (all seats occupied — a seat-scarcity bump, not a VRAM decision)
+# evicts through the same verb the plan executor uses: same telemetry, same
+# ``vram_evictions`` counter, same forget-everywhere. None -> the pool unloads
+# the seat itself and drops the victim's runner caches (bare engine).
+_EVICT_VERB = None
+
+
+def set_evict_verb(fn) -> None:
+    global _EVICT_VERB
+    _EVICT_VERB = fn
 
 
 def _slot_count() -> int:
@@ -399,37 +417,6 @@ class SlotPool:
         except Exception:  # noqa: BLE001 — a broken gate must not crash serving
             return True
 
-    def _evict_coldest_on_demand(self, statuses: list[dict],
-                                 model_key: str) -> "dict | None":
-        """Evict the single LRU idle on-demand slot occupant (the SAME candidate
-        rule the all-busy promotion branch uses) and return the evicted status
-        dict, or None when nothing is evictable. Reuses ``_EVICTION_POLICY`` (the
-        worker answers True only for on-demand — never static, never a busy slot,
-        never the incoming model). No-op (None) when no eviction policy is
-        registered."""
-        if _EVICTION_POLICY is None:
-            return None
-        candidates = [s for s in statuses
-                      if s.get("model_key") and s.get("healthy")
-                      and not s.get("busy")
-                      and s.get("model_key") != model_key]
-        try:
-            candidates = [s for s in candidates
-                          if _EVICTION_POLICY(s["model_key"])]
-        except Exception:  # noqa: BLE001 — a broken policy must not crash serving
-            return None
-        candidates.sort(key=lambda s: s.get("last_used") or 0)
-        for victim in candidates:
-            try:
-                self.unload(victim["_control"])
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("ceiling evict failed on %s: %s",
-                               victim["_control"], exc)
-                continue
-            _drop_resident(victim.get("model_key"))   # STALE-SLOT-FIX-20260910 + F4b
-            return victim
-        return None
-
     @staticmethod
     def _polite_load() -> bool:
         """k96/k56: is the CURRENT load forbidden from evicting anyone?  True
@@ -447,6 +434,57 @@ class SlotPool:
             return no_evict_env()
         except Exception:  # noqa: BLE001
             return False
+
+    @staticmethod
+    def _seat_admission(model_key: str, eff_opts: dict) -> "dict | None":
+        """Over the real-VRAM ceiling: ONE admission through the registered
+        make-room hook (the worker's plan_fit path). Threads a ``partial``
+        verdict's ``n_gpu_layers`` / ``n_cpu_moe`` into the /load opts, raises
+        ``LoadRefusal`` on ``refuse`` (honest: never admit-then-OOM), returns
+        the verdict otherwise. With no hook registered nothing can measure the
+        residents, so nothing is evicted: the seat proceeds with a warning
+        (autofit spills/offloads; a request is never hung)."""
+        if _MAKE_ROOM is None:
+            logger.warning(
+                "VRAM ceiling: seating %s would exceed the real-VRAM ceiling and "
+                "no admission planner is registered — proceeding anyway (autofit "
+                "will spill/offload; nothing is evicted outside plan_fit)", model_key)
+            return None
+        verdict = _MAKE_ROOM(model_key)          # LoadRefusal propagates
+        if not isinstance(verdict, dict):
+            return None
+        action = verdict.get("action")
+        if action == "refuse":
+            from hugpy_engine.dispatch.dispatch import LoadRefusal
+            raise LoadRefusal(verdict.get("reason") or {
+                "reason": f"won't fit on GPU: seating {model_key} would breach the "
+                          "VRAM ceiling and no eviction admits it",
+                "model_key": model_key})
+        if action == "partial" and verdict.get("n_gpu_layers") is not None:
+            # PARTIAL-offload admission (autofit's hybrid contract): launch
+            # the child with the plan's exact layer count / expert split.
+            eff_opts["n_gpu_layers"] = verdict["n_gpu_layers"]
+            if verdict.get("n_cpu_moe") is not None:
+                eff_opts["n_cpu_moe"] = verdict["n_cpu_moe"]
+                logger.info(
+                    "VRAM ceiling: %s admitted as a MoE expert split — "
+                    "n_gpu_layers=%s, --n-cpu-moe %s (experts to CPU); evicted=%s",
+                    model_key, verdict["n_gpu_layers"], verdict["n_cpu_moe"],
+                    verdict.get("evicted") or [])
+            else:
+                logger.info(
+                    "VRAM ceiling: %s admitted as a PARTIAL offload — %s/%s layers "
+                    "on GPU (%s%%); launching child with --n-gpu-layers %s; "
+                    "evicted=%s", model_key, verdict["n_gpu_layers"],
+                    (verdict.get("partial") or {}).get("total_layers"),
+                    verdict.get("gpu_pct"), verdict["n_gpu_layers"],
+                    verdict.get("evicted") or [])
+            return verdict
+        logger.info("VRAM ceiling: plan_fit admitted %s: action=%s evicted=%s "
+                    "freed_bytes=%s%s", model_key, action, verdict.get("evicted") or [],
+                    verdict.get("freed_bytes"),
+                    (" note=%r" % verdict.get("note")) if verdict.get("note") else "")
+        return verdict
 
     def endpoint_for(self, model_key: str, *, load_timeout: float = 900.0,
                      opts: dict | None = None) -> str | None:
@@ -529,12 +567,12 @@ class SlotPool:
         #     current free VRAM (not slot-occupancy count). This catches the ae
         #     case: a card 95%-full from a SEPARATE ComfyUI process but with an
         #     idle slot would otherwise /load happily, then OOM/under-offload.
-        #     When over ceiling, evict the coldest on-demand occupant(s) via the
-        #     SAME LRU mechanism the all-busy branch uses (re-reading statuses so
-        #     each re-check sees the freed seat) until the gate passes OR nothing
-        #     is evictable. Nothing evictable + still over ceiling => proceed
-        #     anyway (honest-degrade: the child's autofit does its best; we never
-        #     HANG a legitimate request), with a clear warning. No-op when no
+        #     When over ceiling, ask the registered admission (the worker's
+        #     plan_fit path) ONCE — step 2 F1: it evicts only the plan's named
+        #     victims (slot children and in-process alike), logs the verdict,
+        #     bumps the counters, threads a partial's layer count, or refuses
+        #     honestly (LoadRefusal). No admission registered => proceed with a
+        #     warning (nothing is evicted outside plan_fit). No-op when no
         #     ceiling gate is registered (bare central / no-GPU / can't measure).
         if not self._ceiling_ok(model_key):
             # k96/k56 POLITE seat: over the ceiling and this load may not cost
@@ -570,63 +608,26 @@ class SlotPool:
                                    % model_key),
                         "model_key": model_key, "no_makeroom": True})
             else:
-                while not self._ceiling_ok(model_key):
-                    victim = self._evict_coldest_on_demand(statuses, model_key)
-                    if victim is None:
-                        # Slot-side eviction exhausted. CROSS-TIER (slice 10): an
-                        # IN-PROCESS transformers resident (invisible to the slot
-                        # scheduler) may still be squatting the card — the make-room
-                        # hook evicts ALL permissible residents from the pid-registry
-                        # measured truth. If it evicts something, re-check the ceiling;
-                        # if it REFUSES (nothing left to evict), honest-degrade below.
-                        if _MAKE_ROOM is not None:
-                            try:
-                                verdict = _MAKE_ROOM(model_key)
-                            except Exception:  # noqa: BLE001 — never hang a request
-                                verdict = None
-                            # PARTIAL-offload admission (autofit's hybrid contract): the
-                            # full weights don't fit even after eviction, but the honest
-                            # layers-that-fit plan admits. Launch the child with that
-                            # exact n_gpu_layers and stop looping the (full-need) ceiling
-                            # check — it can never pass, and re-looping would spin.
-                            if (isinstance(verdict, dict)
-                                    and verdict.get("action") == "partial"
-                                    and verdict.get("n_gpu_layers") is not None):
-                                eff_opts["n_gpu_layers"] = verdict["n_gpu_layers"]
-                                # MoE expert split (2026-07-24): the admission may
-                                # answer the hybrid with -1 + n_cpu_moe instead of a
-                                # layer count — thread it so the child launches with
-                                # --n-cpu-moe (all layers on GPU, experts on CPU).
-                                if verdict.get("n_cpu_moe") is not None:
-                                    eff_opts["n_cpu_moe"] = verdict["n_cpu_moe"]
-                                    logger.info(
-                                        "VRAM ceiling: %s admitted as a MoE expert "
-                                        "split — n_gpu_layers=%s, --n-cpu-moe %s "
-                                        "(experts to CPU)", model_key,
-                                        verdict["n_gpu_layers"], verdict["n_cpu_moe"])
-                                else:
-                                    logger.info(
-                                        "VRAM ceiling: %s admitted as a PARTIAL offload — "
-                                        "%s/%s layers on GPU (%s%%); launching child with "
-                                        "--n-gpu-layers %s", model_key,
-                                        verdict["n_gpu_layers"],
-                                        (verdict.get("partial") or {}).get("total_layers"),
-                                        verdict.get("gpu_pct"), verdict["n_gpu_layers"])
-                                break
-                            if isinstance(verdict, dict) and verdict.get("evicted"):
-                                statuses = self.statuses()
-                                continue         # re-check the ceiling with the freed room
-                        logger.warning(
-                            "VRAM ceiling: loading %s would exceed the real-VRAM "
-                            "ceiling and nothing on-demand is evictable (slot or "
-                            "in-process) — proceeding anyway (autofit will spill/"
-                            "offload; not hanging the request)", model_key)
-                        break
-                    logger.info(
-                        "VRAM ceiling: evicted idle on-demand %s from %s to keep %s "
-                        "under the real-VRAM ceiling", victim["model_key"],
-                        victim["_control"], model_key)
-                    statuses = self.statuses()   # re-read: the seat is now free
+                # ONE admission through plan_fit (step 2, F1). The old loop
+                # evicted the coldest on-demand SLOT occupant itself — outside
+                # plan_fit: no verdict line, no evict.start/done, no
+                # vram_evictions bump, a pinned resident labelled "on-demand",
+                # a hollow runner left behind (S3c / S6, 2026-09-29). The
+                # worker's make-room hook IS that path: it gathers the measured
+                # residents (slot children included), plans, executes only the
+                # plan's named evictions, logs the verdict and bumps the
+                # counters. One eviction path, one vocabulary.
+                verdict = self._seat_admission(model_key, eff_opts)
+                statuses = self.statuses()       # re-read: seats may have freed
+                if verdict is not None and not self._ceiling_ok(model_key):
+                    # The plan admitted; the ceiling gate still disagrees (it
+                    # does not credit the subject's own footprint, or the card
+                    # moved). Logged, never looped: the plan is the decision.
+                    logger.warning(
+                        "VRAM ceiling: plan_fit admitted %s (action=%s, evicted=%s) "
+                        "but the ceiling gate still reads over — proceeding on "
+                        "the plan (see the plan_fit verify line)", model_key,
+                        verdict.get("action"), verdict.get("evicted"))
         elif _MAKE_ROOM is not None and "n_gpu_layers" not in eff_opts:
             # EVICTION-AWARE AUTOFIT (2026-07-25). The ceiling gate PASSED, so
             # nothing must be evicted — but "fits" is not a placement. Left alone,
@@ -705,14 +706,26 @@ class SlotPool:
             for victim in candidates:
                 logger.info(
                     "slot promotion: evicting idle on-demand %s from %s to "
-                    "load %s", victim["model_key"], victim["_control"], model_key)
+                    "load %s (seat scarcity, not VRAM)", victim["model_key"],
+                    victim["_control"], model_key)
                 try:
-                    self.unload(victim["_control"])
+                    if _EVICT_VERB is not None:
+                        # step 2 (F1): the SAME verb the plan executor uses —
+                        # telemetry, vram_evictions, forget-everywhere.
+                        res = _EVICT_VERB(victim["model_key"], model_key)
+                        if not (isinstance(res, dict) and res.get("evicted")):
+                            logger.warning("promotion evict of %s did not free it: %s",
+                                           victim["model_key"],
+                                           (res or {}).get("reason") if isinstance(res, dict)
+                                           else res)
+                            continue
+                    else:
+                        self.unload(victim["_control"])
+                        _drop_resident(victim.get("model_key"))   # STALE-SLOT-FIX-20260910 + F4b
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("promotion evict failed on %s: %s",
                                    victim["_control"], exc)
                     continue
-                _drop_resident(victim.get("model_key"))   # STALE-SLOT-FIX-20260910 + F4b
                 body = {"model_key": model_key, **eff_opts,
                         **_alloc_body(requested, source, reload_reason)}
                 resp = _post(victim["_control"] + "/load", body, load_timeout)

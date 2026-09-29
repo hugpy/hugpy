@@ -608,6 +608,14 @@ def _build_runner(model_key: str) -> "LlamaCppBaseRunner":
             # up without the projector) is already the final, typed answer.
             if getattr(exc, "load_class", None) == "vision_needs_slot":
                 raise
+            # A LoadRefusal from the seat admission (step 2, F1) is a CAPACITY
+            # verdict about the card — the in-process path shares that card,
+            # so falling back would be the admit-then-OOM the refusal exists
+            # to prevent (and the polite k96 refusal must fail fast, not
+            # degrade in-process). Typed reason rides on .reason.
+            if type(exc).__name__ == "LoadRefusal" and isinstance(
+                    getattr(exc, "reason", None), dict):
+                raise
             # HARD loader rejection (2026-09-23, Echo-Mini): the native loader
             # refused the FILE (check_tensor_dims wrong shape, unknown
             # architecture 'clip', ...). An in-process retry of the same bytes
