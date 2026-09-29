@@ -227,6 +227,9 @@ def test_device_source_is_the_only_new_key(monkeypatch):
         # alloc-mismatch provenance added 2026-09-23: what the seat was loaded
         # FOR and by whom, what it actually got, and why it replaced a resident.
         "alloc_requested", "alloc_source", "alloc_effective", "reload_reason",
+        # step 2 F4 (2026-09-29): the slot's MEASURED residency (its own probe)
+        # — the same key ram rows carry, so central consults ONE field.
+        "materialized",
     }
 
 
