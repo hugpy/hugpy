@@ -29,6 +29,16 @@ This test is central-side only (no worker / no GPU / no model):
     DelegatingRunner stream()/run() paths — fail FAST, once, naming the real
     fault, never blaming box size.
 
+INVARIANT — fail-fast on transport disconnect from a ready worker (operator
+ruling 2026-09-29, current-behaviour-is-baseline). When the load-state provider
+reports the worker ready (healthy / loaded+idle) and the relay then drops the
+transport mid-request (e.g. ``RemoteProtocolError: Server disconnected``, not a
+busy signal), the h25 "loaded+idle immediate dispatch" branch ends the hold on
+the FIRST attempt with a TERMINAL ``... loaded and idle, but the request failed:
+<err>``. It is NOT held/retried. The older expectation — that such a transient
+cold failure is still held and retried to success — is retired; the fast failure
+is the intended contract.
+
 Runs under pytest AND as a plain script:
     venv/bin/python -m pytest tests/test_chat_role_alternation.py -q
     venv/bin/python tests/test_chat_role_alternation.py
@@ -447,7 +457,12 @@ def _relay_checks(remote):
         finally:
             os.environ.pop("HUGPY_LOCAL_FALLBACK", None)
 
-        # -- a TRANSIENT failure is still held (no regression) ----------------
+        # -- a transport disconnect from a ready worker fails FAST ------------
+        # Operator ruling 2026-09-29 (current-behaviour-is-baseline): a worker
+        # that reports loaded+idle and then drops the transport mid-request is a
+        # TERMINAL failure. The h25 loaded+idle branch fires on the FIRST attempt
+        # (the disconnect is not a busy signal), so the hold ends at once with a
+        # "loaded and idle, but the request failed" error — it is NOT retried.
         calls3 = {"n": 0}
 
         async def ws_transient(worker, payload, rid):
@@ -460,9 +475,13 @@ def _relay_checks(remote):
 
         remote._worker_stream = ws_transient
         evs = asyncio.run(_collect(runner.stream(_req("hold-1"))))
-        check("a genuinely transient cold failure is STILL held and retried",
-              calls3["n"] == 3 and "token" in _etypes(evs)
-              and "error" not in _etypes(evs))
+        check("a transport disconnect from a ready worker fails fast — NOT held/retried",
+              calls3["n"] == 1 and "token" not in _etypes(evs)
+              and _etypes(evs).count("error") == 1)
+        _fferr = [e for e in evs if getattr(e, "type", None) == "error"][0]
+        check("the fail-fast error names the loaded+idle worker and the disconnect",
+              "loaded and idle, but the request failed" in _fferr.message.lower()
+              and "server disconnected" in _fferr.message.lower())
 
         # -- run(): the one-shot twin -----------------------------------------
         calls4 = {"n": 0}
@@ -487,7 +506,10 @@ def _relay_checks(remote):
         check("run(): the raised message does NOT blame the box size",
               "too large for the box" not in raised.lower())
 
-        # -- run(): a transient failure is still held (no regression) ---------
+        # -- run(): a transport disconnect from a ready worker fails FAST -----
+        # Same operator ruling 2026-09-29 on the one-shot twin: a loaded+idle
+        # worker that drops the transport raises a TERMINAL error on the first
+        # attempt, not held/retried to success.
         calls5 = {"n": 0}
 
         async def run_transient(worker, payload, result_type, request_id, model_key):
@@ -498,9 +520,15 @@ def _relay_checks(remote):
                     "model_key": model_key}
 
         remote._worker_run_once = run_transient
-        res = asyncio.run(runner.run(_req("hold-run")))
-        check("run(): a transient cold failure is STILL held and retried",
-              res.get("ok") is True and calls5["n"] == 3)
+        raised_ff = None
+        try:
+            asyncio.run(runner.run(_req("hold-run")))
+        except RuntimeError as exc:
+            raised_ff = str(exc)
+        check("run(): a transport disconnect from a ready worker fails fast — NOT held/retried",
+              raised_ff is not None and calls5["n"] == 1
+              and "loaded and idle, but the request failed" in raised_ff.lower()
+              and "server disconnected" in raised_ff.lower())
     finally:
         remote._select = orig_select
         remote._worker_stream = orig_ws

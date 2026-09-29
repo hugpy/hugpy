@@ -217,6 +217,27 @@ def pair_block_map(model_key: Optional[str]) -> dict:
     return v if isinstance(v, dict) else {}
 
 
+def all_pair_blocks() -> dict:
+    """The pair-block registry, keyed by normalized model then worker id."""
+    try:
+        return settings_store.all(NS_PAIR)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pair-block registry read failed: %s", exc)
+        return {}
+
+
+def pair_blocks_for_worker(worker_id: Optional[str]) -> dict:
+    """Operator/automatic pair blocks for one worker, keyed by model key."""
+    if not worker_id:
+        return {}
+    out = {}
+    for model_key, workers in all_pair_blocks().items():
+        rec = (workers or {}).get(str(worker_id)) if isinstance(workers, dict) else None
+        if isinstance(rec, dict) and rec.get("blocked"):
+            out[str(model_key)] = dict(rec)
+    return out
+
+
 def pair_blocked(model_key: Optional[str], worker_id: Optional[str]) -> bool:
     """True iff (model, worker) carries a durable pair block."""
     if not model_key or not worker_id:
@@ -231,7 +252,12 @@ def auto_block_pair(model_key: str, worker_id: str, *, why: str = "",
     Returns True when a NEW block was recorded (for one honest log line)."""
     try:
         cur = pair_block_map(model_key)
-        fresh = not (cur.get(str(worker_id)) or {}).get("blocked")
+        previous = cur.get(str(worker_id)) or {}
+        # A human's worker-specific block is stronger than a refreshed fit
+        # verdict. Keep it until the operator explicitly unblocks this pair.
+        if previous.get("blocked") and previous.get("by") == "operator":
+            return False
+        fresh = not previous.get("blocked")
         cur = dict(cur)
         cur[str(worker_id)] = {"blocked": True, "by": "auto", "ts": time.time(),
                                "why": why, "worker_name": worker_name}
@@ -247,21 +273,54 @@ def auto_block_pair(model_key: str, worker_id: str, *, why: str = "",
 
 
 def clear_pair_block(model_key: str, worker_id: str) -> bool:
-    """Drop the pair block (the verdict changed). Returns True when one was
-    actually cleared."""
+    """Clear an automatic pair block when the fit verdict changes."""
     try:
         cur = pair_block_map(model_key)
-        if str(worker_id) not in cur:
+        rec = cur.get(str(worker_id)) or {}
+        if not rec.get("blocked") or rec.get("by") != "auto":
             return False
         cur = dict(cur)
-        rec = cur.pop(str(worker_id))
+        cur.pop(str(worker_id))
         settings_store.set(NS_PAIR, str(model_key), cur)
-        if rec.get("blocked"):
-            logger.info("pair block CLEARED for %s on %s (fit verdict changed)",
-                        model_key, rec.get("worker_name") or worker_id)
-            return True
-        return False
+        logger.info("automatic pair block CLEARED for %s on %s (fit verdict changed)",
+                    model_key, rec.get("worker_name") or worker_id)
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("pair-block clear failed for %s/%s: %s",
                        model_key, worker_id, exc)
         return False
+
+
+def operator_block_pair(model_key: str, worker_id: str, *, why: str = "",
+                        worker_name: Optional[str] = None) -> dict:
+    """Persist an operator's explicit block for one model × worker pair."""
+    cur = pair_block_map(model_key)
+    previous = cur.get(str(worker_id)) or {}
+    rec = {"blocked": True, "by": "operator", "ts": time.time(),
+           "why": why, "worker_name": worker_name}
+    cur = dict(cur)
+    cur[str(worker_id)] = rec
+    settings_store.set(NS_PAIR, str(model_key), cur)
+    if not (previous.get("blocked") and previous.get("by") == "operator"):
+        logger.info("operator pair-BLOCKED %s on %s: %s", model_key,
+                    worker_name or worker_id, why or "operator block")
+    return rec
+
+
+def operator_unblock_pair(model_key: str, worker_id: str) -> tuple[bool, dict | None]:
+    """Remove an operator pair block; automatic fit blocks remain machine-owned."""
+    try:
+        cur = pair_block_map(model_key)
+        rec = cur.get(str(worker_id)) or {}
+        if not rec.get("blocked") or rec.get("by") != "operator":
+            return False, (dict(rec) if rec else None)
+        cur = dict(cur)
+        cur.pop(str(worker_id), None)
+        settings_store.set(NS_PAIR, str(model_key), cur)
+        logger.info("operator pair block CLEARED for %s on %s", model_key,
+                    rec.get("worker_name") or worker_id)
+        return True, dict(rec)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("operator pair-block clear failed for %s/%s: %s",
+                       model_key, worker_id, exc)
+        return False, None

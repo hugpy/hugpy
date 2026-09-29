@@ -416,6 +416,7 @@
 /* ── Per-GPU VRAM used/free bar ──────────────────────────────────────────── */
 .wp-gpu { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
 .wp-gpu-head { white-space: nowrap; font-size: 11px; }
+.wp-gpu-detail { min-width: min(520px, 75vw); padding-top: 6px; }
 .wp-vram-bar {
   height: 5px; border-radius: 3px; overflow: hidden;
   background: rgba(74, 222, 128, 0.18);   /* free portion */
@@ -607,6 +608,7 @@
    disk) — and deliberately NOT amber, which this panel reserves for the
    actionable ⊘ refused ("won't fit"). */
 .wp-pill-missing { color: var(--muted);  background: rgba(139, 148, 158, 0.06); border: 1px dashed rgba(139, 148, 158, 0.45); }
+.wp-pill-unknown { color: var(--muted); background: rgba(139, 148, 158, 0.04); border: 1px dotted rgba(139, 148, 158, 0.4); }
 .wp-pill-idle    { color: var(--muted);  background: var(--surface-2);          border: 1px solid var(--border); }
 /* ◌ allocated = an allocation is ATTRIBUTED to this model but nothing measured
    its residency (a hollow runner, or worker-side recency with no footprint
@@ -681,6 +683,26 @@
   border-radius: 8px; padding: 4px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
+.wp-ctx-anchor { position: relative; display: inline-block; }
+.wp-ctx-button {
+  border: 0; border-bottom: 1px dotted var(--muted); background: none;
+  color: inherit; padding: 1px 2px; cursor: pointer; font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.wp-ctx-button:hover { color: var(--accent, #60a5fa); border-bottom-color: currentColor; }
+.wp-context-menu {
+  position: fixed; z-index: 1000; min-width: 220px; padding: 10px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+}
+.wp-context-title { font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+.wp-context-menu input[type="range"] { width: 200px; display: block; }
+.wp-context-value { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; }
+.wp-context-head { font-size: 11px; color: var(--text); padding: 4px 6px 2px; font-weight: 600; }
+.wp-context-result { color: var(--muted); font-size: 10px; padding: 0 6px 3px; }
+.wp-context-actions { display: flex; justify-content: flex-end; gap: 5px; padding: 3px 4px 2px; border-top: 1px solid var(--border); }
+.wp-context-actions button { border: 1px solid var(--border); border-radius: 5px; background: var(--surface-1); color: var(--text); padding: 3px 8px; cursor: pointer; font-size: 10px; }
+.wp-context-actions .wp-context-apply { border-color: var(--border-strong); }
 .wp-allocmode-opt {
   display: flex; align-items: baseline; gap: 6px; text-align: left;
   background: none; border: 1px solid transparent; border-radius: 6px;
@@ -1604,6 +1626,10 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-lease-toggle:disabled { opacity: .5; cursor: wait; }
 .wp-lease-toggle.wp-lease-off { border-color: var(--warn, #b58a2a); color: var(--warn, #d9a63c); }
 .wp-lease-err { font-size: 10px; color: var(--danger, #e05c5c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+.wp-lease-chat { display: flex; flex-wrap: wrap; align-items: end; gap: 6px; width: 100%; padding: 8px; border: 1px solid var(--border, #2a3346); border-radius: 8px; }
+.wp-lease-chat label { display: grid; gap: 4px; flex: 1 1 250px; }
+.wp-lease-chat textarea { width: 100%; min-height: 60px; resize: vertical; }
+.wp-lease-chat pre { width: 100%; margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---- explicit priority-group clusters in the serving table (k119) ------ */
 .wp-pgroup-row td {

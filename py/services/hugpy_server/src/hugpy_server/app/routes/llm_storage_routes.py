@@ -118,7 +118,14 @@ def list_models():
         (m.get("model_key") or k) for k, m in manifest.items()})
     output = []
     for key, model in manifest.items():
-        model = update_model_status(model)
+        if model.get("worker_only"):
+            # Central has no file path for a worker-owned model.  Its host scan
+            # already supplied presence and size; resolving a central path here
+            # would falsely mark it missing and could make it a transfer source.
+            model = dict(model)
+            model["status"] = "installed"
+        else:
+            model = update_model_status(model)
         mk = model.get("model_key") or key
         # Operator BLOCK state (additive): ⛔ blocked from the serving pool. The
         # console renders the chip + block/unblock control off this flag; the
@@ -148,7 +155,8 @@ def list_models():
         # what you're committing before you commit it. Same numbers the two
         # annotators produced — derived once, at the events that change them,
         # not re-walked out of the store on every GET.
-        update_model_sizes(model, mk)
+        if not model.get("worker_only"):
+            update_model_sizes(model, mk)
         output.append(model)
 
     # HOT / COLD residency (operator ask 2026-09-12): a model is HOT where it
@@ -420,7 +428,11 @@ def get_model(model_key):
     # the persisted record the listings read, so "open the row" is how an
     # operator forces a re-read of a shared, mutable store — and it repairs the
     # listing for everyone else at the same time.
-    detail = {"key": model_key, **model, **refresh_fields(model, model_key)}
+    if model.get("worker_only"):
+        detail = {"key": model_key, **model, "status": "installed",
+                  "destination": None}
+    else:
+        detail = {"key": model_key, **model, **refresh_fields(model, model_key)}
     # The single-model read is ALWAYS verbose (operator ask 2026-07-29): the
     # per-worker serving facts (alloc/4-bit/MoE/seat/residency/📌) ride every
     # detail fetch — one call, everything known about the model in the pool.

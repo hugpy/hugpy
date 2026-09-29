@@ -446,6 +446,7 @@ def _lanes(client, workers, models):
     lanes = []
     for model in models:
         mid = model_id(model); serving = _serving(client, mid)
+        owners = set((model.get("worker_locations") or {}).keys()) if model.get("worker_only") else None
         joins = {}
         for row in model.get("workers") or []:
             for key in (row.get("worker_id"), row.get("worker")):
@@ -453,6 +454,8 @@ def _lanes(client, workers, models):
                     joins[key] = row
         for worker in eligible_workers:
             wid, wname = worker.get("id"), worker.get("name")
+            if owners is not None and wid not in owners:
+                continue
             joined = joins.get(wid) or joins.get(wname) or {}
             # The per-model serve override (n_cpu_moe, n_gpu_layers) and served
             # ctx ride the lane's join row so the constraint check prices the
@@ -480,6 +483,16 @@ def _cold_reset(client, lane):
     worker-local cached copy.  The next ordinary inference call is solely
     responsible for triggering the normal central-to-worker download and load.
     """
+    if lane.get("model_record", {}).get("worker_only"):
+        return {"skipped": "worker-owned model has no central cold-transfer source"}
+    # Never remove the worker's only copy.  A catalog entry or a worker-side
+    # quant listing does not prove central can provision the selected file.
+    central_path = _lane_path(lane)
+    expected = lane.get("size_bytes")
+    if (not central_path or not isinstance(expected, (int, float)) or expected <= 0
+            or not os.path.isfile(central_path)
+            or os.path.getsize(central_path) < expected):
+        return {"skipped": "selected quant has no verified complete copy on central storage"}
     base = "/llm/workers/" + quote(str(lane["worker_id"]), safe="")
     # A benchmark reset is an explicit destructive reset of this one seat.  It
     # must not be vetoed by residency policy; the assignment itself survives.
@@ -1138,7 +1151,8 @@ def _last_load_report(client, worker_id, model):
 
 def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None, worker_ids=None,
                            suite=None, with_judge=False, budgets=None, resume=False, force=False,
-                           done=None, cold_store=None, force_cold=False, defer_judge=False):
+                           done=None, cold_store=None, force_cold=False, defer_judge=False,
+                           measure_cold_load=False):
     """Grade once per precision and benchmark every physically valid allocation.
 
     Each model is graded by the suite registered for its task
@@ -1156,11 +1170,9 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
     ``resume`` skips lanes graded within ``resume_hours`` unless ``force``.
     ``done`` (``result_key`` tuples) are rows THIS run already recorded before a
     central restart: skipped silently (counted as completed, no new row).
-    ``cold_store`` (``get(model, quant, worker)`` / ``worker_rate(worker)``)
-    holds recorded cold loads: a pinned lane with one skips the cold reset and
-    reuses it (``cold_source: recorded <date>``); without one (or with
-    ``force_cold``) the lane resets, measures and its rows carry
-    ``cold_source: measured`` + the transfer/load split for the caller to record.
+    ``measure_cold_load`` opts into cold timing and reset (off by default).
+    ``cold_store`` holds prior measurements, reused unless ``force_cold``.
+    Reset only occurs if the selected quant has a verified central copy.
     Order: already-hot models first, then smallest first.
 
     ``defer_judge`` (operator ruling 2026-09-24, the two-phase split): PHASE 1
@@ -1174,6 +1186,7 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
     uses an already-hot model and so never causes that contention.
     """
     from .suites import suite_by_name, suite_for_model
+    measure_cold_load = bool(measure_cold_load or force_cold)
     b = bench_budgets(budgets)
     forced = suite_by_name(suite) if suite else None
     full_catalog = catalog = verbose_catalog(client, log=report)
@@ -1264,6 +1277,9 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
 
     cold_of, cold_label = {}, {}
     for lane in lanes:
+        if not measure_cold_load:
+            cold_of[id(lane)], cold_label[id(lane)] = None, "off"
+            continue
         if not suite_of[lane["model"]].pinned:
             cold_of[id(lane)], cold_label[id(lane)] = None, "n/a (hugpy-placed)"
             continue
@@ -1346,7 +1362,10 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
             completed += sum(1 for v in variations if v[3]); progress(lane_plan(variations[0])); continue
         grades = {}; cold_s = None; cold_info = {}
         cold_budget = _cold_budget(lane, b, _worker_rate(cold_store, wname))
-        recorded = cold_of.get(id(lane))
+        recorded = cold_of.get(id(lane)) if measure_cold_load else None
+        cold_measure_this_lane = measure_cold_load and grader.pinned and not recorded
+        if not measure_cold_load:
+            cold_info = {"cold_source": "off", "cold_measured": False}
         if recorded:
             cold_s = recorded["cold_load_s"]
             cold_info = {"cold_source": _cold_label(recorded), "cold_measured": False,
@@ -1356,14 +1375,21 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
                 _select_quant(client, lane)
             except Exception as exc:
                 report("notice", {**public(lane), "phase": "select-quant", "error": str(exc)})
-            if recorded:
+            if not measure_cold_load:
+                pass
+            elif recorded:
                 report("notice", {**public(lane), "phase": "cold-reset", "error": None,
                                   "skipped": "cold load " + cold_info["cold_source"]})
             else:
                 try:
-                    _cold_reset(client, lane)
-                    report("notice", {**public(lane), "phase": "cold-reset", "error": None})
+                    reset = _cold_reset(client, lane)
+                    if reset.get("skipped"):
+                        cold_measure_this_lane = False
+                        cold_info = {"cold_source": "skipped: no central copy", "cold_measured": False}
+                    report("notice", {**public(lane), "phase": "cold-reset", "error": None, **reset})
                 except Exception as exc:
+                    cold_measure_this_lane = False
+                    cold_info = {"cold_source": "skipped: reset failed", "cold_measured": False}
                     # Continue to the normal seat so an older worker can still be
                     # benchmarked, but expose that the cold reset was unavailable.
                     report("notice", {**public(lane), "phase": "cold-reset", "error": str(exc)})
@@ -1392,7 +1418,7 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
                 completed += 1; progress(plan); return row
 
             try:
-                phase = "cold-load" if cold_s is None else "hot-load"
+                phase = "cold-load" if cold_measure_this_lane else "hot-load" if recorded else "seat"
                 bounded.set_phase(phase, cold_budget)
                 seat_wall = time.time()
                 seat_started = time.monotonic(); seat = grader.call(bounded, lane, variation, grader.seat, 1); seat_error = seat["error"]
@@ -1410,7 +1436,7 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
                     if mid in dead_models or wname in dead_workers: break
                     continue
                 strike(wname, "ok")
-                if cold_s is None:
+                if cold_measure_this_lane and cold_s is None:
                     cold_s, hot_s = seat_s, seat_s
                     if grader.pinned:
                         cold_info = {"cold_source": "measured", "cold_measured": True,
@@ -1564,7 +1590,7 @@ def run_capacity_benchmark(client, workers, tokens, stop, report, model_ids=None
             result = {**plan, **grade, "matrix": True, "ok": not speed_error,
                       "status": "complete" if not speed_error else "error", "grade": f"{grade['score']}/{grade['max']}",
                       "format_grade": (f"{grade['format_score']}/{grade['format_max']}" if grade.get("format_max") else None),
-                      "cold_s": cold_s, **cold_info, "cold_shared": True, "hot_load_s": hot_s, "inference_s": inference_s,
+                      "cold_s": cold_s, **cold_info, "cold_shared": cold_s is not None, "hot_load_s": hot_s, "inference_s": inference_s,
                       "tok_s": speed or "N/A", "tok_s_avg": speed or "N/A", "metrics_complete": speed is not None,
                       "error": speed_error or "N/A", "finished": time.time()}
             if grader.name != "hugpy-native-v2":

@@ -226,7 +226,7 @@ function modeToSpill(mode, gib, ram, threads, gpuBand, ramBand, ctxPct, ctxBand,
 // and apply to every engine. Mirrors the backend's _alloc_is_gguf_only so the UI
 // split preview and the server gate agree.
 const EXPLICIT_BUDGET_KEYS = ['gpu_mem_gib', 'cpu_mem_gib', 'threads', 'tensor_split',
-  'gpu_mem_gib_deviation_pct', 'cpu_mem_gib_deviation_pct', 'ctx_pct', 'ctx_deviation_pct',
+  'gpu_mem_gib_deviation_pct', 'cpu_mem_gib_deviation_pct',
   'priority', 'leniency_pct', 'priority_device']
 function allocIsGgufOnly(spill) {
   if (!spill || Object.keys(spill).length === 0) return false   // autofit — universal
@@ -1148,6 +1148,64 @@ function AllocModeMenu({ mode, spill, worker, need, engineGguf, feasible, feasib
           })}
         </>
       )}
+    </div>
+  )
+}
+
+// Focused context editor opened from the Ctx value in a model row.  Context is
+// persisted as ctx_pct in the same per-(worker,model) allocation spill used by
+// the full Alloc editor; the readout shows the resulting token window so the
+// operator does not have to do the percentage math mentally.
+function ContextMenu({ anchorRef, maxContext, value, onApply, onClose }) {
+  const ref = useRef(null)
+  const [pos, setPos] = useState(null)
+  const [pct, setPct] = useState(value == null ? '' : String(value))
+  useEffect(() => {
+    const place = () => {
+      const el = anchorRef && anchorRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const mw = (ref.current && ref.current.offsetWidth) || 260
+      const maxLeft = Math.max(4, (window.innerWidth || 0) - mw - 4)
+      setPos({ top: r.bottom + 4, left: Math.max(4, Math.min(r.left, maxLeft)) })
+    }
+    place()
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(place) : null
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      if (raf != null) cancelAnimationFrame(raf)
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [anchorRef])
+  useEffect(() => {
+    const onDown = e => {
+      if (ref.current?.contains(e.target) || anchorRef?.current?.contains(e.target)) return
+      onClose()
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [anchorRef, onClose])
+  const shownPct = pct === '' ? null : Math.max(1, Math.min(100, Number(pct)))
+  const tokens = shownPct == null || maxContext == null ? null
+    : Math.max(1, Math.round(Number(maxContext) * shownPct / 100))
+  return (
+    <div className="wp-allocmode-menu wp-context-menu" ref={ref}
+         style={pos ? { position: 'fixed', top: pos.top, left: pos.left } : undefined}
+         onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
+      <div className="wp-context-head">Context allocation</div>
+      <PlainSlider label="CTX" min={1} max={100} value={pct} onChange={setPct}
+                   formatValue={v => v == null ? 'auto' : `${v}%`}
+                   title="Percent of this model's maximum context reserved for KV." />
+      <div className="wp-context-result">
+        {tokens == null ? 'auto / derived context' : `${tokens.toLocaleString()} tokens of ${Number(maxContext).toLocaleString()}`}
+      </div>
+      <div className="wp-context-actions">
+        <button type="button" onClick={() => onApply('')}>Auto</button>
+        <button type="button" className="wp-context-apply"
+                onClick={() => onApply(shownPct == null ? '' : String(shownPct))}>Apply</button>
+      </div>
     </div>
   )
 }
@@ -2796,6 +2854,8 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
   const [newSpill, setNewSpill] = useState({})   // allocation for the next assign
   const [allocMenu, setAllocMenu] = useState(null)   // model key whose in-place alloc menu is open
   const allocAnchorRef = useRef(null)                // the open menu's trigger button (for fixed positioning)
+  const [ctxMenu, setCtxMenu] = useState(null)       // model key whose context editor is open
+  const ctxAnchorRef = useRef(null)
   // Optimistic per-model alloc override: key -> spill dict, applied on top of
   // the derived mode so the cell updates the instant a mode is picked; reverted
   // (deleted) if the /assign POST rejects, and cleared once the refetch lands.
@@ -2966,12 +3026,23 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
   // unchanged server value; onAssign already surfaced the reason).
   const applyAllocMode = useCallback((key, spill) => {
     setAllocMenu(null)
+    setCtxMenu(null)
     setAllocOptimistic(prev => ({ ...prev, [key]: spill }))
     Promise.resolve(onAssign(worker, key, spill))
       .finally(() => setAllocOptimistic(prev => {
         const next = { ...prev }; delete next[key]; return next
       }))
   }, [onAssign, worker])
+
+  const applyContext = useCallback((key, pct, baseSpill = {}) => {
+    const current = key in allocOptimistic ? allocOptimistic[key] : baseSpill
+    const next = { ...(current || {}) }
+    if (pct === '') delete next.ctx_pct
+    else next.ctx_pct = Math.round(Number(pct))
+    // Clearing the last allocation field returns this model to the derived
+    // default instead of leaving an empty pinned object behind.
+    applyAllocMode(key, next)
+  }, [allocOptimistic, applyAllocMode])
 
   const checkHealth = useCallback(async () => {
     setPing('checking')
@@ -3248,7 +3319,24 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
     },
     ctx: {
       label: 'Ctx', sortable: true, num: true, cls: 'wp-lt-num',
-      render: ({ m }) => m?.model_max_length || '—',
+      render: ({ key, m, d }) => {
+        const max = m?.model_max_length
+        if (!max) return <span className="wp-lt-muted">—</span>
+        const spill = key in allocOptimistic ? allocOptimistic[key] : d.override
+        const pct = spill?.ctx_pct
+        const isOpen = ctxMenu === key
+        return (
+          <span className="wp-ctx-anchor">
+            <button type="button" className="wp-ctx-button" ref={isOpen ? ctxAnchorRef : undefined}
+                    title={`Maximum context: ${Number(max).toLocaleString()} tokens. Click to set this model's per-allocation context.`}
+                    onClick={() => { setCtxMenu(isOpen ? null : key); setAllocMenu(null) }}>
+              {pct != null ? Math.max(1, Math.round(Number(max) * Number(pct) / 100)).toLocaleString() : Number(max).toLocaleString()}
+            </button>
+            {isOpen && <ContextMenu anchorRef={ctxAnchorRef} maxContext={max} value={pct}
+                                    onApply={v => applyContext(key, v, spill)} onClose={() => setCtxMenu(null)} />}
+          </span>
+        )
+      },
     },
     state: {
       // State — the EXISTING pill, verbatim (FixDoc on missing, live pulling %,

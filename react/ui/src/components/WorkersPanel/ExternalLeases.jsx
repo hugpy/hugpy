@@ -1,97 +1,131 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
 
-// External gpu_lease residents — wildcard processes (e.g. the bluebook OCR
-// batch) riding the card as evictable pseudo-models via `hugpy-lease`.
-// Read: GET /llm/workers/<id>/external (relay of the worker's /ops/residents).
-// Write: POST /llm/workers/<id>/external-set — the console twin of the
-// `hugpy-lease-set` CLI. The worker-side registry is authoritative and
-// forwards each set to the lease supervisor's control URL, so the toggles
-// apply LIVE (no job restart) and the lease's own heartbeats can't undo an
-// operator's choice. A restart of the lease service reverts to its unit-file
-// flags — these toggles are the "for now" lever, the unit is the "forever" one.
-//
-// Renders nothing when the worker has no external leases (the common case),
-// so it costs no vertical space on ordinary workers.
+// One host inventory: Hugpy models, registered harnesses, and raw GPU PIDs.
+// Visibility comes from the GPU process scan; eviction requires a safe adapter.
 export function ExternalLeases({ worker }) {
-  const [rows, setRows] = useState(null)   // null = not loaded yet
-  const [busy, setBusy] = useState(null)   // model_key of the in-flight set
-  const [err, setErr]   = useState(null)
+  const [rows, setRows] = useState(null)
+  const [busy, setBusy] = useState(null)
+  const [err, setErr] = useState(null)
+  const [chatTarget, setChatTarget] = useState(null)
+  const [chatText, setChatText] = useState('')
+  const [chatReply, setChatReply] = useState(null)
   const alive = useRef(true)
+  const inFlight = useRef(false)
 
   const load = useCallback(async () => {
+    if (inFlight.current) return
+    inFlight.current = true
     try {
-      const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/external`)
-      if (!alive.current) return
-      setRows(r.external || [])
-    } catch {
-      // Unreachable worker or older agent without /ops/residents: stay hidden
-      // rather than adding a permanent warning chip to every dead row.
-      if (alive.current) setRows([])
+      const result = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/activity`)
+      if (!Array.isArray(result?.activity)) throw new Error('activity response has no activity list')
+      if (alive.current) {
+        // Central returns the presentation-ready activity inventory, already
+        // excluding infrastructure and catalogued models shown in allocations.
+        setRows(result.activity)
+        setErr(null)
+      }
+    } catch (error) {
+      // An unreachable worker or one delayed response is not an empty GPU.
+      // Keep the last good snapshot; the next poll will refresh it.
+      if (alive.current) setErr(`GPU activity refresh failed: ${error.message}`)
+    } finally {
+      inFlight.current = false
     }
   }, [worker.id])
 
   useEffect(() => {
     alive.current = true
-    load()
-    const t = setInterval(load, 30000)
-    return () => { alive.current = false; clearInterval(t) }
+    let timer
+    let stopped = false
+    const poll = async () => {
+      await load()
+      if (!stopped) timer = setTimeout(poll, 15000)
+    }
+    poll()
+    return () => { stopped = true; alive.current = false; clearTimeout(timer) }
   }, [load])
 
-  const adjust = useCallback(async (lease, patch) => {
-    setBusy(lease.model_key)
+  const adjust = useCallback(async (row, patch) => {
+    setBusy(row.model_key)
     setErr(null)
     try {
       await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/external-set`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_key: lease.model_key, ...patch }),
+        body: JSON.stringify({ model_key: row.model_key, ...patch }),
       })
-    } catch (e) {
-      setErr(`${lease.model_key}: ${e.message}`)
+    } catch (error) {
+      setErr(`${row.model_key}: ${error.message}`)
     } finally {
       setBusy(null)
       load()
     }
   }, [worker.id, load])
 
-  if (!rows || rows.length === 0) return null
+  const call = useCallback(async () => {
+    if (!chatTarget || !chatText.trim()) return
+    setBusy(chatTarget)
+    setChatReply(null)
+    setErr(null)
+    try {
+      const result = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/external-chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_key: chatTarget, messages: [{ role: 'user', content: chatText.trim() }], max_tokens: 512 }),
+      })
+      setChatReply(result.choices?.[0]?.message?.content || JSON.stringify(result))
+    } catch (error) {
+      setErr(`${chatTarget}: ${error.message}`)
+    } finally {
+      setBusy(null)
+      load()
+    }
+  }, [worker.id, chatTarget, chatText, load])
+
+  if (!rows || rows.length === 0) return err ? <span className="wp-lease-err" title={err}>⚠ {err}</span> : null
 
   return (
     <div className="wp-caps wp-leases">
-      <span className="wp-cap-chip"
-            title={'External gpu_lease residents: batch jobs sharing this card as pseudo-models (hugpy-lease). '
-                 + 'Both toggles apply live via the worker’s /ops/external/set — no job restart. '
-                 + 'They revert to the lease’s launch flags if the lease service itself restarts.'}>
-        🎟 leases:
+      <span className="wp-cap-chip" title="Every visible GPU compute process on this host, joined to Hugpy models and registered harnesses where known. Unregistered processes remain visible without eviction controls.">
+        ◉ host model / GPU activity:
       </span>
-      {rows.map(l => {
-        const evictable = l.evictable !== false
-        const resumes   = l.resume !== 'disabled'
-        const isBusy    = busy === l.model_key
+      {rows.map(row => {
+        const evictable = row.evictable !== false
+        const controllable = row.kind === 'external' && !row.immutable
+        const label = row.kind === 'observed'
+          ? `${row.service || 'process'} (PID ${row.pids?.[0]})`
+          : row.model_key || row.service || `PID ${row.pids?.[0]}`
         return (
-          <span key={l.model_key} className="wp-cap-chip wp-lease-chip">
-            <strong title={l.note || l.model_key}>{l.model_key}</strong>
-            {l.vram_gib != null && <em> {l.vram_gib}GiB</em>}
-            {l.state && <em> · {l.state}</em>}
-            <button className={`wp-lease-toggle${evictable ? '' : ' wp-lease-off'}`}
-                    disabled={isBusy}
-                    title={evictable
-                      ? 'Evictable: any demand path (model load, image gen) may pause this job to reclaim VRAM. Click to protect it (external twin of 🔒 static — only force-evict touches it).'
-                      : 'Protected (non-evictable): only force-evict can pause this job. Click to make it evictable again.'}
-                    onClick={() => adjust(l, { evictable: !evictable })}>
-              {evictable ? '⚡ evictable' : '🔒 protected'}
-            </button>
-            <button className={`wp-lease-toggle${resumes ? '' : ' wp-lease-off'}`}
-                    disabled={isBusy}
-                    title={resumes
-                      ? 'Resume enabled: after an eviction pause the lease waits, re-claims VRAM and relaunches the job where it left off. Click to make a pause final.'
-                      : 'Resume disabled: a pause ENDS the run (the supervisor unregisters and exits). Click to re-enable relaunch-after-pause.'}
-                    onClick={() => adjust(l, { resume: resumes ? 'disabled' : 'enabled' })}>
-              {resumes ? '🔁 resume' : '⏹ one-shot'}
-            </button>
+          <span key={`${row.kind}:${label}:${row.pids?.join(',')}`} className="wp-cap-chip wp-lease-chip"
+                title={`${row.note || label}\nPIDs: ${(row.pids || []).join(', ') || 'none'}\nGPU: ${(row.gpu_indices || []).join(', ') || 'none'}`}>
+            <strong>{label}</strong>
+            {!!row.gpu_indices?.length && <em> · GPU {row.gpu_indices.join(',')}</em>}
+            {row.vram_mib > 0 && <em> · {(row.vram_mib / 1024).toFixed(1)} GiB</em>}
+            {row.state && <em> · {row.state}</em>}
+            {row.activity?.active_requests > 0 && <em> · {row.activity.active_requests} active</em>}
+            {row.immutable && <em> · 🔒 observation only</em>}
+            {row.kind === 'observed' && <em> · no adapter</em>}
+            {controllable &&
+              <button className={`wp-lease-toggle${evictable ? '' : ' wp-lease-off'}`}
+                      disabled={busy === row.model_key}
+                      title={evictable ? 'Allow Hugpy to evict this service when resources are needed' : 'Protected from demand eviction; force can still override'}
+                      onClick={() => adjust(row, { evictable: !evictable })}>
+                {evictable ? '⚡ evictable' : '🔒 protected'}
+              </button>}
+            {row.kind === 'external' && row.api_available &&
+              <button className="wp-lease-toggle" onClick={() => { setChatTarget(row.model_key); setChatReply(null) }}>
+                💬 Call
+              </button>}
           </span>
         )
       })}
+      {chatTarget && <div className="wp-lease-chat">
+        <label>Call {chatTarget}
+          <textarea value={chatText} onChange={event => setChatText(event.target.value)} rows={3} />
+        </label>
+        <button disabled={!chatText.trim() || busy === chatTarget} onClick={call}>{busy === chatTarget ? 'Calling…' : 'Send'}</button>
+        <button onClick={() => setChatTarget(null)}>Close</button>
+        {chatReply && <pre>{chatReply}</pre>}
+      </div>}
       {err && <span className="wp-lease-err" title={err}>⚠ {err}</span>}
     </div>
   )

@@ -5,8 +5,26 @@ import { residentState, vramBytesFor } from './workerMetrics'
 import { WorkerStorageBar } from './WorkerStorageBar'
 
 // Per-GPU chip with a used/free VRAM bar.
-export function GpuChips({ gpus }) {
+export function GpuChips({ gpus, items = [], loadedSet, loadingSet, worker, sizeByKey, onEvict }) {
   if (!gpus || !gpus.length) return <span className="wp-nogpu">no GPU reported</span>
+  const allocationByModel = new Map(items.filter(a => a?.model_key).map(a => [a.model_key, a]))
+  const registryByModel = new Map((worker.pid_registry?.models || []).filter(m => m?.model_key)
+    .map(m => [m.model_key, m]))
+  const registryModelKeys = new Set(registryByModel.keys())
+  const deviceIndexes = a => {
+    const assigned = a.gpu_indexes?.length ? a.gpu_indexes
+      : registryByModel.get(a.model_key)?.gpu_indexes?.length
+        ? registryByModel.get(a.model_key).gpu_indexes
+        : [a.gpu_index ?? registryByModel.get(a.model_key)?.gpu_index]
+    return assigned.filter(i => i != null).map(Number)
+  }
+  const onGpu = (a, index) => deviceIndexes(a).includes(Number(index))
+  const hasUnplacedRegistryModel = (worker.pid_registry?.models || []).some(m =>
+    !(m.gpu_indexes?.length || m.gpu_index != null
+      || deviceIndexes(allocationByModel.get(m.model_key) || {}).length))
+  const hasUnknownForeign = (worker.pid_registry?.unattributed || []).some(p =>
+    p.gpu_index == null && !p.gpu_indexes?.length)
+  const hasUnplaced = items.some(a => deviceIndexes(a).length === 0) || hasUnplacedRegistryModel || hasUnknownForeign
   return (
     <div className="wp-gpus">
       {gpus.map((g, i) => {
@@ -20,15 +38,41 @@ export function GpuChips({ gpus }) {
               {used != null && (
                 <em> · {fmtBytes(used)} used / {fmtBytes(total)}</em>
               )}
+              {g.utilization != null && <em> · {g.utilization}% compute</em>}
             </div>
             {used != null && (
               <div className="wp-vram-bar" title={`${fmtBytes(free)} free`}>
                 <div className="wp-vram-fill" style={{ width: `${pct}%` }} />
               </div>
             )}
+            <div className="wp-gpu-detail">
+              <div className="wp-res-detail-label">Process registry and per-card usage · GPU {g.index ?? i}</div>
+              {items.some(a => !registryModelKeys.has(a.model_key) && onGpu(a, g.index ?? i)) && <>
+                <div className="wp-res-detail-label">GPU residents without a PID registry row</div>
+                <ResidentList items={items.filter(a => !registryModelKeys.has(a.model_key)
+                  && onGpu(a, g.index ?? i))}
+                  loadedSet={loadedSet} loadingSet={loadingSet} worker={worker} resource="vram" sizeByKey={sizeByKey}
+                  emptyLabel="No additional model rows." />
+              </>}
+              <PidRegistry worker={worker} loadedSet={loadedSet} loadingSet={loadingSet} gpuIndex={g.index ?? i} onEvict={onEvict} />
+            </div>
           </div>
         )
       })}
+      {hasUnplaced &&
+        <div className="wp-gpu wp-gpu-unassigned">
+          <strong className="wp-gpu-head">GPU placement unknown</strong>
+          <div className="wp-gpu-detail">
+            <div className="wp-res-detail-label">Process VRAM is measured; source did not report a card index</div>
+            {items.some(a => !registryModelKeys.has(a.model_key) && deviceIndexes(a).length === 0) && <>
+              <div className="wp-res-detail-label">Allocation rows without a PID registry row</div>
+              <ResidentList items={items.filter(a => !registryModelKeys.has(a.model_key) && deviceIndexes(a).length === 0)}
+                loadedSet={loadedSet} loadingSet={loadingSet} worker={worker} resource="vram" sizeByKey={sizeByKey}
+                emptyLabel="No additional model rows." />
+            </>}
+            <PidRegistry worker={worker} loadedSet={loadedSet} loadingSet={loadingSet} onEvict={onEvict} gpuIndex="unknown" />
+          </div>
+        </div>}
     </div>
   )
 }
@@ -45,12 +89,27 @@ export function GpuChips({ gpus }) {
 //     hugpy-owned models; killing a foreign pid needs a privileged worker helper
 //     that does not exist yet. See the TODO below.
 // Degrades to nothing when the worker reports no pid_registry (older agent / no GPU).
-export function PidRegistry({ worker, onEvict }) {
+export function PidRegistry({ worker, onEvict, gpuIndex, loadedSet, loadingSet }) {
   const reg = worker && worker.pid_registry
   const [evicting, setEvicting] = useState(null)  // model_key currently in-flight
   if (!reg) return null
-  const models = Array.isArray(reg.models) ? reg.models : []
-  const foreign = Array.isArray(reg.unattributed) ? reg.unattributed : []
+  const allModels = Array.isArray(reg.models) ? reg.models : []
+  const allocationByModel = new Map((worker.allocations || []).filter(a => a?.model_key)
+    .map(a => [a.model_key, a]))
+  // The heartbeat PID registry is process based; model placement already carries
+  // the CUDA device. Join by model key so multi-GPU rows can be shown on their
+  // owning card without changing the measured PID/VRAM values.
+  const deviceByModel = new Map((worker.allocations || []).filter(a => a && a.model_key && a.gpu_index != null)
+    .map(a => [a.model_key, a.gpu_index]))
+  const modelDevices = m => m.gpu_indexes?.length ? m.gpu_indexes
+    : [m.gpu_index ?? deviceByModel.get(m.model_key)].filter(i => i != null)
+  const models = gpuIndex === 'unknown' ? allModels.filter(m => modelDevices(m).length === 0)
+    : gpuIndex == null ? allModels : allModels.filter(m => modelDevices(m).some(i => Number(i) === Number(gpuIndex)))
+  const allForeign = Array.isArray(reg.unattributed) ? reg.unattributed : []
+  const foreignDevices = p => p.gpu_indexes?.length ? p.gpu_indexes
+    : [p.gpu_index].filter(i => i != null)
+  const foreign = gpuIndex === 'unknown' ? allForeign.filter(p => foreignDevices(p).length === 0)
+    : gpuIndex == null ? allForeign : allForeign.filter(p => foreignDevices(p).some(i => Number(i) === Number(gpuIndex)))
   if (!models.length && !foreign.length) return null
 
   const doEvict = async (mk) => {
@@ -65,8 +124,14 @@ export function PidRegistry({ worker, onEvict }) {
   // footer proves it. Raw MiB is the summed value (MIB below), GiB is render-only
   // via fmtBytes (which divides by 1024) — never round-trip a rounded GiB back.
   const MIB = 1024 * 1024
-  const measuredSum = models.reduce((s, m) => s + (Number(m.vram_bytes) || 0), 0)
-  const foreignSum = foreign.reduce((s, p) => s + (Number(p.mib) || 0) * MIB, 0)
+  const modelVramBytes = m => gpuIndex != null && gpuIndex !== 'unknown'
+    ? (m.per_gpu_vram_bytes?.[String(gpuIndex)] ?? m.vram_bytes)
+    : m.vram_bytes
+  const foreignVramBytes = p => gpuIndex != null && gpuIndex !== 'unknown'
+    ? (p.per_gpu_vram_bytes?.[String(gpuIndex)] ?? (Number(p.mib) || 0) * MIB)
+    : (Number(p.mib) || 0) * MIB
+  const measuredSum = models.reduce((s, m) => s + (Number(modelVramBytes(m)) || 0), 0)
+  const foreignSum = foreign.reduce((s, p) => s + (Number(foreignVramBytes(p)) || 0), 0)
   const smiTotal = measuredSum + foreignSum
   // A row's human label: a served model shows its key; a worker-infra / comfy /
   // idle row (model_key null) shows its host-mode label instead of a blank.
@@ -78,30 +143,46 @@ export function PidRegistry({ worker, onEvict }) {
     <div className="wp-pidreg">
       {models.length > 0 && (
         <>
-          <div className="wp-res-detail-label">GPU process registry — model → pid → measured VRAM (mirrors nvidia-smi · {models.length})</div>
+          <div className="wp-res-detail-label">
+            GPU process registry — model → pid → measured VRAM
+            {gpuIndex === 'unknown' ? ' · card index unavailable'
+              : gpuIndex == null ? ` · worker total (${models.length})`
+                : ` · GPU ${gpuIndex} (${models.length})`}
+          </div>
           <div className="wp-pidreg-list">
             {models.map((m, i) => {
               const isModel = !!m.model_key
               const busy = isModel && evicting === m.model_key
               const alive = m.alive !== false
+              const allocation = allocationByModel.get(m.model_key)
+              const state = isModel
+                ? (allocation ? residentState(allocation, loadedSet, loadingSet)
+                  : loadingSet?.has(m.model_key)
+                    ? { state: 'heating', glyph: '🔶 loading', title: 'weights loading into VRAM/RAM right now' }
+                    : null)
+                : null
               // PLANNED beside MEASURED (E/M): an in-process row carries its torch
               // weight estimate; the measured figure also holds the CUDA context /
               // KV, so they legitimately differ. Show the disagreement — never blend.
               const planned = m.vram_bytes_planned
-              const measured = m.vram_bytes
+              const measured = modelVramBytes(m)
+              const combinedAcrossCards = gpuIndex != null && gpuIndex !== 'unknown'
+                && m.gpu_indexes?.length > 1 && !m.per_gpu_vram_bytes?.[String(gpuIndex)]
               const showPlanned = planned != null && measured != null
                 && Math.abs(Number(planned) - Number(measured)) > MIB
               return (
-                <div key={`${m.model_key || m.host_mode}-${m.pid}-${i}`} className="wp-pidreg-row" title={`${rowLabel(m)} · pid ${m.pid} · ${m.host_mode || 'unknown host'}`}>
+                <div key={`${m.model_key || m.host_mode}-${m.pid}-${i}`} className="wp-pidreg-row" title={`${rowLabel(m)} · pid ${m.pid} · ${m.host_mode || 'unknown host'}${combinedAcrossCards ? ` · process total spans GPUs ${m.gpu_indexes.join(', ')}` : ''}`}>
                   <span className={`wp-pidreg-dot ${alive ? 'wp-pidreg-alive' : 'wp-pidreg-dead'}`}
                         title={alive ? 'process alive' : 'process gone (stale entry)'}>{alive ? '●' : '○'}</span>
                   <span className="wp-pidreg-name">{rowLabel(m)}</span>
+                  {state && <span className={`wp-state-pill wp-pill-${state.state}`} title={state.title}>{state.glyph}</span>}
                   <span className="wp-pidreg-meta">pid {m.pid}</span>
                   <span className="wp-pidreg-mode" title={`host mode: ${m.host_mode || 'unknown'}`}>{m.host_mode || '—'}</span>
                   <span className="wp-pidreg-vram" title={showPlanned
                         ? `measured ${fmtBytes(measured)} (nvidia-smi) vs planned ${fmtBytes(planned)} (declared weights) — the gap is CUDA context / KV`
                         : 'measured VRAM from nvidia-smi per-PID'}>
                     {measured != null ? fmtBytes(measured) : '—'}
+                    {combinedAcrossCards && <span className="wp-fact-est"> (combined PID)</span>}
                     {showPlanned && <span className="wp-fact-est"> (plan ~{fmtBytes(planned)})</span>}
                   </span>
                   <button className="wp-model-x wp-pidreg-x" disabled={busy || !onEvict || !isModel}
@@ -128,7 +209,7 @@ export function PidRegistry({ worker, onEvict }) {
                 <span className="wp-pidreg-dot wp-pidreg-foreign-dot">◈</span>
                 <span className="wp-pidreg-name">{p.name || 'unknown process'}</span>
                 <span className="wp-pidreg-meta">pid {p.pid}</span>
-                <span className="wp-pidreg-vram" title="measured VRAM from nvidia-smi per-PID">{p.mib != null ? fmtBytes(Number(p.mib) * MIB) : '—'}</span>
+                <span className="wp-pidreg-vram" title="measured process VRAM from nvidia-smi">{p.mib != null ? fmtBytes(foreignVramBytes(p)) : '—'}</span>
                 {/* TODO(keeper): kill-by-pid needs the privileged worker helper (operator privilege decision pending) */}
                 <button className="wp-model-x wp-pidreg-x" disabled
                         title="foreign process — kill requires a privileged worker helper (not yet enabled)">×</button>
@@ -143,10 +224,12 @@ export function PidRegistry({ worker, onEvict }) {
           once, sized by its measured mib). If this ever disagrees with the GPU
           chip's used bar, the difference is KV/activations not tied to a
           compute-app PID — never a rounding artifact. */}
-      <div className="wp-pidreg-total" title="Sum of every attributed model row + unattributed row, each sized by its measured nvidia-smi per-PID mib. Mirrors nvidia-smi compute-apps byte-for-byte.">
-        Σ measured = {fmtBytes(smiTotal)}
+      <div className="wp-pidreg-total" title={gpuIndex == null
+        ? 'Sum of every attributed model row + unattributed row, each sized by measured per-PID VRAM. Mirrors the worker process registry total.'
+        : 'Sum of the process rows shown in this GPU placement group; process figures are measured VRAM, not card-level usage.'}>
+        {gpuIndex == null ? 'Σ measured' : gpuIndex === 'unknown' ? 'Σ process measured (GPU unknown)' : `Σ process measured (GPU ${gpuIndex})`} = {fmtBytes(smiTotal)}
         {foreignSum > 0 && <span className="wp-fact-est"> ({fmtBytes(measuredSum)} attributed + {fmtBytes(foreignSum)} unattributed)</span>}
-        {' — mirrors nvidia-smi'}
+        {gpuIndex == null && ' — worker process total'}
       </div>
     </div>
   )
@@ -173,12 +256,12 @@ export const ESTIMATED_VRAM_TITLE =
 
 // One resident row (a model occupying VRAM or host RAM). Shared by the VRAM and
 // RAM resource details; engine-agnostic via residentState.
-export function ResidentList({ items, loadedSet, worker, resource, emptyLabel, sizeByKey }) {
+export function ResidentList({ items, loadedSet, loadingSet, worker, resource, emptyLabel, sizeByKey }) {
   if (!items || !items.length) return <div className="wp-res-empty">{emptyLabel}</div>
   return (
     <div className="wp-models wp-res-models">
       {items.map((a, i) => {
-        const st = residentState(a, loadedSet)
+        const st = residentState(a, loadedSet, loadingSet)
         const res = worker.config?.residency?.[a.model_key]
         // Per-resource footprint — the honest split. A GGUF slot's host-RAM use is
         // its process RSS; its GPU use is the offloaded layer count (exact per-slot
@@ -494,6 +577,7 @@ export function ResourceStrip({ worker, models, onApproveEvictions, onEvict }) {
   const limits = worker.limits || {}
   const allocs = Array.isArray(worker.allocations) ? worker.allocations.filter(a => a && a.model_key) : []
   const loadedSet = new Set(worker.loaded_models || [])
+  const loadingSet = new Set(worker.loading || [])
   // Resource-aware split — a GGUF slot lives in host RAM (its process rss) AND, when
   // layers are offloaded, on the GPU, so it appears under BOTH (each with the
   // footprint that fits). This is why a 15 GB model on an 8 GB GPU now shows in RAM
@@ -580,25 +664,28 @@ export function ResourceStrip({ worker, models, onApproveEvictions, onEvict }) {
               single-GPU worker the collapsed chip already IS that GPU's summary
               (same name, same used/total, same bar), so repeating it here read
               as a phantom second GPU (operator ask, 2026-07-11). */}
-          {gpus.length > 1 && <GpuChips gpus={gpus} />}
+          {gpus.length > 0 && <GpuChips gpus={gpus} items={gpuRes} loadedSet={loadedSet} loadingSet={loadingSet}
+                                                   worker={worker} sizeByKey={ggufSize} onEvict={onEvict} />}
           {/* Only models actually resident in this GPU's VRAM, each with its VRAM
               allocation. Host-RAM-only residents belong under the RAM chip, not
               here — listing a "not in VRAM" model under a VRAM heading reads as a
               contradiction. So this is the honest "models within the VRAM" view,
               and its count matches the chip's in-VRAM badge. */}
-          <div className="wp-res-detail-label">Models in VRAM — allocation each ({gpuRes.length})</div>
-          <ResidentList items={gpuRes} loadedSet={loadedSet} worker={worker} resource="vram"
-                        sizeByKey={ggufSize}
-                        emptyLabel="No models are using this GPU's VRAM right now." />
+          {gpus.length === 0 && <>
+            <div className="wp-res-detail-label">Models in VRAM — allocation each ({gpuRes.length})</div>
+            <ResidentList items={gpuRes} loadedSet={loadedSet} loadingSet={loadingSet} worker={worker} resource="vram"
+                          sizeByKey={ggufSize}
+                          emptyLabel="No models are using this GPU's VRAM right now." />
+          </>}
           <VramReconcile worker={worker} gpuRes={gpuRes} comfy={comfy} sizeByKey={ggufSize} />
-          <PidRegistry worker={worker} onEvict={onEvict} />
+          {gpus.length === 0 && <PidRegistry worker={worker} loadedSet={loadedSet} loadingSet={loadingSet} onEvict={onEvict} />}
         </div>
       )}
 
       {open === 'ram' && (
         <div className="wp-res-detail">
           <div className="wp-res-detail-label">Models in host RAM ({ramRes.length})</div>
-          <ResidentList items={ramRes} loadedSet={loadedSet} worker={worker} resource="ram"
+          <ResidentList items={ramRes} loadedSet={loadedSet} loadingSet={loadingSet} worker={worker} resource="ram"
                         sizeByKey={ggufSize}
                         emptyLabel="No models resident in host RAM right now." />
           {comfy && (

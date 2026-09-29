@@ -30,7 +30,7 @@ export const BUCKET_LABELS = { ready: 'ready', waste: 'wasting your time', unkno
 
 // The per-(model, worker) vocabulary — identical to the server's
 // model_worker_state (WORKER_STATES + the failed overlay).
-export const WORKER_STATES = ['answering', 'serving', 'hot', 'loading', 'downloading from central', 'cold', 'on central', 'not allocated', 'missing', 'n/a', 'failed']
+export const WORKER_STATES = ['answering', 'serving', 'hot', 'loading', 'downloading from central', 'cold', 'on central', 'on another worker', 'unknown', 'not allocated', 'missing', 'n/a', 'failed']
 export const WORKER_STATE_META = {
   answering: { icon: '⚡', tone: 'ok' },
   serving: { icon: '▶', tone: 'ok' },
@@ -41,6 +41,10 @@ export const WORKER_STATE_META = {
   // on central: files on central's store, not on this worker's drive yet — they
   // copy on first call (lazy download). Not missing: the files exist somewhere.
   'on central': { icon: '◌', tone: 'muted' },
+  // Another worker has the files; this worker and central do not.
+  'on another worker': { icon: '↗', tone: 'muted' },
+  // No copy was reported, but the fleet inventory is incomplete.
+  unknown: { icon: '?', tone: 'muted' },
   // not allocated: on no drive and not assigned to this worker — neutral.
   'not allocated': { icon: '·', tone: 'muted' },
   // missing: on no drive anywhere AND allocated here — the only state that needs

@@ -103,6 +103,7 @@ export default function ReviewPanel() {
   // an ordinary refresh failure.
   const benchmarkStatusRef = useRef(benchmark.status)
   const [benchmarkModel, setBenchmarkModel] = useState('')
+  const [measureColdLoad, setMeasureColdLoad] = useState(false)
   // Models ticked for grading in the workbook picker (multi-select). Empty = no
   // explicit pick; the run then falls back to the model text box, and if that is
   // blank too, to ALL central models (today's default, stated on the button).
@@ -279,15 +280,15 @@ export default function ReviewPanel() {
     const models = gradeModels.length ? gradeModels : (benchmarkModel.trim() ? [benchmarkModel.trim()] : [])
     const mLabel = gradeModels.length ? `${gradeModels.length} selected model(s): ${gradeModels.join(', ')}`
       : (benchmarkModel.trim() || 'ALL central models')
-    if (!confirm(`Run the capacity test?\n\nModels: ${mLabel}\nWorkers: ${wLabel}\n\nBefore each involved worker is tested, its state (allocations/pins, per-model quant & levers, and which model files are on its drive) is backed up, and restored when the test ends. Cold quants may be copied from central to worker drives to measure cold loads; central llm_storage is never deleted.`)) return
+    if (!confirm(`Run the capacity test?\n\nModels: ${mLabel}\nWorkers: ${wLabel}\nCold-load measurement: ${measureColdLoad ? 'ON — worker copies with verified central backups may be evicted and copied again' : 'OFF'}\n\nBefore each involved worker is tested, its state (allocations/pins, per-model quant & levers, and which model files are on its drive) is backed up, and restored when the test ends.`)) return
     setNote('starting fleet capacity benchmark…')
     setFcOpen(true)   // expand the initiator immediately on Run, before the first poll
     fetchJson('/api/llm/benchmark/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ executor: 'hugpy-central', tokens: 128, models, workers: chosenWorkers }),
+      body: JSON.stringify({ executor: 'hugpy-central', tokens: 128, models, workers: chosenWorkers, measure_cold_load: measureColdLoad }),
     }).then(d => { setBenchmark(d); setNote('fleet benchmark started') })
       .catch(e => setNote(`benchmark failed to start: ${e.message}`))
-  }, [benchmark.status, benchmarkModel, gradeModels, chosenWorkers, eligibleWorkers, workersList])
+  }, [benchmark.status, benchmarkModel, gradeModels, chosenWorkers, eligibleWorkers, workersList, measureColdLoad])
 
   // PHASE 2 on demand: grade the collected outputs still pending (a finished or
   // partial run). Central refuses (409) while a run is still collecting/judging
@@ -368,6 +369,13 @@ export default function ReviewPanel() {
           {!BENCHMARK_ACTIVE.includes(benchmark.status) && (benchmark.results?.length > 0) &&
             <button onClick={judgeNow} title="Phase 2: grade every collected output still awaiting the judge (the agent default brain, placed by central)">⚖ Judge now</button>}
         </div>
+        <label className="rv-benchmark-cold-option">
+          <input type="checkbox" checked={measureColdLoad} disabled={BENCHMARK_ACTIVE.includes(benchmark.status)}
+            onChange={e => setMeasureColdLoad(e.target.checked)} />
+          Measure cold load (off by default)
+        </label>
+        {measureColdLoad && <div className="rv-note" role="alert">⚠ Cold-load measurement ON: the grader may remove a worker copy and reload it only when the selected quant has a verified complete copy on central storage.</div>}
+        {benchmark.params?.measure_cold_load && <div className="rv-note" role="status">⚠ This run has cold-load measurement ON.</div>}
         <div className="rv-benchmark-meta">
           {gradeModels.length
             ? <span><strong>{gradeModels.length}</strong> model(s) ticked for grading in the workbook below

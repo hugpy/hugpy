@@ -102,8 +102,10 @@ def test_allocation_is_hard_scope():
     mc.set_worker_wildcard("wild-box", True)
     assert [w["id"] for w in store.candidates_for_model(ASSIGNED)] == ["home-box"]
     assert (store.pick_for_model(ASSIGNED) or {}).get("id") == "home-box"
-    store.register(name="home-box", url="http://home-box:9100", worker_id="home-box",
-                   models=[ASSIGNED], engine={"installed": False})
+    # The engine report arrives on a heartbeat. (A re-REGISTER is an agent
+    # reboot and drops unpinned designations, which would dissolve the very
+    # allocation this test is about.)
+    store.heartbeat("home-box", engine={"installed": False})
     assert store.pick_for_model(ASSIGNED) is None
     assert store.workers_for_model(ASSIGNED) == []
 

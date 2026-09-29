@@ -405,6 +405,7 @@ def _legacy_setters() -> Dict[str, Callable]:
         log.info("legacy resolver seam unavailable: %s", exc)
         return out
     for name in ("set_worker_provider", "set_worker_lookup_provider",
+                 "set_serving_provider",
                  "set_placement_provider", "set_worker_candidates_provider",
                  "set_no_worker_diagnostic", "set_no_worker_skips",
                  "set_load_state_provider",
@@ -430,6 +431,7 @@ def _install_legacy_providers() -> None:
 
     _try("set_worker_provider", W.pick_worker_for_model, W.spill_for)
     _try("set_worker_lookup_provider", W.lookup_worker)
+    _try("set_serving_provider", W.serving_endpoint_for)
     # Allocator-driven sharding: no-op until HUGPY_SHARD_MODELS opts a model in.
     _try("set_placement_provider", W.placement_for_model)
     _try("set_worker_candidates_provider", W.candidates_for_model)

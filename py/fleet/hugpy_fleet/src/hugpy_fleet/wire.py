@@ -154,6 +154,9 @@ class WorkerHeartbeat(WireDTO):
     # measured central->worker transfer rate, bytes/s (EMA over completed
     # provisions); the benchmark's cold-load budget derives from it
     load_bytes_per_s: Optional[float] = None
+    # Worker-discovered (system/external) models: {model_key: row} — mirrors
+    # WorkerStore.heartbeat's `models_discovered` param (lockstep: test_wire_dtos).
+    models_discovered: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 @dataclass

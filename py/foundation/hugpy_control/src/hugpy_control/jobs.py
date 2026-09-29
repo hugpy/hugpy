@@ -238,6 +238,9 @@ class Job:
     payload: Optional[dict] = None
     # Live-stream telemetry (was activity.py).
     tokens: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
     started_ts: float = field(default_factory=time.time)
     first_output_ts: Optional[float] = None
     ended_ts: Optional[float] = None
@@ -260,6 +263,13 @@ class Job:
     # stalled clock (see _compute_stalled). Distinct from updated_at, which also
     # bumps on a log-tail-only write; this bumps only on real advancement.
     progressed_at: float = field(default_factory=time.time)
+    # Dispatch lease: set as soon as routing selects a worker/model.  This is
+    # separate from progressed_at so a request cannot remain "pending" while
+    # the dispatcher has already handed it to a worker.
+    dispatch_started_at: Optional[float] = None
+    dispatch_lease_until: Optional[float] = None
+    dispatch_last_seen: Optional[float] = None
+    dispatch_generation: Optional[str] = None
     created_at: str = field(default_factory=_utcnow_iso)
     updated_at: str = field(default_factory=_utcnow_iso)
     # Runtime-only, never serialized: download subprocess, resolved model dict
@@ -294,6 +304,9 @@ class Job:
             "prompt": self.prompt,
             "error": self.error.to_dict() if self.error else None,
             "tokens": self.tokens,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
             "elapsed": round(ended - self.started_ts, 1),
             # seconds spent waiting before the first output (queue time).
             "wait": round((self.first_output_ts or ended) - self.started_ts, 1),
@@ -319,6 +332,11 @@ class Job:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.dispatch_started_at is not None:
+            d["dispatch_started_at"] = self.dispatch_started_at
+            d["dispatch_lease_until"] = self.dispatch_lease_until
+            d["dispatch_last_seen"] = self.dispatch_last_seen
+            d["dispatch_generation"] = self.dispatch_generation
         # Omit-when-unset: only media/video jobs carry a placement — every other
         # row's shape is byte-identical to before this field existed.
         if self.placement is not None:
@@ -394,6 +412,11 @@ class JobStore:
         self.mirror = mirror
         self._last_mirror_prune = 0.0
         self._watcher: Optional[threading.Thread] = None
+        self._dispatch_reconciler: Optional[Callable[[], None]] = None
+
+    def set_dispatch_reconciler(self, callback: Optional[Callable[[], None]]) -> None:
+        """Install the fleet-aware lease reconciliation callback."""
+        self._dispatch_reconciler = callback
 
     # -- creation ----------------------------------------------------------
     def create(self, model_key: str = "", *, id: Optional[str] = None,
@@ -586,6 +609,79 @@ class JobStore:
         if sync:
             self._mirror_upsert(job)
 
+    def begin_dispatch(self, job_id: str, *, worker: Optional[str] = None,
+                       slot: Optional[str] = None, generation: Optional[str] = None,
+                       lease_s: float = 120.0) -> Optional[Job]:
+        """Atomically mark a selected request as processing and lease it.
+
+        Routing must call this before waiting for model load or worker output.
+        The lease is renewed by ``renew_dispatch`` and cleared by ``finish``;
+        a reconciler may safely requeue it after expiry only when the worker
+        reports no matching request and no busy slot.
+        """
+        now = time.time()
+        try:
+            lease_s = max(5.0, float(lease_s))
+        except (TypeError, ValueError):
+            lease_s = 120.0
+        return self.update(
+            job_id,
+            status="processing",
+            worker=worker,
+            slot=slot,
+            dispatch_started_at=now,
+            dispatch_last_seen=now,
+            dispatch_lease_until=now + lease_s,
+            dispatch_generation=generation,
+        )
+
+    def renew_dispatch(self, job_id: str, *, lease_s: float = 120.0,
+                       generation: Optional[str] = None) -> Optional[Job]:
+        """Renew a dispatch lease without fabricating token progress."""
+        now = time.time()
+        try:
+            lease_s = max(5.0, float(lease_s))
+        except (TypeError, ValueError):
+            lease_s = 120.0
+        changes = {"dispatch_last_seen": now, "dispatch_lease_until": now + lease_s}
+        if generation is not None:
+            changes["dispatch_generation"] = generation
+        return self.update(job_id, **changes)
+
+    def reconcile_dispatch(self, *, worker_state: Callable[[Job], dict],
+                           now: Optional[float] = None) -> list[str]:
+        """Expire/requeue demonstrably stale dispatches.
+
+        ``worker_state(job)`` must return ``online``, ``slot_busy``, and
+        ``request_active``.  We never infer staleness from a quiet GPU alone:
+        the lease must be expired and the worker must report no matching
+        request.  The callback is deliberately injected to keep this shared
+        store independent of Hugpy fleet modules.
+        """
+        now = time.time() if now is None else float(now)
+        stale = []
+        with self._lock:
+            rows = list(self._jobs.values())
+        for job in rows:
+            if job.terminal or normalize_status(job.status) not in ("processing", "streaming"):
+                continue
+            if job.dispatch_lease_until is None or now <= float(job.dispatch_lease_until):
+                continue
+            try:
+                state = worker_state(job) or {}
+            except Exception:
+                continue
+            if (state.get("online") is not True
+                    or state.get("slot_busy") is True
+                    or state.get("request_active") is True):
+                continue
+            stale.append(job.id)
+            self.update(job.id, status="pending", worker=None, slot=None,
+                        message="dispatch lease expired; worker had no matching active request",
+                        dispatch_started_at=None, dispatch_lease_until=None,
+                        dispatch_last_seen=None, dispatch_generation=None)
+        return stale
+
     def finish(self, job_id: str, status: Optional[str] = None,
                error: Any = None) -> Optional[Job]:
         """Terminal marking, from the code that actually owned the stream.
@@ -601,7 +697,11 @@ class JobStore:
                 status = "cancelled"
             else:
                 status = "done"
-        changes: dict[str, Any] = {"status": status}
+        changes: dict[str, Any] = {
+            "status": status,
+            "dispatch_lease_until": None,
+            "dispatch_last_seen": None,
+        }
         if error is not None:
             changes["error"] = error
         _done = self.update(job_id, **changes)
@@ -1043,9 +1143,11 @@ class JobStore:
         t.start()
 
     def _watch_mirror(self) -> None:
+        tick = 0
         while True:
             time.sleep(1.0)
             try:
+                tick += 1
                 with self._lock:
                     candidates = [j.id for j in self._jobs.values()
                                   if not j.terminal and not j.cancel_requested]
@@ -1055,6 +1157,14 @@ class JobStore:
                 for jid in candidates:
                     if jid in flagged:
                         self.cancel(jid, reason="cancelled by sibling process")
+                # Reconcile dispatch leases independently of token traffic.
+                # Five-second cadence catches a lost relay without making the
+                # token path or every mirror read pay for worker probes.
+                if tick >= 5:
+                    tick = 0
+                    callback = self._dispatch_reconciler
+                    if callback is not None:
+                        callback()
             except Exception:
                 pass
 

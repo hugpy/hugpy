@@ -65,16 +65,10 @@ def _private_bus():
     return media_bus, tmpdir
 
 
-def step_progress_target(spec_dict, conn, cancel_event):
-    """A FAKE render child — module-level so multiprocessing 'spawn' can pickle it
-    by reference (the sibling watchdog test's idiom). Streams three denoise-step
-    frames, then the settled payload."""
-    from hugpy_fleet.worker import _studio_subproc
-    for step in (1, 2, 3):
-        conn.send({_studio_subproc._PROGRESS_KEY: {
-            "phase": "rendering", "step": step, "steps": 3}})
-    conn.send({"ok": True, "path": "/shared/clip.mp4", "frames": 81})
-    conn.close()
+# The FAKE render child lives in an importable helper module (multiprocessing
+# 'spawn' pickles the target by reference; under importlib import mode this test
+# module's own name is not importable from the child — see the helper's docstring).
+from studio_subproc_targets import step_progress_target  # noqa: E402
 
 
 def _insert(media_bus, job_id, *, name="studio_i2v", status="running",

@@ -19,7 +19,7 @@ no thread of its own.
 The record shape:
     {model_key, pid, control_url, vram_gib, note,
      registered_at, last_seen, state,       # state: "running" | "yielded"
-     evictable, resume}                     # the operator-adjustable policy
+     evictable, resume, immutable, api_url, served_model}
 
 Policy semantics (2026-08-12, "wildcard process" ruling):
   * ``evictable`` (bool, default True) is the external twin of managed-model
@@ -48,7 +48,13 @@ def register(model_key: str, pid: Optional[int],
              vram_gib: Optional[float] = None,
              note: Optional[str] = None,
              evictable: Optional[bool] = None,
-             resume: Optional[str] = None) -> dict:
+             resume: Optional[str] = None,
+             gpu_indices: Optional[list[int]] = None,
+             pids: Optional[list[int]] = None,
+             immutable: Optional[bool] = None,
+             api_url: Optional[str] = None,
+             served_model: Optional[str] = None,
+             activity: Optional[dict] = None) -> dict:
     """Record (or refresh) an external lease. Idempotent: the supervisor
     re-posts this on its heartbeat (and after every relaunch, with the new
     child pid) — a refresh updates pid/last_seen and flips state back to
@@ -75,6 +81,18 @@ def register(model_key: str, pid: Optional[int],
             rec["evictable"] = bool(evictable)
         if resume in ("enabled", "disabled"):
             rec["resume"] = resume
+        if gpu_indices is not None:
+            rec["gpu_indices"] = sorted(set(int(i) for i in gpu_indices if int(i) >= 0))
+        if pids is not None:
+            rec["pids"] = sorted(set(int(i) for i in pids if int(i) > 0))
+        if immutable is not None:
+            rec["immutable"] = bool(immutable)
+        if api_url is not None:
+            rec["api_url"] = api_url
+        if served_model is not None:
+            rec["served_model"] = served_model
+        if activity is not None:
+            rec["activity"] = dict(activity)
         return dict(rec)
 
 
@@ -87,6 +105,8 @@ def set_policy(model_key: str,
         rec = _RECORDS.get(model_key)
         if rec is None:
             return None
+        if rec.get("immutable"):
+            return dict(rec)
         if evictable is not None:
             rec["evictable"] = bool(evictable)
         if resume in ("enabled", "disabled"):
@@ -103,7 +123,24 @@ def unregister(model_key: str) -> bool:
 def get(model_key: str) -> Optional[dict]:
     with _LOCK:
         rec = _RECORDS.get(model_key)
-        return dict(rec) if rec is not None else None
+        if rec is not None:
+            return dict(rec)
+        # Central and worker inventory legitimately use different owner
+        # spellings (bare, owner~name, or a path-qualified name).  A live
+        # external resident is the worker-local serving authority, so do the
+        # same unambiguous equivalent-key match used by fleet routing.  Keep
+        # exact lookup first and refuse ambiguous tails rather than selecting
+        # the wrong resident.
+        try:
+            from hugpy_platform.model_keys import model_key_forms
+            wanted = model_key_forms(model_key)
+            matches = [row for key, row in _RECORDS.items()
+                       if wanted & model_key_forms(key)]
+        except Exception:  # noqa: BLE001 — optional matching helper
+            matches = []
+        if len(matches) == 1:
+            return dict(matches[0])
+        return None
 
 
 def keys() -> List[str]:

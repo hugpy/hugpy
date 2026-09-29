@@ -305,11 +305,22 @@ def test_route_v2v_source_video_200():
 #     invariant that lets this land in the dispatch table without dragging CUDA in.
 # --------------------------------------------------------------------------- #
 def test_wan_vace_import_is_gpu_stack_free():
-    import importlib as _il
-    _il.import_module("hugpy_video.intel.studio.runners.wan_vace")
-    heavy = [m for m in ("torch", "diffusers", "transformers", "bitsandbytes")
-             if m in sys.modules]
-    assert not heavy, f"importing wan_vace must not pull the heavy GPU stack; pulled {heavy}"
+    # In a FRESH interpreter: inside the full suite torch/transformers are long
+    # since imported by earlier tests, so an in-process check proves nothing
+    # either way. Same interpreter + this process's sys.path (the in-tree src
+    # roots), nothing else.
+    code = (
+        "import sys, importlib\n"
+        "importlib.import_module('hugpy_video.intel.studio.runners.wan_vace')\n"
+        "heavy = [m for m in ('torch', 'diffusers', 'transformers', 'bitsandbytes')"
+        " if m in sys.modules]\n"
+        "assert not heavy, f'importing wan_vace must not pull the heavy GPU stack; pulled {heavy}'\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          text=True, timeout=120, env=env)
+    assert proc.returncode == 0, proc.stderr[-2000:]
 
 
 CHECKS = [

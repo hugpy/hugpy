@@ -194,6 +194,35 @@ def test_3a_inprocess_on_demand_evicted(inprocess, fixed_mem):
     assert inprocess == ["ip"]
 
 
+def test_3a2_operator_evict_is_recorded_in_the_eviction_stream(
+        inprocess, fixed_mem, seams):
+    """The explicit control verb must be visible alongside automatic reclaim."""
+    events = []
+
+    class _Scope:
+        def __enter__(self):
+            return "operator-run"
+
+        def __exit__(self, *_exc):
+            return False
+
+    class _Telemetry:
+        @staticmethod
+        def run_scope():
+            return _Scope()
+
+    seams.setattr(agent, "_evt", _Telemetry())
+    seams.setattr(agent, "_evt_emit",
+                  lambda stage, **fields: events.append((stage, fields)))
+
+    b = _new_client().post("/ops/evict", json={"model_key": "ip"}).get_json()
+    assert b["evicted"] is True
+    assert [stage for stage, _ in events] == ["evict.start", "evict.done"]
+    assert events[0][1]["trigger"] == "operator"
+    assert events[1][1]["tier"] == "in-process"
+    assert events[1][1]["freed_bytes"] == 4000
+
+
 def test_3b_static_residency_gated_without_force(inprocess, fixed_mem):
     agent._RUNTIME_SETTINGS.update({"residency": {"ip": "static"}})
     b = _new_client().post("/ops/evict", json={"model_key": "ip"}).get_json()

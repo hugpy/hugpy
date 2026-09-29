@@ -36,6 +36,33 @@ hc = importlib.import_module("hugpy_engine.serve.hot_cache")
 # cases (a small budget from one test must not silently disable the next).
 _REAL_BUDGET = hc._budget_bytes
 _REAL_FREE = hc._free_bytes
+_REAL_MODELS_HOME = hc._models_home
+_REAL_MIN_RESIDENCY = hc._min_residency_s
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _restore_hot_cache_module_state():
+    """The script-style body reassigns hot_cache globals directly (and its LAST
+    ``_reset(budget=...)`` is never undone), so without this the lambda budget
+    leaked into every later test in the session — test_budget_min_wins saw a
+    10 GiB constant instead of the real ``_budget_bytes`` (triage 2026-09-29)."""
+    saved_root = os.environ.get("HUGPY_HOT_CACHE_ROOT")
+    yield
+    hc._budget_bytes = _REAL_BUDGET
+    hc._free_bytes = _REAL_FREE
+    hc._models_home = _REAL_MODELS_HOME
+    hc._min_residency_s = _REAL_MIN_RESIDENCY
+    if saved_root is None:
+        os.environ.pop("HUGPY_HOT_CACHE_ROOT", None)
+    else:
+        os.environ["HUGPY_HOT_CACHE_ROOT"] = saved_root
+    with hc._INDEX_LOCK:
+        hc._INDEX = {"version": 1, "entries": {}}
+        hc._INDEX_LOADED = False
+    with hc._STATE_LOCK:
+        hc._QUEUED.clear()
 
 ok = 0
 def check(name, cond):

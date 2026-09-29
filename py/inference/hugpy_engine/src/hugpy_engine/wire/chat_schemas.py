@@ -19,6 +19,13 @@ class ChatBody(BaseModel):
     # Explicit dispatch task key (e.g. "image-text-to-text"); wins over the
     # model's primary_task and over the text-only auto-routing below.
     task: Optional[str] = None
+    # Explicit REPRESENTATION override (operator 2026-09-29): "gguf" |
+    # "transformers" | "auto" (default). Set to gguf/transformers it is
+    # authoritative — resolution picks that representation of the model even if
+    # the other is already loaded. None/"auto" = pick by name qualifier / the
+    # serving representation, exactly as before. Resolution-only: the resolved
+    # registry key already carries the framework, so it never rides to the worker.
+    model_format: Optional[str] = None
     # Client-supplied id so a chat can be cancelled mid-stream
     # (POST /api/llm/chat/cancel/<request_id>).
     request_id: Optional[str] = None

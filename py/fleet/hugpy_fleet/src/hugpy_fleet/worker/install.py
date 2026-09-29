@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -33,6 +35,59 @@ from hugpy_platform.central import central_base_url
 
 _SERVICE_NAME = "hugpy-worker"
 _LAUNCHD_LABEL = "ai.hugpy.worker"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _default_env_file() -> Optional[str]:
+    """The canonical worker-owned configuration, when it already exists.
+
+    Fresh installs still work from flags.  Re-running the installer on an
+    established worker instead adopts ``~/hugpy-worker/worker.env`` so package,
+    CUDA, and service convergence cannot silently replace operator settings.
+    """
+    explicit = (os.environ.get("HUGPY_WORKER_ENV_FILE") or "").strip()
+    candidate = explicit or os.path.join(
+        os.path.expanduser("~"), "hugpy-worker", "worker.env")
+    candidate = os.path.abspath(os.path.expanduser(candidate))
+    return candidate if explicit or os.path.isfile(candidate) else None
+
+
+def _load_worker_env_file(path: str) -> dict[str, str]:
+    """Load the simple ``KEY=value`` subset accepted by systemd EnvironmentFile.
+
+    This deliberately does not ``source`` the file: configuration values are
+    data, not shell code.  Values may be bare or single/double quoted.  The file
+    overrides the caller's ambient environment; explicit installer CLI flags are
+    parsed afterwards and therefore still win for a deliberate one-off run.
+    """
+    loaded: dict[str, str] = {}
+    with open(path, "r", encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"{path}:{lineno}: expected KEY=value")
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not _ENV_KEY_RE.fullmatch(key):
+                raise ValueError(f"{path}:{lineno}: invalid environment key {key!r}")
+            value = value.strip()
+            try:
+                words = shlex.split(value, comments=False, posix=True)
+            except ValueError as exc:
+                raise ValueError(f"{path}:{lineno}: {exc}") from exc
+            if len(words) > 1:
+                raise ValueError(
+                    f"{path}:{lineno}: quote values containing whitespace")
+            decoded = words[0] if words else ""
+            loaded[key] = decoded
+    os.environ.update(loaded)
+    return loaded
+
+
+def _systemd_quote(value: str) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _fleet_default_serve_mode() -> str:
@@ -47,8 +102,13 @@ def _fleet_default_serve_mode() -> str:
         return "swap"
 
 
-def _worker_argv(opts) -> List[str]:
+def _worker_argv(opts, *, env_only: bool = False) -> List[str]:
     argv = [sys.executable, "-m", "hugpy_fleet.worker", "--central", opts.central]
+    if env_only:
+        # WORKER_CENTRAL_URL and every other worker setting come from the
+        # EnvironmentFile.  Do not freeze a second, higher-precedence copy in
+        # ExecStart; editing worker.env must take effect on the next restart.
+        return [sys.executable, "-m", "hugpy_fleet.worker"]
     if opts.name:
         argv += ["--name", opts.name]
     if getattr(opts, "advertise", None):
@@ -95,11 +155,15 @@ def _render_unit(opts) -> str:
     """The canonical systemd user unit text for ``opts`` (pure — no I/O). Factored
     out so drift detection can diff the existing unit against what we WOULD write
     without touching the filesystem."""
-    exec_start = " ".join(_worker_argv(opts))
+    env_file = getattr(opts, "env_file", None)
+    exec_start = " ".join(_worker_argv(opts, env_only=bool(env_file)))
     # Use systemd's %h home specifier for the engine-dir default so the unit is
     # portable across users (no baked-in /home/<user> path).
-    env_lines = "\n".join(f'Environment="{k}={v}"'
-                          for k, v in _env_for(opts, home="%h").items())
+    if env_file:
+        env_lines = f"EnvironmentFile={os.path.abspath(env_file)}"
+    else:
+        env_lines = "\n".join(f'Environment="{k}={v}"'
+                              for k, v in _env_for(opts, home="%h").items())
     return (
         "[Unit]\n"
         f"Description=hugpy worker ({opts.name})\n"
@@ -108,6 +172,11 @@ def _render_unit(opts) -> str:
         "[Service]\n"
         "Type=simple\n"
         f"{env_lines}\n"
+        # Repair a partial/broken package rollout before Python imports the
+        # worker agent. The sidecar is stdlib-only, so it still runs when an
+        # installed Hugpy module raises during import.
+        f"ExecStartPre={sys.executable} %h/hugpy-worker/preflight_update.py "
+        f"--central={_systemd_quote(opts.central)}\n"
         f"ExecStart={exec_start}\n"
         # on-failure (NOT always): a deliberate operator block/revoke makes the
         # agent exit 0 and it must STAY stopped — Restart=always would fight the
@@ -157,6 +226,14 @@ def _install_systemd_user(opts) -> str:
         return f"DRY-RUN: systemd user unit NOT written ({unit_path})"
 
     os.makedirs(unit_dir, exist_ok=True)
+    helper_dir = os.path.join(os.path.expanduser("~"), "hugpy-worker")
+    os.makedirs(helper_dir, exist_ok=True)
+    helper_source = os.path.join(os.path.dirname(__file__), "preflight_update.py")
+    helper_target = os.path.join(helper_dir, "preflight_update.py")
+    with open(helper_source, "r", encoding="utf-8") as src, \
+            open(helper_target, "w", encoding="utf-8") as dst:
+        dst.write(src.read())
+    os.chmod(helper_target, 0o755)
     # Establish ~/.hugpy/{state,config,logs,run} at install time so the very
     # first write lands in the right place — "dictated at install".
     try:
@@ -351,9 +428,24 @@ def _resolve_service(choice: str) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    env_probe = argparse.ArgumentParser(add_help=False)
+    env_probe.add_argument("--env-file")
+    env_known, _ = env_probe.parse_known_args(raw_argv)
+    env_file = env_known.env_file or _default_env_file()
+    if env_file:
+        env_file = os.path.abspath(os.path.expanduser(env_file))
+        try:
+            _load_worker_env_file(env_file)
+        except (OSError, ValueError) as exc:
+            env_probe.error(f"cannot load worker environment file: {exc}")
+
     p = argparse.ArgumentParser(
         prog="hugpy-worker-install",
         description="Install/run this machine as a hugpy GPU worker (cross-platform).")
+    p.add_argument("--env-file", default=env_file,
+                   help="authoritative worker KEY=value file; defaults to "
+                        "~/hugpy-worker/worker.env when it exists")
     p.add_argument("--central", default=central_base_url(default=None),
                    help="central hugpy base URL (e.g. https://your-hugpy/); "
                         "env HUGPY_BASE_URL, legacy WORKER_CENTRAL_URL honoured")
@@ -459,7 +551,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--comfy-start-check", action="store_true",
                    help="after install, actually START comfy and verify "
                         "/system_stats + a checkpoint (slower)")
-    opts = p.parse_args(list(sys.argv[1:] if argv is None else argv))
+    opts = p.parse_args(raw_argv)
 
     if not opts.central:
         p.error("--central is required (or set WORKER_CENTRAL_URL)")
@@ -496,14 +588,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(_setup.render(checks))
         return _setup.overall_rc(checks)
 
+    # Required convergence is a PRECONDITION for every service backend, not
+    # merely foreground/none.  Previously the systemd/launchd/schtasks path
+    # wrote and started the unit first and only returned the failing self-check
+    # code at the very end.  A GPU box whose CUDA binding build failed therefore
+    # registered as a healthy worker with the ordinary CPU-only PyPI wheel — the
+    # exact silent fallback the CUDA check says is forbidden.  Refuse service
+    # registration until every required check passes.  Operators who knowingly
+    # want a CPU engine retain the explicit --no-provision-engine opt-out.
+    convergence_rc = _setup.overall_rc(checks)
+    if convergence_rc != 0:
+        print(_setup.render(checks))
+        print("worker convergence found required failures; NOT registering or "
+              "starting the worker service.", file=sys.stderr)
+        return convergence_rc
+
     # ── write + enable the service (dry-run writes nothing) ───────────────────
     if service in ("foreground", "none"):
         print(_setup.render(checks))
-        rc = _setup.overall_rc(checks)
-        if rc != 0:
-            print("self-check found required failures; NOT starting the worker.",
-                  file=sys.stderr)
-            return rc
         if service == "none":
             print("worker command:", " ".join(_worker_argv(opts)))
             return 0

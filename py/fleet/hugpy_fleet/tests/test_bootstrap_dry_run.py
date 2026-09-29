@@ -42,3 +42,28 @@ def test_dry_run_help_lists_flag():
                         capture_output=True, text=True)
     assert cp.returncode == 0
     assert "--dry-run" in (cp.stdout + cp.stderr)
+
+
+def test_existing_worker_env_supplies_install_defaults(tmp_path):
+    home = tmp_path / "home"
+    root = home / "hugpy-worker"
+    root.mkdir(parents=True)
+    env_file = root / "worker.env"
+    env_file.write_text(
+        "WORKER_CENTRAL_URL=http://bogus.invalid:7002\n"
+        "WORKER_NAME=env-box\n"
+        "WORKER_PORT=9200\n"
+        f"DEFAULT_ROOT={root / 'storage'}\n",
+        encoding="utf-8",
+    )
+    cp = subprocess.run(
+        ["bash", str(BOOTSTRAP), "--dry-run"],
+        env={"HOME": str(home), "PATH": "/usr/local/bin:/usr/bin:/bin"},
+        capture_output=True, text=True, timeout=120,
+    )
+    out = cp.stdout + cp.stderr
+    assert cp.returncode == 0, out
+    assert f"using authoritative worker environment: {env_file}" in out
+    assert "--name env-box" in out
+    assert "--port 9200" in out
+    assert f"--env-file {env_file}" in out

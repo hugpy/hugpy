@@ -363,6 +363,7 @@ class HeartbeatRequest(BaseModel):
     # UTIL-08 disk-truth: which ASSIGNED models actually have files on the
     # worker's disk — lets the console show "assigned but missing" drift.
     models_local: list[str] | None = None
+    models_discovered: dict[str, dict] | None = None
     # Models the worker is currently pulling from central/HF in the background.
     provisioning: list[str] | None = None
     # Per-model download progress for the models in `provisioning`:
@@ -587,10 +588,36 @@ def workers_payload():
                            else w.get("pkg_version") == required)
         w["boot_prewarm"] = _stars.get(w.get("id")) or None
         w["wildcard"] = bool(_wildcards.get(w.get("id")))
+        try:
+            from hugpy_fleet.central.blocklist import pair_blocks_for_worker
+            w["blocked_models"] = pair_blocks_for_worker(w.get("id"))
+        except Exception:  # noqa: BLE001 — block metadata must not break roster reads
+            w["blocked_models"] = {}
         _br = _breakers.get(w.get("id")) or {}
         w["unreachable"] = bool(_br.get("open"))
         w["unreachable_reason"] = (_br.get("reason") or None
                                    if w["unreachable"] else None)
+        # Drive presence is a picker input, not an allocation. Surface every
+        # local-only model with the feasibility-derived modes used by /assign.
+        try:
+            from hugpy_fleet.central.workers import (
+                feasible_modes_for, feasibility_context, worker_can_hold,
+            )
+            assigned = set(w.get("models") or [])
+            candidates = {}
+            for key in sorted(set(w.get("models_local") or []) - assigned):
+                modes = list(feasible_modes_for(w.get("id"), key) or [])
+                ctx = feasibility_context(w.get("id"), key)
+                if worker_can_hold(w, key) is False:
+                    modes = []
+                candidates[key] = {
+                    "feasible": modes,
+                    "context": ctx,
+                    "reason": None if modes else "no feasible allocation mode for this worker",
+                }
+            w["allocation_candidates"] = candidates
+        except Exception:  # noqa: BLE001 — picker metadata never breaks roster
+            w["allocation_candidates"] = {}
     # Call-time attribution (2026-07-14): stamp each worker's pid_registry
     # unattributed entries that are a RELAY-dispatched foreign GPU service
     # (identity-render) with the identity slug + job_id of the active
@@ -1355,6 +1382,7 @@ def workers_heartbeat(worker_id):
         loaded_models=body.loaded_models,
         loading=body.loading,
         models_local=body.models_local,
+        models_discovered=body.models_discovered,
         provisioning=body.provisioning,
         provision_progress=body.provision_progress,
         spill=body.spill,
@@ -1402,6 +1430,20 @@ def workers_heartbeat(worker_id):
     if worker.get("admission") == "blocked":
         # Persistent eviction: 403 stops the agent instead of letting it limp on.
         abort(403, description="Worker is blocked by the operator.")
+    if body.models_local is not None:
+        # Drive presence is intentionally NOT an allocation. The roster exposes
+        # these models as operator-selectable candidates; assignment and pinning
+        # happen only after explicit user action and feasibility validation.
+        pass
+    if body.models_discovered is not None:
+        try:
+            from hugpy_engine.config.models.models_config import record_worker_models
+            discovered_keys = record_worker_models(worker_id, body.models_discovered)
+            # Discovery records inventory only. It is not a placement signal:
+            # local models become allocations only through explicit operator
+            # selection from the worker allocation candidates.
+        except Exception:  # noqa: BLE001 — catalog sync cannot break a beat
+            logger.exception("worker model discovery sync failed for %s", worker_id)
     # No per-beat warm: a heartbeat never loads a model (2026-09-25 — models
     # load when called; 🔒static no longer means "kept loaded").
     # 📌 PIN RESTORE REMOVED (operator, 2026-09-25): "any default loads on
@@ -2348,6 +2390,41 @@ def workers_external(worker_id):
                     "total_vram": data.get("total_vram")})
 
 
+@worker_bp.route("/llm/workers/<worker_id>/activity", methods=["GET"])
+def workers_activity(worker_id):
+    """Host-wide GPU activity, including processes outside Hugpy control."""
+    from hugpy_fleet.central import worker_http
+    worker = get_worker(worker_id)
+    if worker is None:
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    try:
+        response = worker_http.get(worker, "/ops/activity", read_timeout=10.0)
+        payload = response.json()
+        if isinstance(payload, dict) and isinstance(payload.get("activity"), list):
+            # The allocation/status row is the one model display. A registered
+            # process whose normalized key is already in the worker's disk
+            # inventory is the same model (for example, Ollama's
+            # ``ollama:name:tag`` lease versus ``ollama~name~tag`` catalog
+            # key), so don't render a second pseudo-model chip for it here.
+            # Uncatalogued host processes remain visible as activity.
+            local_keys = {
+                str(key).strip().lower().replace(":", "~").replace("/", "~")
+                for key in (worker.get("models_local") or [])
+            }
+            payload["activity"] = [row for row in payload["activity"]
+                                   if not (isinstance(row, dict)
+                                           and row.get("kind") == "infrastructure")
+                                   and not (isinstance(row, dict)
+                                            and row.get("kind") == "external"
+                                            and str(row.get("model_key") or "").strip().lower()
+                                            .replace(":", "~").replace("/", "~") in local_keys)]
+        return jsonify(payload), response.status_code
+    except worker_http.WorkerUnreachable as exc:
+        return jsonify({"ok": False, "error": exc.as_error()}), 503
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+
 @worker_bp.route("/llm/workers/<worker_id>/external-set", methods=["POST"])
 def workers_external_set(worker_id):
     """Adjust a RUNNING external lease's policy — the console twin of the
@@ -2369,6 +2446,24 @@ def workers_external_set(worker_id):
         payload["resume"] = body["resume"]
     return _relay_worker_op(worker_id, "/ops/external/set", payload,
                             timeout=15.0, action="external-set")
+
+
+@worker_bp.route("/llm/workers/<worker_id>/external-chat", methods=["POST"])
+def workers_external_chat(worker_id):
+    """Relay a chat call to a registered external API without controlling its process."""
+    from hugpy_fleet.central import worker_http
+    worker = get_worker(worker_id)
+    if worker is None:
+        abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    body = request.get_json(silent=True) or {}
+    try:
+        response = worker_http.post(worker, "/ops/external/chat", json=body,
+                                    read_timeout=330.0)
+        return jsonify(response.json()), response.status_code
+    except worker_http.WorkerUnreachable as exc:
+        return jsonify({"ok": False, "error": exc.as_error()}), 503
+    except Exception as exc:  # noqa: BLE001 — preserve an honest transport error
+        return jsonify({"ok": False, "error": str(exc)}), 502
 
 
 @worker_bp.route("/llm/workers/<worker_id>/reap-orphans", methods=["POST"])
@@ -2915,6 +3010,13 @@ def _validate_band_values(spill) -> "str | None":
 _EXPLICIT_BUDGET_KEYS = ({"gpu_mem_gib", "cpu_mem_gib", "threads", "tensor_split"}
                          | _BAND_SPILL_KEYS | _EXPLICIT_MODE_COMPANION_KEYS
                          | _MOE_SPILL_KEYS)
+# Context/KV sizing is supported by both the GGUF slot path and the
+# Transformers resident path.  It is validated and priced by the worker for
+# either engine, so it must not make an otherwise engine-agnostic context edit
+# look like a GGUF-only explicit budget.
+_GGUF_EXPLICIT_BUDGET_KEYS = _EXPLICIT_BUDGET_KEYS - {
+    "ctx_pct", "ctx_deviation_pct",
+}
 
 
 def _alloc_is_gguf_only(spill) -> bool:
@@ -2922,8 +3024,10 @@ def _alloc_is_gguf_only(spill) -> bool:
     non-GGUF model at the engine gate.
 
     GGUF-only iff it carries any GGUF-exclusive knob (gpu_mem_gib / cpu_mem_gib /
-    threads / tensor_split, a t21 band, an MoE split, or the explicit-only
-    companions leniency_pct / priority_device) OR ``alloc_mode: "explicit"``.
+    threads / tensor_split, GPU/RAM tolerance bands, an MoE split, or the
+    explicit-only companions leniency_pct / priority_device) OR
+    ``alloc_mode: "explicit"``. Context/KV fields are deliberately excluded:
+    both GGUF and Transformers workers price and serve them.
 
     ``alloc_mode: "max-ram"`` is NOT GGUF-only (2026-07-24): the transformers and
     diffusers loaders honor max-ram since Slice C, so a bare max-ram spill is an
@@ -2931,7 +3035,7 @@ def _alloc_is_gguf_only(spill) -> bool:
     GPU / CPU only, which carry ONLY n_gpu_layers) also apply to every engine."""
     if not spill:
         return False
-    if any(k in spill for k in _EXPLICIT_BUDGET_KEYS):
+    if any(k in spill for k in _GGUF_EXPLICIT_BUDGET_KEYS):
         return True
     # alloc_mode is value-sensitive: explicit is GGUF-only, max-ram is not.
     return str(spill.get("alloc_mode") or "").strip().lower() == "explicit"
@@ -3814,6 +3918,144 @@ def workers_fetch(worker_id):
                         "error": f"{type(exc).__name__}: {exc}"})
 
 
+@worker_bp.route("/llm/workers/<worker_id>/copy-from-worker", methods=["POST"])
+def workers_copy_model_from_worker(worker_id):
+    """Explicitly copy one worker-owned model into Central's model store."""
+    import json
+    import os
+    import shutil
+    import tempfile
+    import tarfile
+    from urllib.parse import quote
+
+    try:
+        from hugpy_server.app.operator_auth import operator_authenticated
+        if not operator_authenticated():
+            abort(401, description="Operator authentication required.")
+    except ImportError:
+        abort(503, description="Operator authentication is unavailable.")
+
+    model_key = str((request.get_json(silent=True) or {}).get("model_key") or "").strip()
+    if not model_key:
+        return jsonify({"ok": False, "error": "missing model_key"}), 400
+    worker = get_worker(worker_id)
+    if worker is None:
+        abort(404, description=f"no worker {worker_id!r}")
+    model = get_models_dict(dict_return=True).get(model_key)
+    if not isinstance(model, dict):
+        abort(404, description=f"unknown model {model_key!r}")
+    discovered = worker.get("models_discovered") or {}
+    source_key = model_key if model_key in discovered else None
+    if source_key is None:
+        def _identity(value):
+            return "".join(c.lower() for c in str(value or "") if c.isalnum())
+        wanted = {_identity(model_key), _identity(model.get("hub_id")),
+                  _identity(model.get("name"))} - {""}
+        matches = [(key, row) for key, row in discovered.items()
+                   if isinstance(row, dict) and wanted.intersection(
+                       {_identity(key), _identity(row.get("model_key")),
+                        _identity(row.get("hub_id")), _identity(row.get("name"))} - {""})]
+        if len(matches) == 1:
+            source_key, _source_row = matches[0]
+    source = discovered.get(source_key) if source_key else None
+    if not isinstance(source, dict) or not source.get("worker_location"):
+        return jsonify({"ok": False,
+                        "error": f"{worker.get('name') or worker_id} does not report a local copy of {model_key}"}), 409
+
+    dest = os.path.realpath(route_destination(model))
+    from hugpy_storage.model_presence import model_looks_downloaded
+    if model_looks_downloaded(dest, model):
+        return jsonify({"ok": True, "already_on_central": True,
+                        "model_key": model_key, "path": dest})
+    if os.path.exists(dest):
+        return jsonify({"ok": False, "already_on_central": False,
+                        "error": "Central has a partial or unrecognized copy; refusing to overwrite it."}), 409
+
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    stage = tempfile.mkdtemp(prefix=".worker-copy-", dir=os.path.dirname(dest))
+    moved = 0
+
+    class _ResponseReader:
+        def __init__(self, response):
+            self.chunks = iter(response.iter_raw())
+            self.buffer = bytearray()
+            self.done = False
+
+        def read(self, size=-1):
+            if size is None:
+                size = -1
+            while not self.done and (size < 0 or len(self.buffer) < size):
+                try:
+                    self.buffer.extend(next(self.chunks))
+                except StopIteration:
+                    self.done = True
+            if size < 0:
+                out = bytes(self.buffer)
+                self.buffer.clear()
+                return out
+            out = bytes(self.buffer[:size])
+            del self.buffer[:size]
+            return out
+
+    try:
+        from hugpy_fleet.central import worker_http
+        local_key = source.get("model_key") or source_key or model_key
+        archive_url = "/models/export/" + quote(str(local_key), safe="")
+        with worker_http.stream("GET", worker, archive_url, call="transfer") as response:
+            if response.status_code != 200:
+                response.read()
+                return jsonify({"ok": False,
+                                "error": f"worker export refused ({response.status_code}): {response.text[:500]}"}), 409
+            with tarfile.open(fileobj=_ResponseReader(response), mode="r|*") as archive:
+                for member in archive:
+                    rel = member.name.replace("\\", "/")
+                    if (not rel or rel.startswith("/") or
+                            any(part in ("", ".", "..") for part in rel.split("/"))):
+                        raise ValueError(f"unsafe archive path {member.name!r}")
+                    target = os.path.realpath(os.path.join(stage, *rel.split("/")))
+                    if target != stage and not target.startswith(stage + os.sep):
+                        raise ValueError(f"archive path escapes staging dir: {member.name!r}")
+                    if member.isdir():
+                        os.makedirs(target, exist_ok=True)
+                        continue
+                    if not member.isfile():
+                        raise ValueError(f"unsupported archive entry: {member.name!r}")
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise ValueError(f"missing archive data for {member.name!r}")
+                    with stream, open(target, "wb") as output:
+                        shutil.copyfileobj(stream, output, length=1024 * 1024)
+                    moved += member.size
+
+        if not model_looks_downloaded(stage, model):
+            raise ValueError("copied files do not form a complete model")
+        marker = os.path.join(stage, "hugpy.json")
+        if not os.path.isfile(marker):
+            with open(marker, "w", encoding="utf-8") as fh:
+                json.dump({k: model.get(k) for k in
+                           ("model_key", "name", "hub_id", "framework", "tasks",
+                            "primary_task", "filename", "model_max_length")
+                           if model.get(k) is not None}, fh, indent=2)
+                fh.write("\n")
+        os.replace(stage, dest)
+        try:
+            from hugpy_engine.config.models.models_config import _apply_worker_catalog
+            _apply_worker_catalog(force=True)
+        except Exception:
+            pass
+        return jsonify({"ok": True, "already_on_central": False,
+                        "model_key": model_key, "worker_id": worker_id,
+                        "bytes_copied": moved, "path": dest})
+    except Exception as exc:
+        logger.exception("copy of worker model %s from %s failed", model_key, worker_id)
+        return jsonify({"ok": False,
+                        "error": f"{type(exc).__name__}: {exc}"}), 502
+    finally:
+        if os.path.isdir(stage):
+            shutil.rmtree(stage, ignore_errors=True)
+
+
 # ── worker slots: VRAM-fit preflight + load (the GPU analog of /llm/slots) ──
 #
 # The local slot pool refuses a model that won't fit RAM before it OOMs the box
@@ -4123,6 +4365,49 @@ def model_unblock(model_key):
         pass
     return jsonify({"ok": True, "model_key": model_key, "blocked": False,
                     "was_blocked": was})
+
+
+@worker_bp.route("/llm/models/<path:model_key>/workers/<worker_id>/block", methods=["POST"])
+def model_worker_block(model_key, worker_id):
+    """Block this model on one worker only; its other allocations are untouched."""
+    model_key = _manifest_key_for(model_key) or model_key
+    if model_key not in get_models_dict(dict_return=True):
+        return jsonify({"error": f"unknown model key '{model_key}'"}), 404
+    worker = next((w for w in list_workers() if str(w.get("id")) == str(worker_id)), None)
+    if worker is None:
+        return jsonify({"error": f"unknown worker id '{worker_id}'"}), 404
+    from hugpy_fleet.central.blocklist import operator_block_pair
+    pair_key = str(model_key).split("~")[-1].strip().lower()
+    rec = operator_block_pair(pair_key, worker_id, worker_name=worker.get("name"))
+    try:
+        from hugpy_server.app.routes.comms_routes import audit
+        audit("model.worker_block", {"model_key": model_key, "worker_id": worker_id})
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"ok": True, "model_key": model_key, "worker_id": worker_id,
+                    "blocked": True, "block": rec})
+
+
+@worker_bp.route("/llm/models/<path:model_key>/workers/<worker_id>/unblock", methods=["POST"])
+def model_worker_unblock(model_key, worker_id):
+    """Clear this worker's operator block; automatic fit blocks stay intact."""
+    model_key = _manifest_key_for(model_key) or model_key
+    if model_key not in get_models_dict(dict_return=True):
+        return jsonify({"error": f"unknown model key '{model_key}'"}), 404
+    worker = next((w for w in list_workers() if str(w.get("id")) == str(worker_id)), None)
+    if worker is None:
+        return jsonify({"error": f"unknown worker id '{worker_id}'"}), 404
+    from hugpy_fleet.central.blocklist import operator_unblock_pair
+    pair_key = str(model_key).split("~")[-1].strip().lower()
+    changed, rec = operator_unblock_pair(pair_key, worker_id)
+    try:
+        from hugpy_server.app.routes.comms_routes import audit
+        audit("model.worker_unblock", {"model_key": model_key, "worker_id": worker_id,
+                                       "was_blocked": changed})
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"ok": True, "model_key": model_key, "worker_id": worker_id,
+                    "blocked": False, "was_blocked": changed, "previous": rec})
 
 
 @worker_bp.route("/llm/models/<path:model_key>/placement", methods=["GET"])

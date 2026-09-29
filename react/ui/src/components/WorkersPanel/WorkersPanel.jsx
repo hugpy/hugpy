@@ -14,7 +14,7 @@ import { WorkerRow, effectivePin } from './WorkerRow'
 import { responseReason } from '../responseReason'
 import './WorkersPanel.css'
 
-export default function WorkersPanel({ models = [], embedded = false }) {
+export default function WorkersPanel({ models = [], embedded = false, onChat = null }) {
   // Fleet distribution mode (feasible|designated) — lifted here so the top-of-
   // panel switch, the per-worker wildcard toggle and the per-model strict
   // checkbox all read the SAME live mode from one server-side source.
@@ -373,37 +373,20 @@ export default function WorkersPanel({ models = [], embedded = false }) {
     } catch (err) { alert(`Unassign failed: ${err.message}`) }
   }, [load])
 
-  // Operator model BLOCK / UNBLOCK (global): removes a model from the serving
-  // pool everywhere (never routed / assigned / warmed / a fallback default) or
-  // returns it. Optimistically updates blockedKeys so the ⛔ chip flips at once;
-  // reverts on error. Block does NOT unassign — the designation row stays (inert)
-  // and pin is unaffected (block outranks pin at routing time). Operator token is
-  // merged by hugpyFetch, same as every mutation here.
-  const toggleBlock = useCallback(async (modelKey, block) => {
+  // Model × worker block: excludes this worker from routing for this model only.
+  const toggleBlock = useCallback(async (worker, modelKey, block) => {
     if (block && !confirm(
-      `Block "${modelKey}" from the serving pool?\n\n` +
-      `It will no longer be routed to, assigned, warmed, or used as a fallback ` +
-      `default anywhere — files stay on disk and existing designations stay ` +
-      `recorded (inert). Reversible.`)) return
-    setBlockedKeys(prev => {
-      const next = new Set(prev)
-      if (block) next.add(modelKey); else next.delete(modelKey)
-      return next
-    })
+      `Block "${modelKey}" on ${worker.name}?\n\n` +
+      `This prevents routing this model to ${worker.name}. Its allocation ` +
+      `and routing on other workers stay unchanged.`)) return
     try {
       await fetchJson(
-        `/api/llm/models/${encodeURIComponent(modelKey)}/${block ? 'block' : 'unblock'}`,
+        `/api/llm/models/${encodeURIComponent(modelKey)}/workers/${encodeURIComponent(worker.id)}/${block ? 'block' : 'unblock'}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}) })
       load()
     } catch (err) {
-      // revert the optimistic flip on failure
-      setBlockedKeys(prev => {
-        const next = new Set(prev)
-        if (block) next.delete(modelKey); else next.add(modelKey)
-        return next
-      })
-      alert(`${block ? 'Block' : 'Unblock'} failed: ${err.message}`)
+      alert(`${block ? 'Worker block' : 'Worker unblock'} failed: ${err.message}`)
     }
   }, [load])
 
@@ -1135,6 +1118,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
               key={w.id}
               worker={w}
               models={models}
+              onChat={onChat}
               allocation={allocationMap}
               onAssign={assign}
               onRefresh={load}

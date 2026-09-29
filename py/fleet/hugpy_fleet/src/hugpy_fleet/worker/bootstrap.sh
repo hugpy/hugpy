@@ -4,7 +4,8 @@
 # Usage:
 #   bootstrap.sh --central https://dev.hugpy.ai --name box-1 --token <enroll-token> \
 #                [--port 9100] [--version 0.1.162] [--storage-root /mnt/llm_storage] \
-#                [--venv ~/hugpy-worker/venv] [--force] [--dry-run] \
+#                [--venv ~/hugpy-worker/venv] [--env-file ~/hugpy-worker/worker.env] \
+#                [--force] [--dry-run] \
 #                [--advertise http://<addr>:9100] [--install-comfy] [--self-check-only]
 #
 #   --dry-run          inspect + print every venv/pip/install step; change NOTHING.
@@ -49,18 +50,6 @@
 # WORKER-SETUP.md §2/§3.
 set -eu
 
-CENTRAL=""
-NAME="$(hostname)"
-TOKEN=""
-PORT="9100"
-VERSION=""
-STORAGE_ROOT=""
-VENV="${HOME}/hugpy-worker/venv"
-FORCE=""
-PROFILE="${WORKER_PROFILE:-gpu-worker}"
-DRY=""
-PASSTHRU=""   # extra args forwarded verbatim to the python installer
-
 die() { printf 'bootstrap: %s\n' "$*" >&2; exit 1; }
 say() { printf 'bootstrap: %s\n' "$*"; }
 # run: execute a mutating command, or (under --dry-run) print exactly what would
@@ -73,6 +62,64 @@ run() {
   fi
 }
 
+# An established worker owns its configuration.  Discover worker.env before
+# resolving defaults, and parse it as data rather than sourcing shell code.
+ENV_FILE="${HUGPY_WORKER_ENV_FILE:-}"
+_want_env_path=""
+for _arg in "$@"; do
+  if [ -n "$_want_env_path" ]; then
+    ENV_FILE="$_arg"
+    _want_env_path=""
+    continue
+  fi
+  case "$_arg" in
+    --env-file) _want_env_path=1 ;;
+    --env-file=*) ENV_FILE="${_arg#--env-file=}" ;;
+  esac
+done
+[ -z "$_want_env_path" ] || die "--env-file requires a path"
+if [ -z "$ENV_FILE" ] && [ -r "${HOME}/hugpy-worker/worker.env" ]; then
+  ENV_FILE="${HOME}/hugpy-worker/worker.env"
+fi
+
+load_worker_env() {
+  _path="$1"
+  [ -r "$_path" ] || die "worker environment file is not readable: $_path"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _line="${_line%$'\r'}"
+    case "$_line" in ''|'#'*) continue ;; esac
+    case "$_line" in *=*) ;; *) die "invalid worker environment line in $_path: $_line" ;; esac
+    _key="${_line%%=*}"
+    _value="${_line#*=}"
+    [[ "$_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+      || die "invalid worker environment key in $_path: $_key"
+    if [[ "$_value" == \"*\" && "$_value" == *\" ]]; then
+      _value="${_value:1:${#_value}-2}"
+    elif [[ "$_value" == \'*\' && "$_value" == *\' ]]; then
+      _value="${_value:1:${#_value}-2}"
+    fi
+    export "$_key=$_value"
+  done < "$_path"
+  export HUGPY_WORKER_ENV_FILE="$_path"
+  say "using authoritative worker environment: $_path"
+}
+[ -z "$ENV_FILE" ] || load_worker_env "$ENV_FILE"
+
+CENTRAL="${WORKER_CENTRAL_URL:-}"
+NAME="${WORKER_NAME:-$(hostname)}"
+# Allow a root provisioning wrapper to pass the enrollment credential through
+# the environment, avoiding its appearance in the short-lived process argv.
+TOKEN="${WORKER_ENROLL_TOKEN:-}"
+PIP_RESUME_RETRIES="${HUGPY_PIP_RESUME_RETRIES:-0}"
+PORT="${WORKER_PORT:-9100}"
+VERSION=""
+STORAGE_ROOT="${DEFAULT_ROOT:-}"
+VENV="${HUGPY_WORKER_VENV:-${HOME}/hugpy-worker/venv}"
+FORCE=""
+PROFILE="${WORKER_PROFILE:-gpu-worker}"
+DRY=""
+PASSTHRU=""   # extra args forwarded verbatim to the python installer
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --central)      CENTRAL="${2:-}"; shift 2 ;;
@@ -82,6 +129,8 @@ while [ $# -gt 0 ]; do
     --version)      VERSION="${2:-}"; shift 2 ;;
     --storage-root) STORAGE_ROOT="${2:-}"; shift 2 ;;
     --venv)         VENV="${2:-}"; shift 2 ;;
+    --env-file)     ENV_FILE="${2:-}"; shift 2 ;;
+    --env-file=*)   ENV_FILE="${1#--env-file=}"; shift 1 ;;
     --profile)      PROFILE="${2:-}"; shift 2 ;;
     --force)        FORCE="1"; shift 1 ;;
     --dry-run)      DRY="1"; shift 1 ;;
@@ -207,7 +256,12 @@ else
 fi
 say "pip install --upgrade ${PIP_CONSTRAINT} ${PIP_EXTRA_INDEX} '${SPEC}'"
 # shellcheck disable=SC2086  # PIP_CONSTRAINT / PIP_EXTRA_INDEX are intentionally two words or empty
-run "$PIP_BIN" install --upgrade $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"
+PIP_RETRY_ARGS=""
+if [ "$PIP_RESUME_RETRIES" -gt 0 ] 2>/dev/null; then
+  PIP_RETRY_ARGS="--resume-retries $PIP_RESUME_RETRIES"
+fi
+# shellcheck disable=SC2086
+run "$PIP_BIN" install --upgrade $PIP_RETRY_ARGS $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"
 if [ -n "$CONSTRAINTS_FILE" ]; then rm -f "$CONSTRAINTS_FILE"; fi
 
 # 4b. optional media-intelligence deps the canonical [engine] venv omits -----
@@ -223,7 +277,8 @@ if [ -n "$CONSTRAINTS_FILE" ]; then rm -f "$CONSTRAINTS_FILE"; fi
 # these — they persist across every version converge. (Its no-constraints
 # fallback is `pip install -U --no-deps`, which touches even less.)
 say "installing media-intelligence deps (sentence-transformers, openai-whisper, keybert; numpy<2.5 for numba)"
-run "$PIP_BIN" install --upgrade sentence-transformers openai-whisper keybert "numpy<2.5"
+# shellcheck disable=SC2086
+run "$PIP_BIN" install --upgrade $PIP_RETRY_ARGS sentence-transformers openai-whisper keybert "numpy<2.5"
 
 # 5. write + enable the systemd unit via the canonical installer -----------
 # COMPAT: when central pins a version older than 0.1.164 the installed
@@ -248,6 +303,14 @@ fi
 if [ -n "$STORAGE_ROOT" ]; then
   case "$HELP" in *--storage-root*) set -- "$@" --storage-root "$STORAGE_ROOT";;
                   *) set -- "$@" --storage "$STORAGE_ROOT";; esac
+fi
+if [ -n "$ENV_FILE" ]; then
+  if [ ! -x "$PY_BIN" ]; then
+    set -- "$@" --env-file "$ENV_FILE"
+  else
+    case "$HELP" in *--env-file*) set -- "$@" --env-file "$ENV_FILE";;
+                    *) say "NOTE: this installer predates --env-file; worker.env was loaded for this run only";; esac
+  fi
 fi
 # Forward turnkey passthrough flags (advertise/comfy/self-check/etc) verbatim.
 # shellcheck disable=SC2086  # PASSTHRU is intentionally word-split

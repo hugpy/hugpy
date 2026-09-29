@@ -215,7 +215,7 @@ compared: only authored and derived artifacts are drift.
 
 | Command | What lands |
 |---|---|
-| `pip install hugpy` | the `hugpy`/`hpy` commands and `hugpy-platform`, nothing heavier |
+| `pip install hugpy` | the `hugpy`/`hpy` commands and every lockstep `hugpy-*` module distribution; runtime-specific native/GPU dependencies remain extras |
 | `pip install "hugpy[server]"` | central: `hugpy-server`, `hugpy-fleet`, `hugpy-engine[gguf]`, media, video, oracle, curation, storage, control, discord bot, gunicorn |
 | `hugpy install-deps` | a worker box's pip extras: `hugpy[gpu-worker]` by default, `--cpu` for `hugpy[cpu-worker]`, `--profile auto` to detect; `--version X.Y.Z` pins |
 | `hugpy install-engine [--cuda]` | the native llama.cpp `llama-server`/`rpc-server` binaries |

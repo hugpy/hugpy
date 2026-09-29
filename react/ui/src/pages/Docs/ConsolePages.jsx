@@ -559,10 +559,12 @@ export function ConsoleServingPage() {
             <tr><td><strong>🔥 serving</strong></td><td>In a slot, healthy, routable — requests reach it instantly.</td></tr>
             <tr><td><strong>⚡ answering</strong></td><td>Its slot is processing a request <em>right now</em>.</td></tr>
             <tr><td><strong>📌 loaded</strong></td><td>Resident in the worker&apos;s own process (ready, but not in a slot).</td></tr>
-            <tr><td><strong>○ cold</strong></td><td>Assigned; loads on the first request for it (or when you explicitly Load it).</td></tr>
+            <tr><td><strong>○ cold</strong></td><td>The files are on this worker&apos;s drive but are not loaded; they load on first request.</td></tr>
+            <tr><td><strong>◌ on central</strong></td><td>Files are on central storage and transfer to the worker on first use.</td></tr>
+            <tr><td><strong>↗ on another worker</strong></td><td>A copy exists on a different worker; the current worker has no local copy.</td></tr>
             <tr><td><strong>⏳ pulling 42%</strong></td><td>Files transferring to the worker, with live progress.</td></tr>
             <tr><td><strong>🔶 heating</strong></td><td>Weights loading into memory right now.</td></tr>
-            <tr><td><strong>✗ missing</strong></td><td>Assigned but files absent — the worker re-pulls on its own; if it never resolves, see <a className="docs-inline-link" href="#worker-troubleshooting/missing-files">the fix-it entry</a>.</td></tr>
+            <tr><td><strong>✗ missing</strong></td><td>Files are confirmed absent from central storage and every worker drive. See <a className="docs-inline-link" href="#worker-troubleshooting/missing-files">the fix-it entry</a>.</td></tr>
           </tbody>
         </table>
         <p className="docs-note">
@@ -969,12 +971,14 @@ export function ConsoleGlossaryPage() {
             <tr><td><strong>⚡ answering</strong></td><td>Processing a request at this very moment.</td></tr>
             <tr><td><strong>⏳ warming</strong></td><td>A slot occupant still loading — not healthy yet.</td></tr>
             <tr><td><strong>📌 loaded</strong></td><td>Resident in the worker&apos;s own process (ready, not in a slot).</td></tr>
-            <tr><td><strong>○ cold</strong></td><td>Assigned to the worker; loads on the first request for it (or when you explicitly Load it).</td></tr>
+            <tr><td><strong>○ cold</strong></td><td>The files are on this worker&apos;s drive but are not loaded; they load on the first request (or when you explicitly Load them).</td></tr>
             <tr><td><strong>⏳ pulling 42%</strong></td><td>Files transferring to the worker, live percent.</td></tr>
             <tr><td><strong>🔶 heating</strong></td><td>Weights loading into VRAM/RAM right now.</td></tr>
             <tr><td><strong>🌡 hot</strong></td><td>Files on the worker’s own drive, not loaded — lifts into VRAM/RAM on first request.</td></tr>
-            <tr><td><strong>○ cold</strong></td><td>Files on central storage (llm_storage) only — they copy to the worker on the first call (lazy download). Normal resting state for discovered models.</td></tr>
-            <tr><td><strong>○ missing</strong></td><td>Files nowhere — neither the worker nor central storage has them (stale catalog row or phantom assignment); 📖 links the fix.</td></tr>
+            <tr><td><strong>◌ on central</strong></td><td>Files exist on central storage only; they copy to the worker on the first call.</td></tr>
+            <tr><td><strong>↗ on another worker</strong></td><td>Files are absent here and on central storage, but a copy exists on a different worker.</td></tr>
+            <tr><td><strong>? unknown</strong></td><td>No copy was reported, but a worker inventory is offline or unavailable, so fleet-wide absence cannot be confirmed.</td></tr>
+            <tr><td><strong>○ missing</strong></td><td>Files are confirmed absent from central storage and every worker drive. A model missing only from this worker must not be labeled missing if it exists elsewhere.</td></tr>
             <tr><td><strong>○ slot N</strong></td><td>An empty seat, waiting for an occupant.</td></tr>
           </tbody>
         </table>

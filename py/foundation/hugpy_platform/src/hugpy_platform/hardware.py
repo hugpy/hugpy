@@ -68,7 +68,7 @@ def _detect_gpus_nvidia_smi() -> List[dict]:
         return []
     try:
         out = subprocess.check_output(
-            [smi, "--query-gpu=index,name,memory.total,memory.free",
+            [smi, "--query-gpu=index,name,memory.total,memory.free,utilization.gpu",
              "--format=csv,noheader,nounits"],
             stderr=subprocess.DEVNULL, timeout=10,
         ).decode("utf-8", "replace")
@@ -86,6 +86,7 @@ def _detect_gpus_nvidia_smi() -> List[dict]:
             "name": name,
             "memory_total": tot * 1024 * 1024 if tot else None,   # MiB -> bytes
             "memory_free": free * 1024 * 1024 if free else None,
+            "utilization": _safe_int(parts[4]) if len(parts) > 4 else None,
         })
     return gpus
 

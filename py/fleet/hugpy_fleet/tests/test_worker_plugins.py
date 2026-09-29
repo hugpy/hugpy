@@ -15,11 +15,18 @@ from hugpy_fleet.worker import pid_registry, plugins
 
 @pytest.fixture(autouse=True)
 def _fresh():
+    """Empty registry for the test; the process-wide registrations restored on
+    teardown (a bare ``reset_tasks()`` leaves the entry-point flag set, so the
+    rest of the session would see an empty FRAMEWORK_RUNNERS)."""
+    saved = T.registered_pairs()
     plugins.reset_for_tests()
     T.reset_tasks()
     yield
     plugins.reset_for_tests()
     T.reset_tasks()
+    for (fw, task), spec in saved.items():
+        T.register_task(task, runner=spec.runner, build_request=spec.build_request,
+                        frameworks=(fw,), extra=spec.extra, source=spec.source)
 
 
 def test_overlay_drops_media_tasks_without_media(monkeypatch):

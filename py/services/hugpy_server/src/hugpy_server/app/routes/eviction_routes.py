@@ -164,6 +164,7 @@ def evictions_recent():
     store = evictions_mod.get_store()
     events = store.recent(limit=limit, since_ts=since_ts, after_id=after_id)
     return jsonify({"events": events, "count": len(events),
+                    "store": store.health(),
                     "cursor": (events[-1].get("_id") if events else after_id or 0)})
 
 

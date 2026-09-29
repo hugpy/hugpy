@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # release.sh — cut a hugpy release. A release IS a git tag (CONSISTENCY.md).
 #
-#   ./release.sh X.Y.Z [--dry-run] [--remote origin]
+#   ./release.sh X.Y.Z [--known-good] [--dry-run] [--remote origin]
 #
 # Refuses unless: the tree is clean, the current branch is the remote's default
 # branch and up to date with it (fetched first), the tag does not exist yet,
 # `python py/validate_partition.py --versions` passes, and
 # `hugpy-drift-check --sections A,B` passes when that command is installed.
+# ``--known-good`` additionally runs the complete source test suite before a
+# tag can be created.  It is the release command for a version intended for
+# PyPI and fleet rollout: no test pass, no immutable version tag.
+# The core-behaviour contracts (call queue/relay, evict+fit, model key
+# resolution) live in each package's tests/known_good/ and are catalogued in
+# notes/KNOWN-GOOD-CORE.md (/srv/hugpy/notes on the fleet host).
 # Then: git tag -a vX.Y.Z -m "hugpy X.Y.Z" && git push <remote> vX.Y.Z.
 #
 # Nothing else is edited: setuptools-scm turns the tag into the version of all
@@ -17,10 +23,11 @@ set -euo pipefail
 
 usage() { sed -n '2,15p' "${BASH_SOURCE[0]}"; }
 
-VERSION=""; DRY_RUN=0; REMOTE="origin"
+VERSION=""; DRY_RUN=0; KNOWN_GOOD=0; REMOTE="origin"
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1 ;;
+        --known-good) KNOWN_GOOD=1 ;;
         --remote) [ $# -ge 2 ] || { echo "release.sh: --remote needs a value" >&2; exit 2; }
                   REMOTE="$2"; shift ;;
         --remote=*) REMOTE="${1#--remote=}" ;;
@@ -40,7 +47,26 @@ TAG="v$VERSION"
 
 WORKSPACE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 cd "$WORKSPACE"
+# A release may be invoked by the host automation account while this checkout
+# belongs to the build account.  Scope Git's ownership acknowledgement to this
+# command only; never mutate a caller's global Git configuration just to cut a
+# release.
+git() { command git -c safe.directory="$WORKSPACE" "$@"; }
 if [ -x "$WORKSPACE/.venv/bin/python" ]; then PYTHON="$WORKSPACE/.venv/bin/python"; else PYTHON="${PYTHON:-python3}"; fi
+# The service runtime intentionally has no test dependency.  Prefer a caller's
+# explicit HUGPY_TEST_PYTHON, then the selected build interpreter, then the
+# established host API test environment.  A known-good release must fail closed
+# if none can import pytest; it must never silently omit the suite.
+TEST_PYTHON="${HUGPY_TEST_PYTHON:-$PYTHON}"
+if ! "$TEST_PYTHON" -c 'import pytest' >/dev/null 2>&1; then
+    for _candidate in /srv/hugpy/miniforge3/envs/api/bin/python \
+                      /srv/hugpy/miniforge3/envs/api/bin/python3; do
+        if [ -x "$_candidate" ] && "$_candidate" -c 'import pytest' >/dev/null 2>&1; then
+            TEST_PYTHON="$_candidate"
+            break
+        fi
+    done
+fi
 
 FAILS=0
 ok()   { printf '  ok    %s\n' "$*"; }
@@ -114,9 +140,59 @@ else
     note "hugpy-drift-check not on PATH (pip install hugpy-ops); sections A,B skipped"
 fi
 
+# 6. The optional full-suite gate is deliberately here, after the cheap source
+# checks, so a known-good release never spends time testing a tree that cannot
+# be tagged.  Give every in-tree ``src`` root precedence without relying on a
+# developer's editable installs.  The command is written out in the release
+# log and its complete output remains in a temporary file when it fails.
+if [ "$KNOWN_GOOD" -eq 1 ]; then
+    TEST_LOG="${TMPDIR:-/tmp}/hugpy-known-good-${VERSION}-$$.log"
+    SOURCE_PATH="$(find "$WORKSPACE/py" -mindepth 3 -maxdepth 3 -type d -path '*/src' -printf '%p:' | sed 's/:$//')"
+    # Test each and only each distribution that the lockstep tag will publish.
+    # Root collection also walks vendored and external-project tests, and plain
+    # prepend imports collide on common names such as ``test_import_policy``.
+    # Importlib mode gives every test its own module identity.
+    mapfile -t TEST_PATHS < <("$TEST_PYTHON" - <<'PY'
+import os
+import tomllib
+
+with open("py/partition.toml", "rb") as manifest:
+    for package in tomllib.load(manifest)["package"]:
+        candidate = os.path.join("py", package["destination"], "tests")
+        if os.path.isdir(candidate):
+            print(candidate)
+PY
+)
+    if [ "${#TEST_PATHS[@]}" -eq 0 ]; then
+        fail "no manifest package test directories found"
+    fi
+    TEST_HELPER_PATH="$(IFS=:; printf '%s' "${TEST_PATHS[*]}")"
+    # Pin the rootdir: without it pytest adopts the FIRST in-tree pyproject.toml
+    # carrying [tool.pytest.ini_options] (hugpy_media's) as rootdir, node ids
+    # collapse to bare basenames, and same-named test files in different
+    # distributions share module-scoped/autouse fixtures across packages.
+    PYTEST_ARGS=(-q --import-mode=importlib --rootdir="$WORKSPACE")
+    if "$TEST_PYTHON" -m pytest --help 2>/dev/null | grep -q -- '--timeout'; then
+        PYTEST_ARGS+=(--timeout=120)
+    else
+        note "pytest-timeout unavailable in $TEST_PYTHON; running the complete suite without its per-test timeout option"
+    fi
+    if PYTHONPATH="${SOURCE_PATH}:${TEST_HELPER_PATH}${PYTHONPATH:+:$PYTHONPATH}" \
+        "$TEST_PYTHON" -m pytest "${PYTEST_ARGS[@]}" "${TEST_PATHS[@]}" >"$TEST_LOG" 2>&1; then
+        ok "complete pytest suite (${PYTEST_ARGS[*]})"
+        rm -f "$TEST_LOG"
+    else
+        fail "complete pytest suite failed; log retained at $TEST_LOG"
+        tail -80 "$TEST_LOG" | sed 's/^/        /' || true
+    fi
+fi
+
 echo "plan:"
 echo "  git tag -a $TAG -m \"hugpy $VERSION\"        (at ${LOCAL_SHA:0:12})"
 echo "  git push $REMOTE $TAG"
+if [ "$KNOWN_GOOD" -eq 1 ]; then
+    echo "  full pytest suite passed before this tag (known-good gate)"
+fi
 echo "then, without any further edit:"
 echo "  1. CI pypi-publish.yml builds all 14 distributions at $VERSION, verifies each against the tag,"
 echo "     publishes to PyPI (environment 'pypi', trusted publishing) and creates the GitHub Release $TAG."

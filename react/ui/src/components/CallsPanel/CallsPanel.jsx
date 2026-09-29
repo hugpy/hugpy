@@ -51,6 +51,23 @@ export default function CallsPanel() {
   const [path, setPath] = useState('')
   const [q, setQ] = useState('')
   const [paused, setPaused] = useState(false)
+  const [cancelling, setCancelling] = useState({})
+
+  const cancelCall = useCallback(async (row, event) => {
+    event.stopPropagation()
+    const requestId = row.client_request || row.request_id || row.id
+    if (!requestId || cancelling[requestId]) return
+    if (!window.confirm(`Cancel this active call on ${row.model || row.model_key || 'the selected model'}?`)) return
+    setCancelling(v => ({ ...v, [requestId]: true }))
+    try {
+      await fetchJson(`/api/llm/chat/cancel/${encodeURIComponent(requestId)}`, { method: 'POST' })
+      load()
+    } catch (e) {
+      setNote(`call cancellation failed: ${e.message}`)
+    } finally {
+      setCancelling(v => { const next = { ...v }; delete next[requestId]; return next })
+    }
+  }, [cancelling, load])
 
   const load = useCallback(() => {
     fetchJson('/api/llm/calls?limit=400')
@@ -112,8 +129,9 @@ export default function CallsPanel() {
         <table className="cp-table">
           <thead>
             <tr>
+              <th aria-hidden="true" className="cp-expand-head" />
               <th>When</th><th>Status</th><th>Via</th><th>Client</th><th>User-agent</th><th>Who</th>
-              <th>Op</th><th>Model</th><th>Cache</th><th>Worker</th><th className="cp-num">Tokens</th><th className="cp-num">Took</th><th>Error</th>
+              <th>Op</th><th>Model</th><th>Cache</th><th>Worker</th><th className="cp-num">Tokens</th><th className="cp-num">Took</th><th>Error</th><th>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -131,11 +149,15 @@ export default function CallsPanel() {
                 <td className="cp-model" title={r.model_key || ''}>{r.model || short(r.model_key, 42)}</td>
                 <td className={`cp-mono cp-loc cp-loc-${r.locality || 'na'}`} title="model weights already on the worker's local hot drive (hot) vs served off the shared array (cold), at job start">{r.locality || '—'}</td>
                 <td>{r.worker || '—'}</td>
-                <td className="cp-num">{r.tokens || 0}</td>
+                <td className="cp-num" title={r.total_tokens != null ? `${r.input_tokens || 0} input + ${r.output_tokens || 0} output` : 'streamed token count'}>{r.total_tokens ?? r.tokens ?? 0}</td>
                 <td className="cp-num">{fmtDur(r.duration_ms)}</td>
                 <td className="cp-err" title={r.error || ''}>{short(r.error, 60)}</td>
+                <td className="cp-action">{(r.status === 'active' || r.status === 'running' || r.status === 'answering' || r.status === 'processing') &&
+                  <button onClick={e => cancelCall(r, e)} disabled={!!cancelling[r.client_request || r.request_id || r.id]}>
+                    {cancelling[r.client_request || r.request_id || r.id] ? 'cancelling…' : 'cancel'}
+                  </button>}</td>
               </tr>
-              {expanded[r.id] && <tr className="cp-request-row"><td colSpan={14}>
+              {expanded[r.id] && <tr className="cp-request-row"><td colSpan={15}>
                 <div className="cp-request-meta">
                   <div><b>Caller:</b> {r.client_process || 'process not reported'}{r.client_pid ? ` (pid ${r.client_pid})` : ''} · <b>OS user:</b> {r.client_user || 'not reported'} · <b>HugPy identity:</b> {r.principal || 'unauthenticated'}</div>
                   <div><b>Source:</b> {r.client || '—'} · <b>direct peer:</b> {r.peer || '—'} · <b>forwarded for:</b> {r.forwarded_for || '—'}</div>
@@ -149,7 +171,7 @@ export default function CallsPanel() {
               </td></tr>}
             </Fragment>
             ))}
-            {!filtered.length && <tr><td colSpan={14} className="cp-dim">no calls recorded yet{path ? ` (log: ${path})` : ''}</td></tr>}
+            {!filtered.length && <tr><td colSpan={15} className="cp-dim">no calls recorded yet{path ? ` (log: ${path})` : ''}</td></tr>}
           </tbody>
         </table>
       </div>

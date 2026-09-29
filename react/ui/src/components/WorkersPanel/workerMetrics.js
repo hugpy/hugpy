@@ -66,13 +66,17 @@ export function isMeasuredResident(a) {
   return measuredFootprint(a)
 }
 
-export function residentState(a) {
+export function residentState(a, _loadedSet, loadingSet) {
+  if (a?.model_key && loadingSet?.has(a.model_key)) {
+    return { state: 'heating', glyph: '🔶 loading', title: 'weights loading into VRAM/RAM right now' }
+  }
   if (a.kind === 'slot') {
     if (a.healthy && a.busy) return { state: 'answering', glyph: '⚡ answering', title: 'actively processing a request right now' }
     if (a.healthy)           return { state: 'serving',   glyph: '🔥 serving',   title: 'hosted in a slot on this worker — routable' }
     return { state: 'warming', glyph: '⏳ warming', title: 'seated but not yet healthy — warming' }
   }
   if (isMeasuredResident(a)) {
+    if (a.busy) return { state: 'answering', glyph: '⚡ answering', title: 'actively processing a request right now' }
     return { state: 'serving', glyph: '🔥 serving', title: 'measured residency — the worker sees this model occupying VRAM/RAM right now' }
   }
   // ALLOCATED, not resident. Something on the worker is attributing an allocation

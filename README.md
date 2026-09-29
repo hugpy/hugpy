@@ -6,9 +6,13 @@ own API keys, and pool the GPUs you already have (workstations, laptops, boxes
 on another network, even phones) into one fleet.
 
 ```bash
-pip install "hugpy[server]"
+pip install hugpy
 hugpy serve            # console at http://localhost:7002/ , API at /api/v1
 ```
+
+The base install carries the complete lockstep Hugpy Python module family.
+Install a profile such as `hugpy[server]` when this machine also needs its
+optional service, native-engine, or GPU dependencies.
 
 From a checkout, `./local_install.sh` installs every package editable into
 `.venv` (see [`LOCAL_INSTALL.md`](LOCAL_INSTALL.md)).

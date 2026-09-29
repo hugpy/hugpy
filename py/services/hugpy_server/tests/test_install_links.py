@@ -361,8 +361,14 @@ def test_route_download_lifecycle_and_410(client):
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
         fh.write(body)
         served = fh.name
-    py_compile.compile(served, doraise=True)
+    # Explicit .pyc target beside the source: the default lands in
+    # <tmpdir>/__pycache__, which on a shared host may belong to another user.
+    py_compile.compile(served, cfile=served + "c", doraise=True)
     os.unlink(served)
+    try:
+        os.unlink(served + "c")
+    except OSError:
+        pass
 
     # exhausted now: the .py AND the wrappers all 410 with a human message
     for path in (f"/agent/install/{lid}",
@@ -495,8 +501,14 @@ def test_route_download_real_installer_compiles(client, monkeypatch):
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
         fh.write(body)
         served = fh.name
-    py_compile.compile(served, doraise=True)
+    # Explicit .pyc target beside the source: the default lands in
+    # <tmpdir>/__pycache__, which on a shared host may belong to another user.
+    py_compile.compile(served, cfile=served + "c", doraise=True)
     os.unlink(served)
+    try:
+        os.unlink(served + "c")
+    except OSError:
+        pass
 
 
 def test_route_expired_link_410(client):

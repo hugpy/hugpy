@@ -109,13 +109,23 @@ export function Console({ banner = null }) {
   // `error` only when we never got one.
   const modelsRef = useRef(models)
   modelsRef.current = models
+  // Feed events and the slow safety poll can request the catalog at the same
+  // time. Only the newest request may publish: an older response that happens
+  // to finish last must not roll model presence back to an earlier snapshot.
+  const modelsRequestRef = useRef(0)
   const refreshModels = useCallback(() => {
+    const requestId = ++modelsRequestRef.current
     fetchJson('/api/models')
       .then(data => {
+        if (requestId !== modelsRequestRef.current) return
         if (Array.isArray(data)) { setModels(data); setError(null) }
         setLoading(false)
       })
-      .catch(e => { if (!modelsRef.current.length) setError(e.message); setLoading(false) })
+      .catch(e => {
+        if (requestId !== modelsRequestRef.current) return
+        if (!modelsRef.current.length) setError(e.message)
+        setLoading(false)
+      })
   }, [])
 
   const refreshWorkers = useCallback(() => {
@@ -211,6 +221,10 @@ export function Console({ banner = null }) {
   }, [])
 
   const handleChat = useCallback((modelKey) => { setActiveChat(modelKey) }, [])
+  const handleComputeChat = useCallback((modelKey) => {
+    setActiveChat(modelKey)
+    setComputeChatOpen(true)
+  }, [])
 
   // ── Models tab vertical split (model list / live eviction feed) ───────────
   // Height of the feed as a % of the pane. Session-scoped like the tab's other
@@ -485,6 +499,7 @@ export function Console({ banner = null }) {
                 onClose={() => setActiveChat(null)}
                 chats={chats}
                 models={models}
+                workers={workers}
                 onSwitchChat={handleChat}
               />
             )}
@@ -523,7 +538,7 @@ export function Console({ banner = null }) {
               </button>
             </div>
             {/* Each pool is a collapsible row — click its header bar to expand. */}
-            <WorkersPanel models={models} />
+            <WorkersPanel models={models} onChat={handleComputeChat} />
             {/* SlotsPanel retired 2026-07-03 (daylight item 3): central presents
                 as a worker row inside WorkersPanel with its own load/unload. */}
             <PhoneBrickPanel />
@@ -547,6 +562,7 @@ export function Console({ banner = null }) {
                     onClose={() => setComputeChatOpen(false)}
                     chats={chats}
                     models={models}
+                    workers={workers}
                     onSwitchChat={handleChat}
                   />
                 ) : (

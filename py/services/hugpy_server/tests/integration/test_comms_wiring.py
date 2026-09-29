@@ -28,6 +28,11 @@ def test_queue_view_activity_shim(client):
     q = client.get("/llm/queue").get_json()
     mine = [e for e in q["active"] if e["request_id"] == "it-1"]
     assert len(mine) == 1 and mine[0]["state"] == "waiting", "begun request visible as waiting"
+    job_store.begin_dispatch("it-1", worker="ae-worker", slot="1")
+    q = client.get("/llm/queue").get_json()
+    mine = [e for e in q["active"] if e["request_id"] == "it-1"]
+    assert len(mine) == 1 and mine[0]["state"] == "processing", \
+        "dispatched request visible as processing"
     assert set(mine[0]) == {"request_id", "model_key", "model", "kind", "state",
         "elapsed", "wait", "tokens", "prompt"}, "snapshot keys intact"
     activity.on_token("it-1"); activity.on_token("it-1")

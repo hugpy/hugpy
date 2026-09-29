@@ -41,9 +41,14 @@ def test_isolated_worker_store_redirects_registry_and_sidecar():
     v1 = store.register(name="ghost-a", url="http://192.0.2.50:9100",
                         worker_id="ghost-a", models=["Some~Model"])
     assert v1 is not None
+    # A re-register is an agent (re)boot: ``models`` from its command line is
+    # not a durable pin, so unpinned designations are dropped rather than
+    # resurrected; the worker's local-disk inventory re-pins them.
     v1b = store.register(name="ghost-a", url="http://192.0.2.50:9100",
                          worker_id="ghost-a", models=["Some~Model", "Other~Model"])
-    assert "Other~Model" in v1b["models"]
+    assert v1b is not None and "Other~Model" not in v1b["models"]
+    v1c = store.pin_local_designations("ghost-a", ["Some~Model", "Other~Model"])
+    assert v1c is not None and "Other~Model" in v1c["models"]
     store.register(name="ghost-b", url="http://192.0.2.51:9100", worker_id="ghost-b")
     av = store.assign_model("ghost-b", "Assigned~Model")
     assert av is not None and "Assigned~Model" in av["models"]
@@ -77,3 +82,27 @@ def test_swap_worker_store_drives_module_wrappers_and_restores():
     assert W.settings.manifest_path == orig_manifest
     assert W._default_workers_path() == os.path.join(
         os.path.dirname(orig_manifest), "workers.json")
+
+
+def test_local_disk_models_become_pinned_allocations():
+    """A heartbeat's disk truth promotes a model without pulling or loading it."""
+    with swap_worker_store(prefix="hugpy-local-pin-") as store:
+        store.register(name="w1", url="http://192.0.2.60:9100", worker_id="w1")
+        view = store.pin_local_designations("w1", ["Local~Model"])
+        assert view is not None
+        assert "Local~Model" in view["models"]
+        row = next(d for d in view["designations"]
+                   if d["model_key"] == "Local~Model")
+        assert row["pinned"] is True
+        assert row["pinned_by"] == "worker local"
+
+
+def test_local_disk_default_does_not_override_operator_unpin():
+    with swap_worker_store(prefix="hugpy-local-unpin-") as store:
+        store.register(name="w1", url="http://192.0.2.60:9100", worker_id="w1",
+                       models=["Local~Model"])
+        store.set_pin("w1", "Local~Model", False, by="operator")
+        view = store.pin_local_designations("w1", ["Local~Model"])
+        row = next(d for d in view["designations"]
+                   if d["model_key"] == "Local~Model")
+        assert row["pinned"] is False

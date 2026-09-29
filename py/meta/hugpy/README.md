@@ -6,15 +6,14 @@ with on-site API keys, and a GPU worker fleet with cross-machine RPC sharding â€
 all served by one command, with no nginx and no Node required.
 
 ```bash
-pip install "hugpy[server]"
+pip install hugpy
 hugpy serve            # console at http://localhost:7002/ , API at /api/v1
 ```
 
-`hugpy` is the **meta distribution**: it installs the `hugpy` and `hpy`
-commands and picks the rest of the product through extras. The implementation
-lives in a family of `hugpy-*` distributions (below); the `hugpy` command only
-dispatches to them, so a bare `pip install hugpy` stays tiny and imports
-nothing but the standard library and `hugpy-platform`.
+`hugpy` is the **meta distribution**: a normal install brings in the complete,
+lockstep `hugpy-*` module family used by development. The implementation remains
+split into focused distributions, while extras add optional native, GPU, model
+runner, and service dependencies for a particular machine profile.
 
 ---
 
@@ -49,9 +48,9 @@ around self-hosting:
 - **Bring your own GPUs.** Join any machine to a central as a worker
   (`hugpy worker`), or lend its GPU to a **cross-machine shard pool** so models
   larger than one card can run across several boxes over RPC.
-- **Phone-to-server install.** The base install is small and wheels-only (it
-  runs on Termux/aarch64 as a coordinator); the heavy engine, vision, OCR, and
-  media stacks are opt-in extras that the code lazy-imports only when used.
+- **One install, configurable runtime.** The base install carries the complete
+Hugpy module family; native engines, GPU runners, and optional media stacks are
+opt-in extras that the code lazy-imports only when used.
 
 ---
 
@@ -82,12 +81,11 @@ does not create a dependency.
 ## Install
 
 ```bash
-pip install hugpy                         # base: the commands + hugpy-platform only
+pip install hugpy                         # complete lockstep Hugpy module family
 ```
 
-Add capabilities with extras. Each extra pulls the owning distribution(s) and
-their own extras; the profiles compose, so `hugpy[all]` is a superset of
-`hugpy[server]` and `hugpy[gpu-worker]`.
+Add runtime capabilities with extras. The profiles compose, so `hugpy[all]` is
+a superset of `hugpy[server]` and `hugpy[gpu-worker]`.
 
 | Extra | Pulls | Use it for |
 |-------|-------|------------|

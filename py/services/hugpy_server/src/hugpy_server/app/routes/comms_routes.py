@@ -381,6 +381,18 @@ def model_meta_route(model_key):
         cfg = None
     if cfg is None:
         abort(404, description="Unknown model key.")
+    # Worker-discovered models carry measured sizes in the shared worker
+    # catalog. Merge those facts into the metadata input: ModelConfig's serving
+    # shape intentionally doesn't own these per-worker physical measurements.
+    cfg_meta = cfg.to_dict()
+    try:
+        from hugpy_engine.config.models.models_config import get_model_registry
+        catalog_row = get_model_registry(dict_return=True).get(model_key) or {}
+        for field in ("size_bytes", "effective_bytes"):
+            if catalog_row.get(field) is not None:
+                cfg_meta[field] = catalog_row[field]
+    except Exception:
+        pass
     vram = None
     raw = (request.args.get("vram_gib") or "").strip()
     if raw:
@@ -402,4 +414,4 @@ def model_meta_route(model_key):
     # ?gguf=<basename|quant> sizes + recommends for THAT variant (the per-worker
     # quant dropdown's fit readout); absent = the effective quant, as before.
     sel = (request.args.get("gguf") or "").strip() or None
-    return jsonify(model_meta(cfg, vram_bytes=vram, select_gguf=sel))
+    return jsonify(model_meta(cfg_meta, vram_bytes=vram, select_gguf=sel))

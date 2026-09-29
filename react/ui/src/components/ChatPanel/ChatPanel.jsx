@@ -47,7 +47,7 @@ function stripDataUrl(dataUrl) {
   return i >= 0 ? dataUrl.slice(i + 1) : dataUrl
 }
 
-export default function ChatPanel({ modelKey, model, onClose, messages = [], setMessages, chats = {}, models = [], onSwitchChat }) {
+export default function ChatPanel({ modelKey, model, onClose, messages = [], setMessages, chats = {}, models = [], workers = [], onSwitchChat }) {
   // `messages`/`setMessages` are backed by chatStore.js (a module-level
   // singleton, not component/App state) so the conversation survives tab
   // switches, route changes, reloads — AND, critically, so it keeps being
@@ -76,7 +76,7 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
   const [workerPin, setWorkerPinState] = useState(() => chatStore.getWorkerPin(modelKey))
   const setWorkerPin = useCallback((w) => { setWorkerPinState(w); chatStore.setWorkerPin(modelKey, w) }, [modelKey])
   useEffect(() => { setWorkerPinState(chatStore.getWorkerPin(modelKey)) }, [modelKey])
-  const holders = useMemo(() => holdingWorkers(model), [model])
+  const holders = useMemo(() => holdingWorkers(model, workers), [model, workers])
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
   const fileRef   = useRef(null)
@@ -234,12 +234,12 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
         className={`chat-alloc ${allocation ? (allocation.servedBy === 'local' ? 'is-local' : 'is-worker') : 'is-pending'}`}
         title="The allocation that served the most recent request"
       >
-        <label className="alloc-pin" title="Where the next request runs: system decides (default), or pin one worker that holds this model (sends alloc: {worker}; the pin fails with the reason instead of rerouting)">
+        <label className="alloc-pin" title="Where the next request runs: system decides (default), or pin any registered worker (sends alloc: {worker}; the pin fails with the reason instead of rerouting)">
           <span className="alloc-label">worker</span>
           <select value={workerPin} onChange={e => setWorkerPin(e.target.value)} disabled={streaming}>
             <option value="">system decides</option>
             {holders.map(w => <option key={w.name} value={w.name} disabled={!w.online && w.name !== workerPin}>
-              {w.name}{w.hot ? ' · hot' : ' · on disk'}{w.online ? '' : ' · offline'}
+              {w.name}{w.hot ? ' · hot' : w.onDisk ? ' · on disk' : ' · not holding model'}{w.online ? '' : ' · offline'}
             </option>)}
             {workerPin && !holders.some(w => w.name === workerPin) && <option value={workerPin}>{workerPin} · not holding this model</option>}
           </select>

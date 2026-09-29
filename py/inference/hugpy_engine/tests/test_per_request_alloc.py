@@ -81,6 +81,11 @@ def test_explicit_worker_bypasses_automatic_candidate_filters(monkeypatch):
     monkeypatch.setattr(remote, "_worker_lookup_provider",
                         lambda want: named if want in ("aeb", "w-aeb") else None)
     monkeypatch.setattr(remote, "_worker_candidates_provider", lambda *_args: [])
+    # The explicit pin bypasses SELECTION filters only; the FEASIBILITY gate
+    # (central holds the weights / they fit) is a separate contract with its own
+    # tests. The fleet's placement wiring registers that gate process-wide when
+    # any earlier test builds the server app, so establish "no gate" here.
+    monkeypatch.setattr(remote, "_worker_pin_gate", None)
 
     assert remote._resolve_requested_worker(
         "aeb", "Qwen3.5-0.8B", "some-other-pool", "text-generation") is named

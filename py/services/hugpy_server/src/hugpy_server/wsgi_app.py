@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _VIDEO_DAEMON_STARTED = False
 _ADMISSION_RUNNER_STARTED = False
 _WORKER_RENAME_MIGRATED = False
+_WORKER_UNPINNED_PRUNED = False
 
 
 class ApiPrefixMiddleware:
@@ -596,6 +597,20 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
             _WORKER_RENAME_MIGRATED = True
         except Exception as _exc:  # noqa: BLE001 — must never break app creation
             logger.error("worker-name migration hook failed: %s", _exc)
+    # A central API restart must honor the pin as the allocation persistence
+    # boundary. PostgreSQL itself survives restarts, so remove unpinned worker
+    # designations once per process; complete worker drive inventories arrive
+    # on heartbeat and are restored as pinned local placements.
+    global _WORKER_UNPINNED_PRUNED
+    if not _WORKER_UNPINNED_PRUNED:
+        try:
+            from hugpy_fleet.central.workers import worker_store
+            counts = worker_store.prune_unpinned_assignments()
+            logger.info("worker allocation startup prune: %d workers, %d unpinned assignments",
+                        counts["workers"], counts["models"])
+            _WORKER_UNPINNED_PRUNED = True
+        except Exception as _exc:  # noqa: BLE001 — must never break app boot
+            logger.error("worker allocation startup prune failed: %s", _exc)
     return app
 
 

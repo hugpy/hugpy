@@ -152,6 +152,9 @@ def test_guard_policy_off_no_provider_proceeds(monkeypatch, policy_off):
 
 
 def test_guard_policy_on_refuses_even_with_no_provider(monkeypatch, policy_on):
+    # "no provider" is the posture under test — establish it explicitly (the
+    # server wiring of any earlier-built app registers the fleet's provider).
+    monkeypatch.setattr(remote, "_worker_provider", None)
     monkeypatch.delenv("HUGPY_VIDEOGEN_LOCAL", raising=False)
     res = guard_mod.guard_gpu_worker("some-diffusion-model", "job-1")
     assert res is not None

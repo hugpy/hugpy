@@ -89,7 +89,10 @@ class _FakeProcessor:
 
 
 def _fake_get_transformers(name=None):
-    if name == "Qwen2_5_VLForConditionalGeneration":
+    # The loader dispatches on the checkpoint's own model_type via
+    # AutoModelForImageTextToText (a hardcoded Qwen2_5_VL class shape-mismatched
+    # every non-Qwen VLM); the fake answers both spellings.
+    if name in ("AutoModelForImageTextToText", "Qwen2_5_VLForConditionalGeneration"):
         return _FakeVLModel
     if name == "AutoProcessor":
         return _FakeProcessor

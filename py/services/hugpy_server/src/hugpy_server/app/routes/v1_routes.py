@@ -17,6 +17,7 @@ hub id (org/name), or manifest slug.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -24,9 +25,10 @@ from functools import wraps
 
 from abstract_flask import get_bp
 from flask import Response, jsonify, request, stream_with_context
+from hugpy_platform import async_runtime
 
 from hugpy_engine.config.models.models_config import get_models_dict
-from hugpy_server.app.functions.chat.streaming import chat_iter_sync
+from hugpy_server.app.functions.chat.streaming import chat_iter_sync, _feed_job_from_done
 from hugpy_storage.console.cancelable_downloads import update_model_status
 from hugpy_server.app.functions.imports.utils.api_keys import (
     api_key_required,
@@ -319,6 +321,10 @@ async def _v1_events(prompt_kwargs: dict, call_data=None):
     queue bookkeeping must never break a completion."""
     from hugpy_engine import stream_query
     from hugpy_engine.dispatch import activity
+    # The console chat path already feeds dispatch status into the shared job
+    # store.  /v1 must do the same or OpenAI-compatible calls remain `pending`
+    # in the DB while their worker slot is actively processing them.
+    from hugpy_server.app.functions.chat.streaming import _feed_job_from_status
     rid = prompt_kwargs.get("request_id")
     mk = prompt_kwargs.get("model_key")
     name = mk
@@ -339,17 +345,36 @@ async def _v1_events(prompt_kwargs: dict, call_data=None):
                                       prompt_kwargs.get("prompt")),
         request=call_data,
     )
+    # /v1 has the same cancellation contract as the console chat route.  The
+    # activity row alone is only telemetry: the cancel endpoint needs a live
+    # handle that reaches the engine/worker relay, otherwise a disconnected
+    # OpenAI stream can leave the llama slot busy until its next natural end.
+    cancel_event = asyncio.Event()
+    try:
+        from hugpy_control.jobs import job_store
+        job_store.attach_cancel(
+            rid, lambda: async_runtime.call_soon_threadsafe(cancel_event.set))
+    except Exception:  # noqa: BLE001 — cancellation wiring must not break chat
+        pass
     # Bind the engine stream so a client disconnect (GeneratorExit) acloses it
     # deterministically — that cascade releases the relayed worker's httpx stream
     # and frees the llama-server slot instead of leaving it to GC (incident
     # 2026-09-25). Also log the disconnect once here, at the /v1 hop.
     _sq = None
     try:
-        _sq = stream_query(**prompt_kwargs)
+        _sq = stream_query(cancel_event=cancel_event, **prompt_kwargs)
         async for event in _sq:
             etype = getattr(event, "type", None)
             if etype == "token":
                 activity.on_token(rid)
+            elif etype == "done":
+                _feed_job_from_done(rid, event)
+            elif etype == "status":
+                # Dispatch/load status is also forwarded to the harness as an
+                # SSE status event by the normal `yield event` below.  Reflect
+                # it in the authoritative job row before forwarding it so the
+                # DB and harness observe the same lifecycle transition.
+                _feed_job_from_status(rid, event)
             elif etype == "error":
                 # Reflect an honest failure ONTO the job (first-terminal-wins; the
                 # finally's end() then no-ops) so a v1 call that errored — e.g. the
@@ -538,10 +563,18 @@ def v1_chat_completions():
     # is the design. Only a truly-unresolvable explicit key rejects. A None/
     # "default" model_key (no preference) is left for the engine to default.
     _mk = prompt_kwargs.get("model_key")
+    # Resolve owner-qualified HF spellings (for example Qwen~Repo) to the
+    # catalog's canonical registry key once at intake.  This is catalog-backed
+    # resolution, not heuristic '~' stripping: a genuinely distinct explicit
+    # model remains distinct.  Carrying the resolved key forward keeps intake,
+    # job bookkeeping, and worker dispatch on the same model identity.
+    _resolved_model_key = _mk
     if _mk:
         try:
             from hugpy_engine.resolvers.model_resolver import resolve_model_key
-            resolve_model_key(model_key=_mk)
+            _resolved_model_key = resolve_model_key(
+                model_key=_mk, model_format=prompt_kwargs.get("model_format"))
+            prompt_kwargs["model_key"] = _resolved_model_key
         except (KeyError, ValueError) as exc:
             # The resolver raises with the "Unknown model_key=..." / "did you
             # mean" hint (ValueError from hugpy_engine; KeyError historically).

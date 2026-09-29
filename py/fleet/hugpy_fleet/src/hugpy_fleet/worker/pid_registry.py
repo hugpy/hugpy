@@ -438,6 +438,12 @@ class PidRegistry:
                         explained.add(pid)      # alive child, CPU-resident
                 attributed[mk] = vb
                 rec["last_vram_bytes"] = vb
+                gpu_meta = gpu_procs.get(pid) if pid is not None else None
+                rec["last_gpu_index"] = (gpu_meta or {}).get("gpu_index")
+                rec["last_gpu_indexes"] = list((gpu_meta or {}).get("gpu_indexes") or [])
+                rec["last_per_gpu_vram_bytes"] = (
+                    {str(i): int(mib) * _MIB for i, mib in (gpu_meta or {}).get("per_gpu_mib", {}).items()}
+                    if mode in ("subprocess", "external") else None)
 
             # -- SECOND PASS: recognized-foreign attribution of the leftovers ------
             for p, meta in gpu_procs.items():
@@ -451,7 +457,10 @@ class PidRegistry:
                         "model_key": None, "pid": p, "host_mode": "cuda_context",
                         "vram_bytes": mib * _MIB, "alive": True,
                         "service": "worker", "label": "agent CUDA context",
-                        "name": name})
+                        "name": name, "gpu_index": meta.get("gpu_index"),
+                        "gpu_indexes": list(meta.get("gpu_indexes") or []),
+                        "per_gpu_vram_bytes": {str(i): int(v) * _MIB
+                                                for i, v in (meta.get("per_gpu_mib") or {}).items()}})
                     explained.add(p)
                     continue
                 # (2) ComfyUI — call-time attribution or recognized-idle.
@@ -470,6 +479,13 @@ class PidRegistry:
                         "pid": p, "host_mode": "comfy", "vram_bytes": mib * _MIB,
                         "alive": True, "service": "comfy", "name": name,
                         "display_label": "comfy", "is_process_row": True}
+                    if meta.get("gpu_index") is not None:
+                        row["gpu_index"] = meta["gpu_index"]
+                    if meta.get("gpu_indexes"):
+                        row["gpu_indexes"] = list(meta["gpu_indexes"])
+                    if meta.get("per_gpu_mib"):
+                        row["per_gpu_vram_bytes"] = {str(i): int(v) * _MIB
+                                                      for i, v in meta["per_gpu_mib"].items()}
                     if call is not None:
                         row["model_key"] = call.get("model_key")
                         row["job_id"] = call.get("job_id")
@@ -483,7 +499,11 @@ class PidRegistry:
                     continue
 
             unattributed = [
-                {"pid": p, "name": meta.get("name"), "mib": meta.get("mib")}
+                {"pid": p, "name": meta.get("name"), "mib": meta.get("mib"),
+                 "gpu_index": meta.get("gpu_index"),
+                 "gpu_indexes": list(meta.get("gpu_indexes") or []),
+                 "per_gpu_vram_bytes": {str(i): int(v) * _MIB
+                                        for i, v in (meta.get("per_gpu_mib") or {}).items()}}
                 for p, meta in gpu_procs.items() if p not in explained
             ]
             self._last_unattributed = unattributed
@@ -525,6 +545,12 @@ class PidRegistry:
                     "vram_bytes": rec.get("last_vram_bytes"),
                     "alive": alive,
                 }
+                if rec.get("last_gpu_index") is not None:
+                    row["gpu_index"] = rec["last_gpu_index"]
+                if rec.get("last_gpu_indexes"):
+                    row["gpu_indexes"] = list(rec["last_gpu_indexes"])
+                if rec.get("last_per_gpu_vram_bytes"):
+                    row["per_gpu_vram_bytes"] = dict(rec["last_per_gpu_vram_bytes"])
                 # PLANNED-beside-MEASURED (E/M): an in-process row's torch weight
                 # estimate rides alongside its measured bytes so the panel can show
                 # the disagreement (measured = weights + CUDA context/KV) rather

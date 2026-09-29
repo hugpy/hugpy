@@ -320,6 +320,102 @@ def _quant_rank(key: str) -> int:
     return max((_QUANT_BITS[t] for t in toks if t in _QUANT_BITS), default=0)
 
 
+# Packaging / quant / framework markers — a name carrying any of these named a
+# representation, not merely a base-name family. Single source for both the
+# serving-override gate (_package_specific) and the logical-identity strip
+# (_logical_id) so the two never drift.
+_FORMAT_TOKENS = frozenset({
+    "gguf", "transformers", "transformer", "safetensors", "pytorch",
+    "awq", "gptq", "exl2", "exl3", "mlx", "bnb", "4bit", "8bit",
+    "fp8", "fp16", "bf16", "f16", "q2", "q3", "q4", "q5", "q6", "q8",
+})
+
+# The GGUF engine family (mirrors alloc_modes.GGUF_ENGINES; inlined to keep this
+# resolver import-cheap and cycle-free).
+_GGUF_ENGINES = frozenset({"gguf", "llama_cpp"})
+
+
+def _package_specific(model_key: str) -> bool:
+    """Whether the caller explicitly selected a model packaging/framework.
+
+    A bare family request (``Qwen3-Coder-Next``) must follow the live serving
+    representation, whether that is GGUF or Transformers.  ``GGUF`` and the
+    common Transformers/package markers are deliberate specificity and must
+    remain exact rather than being rewritten to whichever sibling is hot.
+    """
+    return bool(set(_tokens(model_key)) & _FORMAT_TOKENS)
+
+
+def _framework_of(key: str):
+    """The registry framework for ``key`` (scalar), or None when absent."""
+    cfg = MODEL_REGISTRY.get(key)
+    fw = getattr(cfg, "framework", None) if cfg is not None else None
+    if isinstance(fw, (list, tuple)):
+        fw = fw[0] if fw else None
+    return fw
+
+
+def _representation_of(key: str):
+    """The gguf-vs-transformers REPRESENTATION of a registry key, read from its
+    framework (never a name substring). GGUF family -> "gguf"; any other
+    concrete framework -> "transformers"; None when the key is not in the
+    registry."""
+    fw = _framework_of(key)
+    if fw is None:
+        return None
+    return "gguf" if str(fw).strip().lower() in _GGUF_ENGINES else "transformers"
+
+
+def _logical_id(key: str) -> str:
+    """Base-name identity of a key with packaging/quant tokens dropped, so the
+    GGUF and Transformers rows of one model share it (``…-Coder-Next-GGUF`` and
+    ``…-Coder-Next`` -> ``coder next``). Used ONLY to pair representation
+    siblings under an explicit model_format."""
+    return " ".join(t for t in _tokens(_bare_tail(key)) if t not in _FORMAT_TOKENS)
+
+
+def _owner_of(key: str) -> str:
+    """The publisher qualifier of ``key`` (``Owner~Repo`` / ``owner/repo``), or
+    its hub_id owner, or "" — the same owner rule _match_tier enforces, so a
+    representation redirect never crosses publishers."""
+    s = str(key)
+    if "~" in s:
+        return _slugify(s.split("~", 1)[0])
+    hub_id = getattr(MODEL_REGISTRY.get(key), "hub_id", None)
+    if hub_id and "/" in str(hub_id):
+        return _slugify(str(hub_id).split("/", 1)[0])
+    if "/" in s:
+        return _slugify(s.split("/", 1)[0])
+    return ""
+
+
+def _redirect_to_format(resolved: str, model_key: str, fmt: str, *, strict: bool):
+    """Return the key of the requested REPRESENTATION for the model ``resolved``
+    names. When ``resolved`` is already that representation it is returned
+    unchanged; otherwise the same-logical-identity, same-owner sibling of
+    representation ``fmt`` is chosen (deterministically). When the registry has
+    no such representation the resolved key is kept and a warning logged — a
+    resolver cannot invent a row that is not on record."""
+    if not resolved or _representation_of(resolved) == fmt:
+        return resolved
+    want_logical = _logical_id(resolved)
+    want_owner = _owner_of(resolved)
+    siblings = [
+        k for k in MODEL_REGISTRY
+        if _representation_of(k) == fmt
+        and _logical_id(k) == want_logical
+        and (not want_owner or _owner_of(k) == want_owner)
+    ]
+    if not siblings:
+        _log.warning("assure_model_key: model_format=%r requested for %r but no "
+                     "%s representation of %r is on record; kept %s",
+                     fmt, model_key, fmt, resolved, resolved)
+        return resolved
+    if len(siblings) == 1:
+        return siblings[0]
+    return _pick_by_total_order(siblings, strict=strict) or siblings[0]
+
+
 def _match_tier(key, values, slug, bare_slug, model_key) -> int:
     """The strongest identity tier at which ``key`` matches the request, or 0."""
     if _slugify(key) == slug:
@@ -330,7 +426,26 @@ def _match_tier(key, values, slug, bare_slug, model_key) -> int:
     folder = getattr(values, "folder", None)
     if folder and _path_suffix_matches(folder, model_key):
         return _TIER_FOLDER
+    # A qualified request names a publisher, not merely a base-name family.
+    # Never let the bare-tail tier silently turn an explicit
+    # ``unsloth~Qwen3-Coder-Next-GGUF`` request into the Qwen variant (or vice
+    # versa) when one qualified registry row is absent.  The qualified owner
+    # may be represented by the registry key or by the model's Hub ID while
+    # the registry key itself remains bare.
     if _slugify(_bare_tail(key)) == bare_slug:
+        requested_owner = ""
+        if "~" in str(model_key):
+            requested_owner = str(model_key).split("~", 1)[0].strip()
+        elif "/" in str(model_key):
+            requested_owner = str(model_key).split("/", 1)[0].strip()
+        if requested_owner:
+            candidate_owner = ""
+            if "~" in str(key):
+                candidate_owner = str(key).split("~", 1)[0].strip()
+            elif hub_id and "/" in str(hub_id):
+                candidate_owner = str(hub_id).split("/", 1)[0].strip()
+            if _slugify(candidate_owner) != _slugify(requested_owner):
+                return 0
         return _TIER_BARE
     return 0
 
@@ -351,7 +466,29 @@ def _pick_by_total_order(keys, *, strict):
     return ranked[0]
 
 
-def assure_model_key(model_key, *, strict: bool = False, _expand_aliases: bool = True):
+def assure_model_key(model_key, *, strict: bool = False, fmt: str = "auto",
+                     _expand_aliases: bool = True):
+    """Resolve a model reference to a canonical registry key.
+
+    ``fmt`` (model_format: "auto" | "gguf" | "transformers") is the EXPLICIT
+    representation override (operator 2026-09-29). "auto" (default) is
+    byte-identical to legacy resolution. "gguf"/"transformers" is authoritative:
+    the base resolution runs first, then :func:`_redirect_to_format` swaps in the
+    same-model, same-owner sibling of the requested representation (ignoring what
+    is currently serving and any contradicting name suffix). The GGUF-vs-
+    Transformers special-casing downstream keys off the RESOLVED key's framework,
+    so nothing beyond the returned key needs to know about ``fmt``.
+    """
+    resolved = _assure_model_key_base(model_key, strict=strict,
+                                      _expand_aliases=_expand_aliases)
+    if resolved and fmt and str(fmt).strip().lower() not in ("", "auto"):
+        return _redirect_to_format(resolved, model_key, str(fmt).strip().lower(),
+                                   strict=strict)
+    return resolved
+
+
+def _assure_model_key_base(model_key, *, strict: bool = False,
+                           _expand_aliases: bool = True):
     """
     Resolve a user-provided model key, repo id, manifest slug, folder name,
     or folder suffix into the canonical key from MODEL_REGISTRY.
@@ -387,7 +524,7 @@ def assure_model_key(model_key, *, strict: bool = False, _expand_aliases: bool =
     if _expand_aliases:
         target = _alias_target(model_key)
         if target and target != model_key:
-            resolved = assure_model_key(target, strict=strict, _expand_aliases=False)
+            resolved = _assure_model_key_base(target, strict=strict, _expand_aliases=False)
             if resolved is not None:
                 _log.debug("assure_model_key: alias %r -> %r -> %s",
                            model_key, target, resolved)
@@ -410,6 +547,15 @@ def assure_model_key(model_key, *, strict: bool = False, _expand_aliases: bool =
         top = [k for k, t in tiers.items() if t == top_tier]
         if len(top) == 1:
             return top[0]
+        # Same-family variants (notably GGUF vs Transformers) are not a real
+        # ambiguity when the caller did not name a packaging.  Let the normal
+        # serving-aware pipeline choose the live representation first.  An
+        # explicitly qualified request still takes the deterministic exact
+        # path below and cannot be redirected across frameworks.
+        if not _package_specific(model_key):
+            chosen = _pipeline_pick(model_key, top)
+            if chosen is not None:
+                return chosen
         winner = _pick_by_total_order(top, strict=strict)
         if winner is not None:
             _log.debug("assure_model_key: broke tier-%d tie for %r -> %s (of %s)",

@@ -30,6 +30,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
   const [sortKey, setSortKey] = useSessionState('hugpy.sess.wp.load.sort', 'name')
   const [sortDir, setSortDir] = useSessionState('hugpy.sess.wp.load.dir', 'asc')
   const [taskFilter, setTaskFilter] = useSessionState('hugpy.sess.wp.load.task', '')
+  const [driveFilter, setDriveFilter] = useSessionState('hugpy.sess.wp.load.drive', '')
   const [breaker, setBreaker] = useState(false)
   const [q, setQ] = useState('')
   const [busy, setBusy] = useState(false)
@@ -50,6 +51,15 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
     const holders = allocation[keyOf(m)] || []
     return holders.filter(h => h.id !== workerId)
   }, [allocation, workerId])
+
+  // The worker heartbeat's local inventory is the disk-presence signal. This
+  // deliberately does not use loaded_models: a model may be on disk while
+  // cold, or loaded in RAM without the inventory being a serving assertion.
+  const onWorkerDrive = useCallback((m) => {
+    const local = Array.isArray(worker?.models_local) ? worker.models_local : []
+    const key = keyOf(m)
+    return local.includes(key) || local.includes(m.name)
+  }, [worker])
 
   // Pull the authoritative central-readiness map. Cheap + idempotent; polled
   // slowly (a finished download only needs to flip to selectable eventually)
@@ -136,6 +146,21 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
     }
   }
 
+  const copyFromWorker = async (key) => {
+    setDlBusy(prev => new Set(prev).add(key))
+    setDlErr(prev => { const n = { ...prev }; delete n[key]; return n })
+    try {
+      await fetchJson(`/api/llm/workers/${encodeURIComponent(workerId)}/copy-from-worker`, {
+        method: 'POST', body: JSON.stringify({ model_key: key }),
+      })
+      await refetchProv()
+    } catch (e) {
+      if (aliveRef.current) setDlErr(prev => ({ ...prev, [key]: e.message || 'Copy from worker failed' }))
+    } finally {
+      if (aliveRef.current) setDlBusy(prev => { const n = new Set(prev); n.delete(key); return n })
+    }
+  }
+
   // Union of EVERY task across the pickable models (ModelTable's helper, so
   // multi-task models surface under each of their tasks — the same fix that
   // cured ModelTable's primary-task-only skew).
@@ -163,6 +188,8 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
     if (needle) rows = rows.filter(m => (m.name || keyOf(m)).toLowerCase().includes(needle))
     // Full-list task match — a model counts under ANY task it advertises.
     if (taskFilter) rows = rows.filter(m => modelTasks(m).includes(taskFilter))
+    if (driveFilter === 'on') rows = rows.filter(onWorkerDrive)
+    if (driveFilter === 'off') rows = rows.filter(m => !onWorkerDrive(m))
     const col = COLUMNS.find(c => c.key === sortKey) || COLUMNS[0]
     const dir = sortDir === 'asc' ? 1 : -1
     return [...rows].sort((a, b) => {
@@ -170,7 +197,7 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
       if (col.num) return (Number(va) - Number(vb)) * dir
       return String(va).localeCompare(String(vb)) * dir
     })
-  }, [models, q, taskFilter, sortKey, sortDir, allocation, workerId])
+  }, [models, q, taskFilter, driveFilter, sortKey, sortDir, allocation, workerId, onWorkerDrive])
 
   // Selectable only when central fully holds the model (ready) AND the
   // anti-duplicate breaker permits it. A not-ready model's checkbox is disabled;
@@ -209,6 +236,13 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                 title="Filter by task — matches ANY task a model advertises, not just its primary">
           <option value="">All tasks</option>
           {tasks.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select className="wp-loadtable-task" value={driveFilter}
+                onChange={e => { setDriveFilter(e.target.value); setSel(new Set()) }}
+                title="Filter by whether the model files are reported on this worker's drive">
+          <option value="">Drive: all</option>
+          <option value="on">Drive: on this worker</option>
+          <option value="off">Drive: elsewhere / not reported</option>
         </select>
         <label className="wp-breaker" title="Anti-duplicate is ON by default: models already on another worker are locked. Flip this to deliberately allocate a duplicate (replicate across workers — e.g. scene fan-out).">
           <input type="checkbox" checked={breaker} onChange={e => { setBreaker(e.target.checked); setSel(new Set()) }} />
@@ -287,10 +321,15 @@ export function WorkerLoadTable({ models, allocation, workerId, worker, onAlloca
                       <>
                         <span className="wp-state-pill wp-cprov-absent"
                               title="not on central disk / not in the manifest">○ not on central</span>
-                        <button className="wp-cprov-dl" disabled={dlBusy.has(k)} onClick={() => download(k)}
-                                title="Download this model to central disk">
-                          {dlBusy.has(k) ? '…' : '⬇ Download'}
-                        </button>
+                        {!m.ollama_model && m.worker_locations?.[workerId]
+                          ? <button className="wp-cprov-dl" disabled={dlBusy.has(k)} onClick={() => copyFromWorker(k)}
+                                   title={`Copy this worker's local files into Central's model store`}>
+                              {dlBusy.has(k) ? 'Copying…' : `Copy from ${worker?.name || workerId}`}
+                            </button>
+                          : !m.worker_only && <button className="wp-cprov-dl" disabled={dlBusy.has(k)} onClick={() => download(k)}
+                                   title="Download this model to central disk">
+                              {dlBusy.has(k) ? '…' : '⬇ Download'}
+                            </button>}
                       </>
                     )}
                     {prov.state === 'error' && (

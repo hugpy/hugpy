@@ -15,15 +15,25 @@ from hugpy_platform import test_isolation as ti
 
 
 @pytest.fixture
-def _saved_roots():
+def _saved_roots(monkeypatch):
+    """Env restored afterwards — AND the in-process rebinding disabled. These
+    tests exercise the ENV/dir contract; letting ``isolate_storage_to_tmp``
+    also rewrite ``hugpy_platform.constants`` (already imported by the server
+    package's conftest at collection) left constants pointing at this test's
+    throwaway base for the rest of the session, while modules that had bound
+    UPLOADS_HOME/DEFAULT_ROOT at import kept the session base (triage
+    2026-09-29: test_member_tier / test_video_presets_route jail mismatches)."""
     keys = tuple(ti._ROOT_SUBPATHS) + ("HUGPY_TEST_STORAGE_BASE", "HUGPY_TEST_LIVE_ROOT")
     saved = {k: os.environ.get(k) for k in keys}
+    saved_live_roots = ti._LIVE_ROOTS
+    monkeypatch.setattr(ti, "_rebind_already_imported", lambda resolved: None)
     yield
     for k, v in saved.items():
         if v is None:
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+    ti._LIVE_ROOTS = saved_live_roots
 
 
 def test_isolate_forces_roots_under_base_over_inherited_live(_saved_roots):

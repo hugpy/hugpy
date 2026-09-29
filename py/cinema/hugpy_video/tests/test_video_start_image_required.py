@@ -52,6 +52,24 @@ def _require_catalog_fixtures():
 
 _STUB_SENTINEL = "STUB-PLANE-REACHED"
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_stubbed_globals():
+    """``_stub_plane`` rebinds the GPU guard / plane drive / bus path as plain
+    module globals ("persists for the run"). Put them back when this module is
+    done so the no-op guard never leaks into a later module's real-guard tests
+    (suite triage 2026-09-29: test_no_local_serving saw guard_gpu_worker -> None)."""
+    from hugpy_video.intel import media_bus, plane
+    from hugpy_video.intel.runners import _gpu_guard
+    saved = [(mod, name, getattr(mod, name)) for mod, name in (
+        (_gpu_guard, "guard_gpu_worker"), (plane, "execute_prompt"),
+        (media_bus, "DB_PATH"), (media_bus, "_initialized"))]
+    yield
+    for mod, name, value in saved:
+        setattr(mod, name, value)
+
 
 # --------------------------------------------------------------------------- #
 # helpers

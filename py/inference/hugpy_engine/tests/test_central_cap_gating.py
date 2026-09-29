@@ -26,6 +26,23 @@ os.environ["HUGPY_CENTRAL_GATE_WAIT_S"] = "0"  # no wait unless a test asks
 
 remote = importlib.import_module("hugpy_engine.resolvers.remote")
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _restore_remote_seams():
+    """The body rebinds ``remote._select`` / the candidates provider to this
+    file's fake boxA worker and never puts them back; every later ``_select``
+    caller in the session (e.g. test_model_groups_offpath) then got boxA
+    instead of its own fake (suite triage 2026-09-29)."""
+    saved_select = remote._select
+    saved_candidates = remote._worker_candidates_provider
+    yield
+    remote._select = saved_select
+    remote._worker_candidates_provider = saved_candidates
+    with remote._INFLIGHT_LOCK:
+        remote._INFLIGHT.clear()
+
 ok = 0
 def check(name, cond):
     global ok

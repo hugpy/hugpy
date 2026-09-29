@@ -44,6 +44,7 @@ class ModelMetadata:
     vocab_size:                 Optional[int]       = None
 
     # context window — keep these separate; they answer different questions
+    model_max_length:           Optional[int] = None   # resolved per-model context
     max_position_embeddings:    Optional[int] = None   # architectural ceiling
     tokenizer_model_max_length: Optional[int] = None   # tokenizer's declared cap
     sliding_window:             Optional[int] = None

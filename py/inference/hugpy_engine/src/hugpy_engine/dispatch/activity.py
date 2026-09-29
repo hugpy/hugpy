@@ -32,7 +32,10 @@ def format_prompt(messages=None, prompt=None) -> str:
     return json.dumps(messages, ensure_ascii=False, indent=2, default=str)
 
 # view state <- canonical status
-_VIEW_STATE = {"pending": "waiting", "processing": "waiting",
+# Keep queue presentation aligned with the canonical job lifecycle.  A request
+# assigned to a worker but still pre-filling/loading is processing, not waiting;
+# collapsing the two made a live worker request look orphaned in the console.
+_VIEW_STATE = {"pending": "waiting", "processing": "processing",
                "streaming": "active"}
 _QUEUE_KINDS_EXCLUDED = {"download"}
 
@@ -105,6 +108,8 @@ def counts() -> dict:
             if d["kind"] not in _QUEUE_KINDS_EXCLUDED]
     waiting = sum(1 for d in live
                   if _VIEW_STATE.get(d["status"]) == "waiting")
+    # Preserve the existing API shape (`active` is the non-waiting bucket),
+    # while snapshots distinguish `processing` from token-producing `active`.
     active = sum(1 for d in live
-                 if _VIEW_STATE.get(d["status"]) == "active")
+                 if _VIEW_STATE.get(d["status"]) in ("processing", "active"))
     return {"waiting": waiting, "active": active, "total": waiting + active}

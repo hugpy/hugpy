@@ -9,9 +9,10 @@
     hugpy install-engine | install-deps | reclassify-images | version | build
 
 Every feature lives in the package that owns it; this module only maps a
-subcommand to that package's entry point and imports it on demand. A bare
-``pip install hugpy`` therefore stays tiny, and a feature whose package is not
-installed answers with ``pip install "hugpy[<extra>]"`` instead of a traceback.
+subcommand to that package's entry point and imports it on demand. A normal
+``pip install hugpy`` carries every lockstep Hugpy module. Features that need
+optional native, GPU, or service dependencies still answer with
+``pip install "hugpy[<extra>]"`` instead of a traceback.
 
 The only ecosystem package imported eagerly is ``hugpy_platform``; ``chat``
 and ``install-deps`` are stdlib-only so they work on the thinnest install.
@@ -516,7 +517,7 @@ ECOSYSTEM_DISTRIBUTIONS = (
 
 def _buildinfo():
     """``hugpy_platform.buildinfo`` when the installed platform ships it, else
-    None. Lazy: a thin ``pip install hugpy`` may carry an older platform."""
+    None. Lazy so a partial or older environment can still report gracefully."""
     try:
         return importlib.import_module("hugpy_platform.buildinfo")
     except Exception:  # noqa: BLE001 — absent or broken: callers degrade

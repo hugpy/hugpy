@@ -131,6 +131,13 @@ def _completion_kwargs(payload: dict) -> dict:
     # and ChatRequest.no_makeroom).
     if payload.get("no_makeroom"):
         kwargs["no_makeroom"] = True
+    # Explicit representation override (operator 2026-09-29): "gguf" |
+    # "transformers" | "auto". OpenAI clients pass it as a top-level extra field.
+    # Resolution-only — picks the model's GGUF vs Transformers row; never reaches
+    # the worker. Absent/"auto" = legacy behaviour.
+    mf = payload.get("model_format")
+    if isinstance(mf, str) and mf.strip() and mf.strip().lower() != "auto":
+        kwargs["model_format"] = mf.strip().lower()
     return kwargs
 
 

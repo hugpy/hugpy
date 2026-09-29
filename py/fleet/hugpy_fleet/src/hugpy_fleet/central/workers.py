@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import hashlib
 import time
 import uuid
 import threading
@@ -267,7 +268,23 @@ def required_pkg_version() -> Optional[str]:
     """
     try:
         import importlib.metadata as _im
-        v = _im.version(tracked_pkg_name())
+        # The API service can put the checkout on PYTHONPATH for live source
+        # imports.  ``metadata.version()`` searches sys.path in order, so a
+        # checkout's local ``.egg-info`` can win over the wheel pip just
+        # installed into this interpreter and make central advertise None (or
+        # the wrong version).  Workers install from the central wheel index;
+        # read that same interpreter's installed site-packages metadata only.
+        import re as _re
+        import sysconfig as _sysconfig
+        purelib = _sysconfig.get_paths().get("purelib")
+        if not purelib:
+            return None
+        wanted = _re.sub(r"[-_.]+", "-", tracked_pkg_name()).lower()
+        matches = [dist for dist in _im.distributions(path=[purelib])
+                   if _re.sub(r"[-_.]+", "-", dist.metadata.get("Name", "")).lower() == wanted]
+        if len(matches) != 1:
+            return None
+        v = matches[0].version
         return v if (v and "+" not in v) else None
     except Exception:
         return None
@@ -415,11 +432,12 @@ def _now() -> float:
 # model) in ``worker["designation_meta"]`` beside ``worker["models"]`` (the
 # plain designation list stays exactly as it was, for every old reader):
 #
-#   * PIN — operator intent: "this model is ALLOCATED to this worker" (its
-#     routing lives here), durably. Only an operator action sets/clears it
-#     (POST /llm/workers/<id>/pin, pin-all, unpin-all). What a pin DOES: the
-#     allocation survives restarts, re-registers and designation prunes, and
-#     central refuses unassign while pinned (409). What a pin does NOT do:
+#   * PIN — "this model is ALLOCATED to this worker" (its routing lives here),
+#     durably. Operators can set/clear it; a verified worker-drive discovery
+#     also pins a model to the worker that already has its files. What a pin
+#     DOES: the allocation survives API restarts, worker re-registers and
+#     designation prunes, and central refuses unassign while pinned (409).
+#     What a pin does NOT do:
 #     load anything into VRAM/RAM, pre-fetch files, protect from eviction, or
 #     give eviction precedence. A pinned model loads when something CALLS it,
 #     like any other. Canonical statement: worker/agent.py ``_pinned``
@@ -1035,16 +1053,25 @@ def _public_view(worker: Dict[str, Any]) -> Dict[str, Any]:
 
 def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
     """The body of :func:`_public_view`, inside its cold-fill window."""
+    model_fields = _model_view_fields(worker)
+    cached_storage = worker.get("_storage_view_cache")
+    if (isinstance(cached_storage, dict)
+            and cached_storage.get("signature") == _storage_view_signature(worker)
+            and float(cached_storage.get("expires_at") or 0) > _now()
+            and isinstance(cached_storage.get("view"), dict)):
+        storage_view = cached_storage["view"]
+    else:
+        # During a mutation the raw row can change before its transaction's
+        # materialization step. Return the current view to that caller.
+        storage_view = storage_proposal(worker)
     return {
-        **worker,
+        **{k: v for k, v in worker.items()
+           if k not in ("_storage_view_cache", "_model_view_cache")},
         **_vram_summary(worker),
         **_ram_summary(worker),
-        # Derived local-storage view + guarded LRU eviction proposal, recomputed
-        # on every read from already-stored fields (same pure-function pattern as
-        # the vram/ram summaries above; no daemon, no auto-fire — nothing deletes
-        # here). Overwrites the raw ``storage`` heartbeat field with the enriched
-        # console-facing shape (over_budget + proposed_evictions[]).
-        "storage": storage_proposal(worker),
+        # Materialized from stored worker state. Approval uses storage_view()
+        # below, which recomputes the current guards before any deletion.
+        "storage": storage_view,
         # IN-FLIGHT PULLS ONLY (2026-07-16). The raw record keeps whatever the
         # worker last announced; the PUBLIC view reports only pulls that are
         # actually moving, so a dead/stalled entry can never render as an
@@ -1073,7 +1100,7 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # with nothing persisted is deliberately ABSENT rather than stamped
         # max-gpu: absent degrades to the blank max-gpu default at the reader,
         # which is the same answer without asserting a preference nobody chose.
-        "model_alloc_modes": _model_alloc_modes(worker),
+        "model_alloc_modes": model_fields["model_alloc_modes"],
         # BITSANDBYTES SPECIALIZATION (operator, 2026-07-26) — two separate
         # maps because "can this take it" and "is it switched on" are different
         # questions and the console needs both: availability decides whether the
@@ -1081,21 +1108,17 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # A model absent from bnb_available simply has no lever (gguf, a
         # CPU-only worker, an already-quantized repo).
         "bnb_by_model": dict(worker.get("bnb_by_model") or {}),
-        "bnb_available": {mk: True for mk in (worker.get("models") or [])
-                          if bnb_available(worker, mk)},
+        "bnb_available": model_fields["bnb_available"],
         # MoE: capability (can it split at all), the operator override, and the
         # EFFECTIVE state the checkbox renders — auto shows as ticked when the
         # derivation produced a split, so the real behaviour is never hidden.
-        "moe_capable": {mk: True for mk in (worker.get("models") or [])
-                        if moe_capable(mk)},
+        "moe_capable": model_fields["moe_capable"],
         "moe_by_model": dict(worker.get("moe_by_model") or {}),
-        "moe_effective": {mk: True for mk in (worker.get("models") or [])
-                          if moe_effective(worker, mk)},
+        "moe_effective": model_fields["moe_effective"],
         # The INTENDED vram/ram division per model — what the Memory column
         # shows for a model that is not resident yet, so it stops echoing the
         # Size column and starts answering "where will this actually go".
-        "planned_split": {mk: planned_split(worker, mk)
-                          for mk in (worker.get("models") or [])},
+        "planned_split": model_fields["planned_split"],
         # k67 item G — INERT SPILL ROWS. A persisted spill for a BLOCKED model is
         # a dead contract (the model can't route while blocked, and block never
         # authored it). Rather than let it linger indistinguishable from a live
@@ -3005,25 +3028,23 @@ def storage_proposal(worker: Dict[str, Any]) -> Dict[str, Any]:
     if _rows_in and not candidates:
         _breakdown = {w: sum(1 for m in models_out if m.get("why") == w)
                       for w in {m.get("why") for m in models_out if m.get("protected")}}
-        # ONCE PER STATE, not once per heartbeat (operator, 2026-07-29: this
-        # line was repeating every second per gunicorn worker for a condition
-        # that is STEADY STATE on ae/op — shared/central storage is never
-        # reaped, and that's by design, not a collapse to shout about). The
-        # diagnostic stays, but it only speaks when the signature CHANGES;
-        # unchanged repeats drop to debug.
         _wname = worker.get("name") or worker.get("id", "?")[:8]
-        _sig = (_rows_in, tuple(sorted(_breakdown.items())))
-        if _RECLAIM_COLLAPSE_SEEN.get(_wname) != _sig:
-            _RECLAIM_COLLAPSE_SEEN[_wname] = _sig
-            logger.warning(
-                "reclaimable collapse on %s: worker reported %d storage rows but 0 "
-                "survived central's guard chain (protected breakdown: %s) — "
-                "logged once; repeats at debug until this changes",
-                _wname, _rows_in, _breakdown)
+        if _breakdown == {"shared/central storage — never reaped": _rows_in}:
+            # A shared catalog has no local eviction candidates by design.
+            _RECLAIM_COLLAPSE_SEEN.pop(_wname, None)
         else:
-            logger.debug(
-                "reclaimable collapse on %s (unchanged): %d rows, %s",
-                _wname, _rows_in, _breakdown)
+            _sig = (_rows_in, tuple(sorted(_breakdown.items())))
+            if _RECLAIM_COLLAPSE_SEEN.get(_wname) != _sig:
+                _RECLAIM_COLLAPSE_SEEN[_wname] = _sig
+                logger.warning(
+                    "reclaimable collapse on %s: worker reported %d storage rows but 0 "
+                    "survived central's guard chain (protected breakdown: %s) — "
+                    "logged once until this state changes",
+                    _wname, _rows_in, _breakdown)
+    else:
+        # Let a later recurrence of the same signature be reported again.
+        _wname = worker.get("name") or worker.get("id", "?")[:8]
+        _RECLAIM_COLLAPSE_SEEN.pop(_wname, None)
 
     proposed: List[Dict[str, Any]] = []
     proposed_free = 0
@@ -3235,6 +3256,38 @@ def storage_proposal(worker: Dict[str, Any]) -> Dict[str, Any]:
 
 
 from hugpy_platform.model_keys import model_key_forms as _match_keys
+
+
+# ── Representation (gguf vs transformers) of a serving endpoint ───────────────
+# The serving fast-route (remote.DelegatingRunner -> serving_endpoint_for) may be
+# pinned to a representation via the request's ``model_format``. A seat's
+# representation is derived, best-effort, from its served-model name and the
+# resident's service_kind — the only representation-bearing facts a discovered
+# OpenAI-compatible resident carries. GGUF markers (a ``-GGUF``/quant token, or a
+# llama.cpp/ollama service_kind) => "gguf"; anything else classified is
+# "transformers". This is stored on the serving_endpoints row at heartbeat time
+# so the heartbeat stays the single invalidation clock (no discovery-time table).
+_GGUF_NAME_TOKENS = frozenset({
+    "gguf", "q2", "q3", "q4", "q5", "q6", "q8", "iq1", "iq2", "iq3", "iq4",
+})
+_GGUF_SERVICE_KINDS = frozenset({"ollama", "llama.cpp", "llama_cpp", "llamacpp",
+                                 "gguf"})
+
+
+def _endpoint_representation(model_key: str, row: "Optional[Dict[str, Any]]" = None) -> str:
+    """"gguf" | "transformers" for a serving endpoint, best-effort from its name +
+    service_kind. Binary by design so both representations are positively
+    identifiable for the model_format fast-route filter; defaults to
+    "transformers" only when no GGUF signal is present."""
+    row = row or {}
+    name = str(row.get("served_model") or model_key or "").lower()
+    toks = set(re.split(r"[^a-z0-9]+", name))
+    if toks & _GGUF_NAME_TOKENS:
+        return "gguf"
+    if str(row.get("service_kind") or row.get("protocol") or "").strip().lower() \
+            in _GGUF_SERVICE_KINDS:
+        return "gguf"
+    return "transformers"
 
 
 def _serveable_match(model_key: str, wanted: set, serveable) -> bool:
@@ -3522,6 +3575,21 @@ def _polite_admits(worker: Dict[str, Any], model_key: str) -> tuple:
                            f"{NO_EVICT_MIN_PKG_VERSION})")
     except Exception:  # noqa: BLE001 — an unreadable gate must not strand a load
         pass
+    # A healthy native slot is already seated: serving another request through
+    # that child does not allocate the model again and must not be rejected by
+    # the cold-load free-VRAM probe.  Without this fast path, a just-loaded MoE
+    # (which intentionally leaves little free VRAM) answered once and then the
+    # next request was refused as though it needed a second admission.
+    wanted = _match_keys(model_key)
+    for resident in (worker.get("loaded_models") or []):
+        if resident and wanted & _match_keys(str(resident)):
+            return True, "already resident on worker"
+    for slot in (worker.get("slots") or []):
+        if not isinstance(slot, dict) or not slot.get("healthy"):
+            continue
+        seated = slot.get("model_key")
+        if seated and wanted & _match_keys(str(seated)):
+            return True, "already seated in a healthy native slot"
     probe = _free_room_probe
     if probe is None:
         return True, "free room unproven (no probe registered) — worker decides"
@@ -3844,24 +3912,126 @@ def _star_map() -> Dict[str, Any]:
         return {}
 
 
+_STORAGE_VIEW_INPUTS = (
+    "storage", "models", "grants", "model_last_picked", "model_call_stats",
+    "model_tok_stats", "model_alloc_modes", "loaded_models", "loading",
+    "provisioning", "provision_progress", "auto_reap", "last_auto_reap_at",
+)
+_STORAGE_VIEW_MAX_AGE = 60.0
+_MODEL_VIEW_MAX_AGE = 3600.0
+
+
+def _model_view_signature(worker: Dict[str, Any]) -> str:
+    """Only allocation inputs belong in this key; live telemetry does not."""
+    inputs = {key: worker.get(key) for key in (
+        "models", "spill_by_model", "bnb_by_model", "moe_by_model",
+        "ram_total", _RAM_TOTAL_DURABLE_KEY, _GPU_TOTAL_DURABLE_KEY,
+    )}
+    inputs["gpu_total"] = _worker_gpu_total_bytes(worker)
+    payload = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _model_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
+    cached = worker.get("_model_view_cache")
+    if (isinstance(cached, dict)
+            and cached.get("signature") == _model_view_signature(worker)
+            and float(cached.get("expires_at") or 0) > _now()
+            and isinstance(cached.get("fields"), dict)):
+        return cached["fields"]
+    models = worker.get("models") or []
+    return {
+        "model_alloc_modes": _model_alloc_modes(worker),
+        "bnb_available": {mk: True for mk in models if bnb_available(worker, mk)},
+        "moe_capable": {mk: True for mk in models if moe_capable(mk)},
+        "moe_effective": {mk: True for mk in models if moe_effective(worker, mk)},
+        "planned_split": {mk: planned_split(worker, mk) for mk in models},
+    }
+
+
+def _refresh_model_view(worker: Dict[str, Any], now: Optional[float] = None) -> bool:
+    now = _now() if now is None else now
+    signature = _model_view_signature(worker)
+    cached = worker.get("_model_view_cache")
+    if (isinstance(cached, dict) and cached.get("signature") == signature
+            and float(cached.get("expires_at") or 0) > now
+            and isinstance(cached.get("fields"), dict)):
+        return False
+    with _view_fill_window():
+        fields = _model_view_fields(worker)
+    worker["_model_view_cache"] = {
+        "signature": signature,
+        "expires_at": now + _MODEL_VIEW_MAX_AGE,
+        "fields": fields,
+    }
+    return True
+
+
+def _storage_view_signature(worker: Dict[str, Any]) -> str:
+    """Hash stored inputs that can change the worker's storage presentation."""
+    inputs = {key: worker.get(key) for key in _STORAGE_VIEW_INPUTS}
+    storage = worker.get("storage") if isinstance(worker.get("storage"), dict) else {}
+    disk = worker.get("disk") if isinstance(worker.get("disk"), dict) else {}
+    inputs["disk_total"] = disk.get("total_bytes")
+    if storage.get("disk_free") is None:
+        inputs["disk_free"] = disk.get("free_bytes")
+    limits = worker.get("limits") if isinstance(worker.get("limits"), dict) else {}
+    inputs["budget_limits"] = {key: limits.get(key)
+                                for key in ("disk_cache_gib", "disk_reserve_gib")}
+    config = worker.get("config") if isinstance(worker.get("config"), dict) else {}
+    inputs["storage_config"] = {key: config.get(key)
+                                for key in ("residency", "pinned")}
+    payload = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _storage_view_expiry(worker: Dict[str, Any], now: float) -> float:
+    """Next time a liveness or pull-protection result may change on its own."""
+    expiry = now + _STORAGE_VIEW_MAX_AGE
+    if worker.get("provisioning"):
+        deadlines = []
+        try:
+            deadlines.append(float(worker.get("last_seen") or 0) + HEARTBEAT_TIMEOUT_SECONDS)
+        except (TypeError, ValueError):
+            pass
+        progress = worker.get("provision_progress") or {}
+        for entry in (progress.values() if isinstance(progress, dict) else []):
+            if isinstance(entry, dict) and entry.get("progressed_at") is not None:
+                try:
+                    deadlines.append(float(entry["progressed_at"]) + _provision_stall_seconds())
+                except (TypeError, ValueError):
+                    pass
+        expiry = min([expiry] + [t for t in deadlines if t > now])
+    return expiry
+
+
+def _refresh_storage_view(worker: Dict[str, Any], now: Optional[float] = None) -> bool:
+    """Materialize the view only when inputs changed or time-based truth aged."""
+    now = _now() if now is None else now
+    signature = _storage_view_signature(worker)
+    cached = worker.get("_storage_view_cache")
+    if (isinstance(cached, dict) and cached.get("signature") == signature
+            and float(cached.get("expires_at") or 0) > now
+            and isinstance(cached.get("view"), dict)):
+        return False
+    worker["_storage_view_cache"] = {
+        "signature": signature,
+        "expires_at": _storage_view_expiry(worker, now),
+        "view": storage_proposal(worker),
+    }
+    return True
+
+
 class WorkerStore:
-    """Disk-authoritative, multi-process-safe registry of GPU workers.
+    """Multi-process-safe registry of GPU workers.
 
-    Under gunicorn/uwsgi the API runs as several processes, so an in-memory
-    dict would split-brain: a worker registered in process A would be invisible
-    to a heartbeat or chat request handled by process B (the classic symptom is
-    "registers + shows in the UI, but heartbeats 410 and chats never offload").
-
-    To avoid that, ``workers.json`` is the single source of truth: every read
-    re-loads it, and every mutation takes an exclusive ``fcntl`` lock, reloads,
-    mutates, and writes back atomically. A short-lived in-process RLock just
-    keeps threads within one process from racing the same fd.
+    PostgreSQL is authoritative when HUGPY_WORKER_REGISTRY_BACKEND=pg. The
+    existing workers.json is imported once if the database is uninitialized. An
+    explicit path keeps the file backend for isolated callers and tests.
     """
 
-    # Read-cache TTL: the console polls /llm/workers every ~10s; without this
-    # every poll does an open+flock+read of workers.json, which BLOCKS on a
-    # degraded mount and stalls the API. Reads serve from cache within the TTL;
-    # writes always go to disk and refresh the cache, so liveness stays correct.
+    # Read-cache TTL avoids a database query or a file read on every status
+    # request. Mutations refresh this process's cache immediately.
     _READ_TTL = 3.0
 
     def __init__(self, path: Optional[str] = None) -> None:
@@ -3869,7 +4039,19 @@ class WorkerStore:
         self._lock = threading.RLock()
         self._cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._cache_at = 0.0
-        self._ensure_parent()
+        self._pg = None
+        backend = os.environ.get("HUGPY_WORKER_REGISTRY_BACKEND", "").strip().lower()
+        if path is None and backend not in ("", "json", "pg"):
+            raise ValueError(f"unknown worker registry backend: {backend!r}")
+        if path is None and backend == "pg":
+            from hugpy_engine.model_index.client import enabled
+            if not enabled():
+                raise RuntimeError("PostgreSQL worker registry requires HUGPY_REGISTRY_DB=pg")
+            from hugpy_fleet.central.worker_registry_db import WorkerRegistryDB
+            self._pg = WorkerRegistryDB()
+            logger.info("worker registry backend: PostgreSQL")
+        else:
+            self._ensure_parent()
 
     # -- persistence (disk-authoritative) ----------------------------------
     def _ensure_parent(self) -> None:
@@ -3924,19 +4106,46 @@ class WorkerStore:
         except OSError:
             pass
 
-    def _load(self) -> Dict[str, Dict[str, Any]]:
-        """Read-only snapshot of the registry, cached for a few seconds.
+    def _materialize_storage(self, workers: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Persist derived views without holding the registry DB lock during
+        model-size and filesystem lookups."""
+        pending = {}
+        for worker_id, worker in workers.items():
+            storage_changed = _refresh_storage_view(worker)
+            model_changed = _refresh_model_view(worker)
+            if storage_changed or model_changed:
+                pending[worker_id] = {
+                    "storage": worker["_storage_view_cache"] if storage_changed else None,
+                    "model": worker["_model_view_cache"] if model_changed else None,
+                }
+        if not pending:
+            return workers
+        with self._pg.transaction(self._read_unlocked) as current:
+            for worker_id, caches in pending.items():
+                row = current.get(worker_id)
+                if row is None:
+                    continue
+                storage_cache = caches["storage"]
+                if (storage_cache is not None
+                        and _storage_view_signature(row) == storage_cache["signature"]):
+                    row["_storage_view_cache"] = storage_cache
+                model_cache = caches["model"]
+                if (model_cache is not None
+                        and _model_view_signature(row) == model_cache["signature"]):
+                    row["_model_view_cache"] = model_cache
+        return current
 
-        Polls (list/get/pick) hit this; the cache keeps a hung/slow mount from
-        blocking every request. Writes refresh the cache, so freshly-registered
-        or reassigned workers are visible immediately to the writing process.
-        """
+    def _load(self) -> Dict[str, Dict[str, Any]]:
+        """Read-only registry snapshot, cached for a few seconds."""
         now = time.time()
         with self._lock:
             if self._cache is not None and (now - self._cache_at) < self._READ_TTL:
                 return self._cache
             try:
-                data = self._read_unlocked()
+                data = (self._pg.read(self._read_unlocked) if self._pg is not None
+                        else self._read_unlocked())
+                if self._pg is not None:
+                    data = self._materialize_storage(data)
             except (ValueError, KeyError):
                 # Corrupt on-disk file: don't crash polls — serve the last good
                 # snapshot if we have one (the error is already logged).
@@ -3949,12 +4158,18 @@ class WorkerStore:
 
     @contextmanager
     def _transaction(self):
-        """Yield the on-disk workers map under an exclusive cross-process lock.
+        """Yield workers under an exclusive cross-process transaction.
 
-        Reload -> mutate (caller) -> persist. The yielded dict is written back
-        when the block exits without raising. Falls back to a plain in-process
-        critical section when ``fcntl`` is unavailable.
+        PostgreSQL uses a row lock; the file backend uses fcntl. Both reload,
+        mutate, and persist atomically across API processes.
         """
+        if self._pg is not None:
+            with self._lock:
+                with self._pg.transaction(self._read_unlocked) as workers:
+                    yield workers
+                self._cache = self._materialize_storage(workers)
+                self._cache_at = time.time()
+            return
         with self._lock:
             self._ensure_parent()
             # Open r+ (create if missing) so we hold one fd for lock+read+write.
@@ -4006,7 +4221,9 @@ class WorkerStore:
 
         Re-registration is keyed first on the supplied ``worker_id``, then on
         ``url`` — so an agent that restarts and advertises the same URL keeps
-        its assignments instead of creating a duplicate row.
+        its pinned assignments instead of creating a duplicate row. Unpinned
+        designations are intentionally dropped at re-register; the next
+        complete drive inventory restores local models as pinned.
         """
         url = (url or "").rstrip("/")
         with self._transaction() as workers:
@@ -4020,6 +4237,23 @@ class WorkerStore:
                         break
 
             if existing is not None:
+                # Pin is the allocation persistence boundary. A worker restart
+                # must not silently turn every old designation into a durable
+                # allocation. Keep only pinned rows; its next complete drive
+                # inventory will add and pin any locally present models.
+                old_models = set(existing.get("models") or [])
+                keep_models = {mk for mk in old_models
+                               if effective_pin(existing, mk)["pinned"]}
+                dropped_models = old_models - keep_models
+                if dropped_models:
+                    existing["models"] = sorted(keep_models)
+                    for field in ("spill_by_model", "model_last_picked",
+                                  "model_call_stats", "model_tok_stats",
+                                  "designation_meta", "bnb_by_model",
+                                  "moe_by_model"):
+                        values = existing.get(field) or {}
+                        for mk in dropped_models:
+                            values.pop(mk, None)
                 # Grandfather pre-feature rows to approved; never silently revive a
                 # blocked worker (the route refuses it, but don't let a re-register
                 # flip it back to serving).
@@ -4049,8 +4283,9 @@ class WorkerStore:
                 # A register IS an agent (re)boot: stamp when this agent process
                 # started (roster/diagnostics). Nothing is loaded because of it.
                 existing["agent_boot_at"] = _now()
-                if models is not None:
-                    existing["models"] = sorted(set(models))
+                # ``models`` from an agent's command line is not a durable pin;
+                # accepting it here would resurrect unpinned allocations on
+                # every worker restart.
                 if pkg_version is not None:
                     existing["pkg_version"] = pkg_version
                 if engine_build is not None:
@@ -4328,6 +4563,7 @@ class WorkerStore:
         loaded_models: Optional[List[str]] = None,
         loading: Optional[List[str]] = None,
         models_local: Optional[List[str]] = None,
+        models_discovered: Optional[Dict[str, Dict[str, Any]]] = None,
         provisioning: Optional[List[str]] = None,
         provision_progress: Optional[Dict[str, Any]] = None,
         spill: Optional[Dict[str, Any]] = None,
@@ -4387,16 +4623,78 @@ class WorkerStore:
                 # would re-probe already-warm models. Union in what the slots
                 # report about themselves.
                 merged = list(loaded_models)
+                # Measured PID residency is also loaded-state truth. Some
+                # externally managed runners (notably Ollama) are visible in
+                # pid_registry but are not in the worker's in-process dispatch
+                # cache, so relying only on loaded_models made a resident,
+                # designated model look cold and unroutable. Process rows carry
+                # the model identity; ignore infrastructure and call-attribution
+                # rows, which are not model residency.
+                for row in ((pid_registry or {}).get("models") or []):
+                    if not isinstance(row, dict) or not row.get("model_key"):
+                        continue
+                    if row.get("alive") is False or row.get("is_process_row"):
+                        continue
+                    if row.get("host_mode") in ("cuda_context", "comfy"):
+                        continue
+                    key = str(row["model_key"]).strip()
+                    if key.lower().startswith("ollama:"):
+                        key = "ollama~" + key.split(":", 1)[1].replace(":", "~").replace("/", "~")
+                    if key and key not in merged:
+                        merged.append(key)
                 for s in (slots if slots is not None
                           else worker.get("slots") or []):
                     mk = (s or {}).get("model_key")
                     if mk and s.get("healthy") and mk not in merged:
                         merged.append(mk)
                 worker["loaded_models"] = merged
+                # A healthy slot is newer, positive residency truth.  Retire a
+                # prior failed probe/load report for the same model so status
+                # pages and routing diagnostics do not keep presenting a stale
+                # failure after the worker has successfully loaded it.  Keep
+                # the historical failure in metrics; this only clears the
+                # mutable "last failure" snapshot.
+                reports = worker.get("load_reports")
+                if isinstance(reports, dict) and merged:
+                    for report_key, report in list(reports.items()):
+                        if (isinstance(report, dict) and report.get("ok") is False
+                                and _serveable_match(
+                                    report_key, _match_keys(report_key), merged)):
+                            reports.pop(report_key, None)
             if loading is not None:
                 worker["loading"] = loading   # weights load in flight ("heating")
             if models_local is not None:
                 worker["models_local"] = models_local   # disk-truth (UTIL-08)
+            if models_discovered is not None:
+                worker["models_discovered"] = models_discovered
+                # A discovered OpenAI-compatible resident is a SERVING
+                # endpoint, not merely a model-catalog hint.  Persist the
+                # routable worker proxy beside the heartbeat so central can
+                # resolve it before invoking Hugpy placement.  The resident's
+                # api_url is loopback on the worker and is intentionally kept
+                # as upstream_api_url for diagnostics; central uses endpoint.
+                serving = {}
+                for model_key, row in (models_discovered or {}).items():
+                    if not isinstance(row, dict) or not row.get("api_url"):
+                        continue
+                    if worker.get("url"):
+                        serving[str(model_key)] = {
+                            "model_key": str(model_key),
+                            "served_model": row.get("served_model") or str(model_key),
+                            "endpoint": worker["url"].rstrip("/") + "/ops/external/chat",
+                            "stream_endpoint": worker["url"].rstrip("/") + "/ops/external/chat/stream",
+                            "protocol": row.get("service_kind") or "openai-compatible",
+                            # Representation of THIS seat (gguf | transformers) so
+                            # a model_format-pinned request only fast-routes onto
+                            # a matching seat. Refreshed every heartbeat with the
+                            # row — no separate discovery-time table.
+                            "representation": _endpoint_representation(str(model_key), row),
+                            "max_concurrency": row.get("max_concurrency") or 1,
+                            "owner_worker": worker_id,
+                            "upstream_api_url": row.get("api_url"),
+                            "last_seen": _now(),
+                        }
+                worker["serving_endpoints"] = serving
             if provisioning is not None:
                 worker["provisioning"] = provisioning
             if provision_progress is not None:
@@ -4870,6 +5168,197 @@ class WorkerStore:
             _remember_assignments(worker)   # 4b: an explicit unassign IS forgotten
             return _public_view(worker)
 
+    def sync_discovered_designations(
+        self, worker_id: str, model_keys: Iterable[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Make verified worker-local discoveries pinned placements.
+
+        Only ``autoplace`` designations are reconciled: explicit operator and
+        other automated placements keep their existing ownership. A discovered
+        model is added and pinned to this worker. Its drive-local pin is
+        removed when a later complete scan no longer finds it here; unrelated
+        user pins and designations are preserved.
+        """
+        wanted = {str(key).strip() for key in (model_keys or [])
+                  if isinstance(key, str) and str(key).strip()}
+        with self._transaction() as workers:
+            worker = workers.get(worker_id)
+            if worker is None:
+                return None
+            models = set(worker.get("models") or [])
+            meta_all = worker.setdefault("designation_meta", {})
+            changed = False
+            now = _now()
+            for key in sorted(wanted):
+                meta = dict(meta_all.get(key) or {})
+                source = meta.get("source") or UNRECORDED_SOURCE
+                # Disk locality is a routing constraint: weights already on
+                # this worker's drive belong here. Keep provenance separate
+                # from the user's explicit pin controls so a later complete
+                # inventory can withdraw only this automatic pin.
+                if meta.get("pinned") is not True:
+                    if meta.get("pin_source") != "worker_discovery":
+                        meta["pin_restore"] = {
+                            field: meta[field]
+                            for field in ("pinned", "pinned_by", "pinned_at")
+                            if field in meta
+                        }
+                    meta["pinned"] = True
+                    meta["pinned_by"] = "worker discovery"
+                    meta["pinned_at"] = now
+                    meta["pin_source"] = "worker_discovery"
+                    meta_all[key] = meta
+                    changed = True
+                if key in models and source != "autoplace":
+                    continue
+                if (key in models and source == "autoplace"
+                        and meta.get("origin") != "worker_discovery"):
+                    # Other subsystems also use autoplace. Their placements
+                    # are not owned by this inventory reconciliation.
+                    continue
+                if (key in models and meta.get("origin") == "worker_discovery"
+                        and isinstance(meta.get("at"), (int, float))
+                        and now - meta["at"] < 3600):
+                    continue
+                models.add(key)
+                # Refresh only our own transient designations. Never retag an
+                # operator, admission, benchmark, model-group, or other
+                # autoplace placement.
+                meta["source"] = "autoplace"
+                meta["origin"] = "worker_discovery"
+                meta["at"] = now
+                meta_all[key] = meta
+                changed = True
+
+            stale = [key for key in models - wanted
+                     if ((meta_all.get(key) or {}).get("source") == "autoplace"
+                         and (meta_all.get(key) or {}).get("origin")
+                         == "worker_discovery")]
+            for key in stale:
+                models.discard(key)
+                meta = dict(meta_all.pop(key, {}) or {})
+                previous = meta.pop("pin_restore", None)
+                for field in ("pinned", "pinned_by", "pinned_at", "pin_source",
+                              "source", "origin", "at"):
+                    meta.pop(field, None)
+                if isinstance(previous, dict):
+                    meta.update(previous)
+                # No assignment remains, but retain an explicit prior pin
+                # choice so it still overrides any legacy agent-side marker.
+                if meta:
+                    meta_all[key] = meta
+                worker.get("spill_by_model", {}).pop(key, None)
+                worker.get("model_last_picked", {}).pop(key, None)
+                worker.get("model_call_stats", {}).pop(key, None)
+                worker.get("model_tok_stats", {}).pop(key, None)
+                changed = True
+            # A model can have an operator/admission designation as well as an
+            # automatic drive-local pin. If it disappears from this worker's
+            # complete inventory, retain that designation but withdraw only
+            # our pin decision.
+            for key, old_meta in list(meta_all.items()):
+                if (key not in wanted
+                        and old_meta.get("pin_source") == "worker_discovery"):
+                    meta = dict(old_meta)
+                    previous = meta.pop("pin_restore", None)
+                    for field in ("pinned", "pinned_by", "pinned_at"):
+                        meta.pop(field, None)
+                    if isinstance(previous, dict):
+                        meta.update(previous)
+                    meta.pop("pin_source", None)
+                    meta_all[key] = meta
+                    changed = True
+            if changed:
+                worker["models"] = sorted(models)
+                _remember_assignments(worker)
+            return _public_view(worker)
+
+    def pin_local_designations(
+        self, worker_id: str, model_keys: Iterable[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Make the worker's confirmed local models durable placements.
+
+        ``models_local`` is the worker's inexpensive, heartbeat-level disk
+        truth.  Once it confirms that weights for a model are on this worker,
+        the allocation belongs to that worker and is pinned there.  This does
+        not request a transfer or load anything: it only records a fact already
+        reported by the worker.  Unlike the full external-discovery inventory,
+        ``models_local`` is assignment-scoped, so this method is deliberately
+        additive and never withdraws a prior placement.
+
+        An explicit operator unpin remains authoritative.  It is the escape
+        hatch from this default and must not be undone by the next heartbeat.
+        """
+        wanted = {str(key).strip() for key in (model_keys or [])
+                  if isinstance(key, str) and str(key).strip()}
+        with self._transaction() as workers:
+            worker = workers.get(worker_id)
+            if worker is None:
+                return None
+            models = set(worker.get("models") or [])
+            meta_all = worker.setdefault("designation_meta", {})
+            changed = False
+            now = _now()
+            for key in sorted(wanted):
+                meta = dict(meta_all.get(key) or {})
+                # A deliberate operator unpin is stronger than the default.
+                if (meta.get("pinned") is False and meta.get("pinned_by")
+                        and meta.get("pin_source") != "worker_local"):
+                    continue
+                if key not in models:
+                    models.add(key)
+                    meta.setdefault("source", "autoplace")
+                    meta.setdefault("origin", "worker_local")
+                    meta.setdefault("at", now)
+                    changed = True
+                if meta.get("pinned") is not True:
+                    if meta.get("pin_source") != "worker_local":
+                        meta["pin_restore"] = {
+                            field: meta[field]
+                            for field in ("pinned", "pinned_by", "pinned_at")
+                            if field in meta
+                        }
+                    meta["pinned"] = True
+                    meta["pinned_by"] = "worker local"
+                    meta["pinned_at"] = now
+                    meta["pin_source"] = "worker_local"
+                    changed = True
+                meta_all[key] = meta
+            if changed:
+                worker["models"] = sorted(models)
+                _remember_assignments(worker)
+            return _public_view(worker)
+
+    def prune_unpinned_assignments(self) -> Dict[str, int]:
+        """Drop non-pinned worker allocations at central API startup.
+
+        PostgreSQL keeps the registry alive across API restarts, so an
+        unpinned designation otherwise looks just as durable as a pin. Pins
+        are the persistence boundary: keep pinned allocations and remove the
+        rest. Worker-local inventory is reconciled from the next complete
+        heartbeat and becomes pinned by ``sync_discovered_designations``.
+        """
+        removed_workers = removed_models = 0
+        with self._transaction() as workers:
+            for worker in workers.values():
+                models = set(worker.get("models") or [])
+                stale = {key for key in models
+                         if not effective_pin(worker, key)["pinned"]}
+                if not stale:
+                    continue
+                worker["models"] = sorted(models - stale)
+                for field in ("spill_by_model", "model_last_picked",
+                              "model_call_stats", "model_tok_stats",
+                              "designation_meta", "bnb_by_model",
+                              "moe_by_model"):
+                    values = worker.get(field) or {}
+                    for key in stale:
+                        values.pop(key, None)
+                _remember_assignments(worker)
+                removed_workers += 1
+                removed_models += len(stale)
+        return {"workers": removed_workers, "models": removed_models}
+
     # -- PIN (operator intent) + automated-designation prune (2026-09-23) -----
     def set_pin(self, worker_id: str, model_key: str, pinned: bool,
                 by: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -4884,6 +5373,11 @@ class WorkerStore:
                 return None
             meta_all = worker.setdefault("designation_meta", {})
             meta = dict(meta_all.get(model_key) or {})
+            # A direct operator action supersedes an automatic drive-local pin.
+            # If the model is still on disk, the next complete discovery scan
+            # will re-apply the locality rule.
+            meta.pop("pin_source", None)
+            meta.pop("pin_restore", None)
             if pinned and model_key not in (worker.get("models") or []):
                 worker["models"] = sorted(set(worker.get("models") or []) | {model_key})
                 meta["source"], meta["at"] = "operator", _now()
@@ -5333,6 +5827,23 @@ class WorkerStore:
         _dist_feasible = _distribution_feasible()
         _strict = _model_strict(model_key)
         _feasible_open = _dist_feasible and not _strict
+        try:
+            from hugpy_engine.config.models.models_config import get_models_dict
+            _catalog = get_models_dict(dict_return=True) or {}
+            _catalog_row = _catalog.get(model_key) or {}
+            if not _catalog_row:
+                _matches = [row for key, row in _catalog.items()
+                            if row.get("worker_only") and
+                            _serveable_match(model_key, wanted, [key])]
+                if len(_matches) == 1:
+                    _catalog_row = _matches[0]
+        except Exception:  # noqa: BLE001
+            _catalog_row = {}
+        _worker_only_owners = (set((_catalog_row.get("worker_locations") or {}).keys()) |
+                               set((_catalog_row.get("worker_external_apis") or {}).keys())
+                               if _catalog_row.get("worker_only") else set())
+        if _catalog_row.get("worker_only") and not _worker_only_owners:
+            return []
         rows = self.all()
         # ALLOCATION IS HARD SCOPE (operator ruling 2026-08-28, coder-next/
         # computron): a model that HAS designation rows anywhere (operator
@@ -5351,6 +5862,8 @@ class WorkerStore:
             _des = list(_w0.get("models", [])) + list(_w0.get("grants", {}).keys())
             if _des and _serveable_match(model_key, wanted, _des):
                 _alloc_ids.add(_w0.get("id") or "")
+        if _worker_only_owners:
+            _alloc_ids = _worker_only_owners
         # Durable per-(model × worker) blocks (the pair-block half of the same
         # ruling) — one normalized key so bare / "~"-qualified spellings of
         # the same model land on one record (the dispatch cache uses the BARE
@@ -5358,6 +5871,11 @@ class WorkerStore:
         _pair_key = str(model_key).split("~")[-1].strip().lower()
         out = []
         for w in rows:
+            if _worker_only_owners and (w.get("id") or "") not in _worker_only_owners:
+                continue
+            _api_owner = (w.get("id") or "") in (_catalog_row.get("worker_external_apis") or {})
+            if _worker_only_owners and not _api_owner and not _on_disk_match(w, model_key, wanted):
+                continue
             # Only admitted workers serve. Pending (awaiting operator approval) and
             # blocked workers are never picked for inference, even if assigned.
             if w.get("admission") != "approved":
@@ -5403,6 +5921,8 @@ class WorkerStore:
             # not "may not be reclaimed".
             serveable = (list(w.get("models", [])) + list(w.get("loaded_models", []))
                          + list(w.get("grants", {}).keys()))
+            if _worker_only_owners:
+                serveable += list(w.get("models_local") or [])
             # Match on the raw key OR any normalized alias (hub_id vs key vs
             # case vs "~"-qualification), so an assignment made via one form
             # still routes a chat that names the model a slightly different way.
@@ -5413,6 +5933,12 @@ class WorkerStore:
             # model is ALWAYS a "home" match here — never route-refused —
             # wildcard flag or not.
             home = _serveable_match(model_key, wanted, serveable)
+            # Explicit assignments/grants seal the routing scope even if an
+            # unallocated worker has a transient warm copy. Residency is not an
+            # allocation and must not override the operator's worker selection.
+            if _alloc_ids and (w.get("id") or "") not in _alloc_ids:
+                alloc_scope_skipped += 1
+                continue
             # COMFY PRESENCE = DE-FACTO PLACEMENT (2026-09-24). A comfy-framework
             # model is served by the box's EXTERNAL ComfyUI, so a box whose comfy
             # ADVERTISES the checkpoint installed (comfy.checkpoints) can serve it
@@ -5471,18 +5997,6 @@ class WorkerStore:
                         # routing can't offer it (no synchronous transfer). Named
                         # apart from the alloc-scope skip so the log is honest.
                         presence_skipped += 1
-                    continue
-                if _alloc_ids and (w.get("id") or "") not in _alloc_ids:
-                    # An ALLOCATED model never falls to a wildcard / comfy-present /
-                    # feasible-catch box off its allocation (hard scope — see the
-                    # block comment above). ALLOCATIONS KEEP THEIR CURRENT MEANING
-                    # even under "feasible" distribution (operator ruling
-                    # 2026-09-24, point 3): an EXPLICIT models-list assignment stays
-                    # a sealed scope. Feasible distribution only spreads models that
-                    # carry NO assignment anywhere (empty _alloc_ids); designation
-                    # ORDER (worker_prefs/k56) is what softens to a preference, in
-                    # pick_for_model. Designation still outranks bare presence.
-                    alloc_scope_skipped += 1
                     continue
             if online_only and w["status"] != "online":
                 continue
@@ -5598,6 +6112,17 @@ class WorkerStore:
                 if _verdict is False:
                     infeasible_skipped += 1
                     continue
+            # An operator pair block is an explicit per-worker routing veto,
+            # including when the model remains resident on that worker. Fit
+            # refreshes above only clear auto-authored blocks.
+            try:
+                from hugpy_fleet.central import blocklist as _bl
+                _pair_record = _bl.pair_block_map(_pair_key).get(str(w.get("id") or "")) or {}
+                if _pair_record.get("blocked") and _pair_record.get("by") == "operator":
+                    infeasible_skipped += 1
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
             if not home:
                 # Transient RESPONSE-COPY marker: ``w`` is a _public_view copy
                 # (self.all() rebuilds it from the store on every read), so this
@@ -5844,14 +6369,28 @@ class WorkerStore:
             preferred = _prefs_scope(candidates, prefs, model_key)
             if preferred:
                 candidates = preferred
-            elif strict or not _distribution_feasible():
+            else:
+                # In the FEASIBLE/non-strict lane an explicit model allocation
+                # is the routing scope: a stale or mismatched preference must
+                # not erase it; preferences order assigned workers but cannot
+                # veto them. Under strict/distribution:designated the list is a
+                # HARD FENCE — an allocation on an OFF-LIST worker does NOT
+                # satisfy the request, so has_allocated only short-circuits the
+                # feasible fallback, never the strict/designated refuse.
+                wanted_for_alloc = _match_keys(model_key)
+                has_allocated = any(
+                    _serveable_match(model_key, wanted_for_alloc,
+                                     list(w.get("models", [])) +
+                                     list(w.get("grants", {}).keys()))
+                    for w in candidates)
+            if not preferred and (strict or not _distribution_feasible()):
                 _emit_route_refuse(
                     model_key,
                     f"no worker on the preference list {prefs} is an eligible "
                     f"candidate right now"
                     + (" (model is strict)" if strict else ""), [])
                 return None
-            else:
+            elif not preferred and not has_allocated:
                 # FEASIBLE FALLBACK: preference unmet, keep the wider eligible set.
                 feasible_fallback = True
                 logger.warning(
@@ -6685,6 +7224,49 @@ def lookup_worker(name_or_id: str) -> Optional[Dict[str, Any]]:
         return None
     return next((w for w in worker_store.all()
                  if want in (w.get("id"), w.get("name"))), None)
+
+
+def serving_endpoint_for(model_key: str, fmt: str = "auto") -> Optional[Dict[str, Any]]:
+    """Return the authoritative live endpoint for an already-serving model.
+
+    This is deliberately exact-first and refuses ambiguous aliases.  The
+    worker registry is durable (JSON or PostgreSQL, depending on deployment),
+    while the heartbeat refreshes endpoint liveness and removes stale rows.
+
+    ``fmt`` ("gguf" | "transformers" | "auto", default auto) is the explicit
+    representation pin from the request's ``model_format``. When set, only a seat
+    of that representation is a candidate (the row's heartbeat-derived
+    ``representation``), so a format=gguf request never fast-routes onto a
+    transformers seat and vice versa; an unmatched pin falls through to normal
+    placement. ``auto`` matches exactly as before — the serving representation
+    wins.
+    """
+    want_fmt = str(fmt or "auto").strip().lower()
+    wanted = _match_keys(model_key)
+    matches = []
+    now = _now()
+    for worker in worker_store.all():
+        if not _is_online(worker):
+            continue
+        for key, row in (worker.get("serving_endpoints") or {}).items():
+            if not isinstance(row, dict) or not row.get("endpoint"):
+                continue
+            if key == model_key or wanted & _match_keys(key):
+                if want_fmt in ("gguf", "transformers"):
+                    rep = row.get("representation") or _endpoint_representation(key, row)
+                    if rep != want_fmt:
+                        continue
+                item = dict(row)
+                item.setdefault("owner_worker", worker.get("id"))
+                item["worker"] = worker
+                item["healthy"] = True
+                item["last_seen"] = row.get("last_seen", now)
+                matches.append(item)
+    if len(matches) == 1:
+        return matches[0]
+    # An exact key wins over a single alias match, but never hide ambiguity.
+    exact = [m for m in matches if m.get("model_key") == model_key]
+    return exact[0] if len(exact) == 1 else None
 
 
 def worker_storage_view(worker_id: str) -> Optional[Dict[str, Any]]:

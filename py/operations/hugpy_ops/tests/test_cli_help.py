@@ -31,9 +31,39 @@ def _target(module):
     return mod, fn or "main"
 
 
+def _in_tree_src_roots():
+    """The checkout's ``py/<group>/<dist>/src`` roots currently on sys.path —
+    the code under test, and nothing else (no test-helper dirs, no monolith)."""
+    roots = []
+    for entry in sys.path:
+        parts = os.path.normpath(entry).split(os.sep)
+        if len(parts) >= 4 and parts[-1] == "src" and parts[-4] == "py" \
+                and os.path.isdir(entry) and entry not in roots:
+            roots.append(entry)
+    return roots
+
+
+def _installed_strictly() -> bool:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    probe = subprocess.run([sys.executable, "-c", "import hugpy_ops"],
+                           capture_output=True, text=True, timeout=120, env=env)
+    return probe.returncode == 0
+
+
+_INSTALLED_STRICTLY = _installed_strictly()
+
+
 def _strict_env():
+    """The monolith is blocked and no test-helper PYTHONPATH leaks in. When the
+    distributions are not pip-installed into this interpreter (an in-tree
+    source run such as ``release.sh --known-good``), the checkout's own
+    ``src`` roots stand in for the install — still no monolith, no helpers."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env.pop("HUGPY_ALLOW_MONOLITH", None)
+    if not _INSTALLED_STRICTLY:
+        roots = _in_tree_src_roots()
+        if roots:
+            env["PYTHONPATH"] = os.pathsep.join(roots)
     return env
 
 

@@ -154,6 +154,13 @@ def _request_checks(cc, schemas):
     cc.logger.addHandler(handler)
     orig_level = cc.logger.level
     cc.logger.setLevel(logging.INFO)  # default effective level is WARNING
+    # Dozens of script-style test modules call ``logging.disable(INFO|CRITICAL)``
+    # at IMPORT time (collection), and not all of them lift it; in a full-suite
+    # session the process-wide disable is therefore whatever the last collected
+    # module left, which silently drops the INFO record this section asserts on.
+    # Lift it for the duration of these checks only, then put it back.
+    orig_disable = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
     cc._ctx_max_for_model = lambda mk: CTX
     try:
         # -- an overgrown request comes back shortened, everything else intact
@@ -211,6 +218,7 @@ def _request_checks(cc, schemas):
         cc._ctx_max_for_model = orig_ctx
         cc.logger.setLevel(orig_level)
         cc.logger.removeHandler(handler)
+        logging.disable(orig_disable)
 
 
 # ---------------------------------------------------------------------------

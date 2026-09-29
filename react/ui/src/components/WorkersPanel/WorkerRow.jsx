@@ -42,7 +42,7 @@ export function effectivePin(worker, key) {
 
 // A worker row: status + GPUs (with used/free) + provisioning state, the models
 // it serves with per-model load state + concise GPU allocation + free controls.
-export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null, distMode = 'feasible' }) {
+export function WorkerRow({ worker, models, allocation, onChat = null, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null, distMode = 'feasible' }) {
   // The shared per-(model, worker) state vocabulary (GET /llm/models/status):
   // the same words the Models table and the Metrics picker use. Feature-
   // detected — an older central keeps the legacy pill below.
@@ -51,6 +51,8 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
   const [newSpill, setNewSpill] = useState({})   // allocation for the next assign
   const [allocMenu, setAllocMenu] = useState(null)   // model key whose in-place alloc menu is open
   const allocAnchorRef = useRef(null)                // the open menu's trigger button (for fixed positioning)
+  const [ctxMenu, setCtxMenu] = useState(null)       // model key whose context editor is open
+  const ctxAnchorRef = useRef(null)
   // Optimistic per-model alloc override: key -> spill dict, applied on top of
   // the derived mode so the cell updates the instant a mode is picked; reverted
   // (deleted) if the /assign POST rejects, and cleared once the refetch lands.
@@ -256,6 +258,40 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
       }))
   }, [onAssign, worker])
 
+  const applyContext = useCallback((key, currentSpill, pct) => {
+    setCtxMenu(null)
+    const next = { ...(currentSpill || {}) }
+    if (pct == null) delete next.ctx_pct
+    else next.ctx_pct = Number(pct)
+    Promise.resolve(onAssign(worker, key, next)).catch(() => {})
+  }, [onAssign, worker])
+
+  const ContextMenu = ({ maxContext, spill, anchorRef, onApply, onClose }) => {
+    const initial = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
+    const [pct, setPct] = useState(Math.max(1, Math.min(100, initial)))
+    const tokens = Math.max(1, Math.round(Number(maxContext || 0) * pct / 100))
+    useEffect(() => {
+      const close = (e) => {
+        if (!e.target.closest?.('.wp-context-menu') && !e.target.closest?.('.wp-ctx-button')) onClose()
+      }
+      document.addEventListener('mousedown', close)
+      return () => document.removeEventListener('mousedown', close)
+    }, [onClose])
+    const rect = anchorRef.current?.getBoundingClientRect()
+    return (
+      <div className="wp-context-menu" style={{ top: `${(rect?.bottom || 0) + 6}px`, left: `${rect?.left || 0}px` }}>
+        <div className="wp-context-title">Context target</div>
+        <input type="range" min="1" max="100" step="1" value={pct}
+               onChange={e => setPct(Number(e.target.value))} />
+        <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens</span>
+        <div className="wp-context-actions">
+          <button type="button" onClick={() => onApply(pct)}>Apply</button>
+          <button type="button" onClick={() => onApply(null)}>Auto</button>
+        </div>
+      </div>
+    )
+  }
+
   const checkHealth = useCallback(async () => {
     setPing('checking')
     try {
@@ -398,13 +434,15 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
     //   ○ missing  — files NOWHERE. The only state that needs an operator.
     // 'missing' may NEVER show for files that exist somewhere — that was the
     // sam749~flux-klein-q4 complaint (on llm_storage, displayed as missing).
-    const isMissing = notResident && !onWorkerDisk && !centralHas
+    // This fallback has only this worker + central catalog; it cannot prove
+    // fleet-wide absence. Leave the label unknown unless the shared fleet
+    // status endpoint supplies its all-worker calculation.
+    const isMissing = false
     const state = isPulling ? 'pulling' : isHeating ? 'heating'
       : isServing ? (inSlot ? (isAnswering ? 'answering' : 'serving') : 'loaded')
       : isIdleResident ? 'idle'
       : onWorkerDisk ? 'hot'
-      : centralHas ? 'central'
-      : 'missing'
+      : centralHas ? 'central' : 'unknown'
     const stateTitle = isPulling ? `downloading files from central/HF${pct != null ? ` — ${pct}%` : ''}`
       : isHeating ? 'weights loading into VRAM/RAM right now'
       : isServing ? (inSlot
@@ -416,7 +454,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
       : state === 'hot' ? 'files on THIS worker\'s drive, not loaded — weights lift into VRAM/RAM on the first request'
       : state === 'central'
         ? 'files on CENTRAL storage (llm_storage), not on this worker\'s drive yet — they copy to this worker on the FIRST CALL (lazy download). Not missing: the files exist.'
-        : 'files NOWHERE — not on this worker\'s drive and not on central storage either: a stale catalog row, a phantom assignment, or a download that never happened. Serving will fail until the files are downloaded (or the key is unassigned).'
+        : 'inventory unknown — this worker row cannot prove whether the files exist elsewhere in the fleet.'
     // load_reports[key] is the recorded outcome of the LAST warm/probe attempt
     // central made on this (worker, model) — additive, central-side. We annotate
     // it ONLY where the model is NOT resident right now (cold/missing/idle/
@@ -425,7 +463,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
     // measured residency (doctrine above) — this is an annotation, not a state.
     const loadReport = worker.load_reports?.[key]
     const showLoadWhy = !!loadReport
-      && (state === 'hot' || state === 'central' || state === 'missing' || state === 'idle' || state === 'heating')
+      && (state === 'hot' || state === 'central' || state === 'missing' || state === 'unknown' || state === 'idle' || state === 'heating')
     // failed = the probe reported not-ok OR reported it won't fit; ok-stale = the
     // last warm succeeded yet the model has since gone non-resident (cold again).
     // A failure older than a day is history, not a warning: a "worker
@@ -443,7 +481,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
   // hot ▸ cold ▸ missing) — the same ladder the pills read top-to-bottom.
   // missing ranks LAST now: it is the only state that needs an operator, and
   // the "worst" sort surfaces it at the bottom edge either direction.
-  const SERV_STATE_RANK = { answering: 8, serving: 7, loaded: 6, heating: 5, pulling: 4, idle: 3, hot: 2, central: 1, missing: 0 }
+  const SERV_STATE_RANK = { answering: 8, serving: 7, loaded: 6, heating: 5, pulling: 4, idle: 3, hot: 2, central: 1, unknown: 0, missing: -1 }
   // ONE unified, ORDERED column model — the single source both the <th> row and
   // every <td> render from, so a column can be dragged anywhere across the whole
   // set (the data columns and the control columns are no longer two frozen
@@ -525,7 +563,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
       // where the column is only ~28vw of a phone-width table.
       label: 'Model', sortable: true, cls: 'wp-servtable-name',
       title: ({ key }) => key,
-      render: ({ key, isBlocked, compact }) => (
+      render: ({ key, isBlocked, isPairBlocked, isAutoBlocked, compact }) => (
         <>
           {/* Compact keeps the full 14-char TAIL (it is what discriminates
               sibling repos) and gives up head characters instead — the compact
@@ -534,10 +572,12 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
           {compact ? midTrunc(nameFor(key), 8, 14) : midTrunc(nameFor(key))}
           {isBlocked && (
             <span className="wp-blocked-chip"
-                  title="⛔ Blocked from the serving pool by the operator — not routed to, assigned, warmed, or used as a fallback anywhere. This designation stays recorded but inert (block outranks pin). Files are untouched. Use the ⛔ action to unblock.">
-              ⛔ blocked
+                  title="⛔ Globally blocked from the serving pool.">
+              ⛔ global
             </span>
           )}
+          {isPairBlocked && <span className="wp-blocked-chip" title="Blocked on this worker only.">⛔ this worker</span>}
+          {isAutoBlocked && <span className="wp-blocked-chip" title="Automatic fit block: this model does not fit this worker's reported capacity.">⛔ no fit</span>}
         </>
       ),
     },
@@ -561,7 +601,27 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
     },
     ctx: {
       label: 'Ctx', sortable: true, num: true, cls: 'wp-lt-num',
-      render: ({ m }) => m?.model_max_length || '—',
+      render: ({ key, m, d }) => {
+        const max = Number(m?.model_max_length || 0)
+        if (!max) return '—'
+        const spill = key in allocOptimistic ? allocOptimistic[key] : d.override
+        const pct = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
+        const value = Math.max(1, Math.min(max, Math.round(max * pct / 100)))
+        const open = ctxMenu === key
+        return (
+          <span className="wp-ctx-anchor">
+            <button type="button" className="wp-ctx-button" ref={open ? ctxAnchorRef : undefined}
+                    title={`Context target: ${value.toLocaleString()} of ${max.toLocaleString()} tokens (${pct}%). Click to adjust; applies on the next load.`}
+                    disabled={applying}
+                    onClick={() => setCtxMenu(open ? null : key)}>
+              {value.toLocaleString()}
+            </button>
+            {open && <ContextMenu maxContext={max} spill={spill} anchorRef={ctxAnchorRef}
+                                  onApply={next => applyContext(key, spill, next)}
+                                  onClose={() => setCtxMenu(null)} />}
+          </span>
+        )
+      },
     },
     state: {
       // State — the EXISTING pill, verbatim (FixDoc on missing, live pulling %,
@@ -583,7 +643,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
                 : isIdleResident ? '◍ idle'
                 : state === 'hot' ? '🌡 hot'
                 : state === 'central' ? '○ central'
-                : '○ missing'}
+                : state === 'missing' ? '○ missing' : '◌ unknown'}
               {/* FixDoc only on true missing — 'central' self-heals on first
                   call, no operator needed. */}
               {isMissing && <FixDoc doc="worker-model-missing" />}
@@ -811,6 +871,22 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
         // measured figure exists; a bare declared size is NOT residency).
         const resident = (vram != null || anon != null)
           ? (vram || 0) + (anon || 0) : null
+        // Keep the desired placement visible even while the model is resident.
+        // A MoE/Alloc change updates this plan immediately; the worker compares
+        // the next request's spill contract with the resident contract and
+        // evicts/reloads before serving when they differ. Measured residency
+        // below remains the truthful *current* footprint until that request.
+        const plan = worker.planned_split?.[key]
+        const planGpu = plan?.gpu_bytes
+        const planRam = plan?.ram_bytes
+        const planParts = []
+        if (planGpu) planParts.push(`${fmtBytes(planGpu)} VRAM`)
+        if (planRam) planParts.push(`${fmtBytes(planRam)} RAM`)
+        const plannedTitle = plan && planParts.length
+          ? (plan.split
+            ? `Desired MoE split: ${planParts.join(' + ')}; applies on next load.`
+            : `Desired placement under '${plan.mode}': ${planParts.join(' + ')}; applies on next load.`)
+          : ''
         const layersTxt = ngl == null ? ''
           : `${ngl === -1 ? 'all' : ngl}${totalLayers ? `/${totalLayers}` : ''} layers on GPU`
         const declaredTitle = declared != null
@@ -831,7 +907,6 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
         // planned_split answers the question this column exists for ("where will
         // this actually go") and moves with the Alloc mode, the 4-bit lever and
         // the MoE lever, so flipping any switch visibly updates the row.
-        const plan = worker.planned_split?.[key]
         if (resident == null && measuredVram == null && plan
             && (plan.gpu_bytes != null || plan.ram_bytes != null)) {
           const g = plan.gpu_bytes, r = plan.ram_bytes
@@ -868,6 +943,11 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
             ) : measuredVram != null
               ? (measuredVram > 0 ? ` · ${fmtBytes(measuredVram)} VRAM` : ' · 0 VRAM · on CPU')
               : det?.gpu_pct != null ? ` · ~${det.gpu_pct}% GPU / ${100 - det.gpu_pct}% spill` : ''}
+            {resident != null && planParts.length > 0 && (
+              <span className="wp-fact-planned" title={plannedTitle}>
+                {' · '}{planParts.join(' + ')}<span className="wp-fact-planned-tag"> planned</span>
+              </span>
+            )}
           </span>
         )
       },
@@ -878,10 +958,17 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
       // has nothing to seat, its 📖 FixDoc is the affordance) / ⏏ free
       // (resident or hollow-idle) / × unassign (blocked while pinned) / ⛔ block.
       label: 'Actions', sortable: false, cls: 'wp-servtable-actions',
-      render: ({ key, d, isBlocked }) => {
+      render: ({ key, d, isPairBlocked }) => {
         const { state, isServing, isIdleResident, isPinned, centralHas } = d
+        const chatModel = models.find(m => (m.model_key ?? m.key) === key)
+        const canChat = chatModel && modelTasks(chatModel).some(t =>
+          t === 'text-generation' || t === 'image-text-to-text')
         return (
           <>
+            {onChat && canChat && (
+              <button className="wp-activate wp-chat-model" title={`Chat with ${key} in Compute`}
+                      onClick={e => { e.stopPropagation(); onChat(key) }}>💬 chat</button>
+            )}
             {onLoad && (state === 'hot' || state === 'central') && (
               <button className="wp-activate" disabled={activating === key}
                       title={activating === key
@@ -906,11 +993,11 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
                     title={isPinned ? 'pinned — unpin first' : 'Unassign'}
                     onClick={() => onUnassign(worker, key)}>×</button>
             {onToggleBlock && (
-              <button className={`wp-model-block${isBlocked ? ' wp-model-block-on' : ''}`}
-                      title={isBlocked
-                        ? 'Blocked from the serving pool — click to UNBLOCK (return it to routing). Block outranks pin; the designation is unchanged.'
-                        : 'Block this model from the serving pool (global): never routed to / assigned / warmed / a fallback default anywhere. Files stay; designations stay (inert). Reversible.'}
-                      onClick={() => onToggleBlock(key, !isBlocked)}>⛔</button>
+              <button className={`wp-model-block${isPairBlocked ? ' wp-model-block-on' : ''}`}
+                      title={isPairBlocked
+                        ? `Blocked on ${worker.name} only — click to unblock this worker.`
+                        : `Block ${key} on ${worker.name} only. Other workers remain eligible.`}
+                      onClick={() => onToggleBlock(worker, key, !isPairBlocked)}>⛔</button>
             )}
           </>
         )
@@ -1618,6 +1705,10 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
                   // serving pool everywhere. The designation row still renders
                   // (inert + labeled) — block does not unassign and outranks pin.
                   const isBlocked = !!(blockedKeys && blockedKeys.has(key))
+                  const pairKey = String(key).split('~').pop().trim().toLowerCase()
+                  const pairBlock = worker.blocked_models?.[pairKey]
+                  const isPairBlocked = !!(pairBlock?.blocked && pairBlock.by === 'operator')
+                  const isAutoBlocked = !!(pairBlock?.blocked && pairBlock.by !== 'operator')
                   // t49: this model's own requirement (GGUF effective quant),
                   // for the AllocControl VRAM/RAM slider coupling. GGUF-only —
                   // explicit budgets (what the coupling lives inside) are
@@ -1631,7 +1722,7 @@ export function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnas
                   })()
                   // `compact` rides the cell context so a def can tighten its own
                   // rendering (only Model does today: a smaller midTrunc budget).
-                  const cx = { key, m, d, isSel, isBlocked, need, compact: servCompact }
+                  const cx = { key, m, d, isSel, isBlocked, isPairBlocked, isAutoBlocked, need, compact: servCompact }
                   const drawerOpen = servCompact && servDrawer === key
                   return (
                     <Fragment key={key}>

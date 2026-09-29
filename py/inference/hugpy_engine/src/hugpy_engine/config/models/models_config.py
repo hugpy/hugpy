@@ -16,6 +16,8 @@ refresh_registry() explicitly — e.g. on hugpy module startup.
 
 import json
 import os
+import time
+import hashlib
 from dataclasses import MISSING, fields
 from typing import Dict
 from abstract_essentials import get_logFile, safe_dump_to_file, safe_load_from_json
@@ -773,6 +775,7 @@ def derive_model_config_row(name, row):
             or row.get("tokenizer_model_max_length")
             or row.get("max_position_embeddings") or DEFAULT_MAX_TOKENS_LOCAL,
         "filename": row.get("filename"), "include": row.get("include"),
+        **({"ollama_model": row["ollama_model"]} if row.get("ollama_model") else {}),
         "port": row.get("port"), "host": row.get("host"),
         # SERVEABLE = at least one advertised task has a runner (k61). It used to
         # mean "EVERY task has one", which made a partially-servable row read as
@@ -812,6 +815,10 @@ def _absorb_disk(staple, disc):
     """Disk facts from a discovered row override a staple's hand-written guesses."""
     for k in ("dir", "folder", "filename"):
         if disc.get(k):
+            staple[k] = disc[k]
+    for k in ("model_max_length", "tokenizer_model_max_length",
+              "max_position_embeddings"):
+        if disc.get(k) is not None:
             staple[k] = disc[k]
 
 def merge_discovery_into_models(discovery, base=None):
@@ -1492,6 +1499,8 @@ def get_models_dict(models_dict_path=None, dict_return=False, return_dict=False,
     # discovery/path (a fresh walk) forces a rebuild. During the import-time
     # build the globals aren't bound yet -> globals().get() is None -> build.
     if discovery is None and models_dict_path is None:
+        if "_apply_worker_catalog" in globals():
+            _apply_worker_catalog()
         cached = globals().get("MODEL_REGISTRY_DICT" if dict_return else "MODEL_REGISTRY")
         if cached:
             return cached
@@ -1536,6 +1545,171 @@ def get_models_dict(models_dict_path=None, dict_return=False, return_dict=False,
 MODEL_REGISTRY: Dict[str, ModelConfig] = get_models_dict()
 MODEL_REGISTRY_DICT: Dict[str, dict] = get_models_dict(dict_return=True)
 
+# A worker owns the path to its external weights.  Central stores only the
+# catalog metadata and a per-worker path pointer; it must never resolve that
+# pointer as a path on Central or offer it as a central transfer source.
+_WORKER_CATALOG_PATH = os.path.join(os.path.dirname(MODELS_DISCOVERY_PATH),
+                                    "worker_model_catalog.json")
+_WORKER_CATALOG_SEEN = 0.0
+_WORKER_ONLY_KEYS: set[str] = set()
+_WORKER_TOUCHED_KEYS: set[str] = set()
+
+
+def _central_copy_present(key: str) -> bool:
+    """A registry row alone does not prove Central owns transferable bytes."""
+    try:
+        from hugpy_engine.config.main import get_model_path
+        from hugpy_storage.model_presence import model_looks_downloaded
+        cfg = MODEL_REGISTRY[key]
+        return model_looks_downloaded(get_model_path(key), cfg)
+    except Exception:  # noqa: BLE001 — uncertain means no destructive cold reset
+        return False
+
+
+def record_worker_models(worker_id: str, rows: dict) -> list[str]:
+    """Persist one host scan, shared by all Central web processes."""
+    import fcntl
+    path = _WORKER_CATALOG_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        clean = {}
+        for key, row in (rows or {}).items():
+            if not isinstance(key, str) or not isinstance(row, dict):
+                continue
+            location = row.get("external_location")
+            api_url = row.get("api_url")
+            try:
+                from urllib.parse import urlsplit
+                parsed_api = urlsplit(api_url) if isinstance(api_url, str) else None
+                is_api = bool(parsed_api and parsed_api.scheme == "http"
+                              and parsed_api.hostname in ("127.0.0.1", "localhost", "::1")
+                              and parsed_api.port and not parsed_api.username
+                              and not parsed_api.password and parsed_api.path in ("", "/")
+                              and not parsed_api.query and not parsed_api.fragment)
+            except ValueError:
+                is_api = False
+            if not ((isinstance(location, str) and os.path.isabs(location)) or is_api):
+                continue
+            hub = str(row.get("hub_id") or "").strip("/").lower()
+            current = MODEL_REGISTRY.get(key)
+            if (not is_api and current is not None and
+                    str(current.hub_id or "").strip("/").lower() != hub):
+                owner = str(row.get("hub_id") or "local").split("/", 1)[0]
+                key = f"{owner}~{key}"
+            current = MODEL_REGISTRY.get(key)
+            if ((not is_api and current is not None and
+                 str(current.hub_id or "").strip("/").lower() != hub) or
+                    (key in clean and clean[key].get("worker_location") != location
+                     and clean[key].get("api_url") != api_url)):
+                key += "~" + hashlib.sha256(location.encode()).hexdigest()[:8]
+            clean[key] = {k: row.get(k) for k in (
+                "name", "hub_id", "framework", "tasks", "primary_task",
+                "filename", "model_max_length", "model_key", "size_bytes",
+                "effective_bytes", "ollama_model", "api_url", "served_model",
+                "service_kind") if row.get(k) is not None}
+            clean[key]["model_key"] = key
+            if isinstance(location, str) and os.path.isabs(location):
+                clean[key]["worker_location"] = location
+        old = (data.get(worker_id) or {}).get("models")
+        changed = old != clean
+        if changed:
+            data[worker_id] = {"at": time.time(), "models": clean}
+            tmp = path + f".{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.replace(tmp, path)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    _apply_worker_catalog(force=changed)
+    # The canonical keys may differ from worker-local scan keys when central
+    # already has a same-named model from another hub. Return those identities
+    # so heartbeat placement uses the same keys as the shared model catalog.
+    return sorted(clean)
+
+
+def _apply_worker_catalog(force=False) -> None:
+    """Overlay worker-only rows on the regular catalog, preserving local rows."""
+    global _WORKER_CATALOG_SEEN
+    registry = globals().get("MODEL_REGISTRY")
+    registry_dict = globals().get("MODEL_REGISTRY_DICT")
+    if registry is None or registry_dict is None:
+        return  # import-time base build
+    try:
+        stamp = os.stat(_WORKER_CATALOG_PATH).st_mtime_ns
+        if not force and stamp == _WORKER_CATALOG_SEEN:
+            return
+        with open(_WORKER_CATALOG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return
+    locations: dict[str, dict[str, str]] = {}
+    external_apis: dict[str, dict[str, dict]] = {}
+    candidates: dict[str, dict] = {}
+    for worker_id, entry in data.items():
+        for key, row in (entry.get("models") or {}).items():
+            if not isinstance(row, dict):
+                continue
+            if row.get("worker_location"):
+                locations.setdefault(key, {})[worker_id] = row["worker_location"]
+            if row.get("api_url"):
+                external_apis.setdefault(key, {})[worker_id] = {
+                    field: row[field] for field in ("api_url", "served_model", "service_kind")
+                    if row.get(field) is not None}
+            candidates.setdefault(key, row)
+
+    for key in list(_WORKER_ONLY_KEYS - candidates.keys()):
+        registry.pop(key, None)
+        registry_dict.pop(key, None)
+        _WORKER_ONLY_KEYS.discard(key)
+    for key in _WORKER_TOUCHED_KEYS - candidates.keys():
+        if key in registry_dict:
+            registry_dict[key].pop("worker_locations", None)
+            registry_dict[key].pop("worker_external_apis", None)
+            registry_dict[key].pop("worker_only", None)
+        if key in registry:
+            registry[key].extra.pop("worker_only", None)
+    for key, row in candidates.items():
+        if key not in registry:
+            clean = {k: v for k, v in row.items() if k != "worker_location"}
+            derived, _ = derive_model_config_row(key, clean)
+            if not derived:
+                continue
+            derived["worker_only"] = True
+            for size_key in ("size_bytes", "effective_bytes"):
+                if row.get(size_key) is not None:
+                    derived[size_key] = row[size_key]
+            cfg = get_assessed_model_config(derived)
+            if not cfg:
+                continue
+            registry[key] = cfg
+            registry_dict[key] = cfg.to_dict()
+            for size_key in ("size_bytes", "effective_bytes"):
+                if row.get(size_key) is not None:
+                    registry_dict[key][size_key] = row[size_key]
+            _WORKER_ONLY_KEYS.add(key)
+        worker_only = key in _WORKER_ONLY_KEYS or not _central_copy_present(key)
+        registry_dict[key]["worker_locations"] = locations.get(key, {})
+        if external_apis.get(key):
+            registry_dict[key]["worker_external_apis"] = external_apis[key]
+        else:
+            registry_dict[key].pop("worker_external_apis", None)
+        registry_dict[key]["worker_only"] = worker_only
+        if worker_only:
+            registry[key].extra["worker_only"] = True
+        else:
+            registry[key].extra.pop("worker_only", None)
+    _WORKER_TOUCHED_KEYS.clear()
+    _WORKER_TOUCHED_KEYS.update(candidates)
+    _WORKER_CATALOG_SEEN = stamp
+
+
+_apply_worker_catalog(force=True)
+
 
 def get_model_registry(dict_return=False, return_dict=False):
     dict_return = dict_return or return_dict
@@ -1569,6 +1743,8 @@ def refresh_registry(run_discovery=True):
     MODEL_REGISTRY_DICT.update(fresh_dict)
     for stale in [k for k in MODEL_REGISTRY_DICT if k not in fresh_dict]:
         MODEL_REGISTRY_DICT.pop(stale, None)
+    _WORKER_ONLY_KEYS.clear()  # fresh is the central base; recalculate ownership
+    _apply_worker_catalog(force=True)
     try:
         from hugpy_engine.config.models.models_default import refresh_task_registries
         refresh_task_registries()

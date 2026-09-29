@@ -42,11 +42,13 @@ def wclient(monkeypatch):
     state = agent.WorkerState(name="t", url="http://central", worker_id="w-k53")
     served = []
 
-    def _fake_run_once(payload):
+    # The serving seams take the worker ``state`` as well (host-activity /
+    # slot bookkeeping); the fakes accept it and ignore it.
+    def _fake_run_once(payload, state=None):
         served.append(dict(payload))
         return {"ok": True, "text": "hi", "model_key": payload.get("model_key")}
 
-    def _fake_stream(payload, request_id=None):
+    def _fake_stream(payload, request_id=None, state=None):
         served.append(dict(payload))
         yield b"data: {}\n\n"
 

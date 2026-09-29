@@ -133,6 +133,25 @@ def get_all_configs(verbose: bool = False, get_code: bool = False,
 
         hub_id = clean_hub_id(directory, folder)
         framework = (marker or {}).get("framework") or infer_framework(directory)
+        marked_context = (marker or {}).get("model_max_length")
+        if (isinstance(marked_context, (int, float)) and
+                not isinstance(marked_context, bool) and marked_context > 0):
+            max_model_length = int(marked_context)
+        elif framework == "gguf":
+            # Legacy registry walk also needs the trained context. The generic
+            # JSON scanner has no GGUF metadata and otherwise substitutes the
+            # global default for models whose marker predates context capture.
+            try:
+                from hugpy_engine.config.main import get_gguf_file
+                from hugpy_storage.gguf_inspect import gguf_metadata
+                gguf_path = get_gguf_file(
+                    directory, None, prefer=(marker or {}).get("filename"))
+                context = (gguf_metadata(gguf_path, (".context_length",))
+                           .get(".context_length") if gguf_path else None)
+                if isinstance(context, (int, float)) and not isinstance(context, bool) and context > 0:
+                    max_model_length = int(context)
+            except Exception as exc:  # noqa: BLE001 — best-effort metadata only
+                logger.debug("GGUF context unavailable for %s: %s", name, exc)
         tasks = (marker or {}).get("tasks") or tasks_data.get(name)
         primary_task = (marker or {}).get("primary_task") or (tasks[0] if tasks else None)
 
@@ -278,12 +297,36 @@ def resolve_hugpy_marker(directory: str, hub_id: str) -> dict:
     tasks = marker.get("tasks")
     if tasks is not None and not isinstance(tasks, list):
         tasks = [tasks]
-    return {k: v for k, v in {
+    out = {k: v for k, v in {
         "name":         marker.get("name"),
         "framework":    marker.get("framework"),
         "tasks":        tasks,
         "primary_task": marker.get("primary_task"),
     }.items() if v is not None}
+    context = marker.get("model_max_length")
+    if isinstance(context, (int, float)) and not isinstance(context, bool) and context > 0:
+        out["model_max_length"] = int(context)
+    return out
+
+
+def resolve_gguf_context(directory: str, hub_id: str) -> dict:
+    """Read the selected GGUF's trained context from its header."""
+    try:
+        from hugpy_storage.hugpy_marker import read_hugpy_marker
+        marker = read_hugpy_marker(directory) or {}
+        if (marker.get("framework") or infer_framework(directory)) != "gguf":
+            return {}
+        from hugpy_engine.config.main import get_gguf_file
+        from hugpy_storage.gguf_inspect import gguf_metadata
+        gguf = get_gguf_file(directory, None, prefer=marker.get("filename"))
+        if not gguf:
+            return {}
+        value = gguf_metadata(gguf, (".context_length",)).get(".context_length")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return {"model_max_length": int(value)}
+    except Exception as exc:  # noqa: BLE001 — metadata inspection must not block discovery
+        logger.debug("GGUF context unavailable for %s: %s", hub_id, exc)
+    return {}
 
 
 # Storage families that imply a framework. "misc" implies nothing — comfy and
@@ -374,6 +417,7 @@ def build_resolver_chain(*, api: Any = None,
     chain: List[Tuple[str, ResolverFn]] = [
         ("dir_declaration", resolve_dir_declaration),
         ("hugpy_marker",    resolve_hugpy_marker),
+        ("gguf_context",    resolve_gguf_context),
         ("local_config",    resolve_local_config),
         ("local_tokenizer", resolve_local_tokenizer),
     ]
@@ -441,7 +485,8 @@ def discover_model(save_json: bool = True, verbose: bool = True, use_hub: bool =
             "architectures":           meta.architectures,
             "model_type":              meta.model_type,
             "max_position_embeddings": meta.max_position_embeddings,
-            "model_max_length":        meta.tokenizer_model_max_length
+            "model_max_length":        meta.model_max_length
+                                       or meta.tokenizer_model_max_length
                                        or meta.max_position_embeddings
                                        or DEFAULT_MAX_TOKENS,
             "parameter_count":         meta.parameter_count,
@@ -484,6 +529,9 @@ def discover_models(save_json: bool = True, verbose: bool = True, use_hub: bool 
         meta, meta_sources = enrich(directory, hub_id, chain)
 
         row = meta.to_dict()
+        row["model_max_length"] = (meta.model_max_length
+                                   or meta.tokenizer_model_max_length
+                                   or meta.max_position_embeddings)
         # Declared name (hugpy.json) wins; the bare basename is the fallback —
         # a marker-stamped "comfy-sd-turbo" must not degrade to "sd-turbo" and
         # collide with the staple's display name.

@@ -1,9 +1,10 @@
 # hugpy — the meta distribution of the Hugpy ecosystem.
 #
-# `pip install hugpy` gives you the `hugpy` and `hpy` commands and nothing
-# heavier than hugpy-platform. Every feature is an extra that pulls the owning
-# distribution (and that distribution's own extras); the profiles below mirror
-# the install sets the monolith used to ship as a single package.
+# `pip install hugpy` gives an operator the complete lockstep Hugpy module
+# family, matching the development stack.  Features that need optional native,
+# GPU, model-runner, or web-service dependencies remain extras; the profiles
+# below add those runtime capabilities without making an import namespace
+# disappear from a normal install.
 
 [build-system]
 requires = ["setuptools>=77", "setuptools-scm>=8"]
@@ -39,6 +40,18 @@ classifiers = [
 ]
 dependencies = [
     "hugpy-platform",
+    "hugpy-tools",
+    "hugpy-control",
+    "hugpy-storage",
+    "hugpy-engine",
+    "hugpy-media",
+    "hugpy-video",
+    "hugpy-oracle",
+    "hugpy-fleet",
+    "hugpy-curation",
+    "hugpy-ops",
+    "hugpy-discord",
+    "hugpy-server",
 ]
 
 

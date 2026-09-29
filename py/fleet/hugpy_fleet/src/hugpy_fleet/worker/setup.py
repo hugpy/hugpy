@@ -282,6 +282,18 @@ def has_nvcc() -> bool:
     return _which("nvcc") is not None
 
 
+def _probe_json(output: str) -> Optional[dict]:
+    """Read a probe result even when native libraries log after stdout JSON."""
+    for line in output.splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def _llama_offload() -> dict:
     """Probe llama-cpp-python's GPU-offload support in a SUBPROCESS (never import
     llama_cpp into the installer — it poisons a later torch import). Returns
@@ -301,11 +313,8 @@ def _llama_offload() -> dict:
         "print(json.dumps(out))\n"
     )
     rc, o = _run([sys.executable, "-c", code], dry_run=False, timeout=60)
-    try:
-        return json.loads(o.splitlines()[-1])
-    except Exception:  # noqa: BLE001
-        return {"installed": False, "supports_gpu_offload": None,
-                "version": None, "error": o or f"probe rc={rc}"}
+    return _probe_json(o) or {"installed": False, "supports_gpu_offload": None,
+                              "version": None, "error": o or f"probe rc={rc}"}
 
 
 def _native_engine() -> dict:
@@ -379,8 +388,16 @@ def provision_cuda_engine(*, dry_run: bool, jobs: Optional[int] = None) -> Check
         cmake_args = os.environ.get("HUGPY_LLAMA_CMAKE_ARGS", "-DGGML_CUDA=on")
         ver = offload.get("version")
         spec = f"llama-cpp-python=={ver}" if ver else "llama-cpp-python"
+        # Rebuild ONLY the binding.  ``--no-binary :all:`` also forced every
+        # dependency (and, with --force-reinstall, numpy/jinja/diskcache) through
+        # a source build.  Besides making worker bootstrap needlessly fragile,
+        # that could replace an already-doctrinal dependency set while trying to
+        # fix one native extension.  The worker profile installed the binding's
+        # Python dependencies before this convergence step, so leave them alone
+        # and force source only for llama-cpp-python itself.
         pip_argv = [sys.executable, "-m", "pip", "install", "--force-reinstall",
-                    "--no-cache-dir", "--no-binary", ":all:", spec]
+                    "--no-cache-dir", "--no-deps", "--no-binary",
+                    "llama-cpp-python", spec]
         detail_binding = (f"llama-cpp-python installed={offload.get('installed')} "
                           f"supports_gpu_offload={offload.get('supports_gpu_offload')} "
                           f"— rebuilding with CMAKE_ARGS={cmake_args!r}")
@@ -409,7 +426,8 @@ def provision_cuda_engine(*, dry_run: bool, jobs: Optional[int] = None) -> Check
                      fix="build a CUDA llama.cpp (see WORKER-SETUP §2/§3): "
                          "`hugpy install-engine --cuda --build-from-source` and "
                          "`CMAKE_ARGS=-DGGML_CUDA=on pip install --force-reinstall "
-                         "--no-binary :all: llama-cpp-python`; install the CUDA "
+                         "--no-deps --no-binary llama-cpp-python llama-cpp-python`; "
+                         "install the CUDA "
                          "toolkit (nvcc) first",
                      required=True, actions=actions)
     return Check("cuda-engine", OK, detail, required=True, actions=actions)
@@ -436,10 +454,8 @@ def _import_probe(module: str) -> dict:
         "print(json.dumps(out))\n"
     )
     rc, o = _run([sys.executable, "-c", code], dry_run=False, timeout=120)
-    try:
-        return json.loads(o.splitlines()[-1])
-    except Exception:  # noqa: BLE001
-        return {"ok": False, "version": None, "error": o or f"probe rc={rc}"}
+    return _probe_json(o) or {"ok": False, "version": None,
+                              "error": o or f"probe rc={rc}"}
 
 
 def check_torch_companions() -> Check:

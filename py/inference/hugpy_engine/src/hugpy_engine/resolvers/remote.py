@@ -63,6 +63,12 @@ _placement_provider: Optional[Callable[[str], Optional[dict]]] = None
 # around a worker that is at its advertised in-process concurrency cap. None ⇒
 # the gate only ever considers the primary pick (older web layer / standalone).
 _worker_candidates_provider: Optional[Callable[..., List[dict]]] = None
+# Authoritative already-serving endpoint lookup.  A non-None record wins over
+# worker placement: the model is already seated elsewhere and should be proxied
+# directly rather than asking Hugpy to load or select it again.
+_serving_provider: Optional[Callable[[str], Optional[dict]]] = None
+_SERVING_GATES: dict[str, asyncio.Semaphore] = {}
+_SERVING_GATES_LOCK = threading.Lock()
 
 
 def set_worker_provider(pick_fn: Callable, spill_fn: Optional[Callable] = None) -> None:
@@ -88,6 +94,36 @@ def set_worker_lookup_provider(lookup_fn: Optional[Callable]) -> None:
     """
     global _worker_lookup_provider
     _worker_lookup_provider = lookup_fn
+
+
+def set_serving_provider(provider: Optional[Callable[[str], Optional[dict]]]) -> None:
+    """Install the durable lookup for authoritative external serving records."""
+    global _serving_provider
+    _serving_provider = provider
+
+
+def _serving_for(model_key: str, fmt: Optional[str] = None) -> Optional[dict]:
+    """The live serving endpoint for ``model_key``, or None.
+
+    ``fmt`` ("gguf" | "transformers" | None/"auto") is the explicit
+    representation pin: when set, only an endpoint of that representation is a
+    hit — so a format=gguf request never fast-routes onto a transformers seat
+    (and vice versa). None/"auto" matches by served key exactly as before. The
+    provider (central.serving_endpoint_for) accepts ``fmt`` and does the
+    filtering; a provider that predates the kwarg is called positionally-safe."""
+    if _serving_provider is None:
+        return None
+    _fmt = str(fmt or "auto").strip().lower()
+    try:
+        try:
+            row = _serving_provider(model_key, fmt=_fmt)
+        except TypeError:   # older provider without the fmt kwarg
+            row = _serving_provider(model_key)
+        return dict(row) if isinstance(row, dict) and row.get("endpoint") else None
+    except Exception:  # noqa: BLE001 — registry failure must preserve old routing
+        logger.warning("serving endpoint lookup failed for %s", model_key,
+                       exc_info=True)
+        return None
     logger.info("worker lookup provider registered: %s",
                 getattr(lookup_fn, "__name__", lookup_fn))
 
@@ -1592,6 +1628,16 @@ def _cold_hold_poll_s() -> float:
     return _env_float("HUGPY_COLD_HOLD_POLL_S", 2.0)
 
 
+def _worker_busy_max_s() -> float:
+    """Maximum time a request may wait behind an already-warm request.
+
+    A slow cold load is allowed the longer cold-hold ceiling, but a warm slot
+    occupied by another generation is concurrency saturation, not load
+    progress.  Its clock must not be reset by every heartbeat forever.
+    """
+    return _env_float("HUGPY_WORKER_BUSY_MAX_S", 120.0)
+
+
 def _env_int(name: str, default: int) -> int:
     """Positive-int env knob, same discipline as _env_float (garbage / <=0 ⇒
     default — a knob can misconfigure a deployment, never break it)."""
@@ -2111,10 +2157,28 @@ def _admission_refusal(model_key: Optional[str], req: Any = None) -> Optional[st
 
 class _ColdRetry(Exception):
     """A transient pre-token relay failure — the model is (probably) still
-    loading/swapping. Caught by the hold loop, which waits and retries."""
-    def __init__(self, message: str):
+    loading/swapping. Caught by the hold loop, which waits and retries.
+
+    ``busy`` carries the STRUCTURED verdict made where the failure was seen
+    (the worker's error code / HTTP status, via _is_worker_busy_signal on the
+    real exception); ``code`` is the worker's error code when it had one. The
+    hold loop classifies on these first and falls back to the prose markers
+    only when the raise site could not tell (``busy=None``) — a structured
+    ``model_busy`` whose message lacks "is busy:"/"503" is still a busy hold,
+    never a terminal "loaded and idle, but the request failed"."""
+    def __init__(self, message: str, *, busy: Optional[bool] = None,
+                 code: Optional[str] = None):
         self.message = str(message or "")
+        self.busy = busy
+        self.code = code
         super().__init__(self.message)
+
+    def is_busy(self) -> bool:
+        if self.busy is not None:
+            return self.busy
+        if self.code and self.code in _BUSY_CODES:
+            return True
+        return _is_worker_busy_signal(self.message)
 
 
 class _LoadFailed(Exception):
@@ -3041,6 +3105,100 @@ def _next_comfy_candidate(model_key: str, pool: Optional[str], task: Optional[st
     return None
 
 
+def _serving_payload(req, model_key: str, served_model: Optional[str], *, stream: bool) -> dict:
+    """Build the small OpenAI-compatible payload for a serving proxy."""
+    body = req.model_dump()
+    body.pop("pool", None)
+    body["model_key"] = model_key
+    body["model"] = served_model or model_key
+    body["stream"] = stream
+    return body
+
+
+async def _serving_gate(record: dict):
+    """Bound central fan-out per endpoint; the upstream remains authority too."""
+    key = (f"{id(asyncio.get_running_loop())}|{record.get('owner_worker', '')}|"
+           f"{record.get('endpoint', '')}|{record.get('model_key', '')}")
+    try:
+        limit = max(1, int(record.get("max_concurrency") or 1))
+    except (TypeError, ValueError):
+        limit = 1
+    with _SERVING_GATES_LOCK:
+        gate = _SERVING_GATES.get(key)
+        if gate is None or getattr(gate, "_hugpy_limit", limit) != limit:
+            gate = asyncio.Semaphore(limit)
+            gate._hugpy_limit = limit
+            _SERVING_GATES[key] = gate
+    await gate.acquire()
+    return gate
+
+
+async def _serving_run_once(record: dict, req, result_type, model_key: str):
+    import httpx
+    gate = await _serving_gate(record)
+    endpoint = str(record["endpoint"]).rstrip("/")
+    payload = _serving_payload(req, model_key, record.get("served_model"), stream=False)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=3.0)) as client:
+            response = await client.post(endpoint, json=payload)
+        if response.status_code >= 400:
+            raise RuntimeError(f"serving endpoint {endpoint} returned HTTP {response.status_code}: "
+                               f"{response.text[:500]}")
+        data = response.json()
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        result = {
+            "request_id": req.request_id, "model_key": model_key, "ok": True,
+            "text": message.get("content") or "",
+            "finish_reason": choice.get("finish_reason") or "stop",
+            "usage": data.get("usage"),
+        }
+        return result_type.model_validate(result)
+    finally:
+        gate.release()
+
+
+async def _serving_stream(record: dict, req, model_key: str, cancel_event=None):
+    import httpx
+    gate = await _serving_gate(record)
+    endpoint = str(record.get("stream_endpoint") or record["endpoint"]).rstrip("/")
+    payload = _serving_payload(req, model_key, record.get("served_model"), stream=True)
+    count = 0
+    usage = None
+    finish = "stop"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0, connect=3.0)) as client:
+            async with client.stream("POST", endpoint, json=payload) as response:
+                if response.status_code >= 400:
+                    raise RuntimeError(f"serving endpoint {endpoint} returned HTTP "
+                                       f"{response.status_code}: {(await response.aread())[:500]!r}")
+                async for line in response.aiter_lines():
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if event.get("usage"):
+                        usage = event["usage"]
+                    for choice in event.get("choices") or []:
+                        finish = choice.get("finish_reason") or finish
+                        token = (choice.get("delta") or {}).get("content")
+                        if token:
+                            count += 1
+                            yield TokenEvent(request_id=req.request_id, text=token)
+        yield DoneEvent(request_id=req.request_id,
+                        input_tokens=int((usage or {}).get("prompt_tokens") or 0),
+                        output_chunks=count, finish_reason=finish, usage=usage)
+    finally:
+        gate.release()
+
+
 def make_delegating_runner(framework: str, task: str):
     """Dynamic worker-pool offload with local fallback, decided per request.
 
@@ -3162,6 +3320,14 @@ def make_delegating_runner(framework: str, task: str):
             _mk = _member_key(self.model_key, pool, task)
             if _mk and _mk != self.model_key:
                 _MEMBER_KEY.set(_mk)
+            # Already-serving endpoints are authoritative.  Resolve this
+            # before worker selection, cold-load admission, or Hugpy's local
+            # fallback so an explicit resident cannot be shadowed by a stale
+            # assignment or a busy native slot.
+            _serving = _serving_for(self.model_key, getattr(req, "model_format", None))
+            if _serving:
+                return await _serving_run_once(_serving, req, self.result_type,
+                                               self.model_key)
             # ID-LOCK: a request carrying reference images (paths, or the b64
             # offload transport) is an identity-locked STILL — it MUST land on a
             # box whose comfy has the IPAdapter nodes. Gate selection + reroute on
@@ -3196,8 +3362,10 @@ def make_delegating_runner(framework: str, task: str):
             start = time.time()
             deadline = start + _cold_hold_max_s()
             stall_s = _cold_hold_stall_s()
+            busy_since = None
             last_move = start
             last_err = ""
+            last_err_busy = False   # structured verdict of the last failed attempt
             # Retry pacing: base poll while the load PROGRESSES, exponential
             # backoff (doubling to a cap) while it does not — a failing attempt
             # must not be re-fired at storm rate. See _retry_backoff_next.
@@ -3360,6 +3528,9 @@ def make_delegating_runner(framework: str, task: str):
                                 f"HUGPY_LOCAL_FALLBACK=always to allow)") from exc
                         else:
                             last_err = str(exc)
+                            # Structured verdict from the REAL exception (code /
+                            # HTTP status), decided here, not re-derived from prose.
+                            last_err_busy = _is_worker_busy_signal(exc)
                             action = "retry"
                     finally:
                         slot.release()
@@ -3381,9 +3552,18 @@ def make_delegating_runner(framework: str, task: str):
                             f"load {self.model_key}: {honest}")
                     if _msg:
                         last_progress = _msg
+                    # A healthy/idle resident is a routing decision, not a
+                    # reason to re-run selection forever. If its actual call
+                    # failed, surface that worker error immediately; only a
+                    # genuinely busy/working resident remains retryable.
+                    if ready and last_err and not last_err_busy:
+                        raise RuntimeError(
+                            f"worker {worker.get('name') or worker.get('id')} "
+                            f"reported {self.model_key} loaded and idle, but "
+                            f"the request failed: {last_err}")
                     # A structured busy/503 from this worker is the worker
                     # WORKING, not the worker silent — see _is_worker_busy_signal.
-                    if moved or _is_worker_busy_signal(last_err):
+                    if moved or last_err_busy:
                         last_move = time.time()
                     now = time.time()
                     if (not ready) and now > deadline:
@@ -3416,8 +3596,9 @@ def make_delegating_runner(framework: str, task: str):
                 _nw = _no_worker_detail(self.model_key, pool, task)
                 raise RuntimeError(_refusal_message(
                     self.model_key, req, "no_worker",
-                    "no worker selected or every selected worker failed before output, "
-                    "and HUGPY_NO_LOCAL_SERVING forbids serving on central"
+                    "worker routing produced no output (no worker was selected or "
+                    "every selected worker failed before output); central is "
+                    "coordinator-only (HUGPY_NO_LOCAL_SERVING) and does not serve models"
                     + (f" ({_nw})" if _nw else ""),
                     skips=_no_worker_skips(self.model_key, pool, task)))
             result = self._local_runner().run(req=req)
@@ -3440,6 +3621,16 @@ def make_delegating_runner(framework: str, task: str):
             _mk = _member_key(self.model_key, pool, task)
             if _mk and _mk != self.model_key:
                 _MEMBER_KEY.set(_mk)
+            _serving = _serving_for(self.model_key, getattr(req, "model_format", None))
+            if _serving:
+                try:
+                    async for event in _serving_stream(_serving, req, self.model_key,
+                                                       cancel_event=cancel_event):
+                        yield event
+                except Exception as exc:
+                    yield ErrorEvent(request_id=req.request_id,
+                                     message=f"serving endpoint failed: {exc}")
+                return
             # ID-LOCK parity with run(): a request carrying reference images must
             # land on a comfy-with-IPAdapter box; gate selection + reroute on it.
             _id_lock = bool(getattr(req, "reference_images", None)
@@ -3509,8 +3700,11 @@ def make_delegating_runner(framework: str, task: str):
                             # a 200 SSE is a worker to HOLD for, and that must
                             # not be reachable by the local-fallback or the
                             # permanent-error branch.
-                            if _is_worker_busy_signal(ev.message):
-                                raise _ColdRetry(ev.message)
+                            _ev_code = getattr(ev, "code", None)
+                            if (_ev_code and str(_ev_code) in _BUSY_CODES) \
+                                    or _is_worker_busy_signal(ev.message):
+                                raise _ColdRetry(ev.message, busy=True,
+                                                 code=str(_ev_code) if _ev_code else None)
                             if _local_fallback_allowed():
                                 logger.warning("worker %s errored before output (%s); "
                                                "running %s locally", worker.get("id"),
@@ -3520,7 +3714,7 @@ def make_delegating_runner(framework: str, task: str):
                                 _record_load_verdict(worker.get("id"),
                                                      self.model_key, str(ev.message))
                                 raise _LoadFailed(_humanize_worker_error(wname, ev.message))
-                            raise _ColdRetry(ev.message)   # transient — hold + retry
+                            raise _ColdRetry(ev.message, busy=False)   # transient — hold + retry
                         if etype == "done":
                             # Stamp the terminal done BEFORE it leaves: engine
                             # counts as usage when the worker sent none, and
@@ -3577,7 +3771,7 @@ def make_delegating_runner(framework: str, task: str):
                                            worker.get("id"), self.model_key)
                             raise _RelayUnbuildable()
                         raise _ColdRetry(f"worker {wname} produced no output "
-                                         f"(still loading?)")
+                                         f"(still loading?)", busy=False)
                 except (_ColdRetry, _LoadFailed, _RelayUnbuildable):
                     raise
                 except Exception as exc:
@@ -3600,7 +3794,11 @@ def make_delegating_runner(framework: str, task: str):
                     if _is_worker_busy_signal(exc):
                         logger.info("worker %s is busy/loading %s (%s) — holding",
                                     worker.get("id"), self.model_key, exc)
-                        raise _ColdRetry(str(getattr(exc, "message", None) or exc))
+                        # Carry the STRUCTURED verdict (code / 503), not just
+                        # the prose: the hold loop must not re-derive "busy"
+                        # from the message wording.
+                        raise _ColdRetry(str(getattr(exc, "message", None) or exc),
+                                         busy=True, code=getattr(exc, "code", None))
                     if _local_fallback_allowed():
                         logger.warning("worker offload failed (%s); running %s locally",
                                        exc, self.model_key)
@@ -3609,7 +3807,7 @@ def make_delegating_runner(framework: str, task: str):
                         _record_load_verdict(worker.get("id"),
                                              self.model_key, str(exc))
                         raise _LoadFailed(f"worker {wname} failed for {self.model_key}: {exc}")
-                    raise _ColdRetry(str(exc))            # transient — hold + retry
+                    raise _ColdRetry(str(exc), busy=False)   # transient — hold + retry
                 except GeneratorExit:
                     logger.info("relay client-disconnect: closing worker stream "
                                 "worker=%s model=%s req=%s",
@@ -3628,8 +3826,10 @@ def make_delegating_runner(framework: str, task: str):
             start = time.time()
             deadline = start + _cold_hold_max_s()
             stall_s = _cold_hold_stall_s()
+            busy_since = None
             last_move = start
             last_err = ""
+            last_err_busy = False   # structured verdict of the last _ColdRetry
             # Retry pacing — the streaming twin of run()'s: base poll while the
             # load progresses, exponential backoff while it does not.
             retry_wait = _cold_hold_poll_s()
@@ -3718,9 +3918,31 @@ def make_delegating_runner(framework: str, task: str):
                             return
                         if msg:
                             last_progress = msg
-                        if moved or _is_worker_busy_signal(last_err):
+                        if moved or last_err_busy:
                             last_move = time.time()
+                        # A stale cold-kick marker must not turn an already
+                        # loaded, idle native slot into a poll loop.  The
+                        # worker's generation gate remains the concurrency
+                        # authority, so dispatch immediately.
+                        if ready and msg and "loaded and idle" in msg:
+                            _COLD_KICKING.discard(key)
+                            continue
                         now = time.time()
+                        busy_waiting = bool(ready and msg and
+                                            "waiting for its current request" in msg)
+                        if busy_waiting:
+                            if busy_since is None:
+                                busy_since = now
+                            if now - busy_since >= _worker_busy_max_s():
+                                yield ErrorEvent(
+                                    request_id=req.request_id,
+                                    message=(f"worker_busy: {worker.get('name') or wid} "
+                                             f"has served {self.model_key} but its slot "
+                                             f"remained occupied for {int(now - busy_since)}s; "
+                                             "the request was released instead of held") )
+                                return
+                        else:
+                            busy_since = None
                         if (not ready) and (now > deadline or (now - last_move) > stall_s):
                             yield ErrorEvent(request_id=req.request_id,
                                              message=_cold_timeout_message(
@@ -3775,6 +3997,7 @@ def make_delegating_runner(framework: str, task: str):
                         return
                     except _ColdRetry as cr:
                         last_err = cr.message
+                        last_err_busy = cr.is_busy()
                         if not hold:
                             # Feature disabled → today's behavior: surface, no retry.
                             yield ErrorEvent(request_id=req.request_id,
@@ -3813,7 +4036,39 @@ def make_delegating_runner(framework: str, task: str):
                         return
                     if msg:
                         last_progress = msg
-                    if moved or _is_worker_busy_signal(last_err):
+                    # Classify on the STRUCTURED verdict carried by _ColdRetry
+                    # (code / 503 decided at the raise site); prose is only the
+                    # fallback inside is_busy() when the site could not tell.
+                    if ready and last_err and not last_err_busy:
+                        yield ErrorEvent(
+                            request_id=req.request_id,
+                            message=(f"worker {worker.get('name') or wid} "
+                                     f"reported {self.model_key} loaded and idle, "
+                                     f"but the request failed: {last_err}"))
+                        return
+                    busy_waiting = bool(ready and msg and
+                                        "waiting for its current request" in msg)
+                    now = time.time()
+                    if busy_waiting:
+                        if busy_since is None:
+                            busy_since = now
+                        if now - busy_since >= _worker_busy_max_s():
+                            yield ErrorEvent(
+                                request_id=req.request_id,
+                                message=(f"worker_busy: {worker.get('name') or wid} "
+                                         f"has served {self.model_key} but its slot "
+                                         f"remained occupied for {int(now - busy_since)}s; "
+                                         "the request was released instead of held"))
+                            return
+                    else:
+                        busy_since = None
+                    # Once the worker reports a healthy native slot that is
+                    # idle, there is nothing left to deliberate about.  Retry
+                    # the relay immediately without publishing a repeated
+                    # "loaded and idle; retrying" status.
+                    if ready and msg and "loaded and idle" in msg:
+                        continue
+                    if moved or last_err_busy:
                         last_move = time.time()
                     now = time.time()
                     if (not ready) and (now > deadline or (now - last_move) > stall_s):
@@ -3856,8 +4111,9 @@ def make_delegating_runner(framework: str, task: str):
                 yield ErrorEvent(request_id=req.request_id,
                                  message=_refusal_message(
                                      self.model_key, req, "no_worker",
-                                     "no worker selected or every selected worker failed before "
-                                     "output, and HUGPY_NO_LOCAL_SERVING forbids serving on central"
+                                     "worker routing produced no output (no worker was selected "
+                                     "or every selected worker failed before output); central is "
+                                     "coordinator-only (HUGPY_NO_LOCAL_SERVING) and does not serve models"
                                      + (f" ({_nw})" if _nw else ""),
                                      skips=_no_worker_skips(self.model_key, pool, task)))
                 return

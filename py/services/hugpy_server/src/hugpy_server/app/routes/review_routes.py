@@ -799,7 +799,7 @@ def benchmark_run():
     placement, provisioning, loading, dispatch, and eviction.
 
     Body: models, workers, tokens, suite, with_judge, budgets, resume, force,
-    force_cold (re-measure cold loads even where one is recorded).
+    measure_cold_load (default false), force_cold (re-measure recorded loads).
     """
     import time as _time
     import uuid
@@ -823,6 +823,7 @@ def benchmark_run():
     budgets = body.get("budgets") if isinstance(body.get("budgets"), dict) else None
     resume, force = bool(body.get("resume")), bool(body.get("force"))
     force_cold = bool(body.get("force_cold"))
+    measure_cold_load = bool(body.get("measure_cold_load") or force_cold)
     if suite:
         try:
             from hugpy_curation.review.suites import suite_by_name
@@ -832,7 +833,7 @@ def benchmark_run():
     # Everything a restarted central needs to continue this run (persisted).
     params = {"tokens": tokens, "models": model_ids, "workers": worker_ids, "suite": suite,
               "with_judge": with_judge, "budgets": budgets, "resume": resume, "force": force,
-              "force_cold": force_cold}
+              "force_cold": force_cold, "measure_cold_load": measure_cold_load}
 
     with _benchmark_lock():
         _benchmark_reload()
@@ -1043,7 +1044,7 @@ def _start_benchmark_thread(run_id, params, done=None, phase="collect"):
                 for key in ("suite", "budgets"):
                     if params.get(key):
                         extra[key] = params[key]
-                for key in ("with_judge", "resume", "force", "force_cold"):
+                for key in ("with_judge", "resume", "force", "force_cold", "measure_cold_load"):
                     if params.get(key):
                         extra[key] = True
                 if done:

@@ -187,6 +187,7 @@ def _run_checks(cap, W, remote, policy):
         framework, task = next(iter(remote.FRAMEWORK_RUNNERS))
         Runner = remote.make_delegating_runner(framework, task)
         runner = Runner(types.SimpleNamespace(model_key="test-model"))
+        orig_select = remote._select
         remote._select = lambda mk, pool=None, task=None, **kw: (None, None)
         req = types.SimpleNamespace(request_id="rid-1", pool=None)
         os.environ["HUGPY_NO_LOCAL_SERVING"] = "true"
@@ -219,6 +220,7 @@ def _run_checks(cap, W, remote, policy):
     finally:
         remote.set_no_worker_diagnostic(orig_diag)
         os.environ.pop("HUGPY_NO_LOCAL_SERVING", None)
+        remote._select = orig_select
 
 
 def test_no_worker_diagnostic():

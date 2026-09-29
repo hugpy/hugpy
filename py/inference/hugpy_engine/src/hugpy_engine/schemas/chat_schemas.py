@@ -208,6 +208,14 @@ class ChatRequest(BaseModel):
     # model_dump() and released workers run extra="forbid"). None = the honest
     # default, exactly today's behaviour.
     caller: Optional[str] = None
+    # EXPLICIT REPRESENTATION (operator 2026-09-29): "gguf" | "transformers" |
+    # "auto"/None. Resolution already used it to pick the model_key's
+    # representation; it also rides here so the row-first serving-endpoint
+    # fast-route (remote.DelegatingRunner.run/stream -> _serving_for) can match a
+    # gguf seat only for gguf and a transformers seat only for transformers.
+    # Central-only, SAME class as ``caller``: dropped from EVERY model_dump()
+    # below so the extra="forbid" worker wire never sees it.
+    model_format: Optional[str] = None
 
     @model_serializer(mode="wrap")
     def _omit_null_engine_extras(self, handler):
@@ -225,6 +233,9 @@ class ChatRequest(BaseModel):
         # peer relay both ship model_dump()) stays byte-identical and an
         # extra="forbid" worker never sees an unknown key.
         data.pop("caller", None)
+        # ``model_format`` is central-only too (the serving fast-route reads it
+        # off the object as ``req.model_format``); never a worker input.
+        data.pop("model_format", None)
         return data
 
     @field_validator("messages", mode="before")

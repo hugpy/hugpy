@@ -24,6 +24,50 @@ SSE_KEEPALIVE = b": keepalive\n\n"
 _HEARTBEAT_SECS = float(os.environ.get("HUGPY_SSE_HEARTBEAT_SECS", "15") or 15)
 
 
+def _reconcile_dispatch_leases() -> None:
+    """Bridge the shared job lease watchdog to the live fleet registry."""
+    def worker_state(job):
+        try:
+            from hugpy_fleet.central.workers import get_worker
+            worker = get_worker(job.worker) if job.worker else None
+            if not worker:
+                return {"online": False}
+            slots = [s for s in (worker.get("slots") or [])
+                     if isinstance(s, dict) and
+                     str(s.get("model_key") or "") == str(job.model_key)]
+            slot_busy = any(bool(s.get("busy")) for s in slots)
+            # The worker activity endpoint is authoritative for non-slot
+            # backends.  A failed probe is fail-closed: do not expire a live
+            # request merely because telemetry is unavailable.
+            active = None
+            url = str(worker.get("url") or "").rstrip("/")
+            if url:
+                from urllib.request import urlopen
+                with urlopen(url + "/ops/activity", timeout=1.0) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                rows = (body or {}).get("activity") or []
+                active = any(
+                    str(row.get("model_key") or "") == str(job.model_key)
+                    and bool((row.get("activity") or {}).get("request_id")
+                             or (row.get("activity") or {}).get("active"))
+                    for row in rows if isinstance(row, dict))
+            return {"online": worker.get("status") == "online",
+                    "slot_busy": slot_busy,
+                    "request_active": True if active is True else False}
+        except Exception:
+            return {"online": True, "slot_busy": True, "request_active": True}
+
+    job_store.reconcile_dispatch(worker_state=worker_state)
+
+
+# The shared store owns the poller; this module supplies the fleet-specific
+# correlation logic once the server imports its chat streaming path.
+try:
+    job_store.set_dispatch_reconciler(_reconcile_dispatch_leases)
+except Exception:
+    pass
+
+
 def sse_event(payload: dict) -> bytes:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
@@ -53,7 +97,14 @@ def _feed_job_from_status(rid, event) -> None:
                 wname = (getattr(event, "worker_name", None)
                          or getattr(event, "worker_id", None))
                 if wname:
-                    job_store.update(rid, worker=str(wname))
+                    # Mark dispatch at worker selection time. Previously this
+                    # only stamped the worker name, leaving the row `pending`
+                    # until a later load/token event; a lost relay therefore
+                    # created an apparently immortal pending request.
+                    job_store.begin_dispatch(rid, worker=str(wname),
+                                             lease_s=float(os.environ.get(
+                                                 "HUGPY_DISPATCH_LEASE_SECONDS",
+                                                 "120") or 120))
             return
         stage = getattr(event, "stage", None)
         if stage in _LOADING_STAGES:
@@ -64,9 +115,41 @@ def _feed_job_from_status(rid, event) -> None:
             msg = getattr(event, "message", None)
             if msg:
                 changes["message"] = str(msg)
-            job_store.update(rid, **changes)
+            current = job_store.get(rid)
+            if current is not None and current.dispatch_started_at is not None:
+                job_store.renew_dispatch(rid)
+                job_store.update(rid, **changes)
+            else:
+                job_store.update(rid, **changes)
     except Exception:
         pass
+
+
+def _feed_job_from_done(rid, event) -> None:
+    """Persist model-reported token usage on the unified call/job row."""
+    from hugpy_control.jobs import job_store
+    usage = getattr(event, "usage", None)
+    if not isinstance(usage, dict):
+        return
+
+    def _int(*names):
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, (int, float)):
+                return int(value)
+        return None
+
+    inp = _int("input_tokens", "prompt_tokens")
+    out = _int("output_tokens", "completion_tokens")
+    total = _int("total_tokens")
+    if total is None and (inp is not None or out is not None):
+        total = (inp or 0) + (out or 0)
+    changes = {k: v for k, v in (
+        ("input_tokens", inp), ("output_tokens", out),
+        ("total_tokens", total),
+    ) if v is not None}
+    if changes:
+        job_store.update(rid, **changes)
 
 
 def event_to_sse(ev) -> bytes:
@@ -184,6 +267,12 @@ async def stream_events(body: ChatBody):
     if body.task:
         prompt_kwargs["task"] = body.task
 
+    # Explicit representation override (gguf | transformers). Resolution-only —
+    # the resolver uses it to pick the model's representation; never forwarded to
+    # the worker. Omitted/"auto" leaves legacy behaviour untouched.
+    if getattr(body, "model_format", None):
+        prompt_kwargs["model_format"] = body.model_format
+
     if body.messages:
         prompt_kwargs["messages"] = messages_to_dicts(body.messages)
     else:
@@ -209,14 +298,16 @@ async def stream_events(body: ChatBody):
     try:
         _name = None
         try:
-            _cfg = get_model_config(body.model_key) if body.model_key else None
-            _name = getattr(_cfg, "name", None) or body.model_key
+            _job_model_key = prompt_kwargs.get("model_key") or body.model_key
+            _cfg = get_model_config(_job_model_key) if _job_model_key else None
+            _name = getattr(_cfg, "name", None) or _job_model_key
         except Exception:
-            _name = body.model_key
+            _job_model_key = prompt_kwargs.get("model_key") or body.model_key
+            _name = _job_model_key
         _existing = job_store.get(rid)
         if _existing is None or _existing.terminal:
             from hugpy_engine.dispatch.activity import format_prompt
-            job_store.create(body.model_key or "", id=rid, kind="chat",
+            job_store.create(_job_model_key or "", id=rid, kind="chat",
                              transport=body.transport or "web",
                              channel=body.channel,
                              principal=body.principal,
@@ -250,6 +341,8 @@ async def stream_events(body: ChatBody):
             etype = getattr(event, "type", None)
             if etype == "token":
                 job_store.on_output(rid)
+            elif etype == "done":
+                _feed_job_from_done(rid, event)
             elif etype == "status":
                 # A HELD cold call (t36) surfaces its dispatch worker + load
                 # progress as status events. Reflect them into the job so the row

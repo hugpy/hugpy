@@ -101,6 +101,14 @@ def get_model_path(key: str):
         return env_override
     cfg = get_model_config(key)
     path = os.path.join(MODELS_HOME,cfg.folder)
+    # A managed copy takes precedence.  The worker's external pointer is used
+    # only when its Hugpy cache does not hold the model.
+    external = (getattr(cfg, "extra", None) or {}).get("external_location")
+    if external and not model_looks_downloaded(path, cfg) and (
+            os.path.isdir(external) or
+            ((getattr(cfg, "extra", None) or {}).get("ollama_model") and
+             os.path.isfile(external))):
+        return external
     # Read-through (2026-07-12 hotfix): cfg.folder is CENTRAL's layout — after
     # the store flattening it names the FLAT dir, but a worker's files may
     # still sit under a legacy task path. Without the resolver here, every

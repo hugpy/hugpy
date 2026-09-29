@@ -87,7 +87,13 @@ def record(phase: str, job, **extra) -> None:
             "model_key": getattr(job, "model_key", None), "model": getattr(job, "model_name", None),
             "principal": getattr(job, "principal", None), "transport": getattr(job, "transport", None),
             "channel": getattr(job, "channel", None), "worker": getattr(job, "worker", None),
-            "status": getattr(job, "status", None), "tokens": getattr(job, "tokens", 0),
+            "status": getattr(job, "status", None),
+            "tokens": (getattr(job, "total_tokens", None)
+                       if getattr(job, "total_tokens", None) is not None
+                       else getattr(job, "tokens", 0)),
+            "input_tokens": getattr(job, "input_tokens", None),
+            "output_tokens": getattr(job, "output_tokens", None),
+            "total_tokens": getattr(job, "total_tokens", None),
             "started_ts": getattr(job, "started_ts", None),
         }
         request_body = getattr(job, "request", None)

@@ -68,6 +68,43 @@ def test_write_marker_with_manifest_keeps_quants_and_is_atomic(tmp_path, monkeyp
     assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
 
 
+def _gguf_with_context(path, context):
+    """Minimal GGUF v2 header carrying general.architecture and its context KV."""
+    import struct
+
+    def string(value):
+        raw = value.encode()
+        return struct.pack("<Q", len(raw)) + raw
+
+    with open(path, "wb") as fh:
+        fh.write(b"GGUF")
+        fh.write(struct.pack("<IQQ", 2, 0, 2))  # version, tensors, KVs
+        fh.write(string("general.architecture"))
+        fh.write(struct.pack("<I", 8))          # string
+        fh.write(string("llama"))
+        fh.write(string("llama.context_length"))
+        fh.write(struct.pack("<II", 4, context)) # uint32
+
+
+def test_quant_manifest_records_context_per_gguf_quant(tmp_path):
+    _gguf_with_context(tmp_path / "m-Q4_K_M.gguf", 32768)
+    _gguf_with_context(tmp_path / "m-Q8_0.gguf", 65536)
+    (tmp_path / "mmproj-f16.gguf").write_bytes(b"not a language quant")
+
+    quants = hm.list_gguf_quants(str(tmp_path))
+    assert [(q["quant"], q["context_length"]) for q in quants] == [
+        ("q4_k_m", 32768), ("q8_0", 65536),
+    ]
+    hm.write_hugpy_marker(str(tmp_path), hub_id="o/m", framework="gguf")
+    blob = json.loads((tmp_path / "hugpy.json").read_text())
+    assert [q["context_length"] for q in blob["quants"]] == [32768, 65536]
+    assert "model_max_length" not in blob  # no quant is selected by this marker
+    hm.write_hugpy_marker(str(tmp_path), hub_id="o/m", framework="gguf",
+                          filename="m-Q4_K_M.gguf")
+    selected = json.loads((tmp_path / "hugpy.json").read_text())
+    assert selected["model_max_length"] == 32768
+
+
 def test_restamp_without_manifest_preserves_it(tmp_path):
     d = str(tmp_path)
     (tmp_path / "w.safetensors").write_bytes(b"x" * 8)

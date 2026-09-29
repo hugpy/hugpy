@@ -1,16 +1,21 @@
 """Cold grading prepares state but lets ordinary inference provision it."""
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from hugpy_curation.review import fleet_grading
 from hugpy_platform.constants import DEFAULT_AGENT_BRAIN
 
 
-def test_cold_reset_only_evicts_memory_and_worker_cache():
+def test_cold_reset_only_evicts_memory_and_worker_cache(tmp_path):
     client = Mock()
     client.request.side_effect = [{"evicted": True}, {"removed": True}]
-    lane = {"worker_id": "w/1", "model": "org/model"}
+    lane = {"worker_id": "w/1", "model": "org/model", "size_bytes": 8}
 
-    result = fleet_grading._cold_reset(client, lane)
+    central_copy = tmp_path / "model.gguf"
+    central_copy.write_bytes(b"complete")
+    with patch.object(fleet_grading, "_lane_path", return_value=str(central_copy)):
+        result = fleet_grading._cold_reset(client, lane)
 
     assert client.request.call_args_list == [
         call("/llm/workers/w%2F1/evict", "POST", {"model_key": "org/model", "force": True}),
@@ -18,6 +23,14 @@ def test_cold_reset_only_evicts_memory_and_worker_cache():
     ]
     assert result == {"evict": {"evicted": True},
                       "cache_evict": {"removed": True}}
+
+
+def test_cold_reset_preserves_only_worker_copy():
+    client = Mock()
+    with patch.object(fleet_grading, "_lane_path", return_value=None):
+        result = fleet_grading._cold_reset(client, {"worker_id": "w1", "model": "org/m"})
+    assert "skipped" in result
+    client.request.assert_not_called()
 
 
 # ── recorded cold loads (operator 2026-09-23: reset only to MEASURE, once) ──
@@ -51,6 +64,8 @@ class Store:
 
 def _run(store, **kw):
     calls, events = [], []
+    kw.setdefault("measure_cold_load", True)
+    central_copy_available = kw.pop("central_copy_available", True)
 
     def request(path, method="GET", body=None, timeout=None):
         calls.append((path, method, body))
@@ -66,13 +81,34 @@ def _run(store, **kw):
         if path.startswith("/llm/workers/"): return {"ok": True}
         return {"choices": [{"message": {"content": "37"}}]}
     client = Mock(); client.request.side_effect = request
-    fleet_grading.run_capacity_benchmark(client, [_worker()], 16, threading.Event(),
-                                         lambda k, v: events.append((k, v)), budgets=FAST,
-                                         cold_store=store, **kw)
+    with TemporaryDirectory() as directory:
+        central_copy = Path(directory) / "model.gguf"
+        with central_copy.open("wb") as stream:
+            stream.truncate(10**9)
+        with patch.object(fleet_grading, "_lane_path", return_value=str(central_copy) if central_copy_available else None):
+            fleet_grading.run_capacity_benchmark(client, [_worker()], 16, threading.Event(),
+                                                 lambda k, v: events.append((k, v)), budgets=FAST,
+                                                 cold_store=store, **kw)
     results = [v for k, v in events if k == "result" and v.get("status") == "complete"]
     plan = next(v for k, v in events if k == "plan")
     resets = [p for p, _m, _b in calls if p.endswith("/evict") or p.endswith("/cache-evict")]
     return results, plan, resets, events
+
+
+def test_cold_load_off_by_default():
+    store = Store()
+    results, plan, resets, _ = _run(store, measure_cold_load=False)
+    assert resets == []
+    assert {r["cold"] for r in plan["rows"]} == {"off"}
+    assert all(r["cold_s"] is None and r["cold_source"] == "off" for r in results)
+    assert store.asked == []
+
+
+def test_cold_load_on_preserves_worker_copy_when_central_is_missing():
+    results, _plan, resets, events = _run(Store(), central_copy_available=False)
+    assert resets == []
+    assert all(r["cold_s"] is None and r["cold_source"] == "skipped: no central copy" for r in results)
+    assert any(kind == "notice" and row.get("phase") == "cold-reset" and row.get("skipped") for kind, row in events)
 
 
 def test_first_run_measures_and_carries_the_split_for_recording():

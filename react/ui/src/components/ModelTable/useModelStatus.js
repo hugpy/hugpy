@@ -18,6 +18,53 @@ let snap = { index: indexStatus(null), loaded: false, unsupported: false, error:
 const listeners = new Set()
 let timer = null
 let inflight = null
+const missingConfirmations = new Map()
+
+// A worker can briefly report a model absent while its inventory is being
+// refreshed. Don't turn a previously observed cold/on-central model into
+// "missing" on one contradictory snapshot; require the next complete status
+// poll to confirm that transition. The status endpoint is already single-flight,
+// so these are consecutive observations rather than overlapping requests.
+function stabilizeMissing(payload) {
+  if (!Array.isArray(payload?.models)) return payload
+  const seen = new Set()
+  const models = payload.models.map(row => {
+    if (!row || !Array.isArray(row.workers)) return row
+    const previous = snap.index.byKey.get(row.model_key)
+    let changed = false
+    const workers = row.workers.map(worker => {
+      const name = worker?.worker || worker?.worker_id
+      if (!name) return worker
+      const id = `${row.model_key}\u0000${name}`
+      seen.add(id)
+      const base = worker.base || worker.state
+      const prior = previous?.workers?.find(w =>
+        (w.worker || w.worker_id) === name)
+      const priorBase = prior?.base || prior?.state
+      if (base !== 'missing') {
+        missingConfirmations.delete(id)
+        return worker
+      }
+      if (priorBase !== 'cold' && priorBase !== 'on central') {
+        missingConfirmations.delete(id)
+        return worker
+      }
+      const count = (missingConfirmations.get(id) || 0) + 1
+      missingConfirmations.set(id, count)
+      if (count >= 2) return worker
+      changed = true
+      return { ...worker, base: prior.base || priorBase,
+        state: prior.state || priorBase,
+        label: prior.label || priorBase,
+        detail: `one inventory read reported missing; confirming on the next poll. Previous: ${prior.detail || priorBase}` }
+    })
+    return changed ? { ...row, workers } : row
+  })
+  for (const id of missingConfirmations.keys()) {
+    if (!seen.has(id)) missingConfirmations.delete(id)
+  }
+  return { ...payload, models }
+}
 
 function emit(next) {
   snap = { ...snap, ...next }
@@ -43,7 +90,7 @@ export function poll() {
     let next = 15000
     try {
       const { ok, status, data } = await getJson(STATUS_URL)
-      const index = indexStatus(data)
+      const index = indexStatus(stabilizeMissing(data))
       if (index.available) {
         emit({ index, loaded: true, unsupported: false, error: null, at: Date.now() })
         next = index.pollMs

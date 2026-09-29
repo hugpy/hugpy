@@ -180,12 +180,16 @@ def _adopt_vl_tasks_from_disk(model_key, cfg, task):
     return None
 
 
+_MODEL_FORMATS = ("auto", "gguf", "transformers")
+
+
 def resolve_model_key(
     *,
     model_key: Optional[str] = None,
     file: Optional[str] = None,
     media_type: Optional[str] = None,
     task: Optional[str] = None,
+    model_format: Optional[str] = None,
 ) -> str:
     """Pick a model_key via explicit resolution chain.
 
@@ -194,15 +198,25 @@ def resolve_model_key(
 
     `task`, when given alongside `model_key`, is validated against
     cfg.tasks. When given alone, it picks TASK_DEFAULTS[task].
+
+    `model_format` ("auto" | "gguf" | "transformers", default auto) is the
+    explicit representation override — authoritative when choosing between the
+    GGUF and Transformers rows of the same model (operator 2026-09-29).
     """
     if task is not None and task not in KNOWN_TASKS_REGISTRY:
         raise KeyError(
             f"Unknown task={task!r}; known: {sorted(KNOWN_TASKS_REGISTRY)}"
         )
-    
+    fmt = (model_format or "auto").strip().lower() if model_format else "auto"
+    if fmt not in _MODEL_FORMATS:
+        raise ValueError(
+            f"Unknown model_format={model_format!r}; expected one of "
+            f"{list(_MODEL_FORMATS)}"
+        )
+
     if model_key is not None:
         requested = model_key
-        model_key = assure_model_key(model_key)
+        model_key = assure_model_key(model_key, fmt=fmt)
         if not model_key:
             # Fail with NEAR MATCHES, not the whole registry. Two cases produce
             # a None here: nothing matched, or a fuzzy tie the pipeline could
@@ -349,6 +363,7 @@ def resolve(prompt_kwargs: Dict[str, Any]) -> Resolution:
         file=prompt_kwargs.get("file"),
         media_type=prompt_kwargs.get("media_type"),
         task=requested_task,
+        model_format=prompt_kwargs.get("model_format"),
     )
 
     cfg = MODEL_REGISTRY[model_key]

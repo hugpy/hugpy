@@ -694,6 +694,13 @@ _INDEXES = (
 MAX_ROWS = 10000
 PRUNE_EVERY = 200
 MAX_FAILURES = 5
+# Telemetry is observational, but it must not become permanently blind after a
+# brief SQLite lock storm.  Keep the breaker short by default; operators can
+# tune it on a particularly busy shared mount without changing serving.
+STORE_COOLDOWN_SECONDS = float(
+    os.environ.get("HUGPY_EVICTION_STORE_COOLDOWN_SECONDS", "30") or 30)
+STORE_COOLDOWN_MAX_SECONDS = float(
+    os.environ.get("HUGPY_EVICTION_STORE_COOLDOWN_MAX_SECONDS", "300") or 300)
 
 
 from hugpy_control.shared import default_db_path
@@ -723,6 +730,12 @@ class EvictionStore:
                  max_rows: int = MAX_ROWS) -> None:
         from hugpy_control.shared import init_bounded_event_store
         init_bounded_event_store(self, path, max_rows, default_db_path)
+        self._retry_at = 0.0
+        self._cooldown = STORE_COOLDOWN_SECONDS
+        self._probing = False
+        self._outages = 0
+        self._recoveries = 0
+        self._last_error = ""
 
     # -- plumbing ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
@@ -731,18 +744,111 @@ class EvictionStore:
 
     def _ensure(self) -> bool:
         from hugpy_control.shared import ensure_store_schema
+        # A telemetry outage must be a cooldown, never a restart-required
+        # latch.  This mirrors the comms mirror's proven half-open breaker.
+        if self._disabled:
+            if time.time() < self._retry_at:
+                return False
+            self._disabled = False
+            self._initialized = False
+            self._failures = 0
+            self._probing = True
+            logger.warning("eviction telemetry store probing after %.0fs quarantine: %s",
+                           self._cooldown, self.path)
         return ensure_store_schema(self, _SCHEMA, indexes=_INDEXES)
 
     def _note_failure(self, op: str, exc: BaseException) -> None:
         self._failures += 1
-        if self._failures >= MAX_FAILURES and not self._disabled:
+        self._last_error = f"{exc} during {op}"
+        if self._is_corrupt(exc):
+            self._quarantine_corrupt_file()
+        # A failed half-open probe has already established that the store is
+        # still unavailable; re-open immediately instead of spending another
+        # five requests rediscovering it.
+        if self._probing and self._failures < MAX_FAILURES:
+            self._failures = MAX_FAILURES
+        if self._failures >= MAX_FAILURES:
+            if self._probing or self._disabled:
+                self._cooldown = min(self._cooldown * 2,
+                                     STORE_COOLDOWN_MAX_SECONDS)
+            else:
+                self._outages += 1
             self._disabled = True
-            logger.error("eviction telemetry store DISABLED after %d failures "
-                         "(last: %s during %s) — the console loses eviction "
-                         "history until restart; evictions are unaffected",
-                         self._failures, exc, op)
+            self._initialized = False
+            self._retry_at = time.time() + self._cooldown
+            logger.error("eviction telemetry store QUARANTINED for %.0fs after %d "
+                         "failures (last: %s during %s) — evictions continue and "
+                         "history retries automatically",
+                         self._cooldown, self._failures, exc, op)
         else:
             logger.warning("eviction telemetry store %s failed: %s", op, exc)
+
+    @staticmethod
+    def _is_corrupt(exc: BaseException) -> bool:
+        """Whether SQLite has declared the telemetry file unreadable.
+
+        The event log is derived observability, never allocation state.  A
+        corrupt file must therefore be retained for inspection and replaced,
+        rather than turning every allocation attempt into an endless sequence
+        of failing history writes.
+        """
+        message = str(exc).lower()
+        return ("database disk image is malformed" in message
+                or "file is not a database" in message)
+
+    def _quarantine_corrupt_file(self) -> None:
+        """Move a bad event database aside and let the next write recreate it.
+
+        ``os.replace`` makes the hand-off atomic for other gunicorn processes:
+        a sibling with the old file open may finish or fail once, but every new
+        connection sees the fresh path.  The original and its WAL sidecars are
+        kept under a timestamped name for forensic recovery.
+        """
+        path = str(self.path or "")
+        if not path or path.strip().lower() in ("off", "none", "0", "disabled"):
+            return
+        suffix = ".corrupt-%d-%d" % (int(time.time()), os.getpid())
+        moved = False
+        try:
+            if os.path.exists(path):
+                os.replace(path, path + suffix)
+                moved = True
+            for sidecar in ("-wal", "-shm"):
+                candidate = path + sidecar
+                if os.path.exists(candidate):
+                    os.replace(candidate, candidate + suffix)
+                    moved = True
+        except OSError as move_exc:
+            logger.error("eviction telemetry store could not preserve corrupt "
+                         "database %s: %s", path, move_exc)
+            return
+        if moved:
+            self._initialized = False
+            logger.error("eviction telemetry store quarantined corrupt database "
+                         "at %s; a fresh history will be created", path + suffix)
+
+    def _ok(self) -> None:
+        if self._probing:
+            self._probing = False
+            self._recoveries += 1
+            logger.warning("eviction telemetry store RECOVERED: %s", self.path)
+        self._disabled = False
+        self._retry_at = 0.0
+        self._cooldown = STORE_COOLDOWN_SECONDS
+        self._failures = 0
+        self._last_error = ""
+
+    def health(self) -> dict:
+        """Cheap store status for the history API and operational checks."""
+        return {
+            "ok": not self._disabled,
+            "path": self.path,
+            "failures": self._failures,
+            "outages": self._outages,
+            "recoveries": self._recoveries,
+            "retry_in": max(0.0, self._retry_at - time.time()) if self._disabled else 0.0,
+            "last_error": self._last_error,
+        }
 
     # -- write -------------------------------------------------------------
     def append(self, events: Iterable[dict]) -> int:
@@ -776,7 +882,7 @@ class EvictionStore:
                     "INSERT INTO eviction_events "
                     "(ts, seq, worker_id, run_id, stage, model_key, tier, body) "
                     "VALUES (?,?,?,?,?,?,?,?)", rows)
-            self._failures = 0
+            self._ok()
         except Exception as exc:  # noqa: BLE001
             self._note_failure("append", exc)
             return 0
@@ -798,6 +904,8 @@ class EvictionStore:
                     (self.max_rows,))
         except Exception as exc:  # noqa: BLE001
             self._note_failure("prune", exc)
+        else:
+            self._ok()
 
     # -- read --------------------------------------------------------------
     def recent(self, limit: int = 200, since_ts: Optional[float] = None,
@@ -828,6 +936,7 @@ class EvictionStore:
         except Exception as exc:  # noqa: BLE001
             self._note_failure("recent", exc)
             return []
+        self._ok()
         out = []
         for rid, body in reversed(got):
             try:
@@ -850,6 +959,7 @@ class EvictionStore:
         except Exception as exc:  # noqa: BLE001
             self._note_failure("max_id", exc)
             return 0
+        self._ok()
 
 
 _STORE: Optional[EvictionStore] = None

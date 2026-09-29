@@ -53,6 +53,11 @@ def test_wipe_model_publishes_wipe(tmp_path, monkeypatch):
     (target / "w.gguf").write_bytes(b"GGUF")
     monkeypatch.setenv("HUGPY_MODEL_STORE_REAPABLE", "1")
     monkeypatch.delenv("HUGPY_SHARED_MODEL_STORE", raising=False)
+    # The reap opt-in applies to Hugpy's own model cache ONLY: a target outside
+    # MODELS_HOME is refused regardless of the env flag (a discovered model at an
+    # arbitrary local path must never inherit the cache's deletion permission).
+    from hugpy_platform import constants as _constants
+    monkeypatch.setattr(_constants, "MODELS_HOME", str(tmp_path / "models"))
     seen = []
     monkeypatch.setattr(busmod.bus, "publish",
                         lambda topic=None, **f: seen.append((topic, f)) or None)

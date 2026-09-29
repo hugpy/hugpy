@@ -78,6 +78,44 @@ def test_engine_dir_flag_overrides_default(monkeypatch, tmp_path):
     assert "%h/hugpy-worker/engine" not in unit
 
 
+def test_existing_worker_env_is_the_unit_source_of_truth(monkeypatch, tmp_path):
+    env_file = tmp_path / "hugpy-worker" / "worker.env"
+    env_file.parent.mkdir()
+    env_file.write_text(
+        "WORKER_CENTRAL_URL=https://central.example\n"
+        "WORKER_NAME=from-env\n"
+        "WORKER_PORT=9200\n"
+        "MODELS_HOME=/srv/models\n",
+        encoding="utf-8",
+    )
+    opts = _fake_opts()
+    opts.env_file = str(env_file)
+    unit = _render_unit(monkeypatch, tmp_path, opts)
+    assert f'EnvironmentFile={env_file}' in unit
+    assert 'Environment="WORKER_CENTRAL_URL=' not in unit
+    exec_line = next(line for line in unit.splitlines()
+                     if line.startswith("ExecStart="))
+    assert exec_line == f"ExecStart={sys.executable} -m hugpy_fleet.worker"
+
+
+def test_worker_env_parser_is_data_not_shell(monkeypatch, tmp_path):
+    # Let pytest restore the process environment after the loader intentionally
+    # overwrites it.
+    monkeypatch.setenv("WORKER_NAME", "before")
+    monkeypatch.setenv("WORKER_PORT", "1")
+    monkeypatch.setenv("EMPTY", "before")
+    env_file = tmp_path / "worker.env"
+    env_file.write_text(
+        'WORKER_NAME="a brain"\n'
+        "WORKER_PORT=9100\n"
+        "EMPTY=''\n",
+        encoding="utf-8",
+    )
+    loaded = wi._load_worker_env_file(str(env_file))
+    assert loaded == {"WORKER_NAME": "a brain", "WORKER_PORT": "9100", "EMPTY": ""}
+    assert wi.os.environ["WORKER_NAME"] == "a brain"
+
+
 # --------------------------------------------------------------------------- #
 # Slice B — install-shape detector                                            #
 # --------------------------------------------------------------------------- #

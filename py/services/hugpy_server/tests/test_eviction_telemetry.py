@@ -223,6 +223,36 @@ def test_store_self_disables_after_repeated_failure():
     assert s.recent(limit=10) == []
 
 
+def test_store_automatically_recovers_after_its_cooldown(tmp_path):
+    """A transient store failure must not leave the eviction console blind
+    until the API process happens to restart."""
+    s = ev.EvictionStore(path="/proc/definitely/not/writable/x.db")
+    for _ in range(ev.MAX_FAILURES):
+        s.append([ev.build_event("evict.done", model_key="m1")])
+    assert s.health()["ok"] is False
+
+    # Model a mount that recovered while the store was quarantined.
+    s.path = str(tmp_path / "recovered.db")
+    s._retry_at = 0.0
+    assert s.append([ev.build_event("evict.done", model_key="m2")]) == 1
+    assert s.health()["ok"] is True
+    assert s.health()["recoveries"] == 1
+
+
+def test_store_preserves_a_corrupt_history_then_recreates_it(tmp_path):
+    """Corruption costs history, never the allocator or a manual repair.
+
+    The old file stays available for forensic recovery under ``.corrupt-*``.
+    """
+    path = tmp_path / "evictions.db"
+    path.write_bytes(b"not a sqlite database")
+    s = ev.EvictionStore(path=str(path))
+    assert s.append([ev.build_event("evict.done", model_key="before")]) == 0
+    assert list(tmp_path.glob("evictions.db.corrupt-*"))
+    assert s.append([ev.build_event("evict.done", model_key="after")]) == 1
+    assert [row["model_key"] for row in s.recent()] == ["after"]
+
+
 def test_install_store_sink_persists_emitted_events(store):
     ev.install_store_sink()
     with ev.run_scope("R9"):
@@ -320,6 +350,7 @@ def test_ingest_then_read_roundtrip(client):
         "headroom.start", "candidate.skip", "headroom.done"]
     assert body["events"][1]["reason"] == "static"
     assert body["cursor"] > 0
+    assert body["store"]["ok"] is True
 
 
 def test_ingest_rejects_a_malformed_body(client):

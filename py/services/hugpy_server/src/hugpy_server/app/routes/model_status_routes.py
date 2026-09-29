@@ -190,6 +190,24 @@ def name_forms(row: dict) -> List[str]:
     return [f for i, f in enumerate(out) if f and f not in out[:i]]
 
 
+def presence_forms(row: dict, catalog: list) -> set:
+    """Unambiguous spellings for positive fleet-wide disk/residency evidence.
+
+    A basename is only safe when it identifies one catalog model. Otherwise
+    ``owner-a~same-name`` on a worker must not prove the presence of
+    ``owner-b~same-name``.
+    """
+    key = row.get("model_key") or row.get("key") or row.get("name") or ""
+    hub = row.get("hub_id") or ""
+    forms = {x for x in (key, hub, hub.replace("/", "~") if hub else "") if x}
+    tail = key.split("~")[-1]
+    siblings = [r for r in catalog
+                if (r.get("model_key") or r.get("key") or r.get("name") or "").split("~")[-1] == tail]
+    if tail and len(siblings) == 1:
+        forms.add(tail)
+    return forms
+
+
 def expected_suite(row: dict) -> Optional[str]:
     """The grading suite name for this catalog row, or None (no grader)."""
     try:
@@ -473,6 +491,11 @@ def provision_text(p: dict) -> str:
 #                             exist somewhere real (operator ruling 2026-09-10,
 #                             restated 2026-09-24). For a central-served (comfy)
 #                             checkpoint this branch is the ``comfy`` block's job.
+#   on another worker         not on this worker or central, but a local or
+#                             resident copy exists on a different fleet worker.
+#   unknown                   no copy was reported, but at least one worker's
+#                             inventory is unavailable/stale, so absence cannot
+#                             be established across the entire fleet.
 #   missing                   the files are on NO drive — not this worker, not
 #                             central, nowhere — AND the model is allocated
 #                             (designated/assigned) to this worker: the one state
@@ -497,7 +520,7 @@ def provision_text(p: dict) -> str:
 # and ``failed: <class>`` (the last load attempt on that worker failed; only
 # over the disk-absent states cold/missing/on central/not allocated — a hot/
 # loading/downloading model has since moved on).
-WORKER_STATES = ("on central", "missing", "not allocated", "cold",
+WORKER_STATES = ("on central", "on another worker", "unknown", "missing", "not allocated", "cold",
                  "downloading from central", "loading", "hot",
                  "serving", "answering")
 ANSWER_WINDOW_S = 2.0
@@ -600,7 +623,9 @@ def _comfy_worker_state(model_row: dict, w: dict, forms: set, inflight: int, now
 
 def model_worker_state(model_row: dict, worker_row: dict, slots=None, actions=(), *,
                        events=(), held: bool = False, inflight: int = 0,
-                       now: Optional[float] = None, transfers=()) -> dict:
+                       now: Optional[float] = None, transfers=(),
+                       fleet_has: bool = False,
+                       fleet_inventory_complete: bool = True) -> dict:
     """The live state of ONE model on ONE worker (vocabulary above).
 
     ``slots``: the worker's slot rows (default ``worker_row["slots"]``);
@@ -609,7 +634,10 @@ def model_worker_state(model_row: dict, worker_row: dict, slots=None, actions=()
     load.*), filtered the same way; ``inflight``: central's relay in-flight
     count for the pair; ``transfers``: central transfer-ledger rows (the
     AUTHORITATIVE "downloading from central" — central serves the bytes; the
-    worker heartbeat's provision_progress is only the fallback). Pure: no I/O."""
+    worker heartbeat's provision_progress is only the fallback); ``fleet_has``
+    says a worker elsewhere in the fleet has a local or resident copy;
+    ``fleet_inventory_complete`` says every worker supplied a current disk
+    inventory, making an all-workers absence check meaningful. Pure: no I/O."""
     now = time.time() if now is None else now
     w = worker_row or {}
     forms = set(name_forms(model_row or {}))
@@ -664,8 +692,16 @@ def model_worker_state(model_row: dict, worker_row: dict, slots=None, actions=()
     # the model is allocated to THIS worker when it is designated/assigned there
     # (the designation list ``models``, ``designation_meta``, the unified
     # ``allocations`` view, ``model_alloc_modes``, or a legacy ``config.pinned``).
-    central_has = (str((model_row or {}).get("status") or "").lower() == "installed"
-                   or (_num((model_row or {}).get("dir_bytes")) or 0) > 0)
+    # Worker-only catalog rows are synthetic: load_catalog marks them
+    # ``installed`` so they remain selectable in the shared model catalog, but
+    # that does not mean their weights exist in central storage. Treating that
+    # marker as a central copy made an idle worker alternate between ``cold``
+    # (when its heartbeat reported the model locally) and the false ``on
+    # central`` state (when it did not). The worker location/API registry is
+    # the authority for worker-only rows.
+    central_has = (not bool((model_row or {}).get("worker_only")) and
+                   (str((model_row or {}).get("status") or "").lower() == "installed"
+                    or (_num((model_row or {}).get("dir_bytes")) or 0) > 0))
     alloc_names = (set(w.get("models") or [])
                    | set(w.get("designation_meta") or {})
                    | set(w.get("model_alloc_modes") or {})
@@ -736,6 +772,14 @@ def model_worker_state(model_row: dict, worker_row: dict, slots=None, actions=()
         detail = ("on central storage (llm_storage), not on this worker's drive yet — "
                   "central copies it to this worker on the first call (lazy download); "
                   "the files exist, so this is not missing")
+    elif allocated and fleet_has:
+        base = "on another worker"
+        detail = ("the files are not on this worker or central storage, but a copy "
+                  "is present on another worker in the fleet")
+    elif allocated and not fleet_inventory_complete:
+        base = "unknown"
+        detail = ("no copy was reported, but at least one worker's disk inventory "
+                  "is unavailable or stale; fleet-wide absence is not confirmed")
     elif allocated:
         base = "missing"
         detail = ("allocated to this worker but the files are on NO drive — not here and "
@@ -747,7 +791,7 @@ def model_worker_state(model_row: dict, worker_row: dict, slots=None, actions=()
 
     # failed: the LAST load attempt on this worker failed
     failed = None
-    if base in ("cold", "missing", "on central", "not allocated"):
+    if base in ("cold", "missing", "on central", "on another worker", "unknown", "not allocated"):
         cands = []
         for f in forms:
             rep = (w.get("load_reports") or {}).get(f)
@@ -1129,9 +1173,33 @@ def build_status_rows(catalog: Iterable[dict], *, workers: List[dict], metrics_r
         suite = expected_suite(c)
         grade = _grade(c, task, suite, apt.get(mk, []))
         held = admission.get("status") == "held"
+        # "missing" means absent from the entire fleet, never merely absent
+        # from the worker whose row is currently being rendered. A local disk
+        # report or a resident model on any worker is sufficient proof.
+        presence = presence_forms(c, catalog)
+        fleet_has = any(
+            bool(presence & (set(w.get("models_local") or [])
+                             | set(w.get("loaded_models") or [])
+                             | {str(r.get("model_key") or "")
+                                for r in ((w.get("storage") or {}).get("models") or [])
+                                if isinstance(r, dict) and (_num(r.get("bytes")) or 0) > 0}))
+            for w in workers or []
+        ) or any(
+            isinstance(wr, dict) and (_num(wr.get("on_disk_bytes")) or 0) > 0
+            for wr in (c.get("workers") or [])
+        )
+        # An empty or stale heartbeat is not evidence that a model is nowhere.
+        # Only publish the operator-action state "missing" when every known
+        # worker is online and has supplied its disk-truth field. Positive
+        # evidence above remains useful even when another worker is offline.
+        fleet_inventory_complete = bool(workers) and all(
+            w.get("status") == "online" and isinstance(w.get("models_local"), list)
+            for w in workers if isinstance(w, dict)
+        ) and all(isinstance(w, dict) for w in workers)
         wstates = [model_worker_state(c, w, None, acts.get(mk, ()), events=evs.get(mk, ()), held=held,
                                       inflight=_safe_inflight(inflight_of, w, mk), now=now,
-                                      transfers=transfers)
+                                      transfers=transfers, fleet_has=fleet_has,
+                                      fleet_inventory_complete=fleet_inventory_complete)
                    for w in workers or []]
         serv = _servable(c, forms, workers or [], admission, unserveable_reason, wstates)
         row = {
@@ -1397,14 +1465,19 @@ def load_catalog() -> List[dict]:
         blocked = set()
     out = []
     for key, model in get_models_dict(dict_return=True).items():
-        m = dict(update_model_status(model))
+        if model.get("worker_only"):
+            m = dict(model)
+            m["status"] = "installed"
+        else:
+            m = dict(update_model_status(model))
         mk = m.get("model_key") or key
         m["model_key"] = mk
-        try:
-            update_model_sizes(m, mk)
-        except Exception:  # noqa: BLE001 — sizes stay unknown (rendered as such)
-            pass
-        if is_central_served(m):
+        if not m.get("worker_only"):
+            try:
+                update_model_sizes(m, mk)
+            except Exception:  # noqa: BLE001 — sizes stay unknown (rendered as such)
+                pass
+        if not m.get("worker_only") and is_central_served(m):
             m["central_file"] = _central_file(m)
         m["blocked"] = mk in blocked or key in blocked
         m["admission"] = _admission_of(m)

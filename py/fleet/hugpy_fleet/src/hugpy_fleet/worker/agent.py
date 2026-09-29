@@ -38,6 +38,7 @@ import sys
 import json
 import time
 import uuid
+import re
 import socket
 import logging
 import argparse
@@ -721,7 +722,7 @@ class CentralClient:
 # Local inference (reuses the same dispatch the central node uses)
 # ---------------------------------------------------------------------------
 def _ensure_present(payload: dict, central_url: str | None, state=None) -> None:
-    """Provision the requested model before inference (central-first, HF fallback).
+    """Use a worker resident/local model, fetching from central only if absent.
 
     ``state`` opts the pull into the STORAGE BUDGET (evict-to-fit, else refuse).
     A BudgetRefusal PROPAGATES: an unfittable model must fail loudly here rather
@@ -732,6 +733,22 @@ def _ensure_present(payload: dict, central_url: str | None, state=None) -> None:
         return
     try:
         from hugpy_storage.provision import ensure_model_present, ensure_model_registered
+
+        # A resident model is already a usable worker resource. Do not ask
+        # central to authorize it or make a disk copy before dispatching it.
+        if _worker_has_resident(model_key):
+            if state is not None:
+                state.refused.pop(model_key, None)
+            return
+
+        local_key = _discover_local_model_key(model_key)
+        if local_key:
+            payload["model_key"] = model_key = local_key
+            from hugpy_storage.provision import model_is_local
+            if model_is_local(local_key):
+                if state is not None:
+                    state.refused.pop(local_key, None)
+                return
 
         # Learn the model from central if the worker wasn't built with it, then
         # run inference against the canonical local key.
@@ -773,9 +790,9 @@ def _model_key_refusal(payload: dict, central_url: str | None) -> "str | None":
     a per-task designation the caller opted into by naming the task, not the
     fallthrough this exists to kill.
 
-    Side effect (the same one ``_ensure_present`` performs): a key central knows
-    under another name is REWRITTEN to the canonical local key, so resolution
-    downstream works on the name this worker registered."""
+    Side effect: a key central knows under another name is rewritten to its
+    canonical key. A key found only in the worker's inventory is rewritten to
+    that local key instead."""
     model_key = payload.get("model_key")
     if model_key is None or not str(model_key).strip():
         if payload.get("task"):
@@ -783,6 +800,11 @@ def _model_key_refusal(payload: dict, central_url: str | None) -> "str | None":
         return ("model_key is required: this worker serves the model you name "
                 "and never substitutes a default — pass model_key (or a task, "
                 "to use that task's designated default)")
+    # A live worker resident is authoritative even when central has no catalog
+    # row for it. Central supplies files for missing workers; it is not a
+    # serving permission check.
+    if _worker_has_resident(model_key):
+        return None
     try:
         from hugpy_storage.provision import ensure_model_registered
         canonical = ensure_model_registered(model_key, central_url)
@@ -790,9 +812,13 @@ def _model_key_refusal(payload: dict, central_url: str | None) -> "str | None":
         logger.warning("model_key check for %s failed: %s", model_key, exc)
         return None
     if not canonical:
+        local_key = _discover_local_model_key(model_key)
+        if local_key:
+            payload["model_key"] = local_key
+            return None
         return (f"unknown model_key {model_key!r}: this worker has no such "
-                "model and central could not teach it one — check the key, or "
-                "register/assign the model first. No default was substituted.")
+                "model and it is not present on this worker — check the key "
+                "or install it on a worker. No default was substituted.")
     payload["model_key"] = canonical
     # DRAFT-MODEL-GATE-20260910: same refusal for callers that reach the worker directly.
     try:
@@ -805,8 +831,113 @@ def _model_key_refusal(payload: dict, central_url: str | None) -> "str | None":
     return None
 
 
+def _worker_has_resident(model_key: str) -> bool:
+    """Whether this worker already has a live copy that can serve the key."""
+    key = str(model_key or "")
+    try:
+        if key in set(loaded_model_keys()):
+            return True
+    except Exception:
+        pass
+    try:
+        if key in set(_slot_occupants()):
+            return True
+    except Exception:
+        pass
+    try:
+        from hugpy_fleet.worker import external_residents
+        if key in set(external_residents.keys()):
+            return True
+    except Exception:
+        pass
+    # Subprocess and external-engine residents do not appear in the Python
+    # dispatch registry. The live PID registry records those model processes.
+    try:
+        from hugpy_fleet.worker import pid_registry
+        snap = pid_registry.snapshot_for_heartbeat()
+        if any(isinstance(row, dict) and row.get("alive") is not False
+               and str(row.get("model_key") or "") == key
+               for row in (snap.get("models") or [])):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _assigned_here(model_key: str | None, state=None) -> bool:
+    """Whether central explicitly assigned this model to this worker.
+
+    Assignment is the serving authority.  External resident rows can still
+    describe operator services on the same host, but they must not shadow an
+    assigned worker-local model.
+    """
+    if not model_key:
+        return False
+    try:
+        from hugpy_platform.model_keys import model_key_forms
+        wanted = model_key_forms(model_key)
+        return any(wanted & model_key_forms(key)
+                   for key in (getattr(state, "assigned_models", None) or []))
+    except Exception:  # noqa: BLE001 — routing helper must never break dispatch
+        return False
+
+
+def _discover_local_model_key(model_key: str) -> str | None:
+    """Resolve a locally discovered model before treating central as required.
+
+    The first host scan normally runs in the background. If a request arrives
+    before it completes, finish that initial scan on demand so a worker's own
+    model directory can be adopted before the central transfer path is tried.
+    """
+    try:
+        with _SYSTEM_MODELS_LOCK:
+            ready = bool(_SYSTEM_MODELS.get("ready"))
+            running = bool(_SYSTEM_MODELS.get("running"))
+            if not ready and not running:
+                _SYSTEM_MODELS["running"] = True
+        if not ready and not running:
+            _refresh_system_models()
+        elif not ready:
+            deadline = time.monotonic() + 60.0
+            while time.monotonic() < deadline:
+                with _SYSTEM_MODELS_LOCK:
+                    ready = bool(_SYSTEM_MODELS.get("ready"))
+                    running = bool(_SYSTEM_MODELS.get("running"))
+                if ready or not running:
+                    break
+                time.sleep(0.05)
+            if not ready and not running:
+                with _SYSTEM_MODELS_LOCK:
+                    _SYSTEM_MODELS["running"] = True
+                _refresh_system_models()
+        rows = _system_models_snapshot()
+    except Exception:
+        return None
+
+    wanted = str(model_key or "").strip().lower()
+    exact = [key for key, row in rows.items()
+             if key.lower() == wanted or
+             str(row.get("model_key") or "").lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+
+    # Compare only explicit model identities (key, hub id, served name). A
+    # basename match is accepted only when it identifies exactly one local row.
+    def norm(value):
+        return "".join(ch.lower() for ch in str(value or "")
+                       if ch.isalnum())
+    wanted_id = norm(model_key)
+    matches = []
+    for key, row in rows.items():
+        identities = [key, row.get("model_key"), row.get("hub_id"),
+                      row.get("name"), row.get("ollama_model")]
+        if wanted_id and wanted_id in {norm(value) for value in identities if value}:
+            matches.append(key)
+    return matches[0] if len(set(matches)) == 1 else None
+
+
 def _ensure_present_streaming(payload: dict, central_url: str | None, state=None):
-    """Provision the model, yielding SSE 'status' events with download progress.
+    """Resolve worker-local files first; stream progress only for a central fetch.
 
     Yields encoded SSE lines (status/error). Returns normally once the model is
     present (or was already). Throttled so we don't flood the stream.
@@ -821,6 +952,15 @@ def _ensure_present_streaming(payload: dict, central_url: str | None, state=None
         return
     try:
         from hugpy_storage.provision import ensure_model_present, ensure_model_registered, model_is_local
+
+        if _worker_has_resident(model_key):
+            return
+
+        local_key = _discover_local_model_key(model_key)
+        if local_key:
+            payload["model_key"] = model_key = local_key
+            if model_is_local(local_key):
+                return
 
         # Learn the model from central first, then work the rest of the stream
         # against the canonical local key (so resolution/loading can find it).
@@ -1031,8 +1171,22 @@ def _with_load_failure(body: dict, exc, *, classify: bool = False) -> dict:
     return body
 
 
-def _run_once(payload: dict) -> dict:
+def _run_once(payload: dict, state=None) -> dict:
     #from abstract_hugpy_dev.managers.dispatch import execute_prompt
+
+    from hugpy_fleet.worker import ollama_adapter
+    if ollama_adapter.model_name(payload.get("model_key")):
+        return ollama_adapter.run_once(payload)
+    from hugpy_fleet.worker import external_api_adapter
+    # An operator-managed external process is an advisory/failsafe resident.
+    # When the model is explicitly assigned to this worker, the worker-native
+    # slot/in-process path is authoritative.  Otherwise a healthy-looking
+    # observer row can steal the request from the assigned model and, if its
+    # API is wedged, make central retry forever while heartbeat still says
+    # "loaded".
+    if (external_api_adapter.resident(payload.get("model_key"))
+            and not _assigned_here(payload.get("model_key"), state)):
+        return external_api_adapter.run_once(payload)
 
     tmp = _materialize_file(payload)
     try:
@@ -1526,9 +1680,17 @@ def _gpu_process_vram() -> dict:
     try:
         proc = subprocess.run(
             ["nvidia-smi",
-             "--query-compute-apps=pid,process_name,used_gpu_memory",
+             "--query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5)
+        if proc.returncode != 0:
+            # Older drivers may not expose gpu_uuid on the compute-app query.
+            # Keep the established PID/VRAM registry working; placement will
+            # remain explicitly unknown on those drivers.
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5)
         if proc.returncode == 0:
             for line in proc.stdout.splitlines():
                 line = line.strip()
@@ -1537,14 +1699,37 @@ def _gpu_process_vram() -> dict:
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) < 3:
                     continue
-                pid_s, name, mem_s = parts[0], parts[1], parts[-1]
+                pid_s, name, mem_s = parts[0], parts[1], parts[2]
                 if not pid_s.isdigit():
                     continue
                 try:
                     mib = int(float(mem_s))     # "[N/A]"/"[Not Supported]" → skip row
                 except ValueError:
                     continue
-                out[int(pid_s)] = {"name": name, "mib": mib}
+                row = out.setdefault(int(pid_s), {"name": name, "mib": 0})
+                row["mib"] += mib
+                if len(parts) > 3 and parts[3] not in ("[N/A]", "N/A", ""):
+                    uuid = parts[3]
+                    row.setdefault("gpu_uuids", set()).add(uuid)
+                    per_gpu = row.setdefault("per_gpu_mib_by_uuid", {})
+                    per_gpu[uuid] = per_gpu.get(uuid, 0) + mib
+            if out:
+                uuid_to_index = {str(c.get("uuid")): c.get("index")
+                                 for c in _gpu_card_stats() if c.get("uuid")}
+                for row in out.values():
+                    indexes = sorted({int(uuid_to_index[u]) for u in row.get("gpu_uuids", ())
+                                      if u in uuid_to_index and uuid_to_index[u] is not None})
+                    if indexes:
+                        row["gpu_indexes"] = indexes
+                        if len(indexes) == 1:
+                            row["gpu_index"] = indexes[0]
+                        row["per_gpu_mib"] = {
+                            int(uuid_to_index[u]): mib
+                            for u, mib in row.pop("per_gpu_mib_by_uuid", {}).items()
+                            if u in uuid_to_index and uuid_to_index[u] is not None}
+                    else:
+                        row.pop("per_gpu_mib_by_uuid", None)
+                    row.pop("gpu_uuids", None)
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         out = {}                                # no GPU / no nvidia-smi → today's behavior
     _GPU_PROC_CACHE.update(at=now, value=out)
@@ -2634,6 +2819,9 @@ def _prepare_load_contract(state, model_key: str | None,
     """
     if not model_key:
         return
+    from hugpy_fleet.worker import ollama_adapter
+    if ollama_adapter.model_name(model_key):
+        return  # Ollama owns this model's load options and residence.
     model_key = _contract_key(model_key)
     wanted = _load_contract(spill)
     with _LOAD_CONTRACTS_LOCK:
@@ -2705,7 +2893,7 @@ def _event_to_dict(ev) -> dict:
         return {"type": str(t or "status")}
 
 
-def _stream_sync(payload: dict, request_id: str | None = None):
+def _stream_sync(payload: dict, request_id: str | None = None, state=None):
     """Relay the shared chat engine as SSE from Flask's sync context.
 
     Auto-continuation + seam-dedup now live in the core
@@ -2719,6 +2907,59 @@ def _stream_sync(payload: dict, request_id: str | None = None):
     """
     from hugpy_platform import async_runtime
     from hugpy_control.jobs import job_store
+    from hugpy_fleet.worker import ollama_adapter
+    if ollama_adapter.model_name(payload.get("model_key")):
+        try:
+            if request_id:
+                payload.setdefault("request_id", request_id)
+            for event in ollama_adapter.stream(payload):
+                if request_id and event.get("type") == "token":
+                    try:
+                        job_store.on_output(request_id)
+                    except Exception:
+                        pass
+                yield _sse(event)
+        except Exception as exc:
+            if request_id:
+                try:
+                    job_store.finish(request_id, error=exc)
+                except Exception:
+                    pass
+            yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            if request_id:
+                try:
+                    job_store.finish(request_id)
+                except Exception:
+                    pass
+        return
+    from hugpy_fleet.worker import external_api_adapter
+    if (external_api_adapter.resident(payload.get("model_key"))
+            and not _assigned_here(payload.get("model_key"), state)):
+        try:
+            if request_id:
+                payload.setdefault("request_id", request_id)
+            for event in external_api_adapter.stream(payload):
+                if request_id and event.get("type") == "token":
+                    try:
+                        job_store.on_output(request_id)
+                    except Exception:
+                        pass
+                yield _sse(event)
+        except Exception as exc:
+            if request_id:
+                try:
+                    job_store.finish(request_id, error=exc)
+                except Exception:
+                    pass
+            yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            if request_id:
+                try:
+                    job_store.finish(request_id)
+                except Exception:
+                    pass
+        return
     tmp = _materialize_file(payload)
 
     # Register a cancel Event for this request so /infer/cancel can trip it, and
@@ -2774,7 +3015,33 @@ def _stream_sync(payload: dict, request_id: str | None = None):
         _cleanup_file(tmp)
 
 
+def _ollama_live_model_keys(running: "dict | None" = None) -> set[str]:
+    """Canonical catalog keys for Ollama models that ``/api/ps`` says are live.
+
+    Host discovery is asynchronous and can lag a worker restart. Residency must
+    not depend on that catalog scan having completed: Ollama's live model name
+    is sufficient to derive the same ``ollama~...`` key used by system_models.
+    """
+    from hugpy_fleet.worker import ollama_adapter
+    running = ollama_adapter.running() if running is None else running
+    names = set(running or {})
+    keys = set()
+    for key in (_SYSTEM_MODELS.get("rows") or {}):
+        try:
+            if ollama_adapter.model_name(key) in names:
+                keys.add(key)
+        except Exception:
+            continue
+    for name in names:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "~", str(name))
+        if safe:
+            keys.add("ollama~" + safe)
+    return keys
+
+
 def loaded_model_keys() -> list[str]:
+    from hugpy_fleet.worker import ollama_adapter
+    ollama_keys = _ollama_live_model_keys(ollama_adapter.running())
     try:
         from hugpy_engine.dispatch.dispatch import loaded_model_keys as _loaded
         keys = {mk for (mk, _task) in _loaded()}
@@ -2793,9 +3060,9 @@ def loaded_model_keys() -> list[str]:
             keys -= slot_backed_model_keys()
         except Exception:
             pass
-        return sorted(keys)
+        return sorted(keys | ollama_keys)
     except Exception:
-        return []
+        return sorted(ollama_keys)
 
 
 def _loading_model_keys() -> list[str]:
@@ -3883,7 +4150,7 @@ def build_app(state: "WorkerState") -> Flask:
                 # start failure raises ModelLoadFailure -> the except below ships
                 # its structured load_failure to central.
                 _ensure_comfy_started(state, payload.get("model_key"))
-                result = _run_once(payload)
+                result = _run_once(payload, state)
             finally:
                 gate_token.release()
             try:
@@ -4048,7 +4315,7 @@ def build_app(state: "WorkerState") -> Flask:
                 # then generation with auto-continuation. Both emit SSE lines.
                 yield from _ensure_present_streaming(payload, state.central_url,
                                                      state=state)
-                yield from _stream_sync(payload, request_id=req_id)
+                yield from _stream_sync(payload, request_id=req_id, state=state)
             except BaseException as exc:   # noqa: BLE001 — re-raised below
                 _agg_err = f"{type(exc).__name__}: {exc}"
                 raise
@@ -4674,13 +4941,52 @@ def build_app(state: "WorkerState") -> Flask:
         body = request.get_json(silent=True) or {}
         model_key = body.get("model_key")
         force = bool(body.get("force"))
+        # Manual evictions are part of the allocation contract too.  Give this
+        # one request its own run so the central history can distinguish an
+        # operator reclaim from evict-to-fit and headroom-sweep activity.
+        scope = None
+        if _evt is not None:
+            try:
+                scope = _evt.run_scope()
+                scope.__enter__()
+            except Exception:  # noqa: BLE001 — telemetry cannot block reclaim
+                scope = None
+        t0 = time.time()
         try:
-            return jsonify({"ok": True, **_evict_model(state, model_key, force)})
+            _evt_emit("evict.start", model_key=model_key, trigger="operator",
+                      forced=force)
+            result = _evict_model(state, model_key, force)
+            tier = _telemetry_tier(result.get("host_mode"))
+            duration_ms = int((time.time() - t0) * 1000)
+            if result.get("evicted"):
+                # ``freed`` is the truthful per-model number when available;
+                # the legacy box-wide delta remains only a compatibility value.
+                freed = (result.get("freed") or {}).get("vram_bytes")
+                if freed is None:
+                    freed = result.get("vram_freed")
+                _evt_emit("evict.done", model_key=result.get("model_key", model_key),
+                          tier=tier, trigger="operator", forced=force,
+                          freed_bytes=freed, duration_ms=duration_ms)
+            else:
+                _evt_emit("evict.fail", model_key=result.get("model_key", model_key),
+                          tier=tier, trigger="operator", forced=force,
+                          duration_ms=duration_ms,
+                          error=str(result.get("reason") or "eviction freed nothing"))
+            return jsonify({"ok": True, **result})
         except Exception as exc:  # noqa: BLE001 — evict must never 500 the control plane
+            _evt_emit("evict.fail", model_key=model_key, trigger="operator",
+                      forced=force, duration_ms=int((time.time() - t0) * 1000),
+                      error=f"{type(exc).__name__}: {exc}")
             return jsonify({"ok": False, "model_key": model_key,
                             "host_mode": "unknown", "evicted": False,
                             "vram_freed": None, "ram_freed": None,
                             "reason": f"{type(exc).__name__}: {exc}"})
+        finally:
+            if scope is not None:
+                try:
+                    scope.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001 — telemetry cannot block reclaim
+                    pass
 
     @app.route("/ops/cache-evict", methods=["POST"])
     def ops_cache_evict():
@@ -4784,12 +5090,49 @@ def build_app(state: "WorkerState") -> Flask:
             return jsonify({"ok": False,
                             "reason": f"bad resume {resume!r} "
                                       "(enabled|disabled)"}), 400
+        gpu_indices = body.get("gpu_indices")
+        if gpu_indices is not None:
+            try:
+                if not isinstance(gpu_indices, list):
+                    raise ValueError("gpu_indices must be a list")
+                gpu_indices = [int(i) for i in gpu_indices]
+                if any(i < 0 for i in gpu_indices):
+                    raise ValueError("gpu_indices must be nonnegative")
+            except (TypeError, ValueError) as exc:
+                return jsonify({"ok": False, "reason": str(exc)}), 400
+        pids = body.get("pids")
+        if pids is not None:
+            try:
+                if not isinstance(pids, list):
+                    raise ValueError("pids must be a list")
+                pids = [int(i) for i in pids]
+                if any(i <= 0 for i in pids):
+                    raise ValueError("pids must be positive")
+            except (TypeError, ValueError) as exc:
+                return jsonify({"ok": False, "reason": str(exc)}), 400
+        api_url = body.get("api_url")
+        if api_url is not None:
+            from urllib.parse import urlsplit
+            parsed = urlsplit(str(api_url))
+            if (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
+                    or not parsed.port or parsed.username or parsed.password
+                    or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+                return jsonify({"ok": False, "reason": "api_url must be a loopback HTTP origin"}), 400
+        activity = body.get("activity")
+        if activity is not None and not isinstance(activity, dict):
+            return jsonify({"ok": False, "reason": "activity must be an object"}), 400
         try:
             from hugpy_fleet.worker import external_residents as _extres
             rec = _extres.register(model_key, pid,
                                    control_url=body.get("control_url"),
                                    vram_gib=vram_gib, note=body.get("note"),
-                                   evictable=evictable, resume=resume)
+                                   evictable=evictable, resume=resume,
+                                   gpu_indices=gpu_indices,
+                                   pids=pids,
+                                   immutable=body.get("immutable"),
+                                   api_url=api_url,
+                                   served_model=body.get("served_model"),
+                                   activity=activity)
             if pid:
                 from hugpy_fleet.worker import pid_registry as _pidreg
                 _pidreg.record_launch(model_key, pid, "external",
@@ -4798,6 +5141,83 @@ def build_app(state: "WorkerState") -> Flask:
         except Exception as exc:  # noqa: BLE001 — never 500 the control plane
             return jsonify({"ok": False,
                             "reason": f"{type(exc).__name__}: {exc}"})
+
+    @app.route("/ops/external/chat", methods=["POST"])
+    def ops_external_chat():
+        """Call an observed OpenAI-compatible service without taking ownership."""
+        body = request.get_json(silent=True) or {}
+        key = str(body.get("model_key") or "").strip()
+        from hugpy_fleet.worker import external_residents as _extres
+        rec = _extres.get(key)
+        if not rec or not rec.get("api_url"):
+            return jsonify({"ok": False, "reason": "external model has no registered API"}), 404
+        messages = body.get("messages")
+        if (not isinstance(messages, list) or not messages
+                or not all(isinstance(m, dict) and m.get("role") in ("system", "developer", "user", "assistant", "tool")
+                           for m in messages)):
+            return jsonify({"ok": False, "reason": "messages must be a nonempty chat list"}), 400
+        try:
+            max_tokens = max(1, min(4096, int(body.get("max_tokens", 512))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "reason": "max_tokens must be an integer"}), 400
+        payload = {"model": rec.get("served_model") or key, "messages": messages,
+                   "max_tokens": max_tokens, "stream": False}
+        if "temperature" in body:
+            payload["temperature"] = body["temperature"]
+        try:
+            import httpx
+            response = httpx.post(rec["api_url"].rstrip("/") + "/v1/chat/completions",
+                                  json=payload, timeout=httpx.Timeout(300.0, connect=3.0))
+            return jsonify(response.json()), response.status_code
+        except Exception as exc:  # noqa: BLE001 — an external service may restart
+            return jsonify({"ok": False, "reason": f"external API unavailable: {exc}"}), 503
+
+    @app.route("/ops/external/chat/stream", methods=["POST"])
+    def ops_external_chat_stream():
+        """Stream an authoritative external resident through the worker.
+
+        The worker is the network bridge because the resident's api_url is
+        normally loopback.  This route does not enter Hugpy dispatch or the
+        native generation gate; closing the response closes the upstream HTTP
+        stream and releases the resident's own request slot.
+        """
+        body = request.get_json(silent=True) or {}
+        key = str(body.get("model_key") or "").strip()
+        from hugpy_fleet.worker import external_residents as _extres
+        rec = _extres.get(key)
+        if not rec or not rec.get("api_url"):
+            return jsonify({"ok": False, "reason": "external model has no registered API"}), 404
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return jsonify({"ok": False, "reason": "messages must be a nonempty chat list"}), 400
+        try:
+            max_tokens = max(1, min(4096, int(body.get("max_tokens", 512))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "reason": "max_tokens must be an integer"}), 400
+        payload = {"model": rec.get("served_model") or key, "messages": messages,
+                   "max_tokens": max_tokens, "stream": True}
+        for field in ("temperature", "top_p", "stop"):
+            if field in body:
+                payload[field] = body[field]
+
+        def _generate():
+            try:
+                import httpx
+                with httpx.stream(
+                        "POST", rec["api_url"].rstrip("/") + "/v1/chat/completions",
+                        json=payload,
+                        timeout=httpx.Timeout(3600.0, connect=3.0)) as upstream:
+                    upstream.raise_for_status()
+                    for line in upstream.iter_lines():
+                        if line:
+                            yield (line + "\n\n").encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 — preserve SSE error shape
+                yield _sse({"type": "error", "message": f"external API unavailable: {exc}"})
+
+        return Response(stream_with_context(_generate()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache",
+                                 "X-Accel-Buffering": "no",
+                                 "Connection": "keep-alive"}, direct_passthrough=True)
 
     @app.route("/ops/external/unregister", methods=["POST"])
     def ops_external_unregister():
@@ -4841,6 +5261,9 @@ def build_app(state: "WorkerState") -> Flask:
                                       "and/or resume"}), 400
         try:
             from hugpy_fleet.worker import external_residents as _extres
+            current = _extres.get(model_key)
+            if current and current.get("immutable"):
+                return jsonify({"ok": False, "reason": "observation-only service has fixed eviction policy"}), 409
             rec = _extres.set_policy(model_key, evictable=evictable,
                                      resume=resume)
             if rec is None:
@@ -4939,6 +5362,17 @@ def build_app(state: "WorkerState") -> Flask:
         except Exception:  # noqa: BLE001
             pass
         return jsonify(out)
+
+    @app.route("/ops/activity", methods=["GET"])
+    def ops_activity():
+        """One host view: managed, adapter registered, and otherwise unknown GPU PIDs."""
+        from hugpy_fleet.worker import external_residents as _extres
+        from hugpy_fleet.worker import pid_registry as _pidreg
+        from hugpy_fleet.worker.host_activity import gpu_processes, inventory
+        processes = gpu_processes()
+        owned = (_pidreg.snapshot_for_heartbeat() or {}).get("models") or []
+        return jsonify({"ok": True, "activity": inventory(_extres.snapshot(), owned, processes),
+                        "gpu_processes": len(processes)})
 
     @app.route("/identity", methods=["GET"])
     def identity():
@@ -5252,6 +5686,65 @@ def build_app(state: "WorkerState") -> Flask:
                             "provisioning": provisioning})
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.route("/models/export/<path:model_key>", methods=["GET"])
+    def export_local_model(model_key):
+        """Stream a discovered worker-owned model to Central on explicit request."""
+        import tarfile
+
+        local_key = _discover_local_model_key(model_key)
+        rows = _system_models_snapshot()
+        row = rows.get(local_key) if local_key else None
+        path = (row or {}).get("external_location") or (row or {}).get("dir")
+        if not path or not os.path.isdir(path):
+            return jsonify({"ok": False,
+                            "error": "model is not an exportable worker-local directory"}), 404
+        root = os.path.realpath(path)
+        entries = []
+        for base, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for name in sorted(files):
+                full = os.path.join(base, name)
+                if name.startswith(".") or not os.path.isfile(full):
+                    continue
+                real = os.path.realpath(full)
+                if real != full or not (real == root or real.startswith(root + os.sep)):
+                    continue
+                entries.append((full, os.path.relpath(full, root)))
+        if not entries:
+            return jsonify({"ok": False, "error": "worker model directory has no files"}), 409
+
+        def generate():
+            read_fd, write_fd = os.pipe()
+
+            def writer():
+                try:
+                    with os.fdopen(write_fd, "wb") as output:
+                        with tarfile.open(fileobj=output, mode="w|") as archive:
+                            for full, rel in entries:
+                                try:
+                                    archive.add(full, arcname=rel, recursive=False)
+                                except OSError:
+                                    logger.warning("skipping unreadable worker model file %s", full)
+                except Exception:
+                    logger.exception("worker model export failed for %s", model_key)
+
+            thread = threading.Thread(target=writer, daemon=True,
+                                      name="hugpy-model-export")
+            thread.start()
+            try:
+                with os.fdopen(read_fd, "rb") as source:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                thread.join(timeout=30)
+
+        return Response(generate(), mimetype="application/x-tar",
+                        headers={"X-Accel-Buffering": "no"},
+                        direct_passthrough=True)
 
     @app.route("/reap", methods=["POST"])
     def reap():
@@ -5811,19 +6304,242 @@ def _kick_provision(state: "WorkerState", model_key: str,
 # the disk-truth to SHOW the drift meanwhile.
 
 _MODELS_LOCAL_CACHE: dict = {"at": 0.0, "value": []}
+_SYSTEM_MODELS: dict = {"at": 0.0, "rows": {}, "running": False,
+                       "ready": False}
+_SYSTEM_MODELS_LOCK = threading.Lock()
+_SYSTEM_ADDED_KEYS: set[str] = set()
+
+
+def _external_model_alias_key(model_key: str) -> str:
+    """Normalize an external service spelling to its stable catalog key form.
+
+    Ollama exposes ``ollama:qwen:tag`` as its live lease key while host
+    discovery exposes the same model as ``ollama~qwen~tag``. Keep the lease
+    spelling for dispatch/control, but don't publish it as another model when
+    the discovered catalog already owns that identity.
+    """
+    return str(model_key or "").strip().lower().replace(":", "~").replace("/", "~")
+
+
+def _external_rows_without_catalog_aliases(rows: dict, residents) -> dict:
+    catalog_keys = {_external_model_alias_key(key) for key in rows}
+    # A service key (for example ``vllm:qwen3.8``) is not necessarily the
+    # identity the filesystem scanner assigned to its checkpoint directory
+    # (often simply ``qwen3.8``). Join on the service's served model name so
+    # the API row inherits the measured checkpoint size from discovery.
+    def identity(value):
+        return _external_model_alias_key(str(value or "")).lower()
+
+    def compact(value):
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+    discovered_by_name: dict[str, list[dict]] = {}
+    for discovered in rows.values():
+        if not isinstance(discovered, dict):
+            continue
+        for value in (discovered.get("name"), discovered.get("ollama_model"),
+                      discovered.get("served_model")):
+            normalized = identity(value)
+            if normalized:
+                discovered_by_name.setdefault(normalized, []).append(discovered)
+    ollama_running = {}
+    try:
+        from hugpy_fleet.worker import ollama_adapter
+        ollama_running = ollama_adapter.running()
+    except Exception:
+        pass
+    external_rows = {}
+    for rec in residents:
+        if not rec.get("api_url") or rec.get("state") != "running":
+            continue
+        key = str(rec.get("model_key") or "").strip()
+        if not key:
+            continue
+        alias = _external_model_alias_key(key)
+        if alias in catalog_keys:
+            # Ollama's discovered key already represents this service. It has
+            # its own scanned size and should remain the single catalog row.
+            if key.lower().startswith("ollama:"):
+                served = rec.get("served_model") or key.split(":", 1)[1]
+                live = ollama_running.get(served) or {}
+                for catalog_key, catalog_row in rows.items():
+                    if _external_model_alias_key(catalog_key) == alias \
+                            and catalog_row.get("size_bytes") is None and live.get("size"):
+                        catalog_row["size_bytes"] = int(live["size"])
+                        catalog_row.setdefault("effective_bytes", int(live["size"]))
+            continue
+        served_model = rec.get("served_model") or key
+        matches = discovered_by_name.get(identity(served_model), [])
+        if not matches:
+            # vLLM's API name is often shorter than the checkpoint directory
+            # name (qwen3.8 -> Qwen3.8-27B-FP8). Accept a prefix only when the
+            # worker scan finds exactly one checkpoint with that identity.
+            prefix = compact(served_model)
+            if prefix:
+                matches = list({id(discovered): discovered
+                                for discovered in rows.values()
+                                if isinstance(discovered, dict) and any(
+                                    compact(value).startswith(prefix)
+                                    for value in (discovered.get("name"),
+                                                  discovered.get("ollama_model"),
+                                                  discovered.get("served_model"))
+                                    if value)}.values())
+        # The API registration proves a service is responding, not that Hugpy
+        # discovered a model checkpoint or measured its size. Do not publish an
+        # API-only catalog model when the worker scan cannot bind it to exactly
+        # one sized checkpoint; the scan is the inventory authority.
+        if len(matches) != 1:
+            continue
+        discovered = matches[0]
+        ollama_live = (ollama_running.get(served_model) or {}
+                       if key.lower().startswith("ollama:") else {})
+        if (discovered.get("size_bytes") is None and
+                discovered.get("effective_bytes") is None and
+                ollama_live.get("size") is None):
+            continue
+        safe = key.lower().replace(":", "~").replace("/", "~")
+        row = {"model_key": key, "name": key,
+            "hub_id": "external/" + safe, "framework": "gguf",
+            "tasks": ["text-generation"], "primary_task": "text-generation",
+            "api_url": rec["api_url"], "served_model": served_model,
+            "service_kind": "openai-compatible"}
+        for field in ("size_bytes", "effective_bytes"):
+            if discovered.get(field) is not None:
+                row[field] = discovered[field]
+        if key.lower().startswith("ollama:") and row.get("size_bytes") is None:
+            if ollama_live.get("size") is not None:
+                row["size_bytes"] = int(ollama_live["size"])
+                row["effective_bytes"] = int(ollama_live["size"])
+        external_rows[key] = row
+    return external_rows
+
+
+def _system_models_snapshot() -> dict:
+    """Last completed host scan; schedule a refresh without delaying a beat."""
+    with _SYSTEM_MODELS_LOCK:
+        rows = dict(_SYSTEM_MODELS["rows"])
+        due = time.time() - _SYSTEM_MODELS["at"] >= 900
+        if due and not _SYSTEM_MODELS["running"]:
+            _SYSTEM_MODELS["running"] = True
+            threading.Thread(target=_refresh_system_models, daemon=True,
+                             name="hugpy-system-model-scan").start()
+    return rows
+
+
+def _system_models_report() -> dict | None:
+    """Return discovery data only after the first complete host scan.
+
+    An empty pre-scan snapshot is not evidence that the worker has no local
+    models. Sending it as a complete heartbeat inventory made central erase
+    the prior catalog and auto-placements whenever a worker restarted.
+    """
+    _system_models_snapshot()  # starts the asynchronous scan when one is due
+    with _SYSTEM_MODELS_LOCK:
+        if not _SYSTEM_MODELS.get("ready", False):
+            return None
+        rows = dict(_SYSTEM_MODELS["rows"])
+    try:
+        from hugpy_fleet.worker import external_residents
+        rows.update(_external_rows_without_catalog_aliases(rows, external_residents.snapshot()))
+    except Exception:
+        pass
+    return rows
+
+
+def _refresh_system_models() -> None:
+    try:
+        from hugpy_fleet.worker.system_models import scan_system_models
+        from hugpy_fleet.worker.imports import models_config as mc
+        rows = scan_system_models()
+        from hugpy_fleet.worker import external_residents
+        external_rows = _external_rows_without_catalog_aliases(rows, external_residents.snapshot())
+        discovered = {**rows, **external_rows}
+        derived, dropped = mc.merge_discovery_into_models(discovered, base={})
+        valid = {}
+        for key, values in derived.items():
+            if key in external_rows:
+                values.update(external_rows[key])
+                cfg = mc.get_assessed_model_config(values)
+                if cfg is None or cfg is False:
+                    continue
+                if key not in mc.MODEL_REGISTRY:
+                    mc.MODEL_REGISTRY[key] = cfg
+                    mc.MODEL_REGISTRY_DICT[key] = mc.get_assessed_model_config(values, dict_return=True)
+                    _SYSTEM_ADDED_KEYS.add(key)
+                valid[key] = {**external_rows[key], **values}
+                continue
+            path = rows[key]["external_location"]
+            values["external_location"] = path
+            cfg = mc.get_assessed_model_config(values)
+            if cfg is None or cfg is False:
+                continue
+            from hugpy_storage.model_presence import model_looks_downloaded
+            if not model_looks_downloaded(path, cfg):
+                continue
+            current = mc.MODEL_REGISTRY.get(key)
+            if current is not None:
+                current.extra["external_location"] = path
+                mc.MODEL_REGISTRY_DICT[key]["external_location"] = path
+                if values.get("ollama_model"):
+                    current.extra["ollama_model"] = values["ollama_model"]
+                    mc.MODEL_REGISTRY_DICT[key]["ollama_model"] = values["ollama_model"]
+            else:
+                mc.MODEL_REGISTRY[key] = cfg
+                mc.MODEL_REGISTRY_DICT[key] = mc.get_assessed_model_config(
+                    values, dict_return=True)
+                _SYSTEM_ADDED_KEYS.add(key)
+            valid[key] = {**rows[key], **values, "external_location": path}
+        with _SYSTEM_MODELS_LOCK:
+            vanished = set(_SYSTEM_MODELS["rows"]) - set(valid)
+        for key in vanished:
+            if key in _SYSTEM_ADDED_KEYS:
+                mc.MODEL_REGISTRY.pop(key, None)
+                mc.MODEL_REGISTRY_DICT.pop(key, None)
+                _SYSTEM_ADDED_KEYS.discard(key)
+            else:
+                cfg = mc.MODEL_REGISTRY.get(key)
+                if cfg is not None:
+                    cfg.extra.pop("external_location", None)
+                    cfg.extra.pop("ollama_model", None)
+                if key in mc.MODEL_REGISTRY_DICT:
+                    mc.MODEL_REGISTRY_DICT[key].pop("external_location", None)
+                    mc.MODEL_REGISTRY_DICT[key].pop("ollama_model", None)
+        if dropped:
+            logger.info("host model scan: %d usable, %d unclassified", len(valid), len(dropped))
+        with _SYSTEM_MODELS_LOCK:
+            _SYSTEM_MODELS.update(at=time.time(), rows=valid, running=False,
+                                  ready=True)
+        _MODELS_LOCAL_CACHE["at"] = 0.0
+    except Exception as exc:  # noqa: BLE001 — discovery cannot stop serving
+        logger.warning("host model scan failed: %s", exc)
+        with _SYSTEM_MODELS_LOCK:
+            _SYSTEM_MODELS.update(at=time.time(), running=False)
 
 
 def _models_local(state: "WorkerState") -> list[str]:
-    """Assigned models whose files are actually on THIS worker's disk (60s
-    cache — model_is_local walks directories; don't pay that every beat)."""
+    """All discovered host models plus assigned models present on this worker."""
     now = time.time()
+    system = _system_models_snapshot()
+    # Ollama's own process manager has already proved these models are present
+    # on this host, even if the asynchronous filesystem/catalog scan is behind.
+    try:
+        system.update({key: {} for key in _ollama_live_model_keys()})
+    except Exception:
+        pass
+    try:
+        from hugpy_fleet.worker import external_residents
+        system_keys = set(_external_rows_without_catalog_aliases(
+            system, external_residents.snapshot()))
+        system.update({key: {} for key in system_keys})
+    except Exception:
+        pass
     if now - _MODELS_LOCAL_CACHE["at"] < 60.0:
-        return _MODELS_LOCAL_CACHE["value"]
+        return sorted(set(_MODELS_LOCAL_CACHE["value"]) | set(system))
     if not state.assigned_models:
         # Startup window: the assignment list arrives with the FIRST heartbeat
         # response — caching an empty walk here made the console show
         # everything '✗ missing' for ~60s after any restart. Don't cache.
-        return []
+        return sorted(system)
     out: list[str] = []
     unknown: list[str] = []
     try:
@@ -5853,6 +6569,13 @@ def _models_local(state: "WorkerState") -> list[str]:
         # Single-flight + metadata-only (no weight bytes — never a transfer
         # order). The list this beat is still honest about what it could prove.
         _kick_learn_configs(state, unknown)
+    try:
+        from hugpy_fleet.worker import external_residents
+        live_api = {str(rec.get("model_key")) for rec in external_residents.snapshot()
+                    if rec.get("api_url") and rec.get("state") == "running"}
+    except Exception:
+        live_api = set()
+    out = sorted(set(out) | set(system) | live_api)
     _MODELS_LOCAL_CACHE.update(at=now, value=out)
     return out
 
@@ -7819,6 +8542,10 @@ def _external_pause(ext: dict) -> "tuple[bool, str]":
         try:
             os.kill(int(p), 0)
             return True
+        except PermissionError:
+            # A supervised foreign model can run under another Unix user.
+            # EPERM proves the PID exists; only ESRCH means it has gone.
+            return True
         except (OSError, TypeError, ValueError):
             return False
 
@@ -7844,6 +8571,25 @@ def _external_pause(ext: dict) -> "tuple[bool, str]":
                           "gone — treating as already freed")
         return False, (f"external supervisor unreachable at {url}: "
                        f"{type(exc).__name__}: {exc}")
+
+
+def _external_gpu_free_bytes(indices: list[int]) -> "int | None":
+    """Fresh per-card free bytes for an external resident spanning GPUs."""
+    if not indices:
+        return None
+    try:
+        p = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5, check=True)
+        by_index = {}
+        for line in p.stdout.splitlines():
+            fields = [x.strip() for x in line.split(",")]
+            if len(fields) >= 2:
+                by_index[int(fields[0])] = int(fields[1]) * _MIB
+        return sum(by_index[i] for i in indices) if all(i in by_index for i in indices) else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _comfy_base_url(state: "WorkerState") -> str:
@@ -8241,6 +8987,21 @@ def _evict_model(state: "WorkerState", model_key: str,
         out.update(extra)
         return out
 
+    from hugpy_fleet.worker import ollama_adapter
+    ollama_name = ollama_adapter.model_name(model_key)
+    if ollama_name:
+        allowed, why = (True, "") if force else _evict_gate(model_key)
+        if not allowed:
+            return _result("ollama", False, f"eviction gated: {why}")
+        if ollama_name not in ollama_adapter.running():
+            return _result("ollama", True, "already unloaded")
+        try:
+            freed = ollama_adapter.unload(ollama_name)
+            return _result("ollama", freed, "Ollama keep_alive=0 unload" if freed
+                           else "Ollama still reports model resident")
+        except Exception as exc:
+            return _result("ollama", False, f"Ollama unload failed: {exc}")
+
     # 1. ComfyUI-hosted (external adopted service) — framework says comfy. The
     #    worker never owns comfy's PID; it asks comfy to free via HTTP. The gate
     #    still applies best-effort (a comfy gen in flight is protected unless
@@ -8330,6 +9091,10 @@ def _evict_model(state: "WorkerState", model_key: str,
     from hugpy_fleet.worker import external_residents as _extres
     ext = _extres.get(model_key)
     if ext is not None:
+        if ext.get("immutable"):
+            return _result("external", False,
+                           "observation-only service cannot be evicted, even with force",
+                           child_pid=ext.get("pid"))
         # non-evictable is the external twin of static residency (wildcard-
         # process policy, 2026-08-12): no demand path may pause this job; only
         # an operator force does. Same override semantics as static.
@@ -8345,7 +9110,10 @@ def _evict_model(state: "WorkerState", model_key: str,
         # Footprint BEFORE the pause — the pid must still hold VRAM to measure.
         footprint = _model_footprint_before_evict(
             model_key, "external", {"child_pid": ext.get("pid")})
+        gpu_indices = ext.get("gpu_indices") or []
+        external_free_before = _external_gpu_free_bytes(gpu_indices)
         ok, note = _external_pause(ext)
+        external_free_after = _external_gpu_free_bytes(gpu_indices)
         if ok:
             _extres.mark_yielded(model_key)
             try:
@@ -8353,8 +9121,14 @@ def _evict_model(state: "WorkerState", model_key: str,
                 _pidreg.forget(model_key)
             except Exception:  # noqa: BLE001 — sweep_dead reaps it next beat anyway
                 pass
-        return _result("external", ok, note, footprint=footprint,
-                       child_pid=ext.get("pid"))
+        out = _result("external", ok, note, footprint=footprint,
+                      child_pid=ext.get("pid"))
+        if external_free_before is not None and external_free_after is not None:
+            out.update(vram_free_before=external_free_before,
+                       vram_free_after=external_free_after,
+                       vram_freed=external_free_after - external_free_before,
+                       gpu_indices=gpu_indices)
+        return out
 
     # 4. Nothing here holds it. This ALSO covers the foreign/rogue case: a model
     #    that resolves only to a process the agent did not spawn (and isn't comfy)
@@ -8716,7 +9490,7 @@ def _gpu_card_stats() -> list:
     try:
         proc = subprocess.run(
             ["nvidia-smi",
-             "--query-gpu=index,memory.total,memory.used,memory.free,"
+             "--query-gpu=index,uuid,memory.total,memory.used,memory.free,"
              "utilization.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5)
@@ -8726,16 +9500,17 @@ def _gpu_card_stats() -> list:
                 if not line:
                     continue
                 parts = [p.strip() for p in line.split(",")]
-                if len(parts) < 5:
+                if len(parts) < 6:
                     continue
-                total, used, free = _int(parts[1]), _int(parts[2]), _int(parts[3])
+                total, used, free = _int(parts[2]), _int(parts[3]), _int(parts[4])
                 cards.append({
                     "index": _int(parts[0]),
+                    "uuid": parts[1],
                     "mem_total_bytes": total * _MIB if total is not None else None,
                     "mem_used_bytes": used * _MIB if used is not None else None,
                     "mem_free_bytes": free * _MIB if free is not None else None,
                     # "[N/A]" util on a card with no util counter → None, honest.
-                    "util_pct": _int(parts[4]),
+                    "util_pct": _int(parts[5]),
                 })
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         cards = []
@@ -9185,6 +9960,14 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             }
             if _ip_dev.get(mk) is not None:
                 _row["gpu_index"] = _ip_dev.get(mk)
+            if _row["host_mode"] == "external":
+                try:
+                    from hugpy_fleet.worker import external_residents as _extres
+                    _ext = _extres.get(mk) or {}
+                    if _ext.get("gpu_indices"):
+                        _row["gpu_indices"] = _ext["gpu_indices"]
+                except Exception:  # noqa: BLE001 — optional attribution
+                    pass
             out.append(_row)
     except Exception:  # noqa: BLE001 — no registry -> nothing to plan against
         pass
@@ -9245,6 +10028,20 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             out.append(_srow)
     except Exception:  # noqa: BLE001 — slot pool unreadable -> registry rows stand
         pass
+    # Ollama is a separate host process. /api/ps names its loaded models and
+    # reports their VRAM use, so they join the same eviction candidate set.
+    try:
+        from hugpy_fleet.worker import ollama_adapter
+        running = ollama_adapter.running()
+        for mk in _SYSTEM_MODELS.get("rows", {}):
+            name = ollama_adapter.model_name(mk)
+            if name and name in running and mk not in seen:
+                seen.add(mk)
+                out.append({"model_key": mk,
+                            "vram_bytes": int(running[name].get("size_vram") or 0),
+                            "host_mode": "ollama", "alive": True})
+    except Exception:
+        pass
     return out
 
 
@@ -9303,6 +10100,11 @@ def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, l
         if _multi_gpu and _target_dev is not None and r.get("gpu_index") is not None \
                 and int(r["gpu_index"]) != int(_target_dev):
             protected.append({**r, "why": (f"on GPU {r['gpu_index']}, target is "
+                                           f"GPU {_target_dev} (per-device evict)")})
+            continue
+        if _multi_gpu and _target_dev is not None and r.get("gpu_indices") \
+                and int(_target_dev) not in r["gpu_indices"]:
+            protected.append({**r, "why": (f"on GPUs {r['gpu_indices']}, target is "
                                            f"GPU {_target_dev} (per-device evict)")})
             continue
         if str(r.get("host_mode")) == "comfy":
@@ -12681,6 +13483,7 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
                     "loaded_models": _loaded_keys,
                     "loading": _loading_keys,
                     "models_local": _models_local(state),
+                    "models_discovered": _system_models_report(),
                     "provisioning": sorted(state._provisioning),
                     "provision_progress": state.provision_snapshot(),
                     # Measured central->worker transfer rate (B/s, EMA over

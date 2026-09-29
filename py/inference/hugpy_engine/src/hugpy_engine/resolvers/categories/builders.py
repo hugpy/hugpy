@@ -79,9 +79,13 @@ def _build_chat_request(kwargs: Dict[str, Any], model_key: str) -> ChatRequest:
     # the keys above; without forwarding it here the /v1 route's derived client
     # identity never reaches ChatRequest.caller, so every call records as "api".
     # It is central-only (dropped from model_dump before the worker wire).
+    # model_format: central-only representation pin (operator 2026-09-29) — rides
+    # ChatRequest so the serving fast-route matches by representation; dropped
+    # from the worker wire by ChatRequest's serializer, same as ``caller``.
     for k in ("max_new_tokens", "temperature", "top_p", "do_sample", "request_id",
               "unbounded", "max_chunks", "pool", "images", "alloc",
-              "chat_template_kwargs", "logit_bias", "no_makeroom", "caller"):
+              "chat_template_kwargs", "logit_bias", "no_makeroom", "caller",
+              "model_format"):
         if k in kwargs:
             out[k] = kwargs[k]
     out.setdefault("request_id", make_request_id())

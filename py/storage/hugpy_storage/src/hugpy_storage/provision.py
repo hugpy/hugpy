@@ -881,6 +881,14 @@ def _model_store_reapable(rp: str) -> bool:
     sentinel — returns False, so an UNCONFIGURED or shared box never deletes a
     model file. This makes "nothing deletes from the central drive" hold even
     with zero per-box setup: reaping is opt-in, not opt-out."""
+    # The opt-in applies to Hugpy's disposable model cache only.  A discovered
+    # model may resolve to an arbitrary local path; that path must never inherit
+    # the cache's deletion permission merely because it is on the same box.
+    from hugpy_platform.constants import MODELS_HOME
+    root = os.path.realpath(str(MODELS_HOME))
+    rp = os.path.realpath(rp) if rp else ""
+    if not rp or not root or not (rp == root or rp.startswith(root + os.sep)):
+        return False
     if _on_shared_model_store(rp):
         return False
     return os.environ.get("HUGPY_MODEL_STORE_REAPABLE", "").strip().lower() in ("1", "true", "yes", "on")
@@ -916,6 +924,9 @@ def wipe_model(model_key: str, path: str = "") -> bool:
     if not path:
         return False
     rp = os.path.realpath(path)
+    from hugpy_platform.constants import MODELS_HOME
+    if rp == os.path.realpath(str(MODELS_HOME)):
+        return False
     if len(rp) < 6 or rp in ("/", os.path.expanduser("~")):
         return False  # refuse a dangerous target
     # HARD INVARIANT (single choke point for the reaper AND the redownload path):
@@ -1128,7 +1139,12 @@ def _weight_files(files: list[dict], dest: str | None = None) -> list[str]:
         else:
             size = entry.get("size")
         if low.endswith(".gguf"):
-            if _is_projector(full):
+            # Manifest paths are relative names from Central, not files on this
+            # process's current directory.  Only the local-copy pass may read a
+            # GGUF header; the manifest pass judges projector names alone.
+            projector = (_is_projector(full) if dest else
+                         any(h in low for h in ("mmproj", "mm-proj", "mm_proj", "projector")))
+            if projector:
                 continue
             if size is not None and size <= _WEIGHT_FLOOR:
                 continue
@@ -1771,6 +1787,10 @@ def _ensure_model_present_inner(model_key: str, central_url: str | None,
 
     if model_is_local(canonical):
         return True
+    cfg = catalog_get(canonical)
+    if (getattr(cfg, "extra", None) or {}).get("worker_only"):
+        logger.info("%s is worker-owned and absent here; no central cold transfer", canonical)
+        return False
 
     # Single-flight: serialize provisioning of this model so concurrent callers
     # (multiple infer requests + the pre-provision) don't each download it in

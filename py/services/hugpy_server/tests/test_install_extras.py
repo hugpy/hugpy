@@ -76,7 +76,7 @@ def test_bootstrap_installs_profile_under_lockstep_constraints():
     assert "/llm/workers/constraints.txt" in raw
     assert 'PIP_CONSTRAINT="-c ${CONSTRAINTS_FILE}"' in raw
     assert 'SPEC="hugpy[${PROFILE}]==${VERSION}"' in raw
-    assert 'install --upgrade $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"' in raw
+    assert 'install --upgrade $PIP_RETRY_ARGS $PIP_CONSTRAINT $PIP_EXTRA_INDEX "$SPEC"' in raw
     assert "abstract_hugpy_dev" not in raw
 
 

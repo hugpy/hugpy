@@ -161,7 +161,12 @@ _QUANT_TOKEN_RE = None  # compiled lazily; hugpy_marker's star imports may lack 
 
 
 def list_gguf_quants(directory):
-    """The on-disk .gguf variant manifest for a model dir. [] when none."""
+    """The on-disk .gguf variant manifest for a model dir. [] when none.
+
+    Each language-model quant carries its trained ``context_length`` from its
+    GGUF header. Split quants are represented by their first shard, whose KV
+    metadata describes the complete model. Vision projectors are excluded.
+    """
     import re as _re
     global _QUANT_TOKEN_RE
     if _QUANT_TOKEN_RE is None:
@@ -183,6 +188,18 @@ def list_gguf_quants(directory):
                                           "bytes": 0, "shards": 0})
             v["bytes"] += sz
             v["shards"] += 1
+            # GGUF metadata is model/quant-specific. Read the first shard only;
+            # every shard in a set repeats the model's general KV metadata.
+            if v["shards"] == 1:
+                try:
+                    from hugpy_storage.gguf_inspect import gguf_metadata
+                    context = gguf_metadata(
+                        os.path.join(root, fn), (".context_length",)
+                    ).get(".context_length")
+                    if isinstance(context, (int, float)) and context > 0:
+                        v["context_length"] = int(context)
+                except Exception:  # noqa: BLE001 — metadata must not block listing
+                    pass
     out = []
     for key in sorted(variants):
         v = variants[key]
@@ -692,6 +709,47 @@ def write_hugpy_marker(directory, *, hub_id, name=None, framework=None,
                 payload["quants"] = q
         except Exception:  # noqa: BLE001
             pass
+    # MODEL CONTEXT (GGUF header for per-quant precision; config/tokenizer for
+    # non-GGUF models). Keep the model-level value for existing consumers and
+    # make GGUF's per-quant records authoritative where available.
+    if payload.get("model_max_length") is None:
+        context = None
+        if str(framework or "").strip().lower() in ("gguf", "llama_cpp"):
+            quants = [q for q in (payload.get("quants") or []) if isinstance(q, dict)]
+            selected = os.path.basename(str(payload.get("filename") or ""))
+            if selected:
+                import re as _re
+                selected = _re.sub(r"-\d{5}-of-\d{5}(?=\.gguf$)", "", selected, flags=_re.I)
+                match = next((q for q in quants
+                              if os.path.basename(str(q.get("file") or "")) == selected), None)
+                if match:
+                    context = match.get("context_length")
+            elif len(quants) == 1:
+                context = quants[0].get("context_length")
+            if isinstance(context, (int, float)) and context > 0:
+                context = int(context)
+            else:
+                context = None
+        else:
+            # Tokenizer/config context is a useful best-effort for transformers
+            # installs. Do not let malformed optional metadata block stamping.
+            for filename_, keys in (("tokenizer_config.json", ("model_max_length",)),
+                                     ("config.json", ("max_position_embeddings",
+                                                       "n_positions", "max_sequence_length"))):
+                try:
+                    with open(os.path.join(directory, filename_), "r", encoding="utf-8") as fh:
+                        cfg = json.load(fh)
+                    for key in keys:
+                        value = cfg.get(key) if isinstance(cfg, dict) else None
+                        if isinstance(value, (int, float)) and 0 < value < 10**12:
+                            context = int(value)
+                            break
+                    if context is not None:
+                        break
+                except (OSError, ValueError, TypeError):
+                    continue
+        if context is not None:
+            payload["model_max_length"] = context
     prior = read_hugpy_marker(directory)
     prior = prior if isinstance(prior, dict) else {}
     if manifest is None and isinstance(prior.get(MANIFEST_KEY), dict):

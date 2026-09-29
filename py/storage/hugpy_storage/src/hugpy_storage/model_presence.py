@@ -122,6 +122,12 @@ def model_looks_downloaded(path: str, cfg: Any = None) -> bool:
       classic expected files); a model_index.json pipeline with real weights
       in its component dirs; or a config-less custom repo with real weights.
     """
+    extra = _field(cfg, "extra", {}) or {}
+    if _field(cfg, "ollama_model") or extra.get("ollama_model"):
+        # A worker scanner verifies the manifest digest, blobs and running
+        # Ollama inventory before publishing this pointer. Central has no
+        # manifest path, so it cannot mistake its empty cache for a copy.
+        return bool(path and os.path.isfile(path))
     if _field(cfg, "framework") == "comfy":
         fn = _field(cfg, "filename", "") or ""
         return bool(fn) and os.path.isfile(os.path.join(path or "", fn))

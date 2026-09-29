@@ -380,7 +380,9 @@ def test_never_answering_lane_times_out_and_run_continues():
     rows = _results(events)
     hung = [r for r in rows if r["model"] == "org/hang" and r.get("failure_class")]
     assert hung and all(r["failure_class"] == "timeout" for r in hung)
-    assert "cold-load" in hung[0]["reason"] and hung[0]["evidence"]["phase"] == "cold-load"
+    # Cold-load measurement is opt-in (``measure_cold_load``, off here), so the
+    # lane's first answer is timed as its ``seat`` phase.
+    assert "seat" in hung[0]["reason"] and hung[0]["evidence"]["phase"] == "seat"
     assert any(r["model"] == "org/ok" and r["status"] == "complete" for r in rows)
     assert elapsed < FAST["model_s"] + 6        # bounded by the model budget, not the hang
     assert any(v.get("remaining_budget_s") is not None for k, v in events if k == "progress")

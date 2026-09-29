@@ -320,11 +320,11 @@ export default function PlacementControl({ modelKey, workers = [], archived = nu
         </label>
 
         <label className="mt-place-toggle"
-               title="Strict designation fence: keep this model's designations / preference list a HARD scope even under the fleet's Feasible distribution default. On -> an unmet preference REFUSES (the pre-2026-09-24 sealed-scope behaviour); off -> the preference is an ORDER that falls back to any worker where the model feasibly fits.">
+               title="Strict fences unallocated feasible workers to this preference list. Explicit worker allocations remain the routing scope; this setting cannot make an allocated model unroutable just because its preference list is stale.">
           <input type="checkbox" disabled={!!archived} checked={strict}
                  title={archived ? archText : undefined}
                  onChange={e => setStrict(e.target.checked)} />
-          strict: keep designation as a hard fence (even in Feasible mode)
+          strict: fence unallocated workers to this preference list
         </label>
 
         <label className="mt-place-toggle"

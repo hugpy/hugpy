@@ -44,9 +44,18 @@ HEAVY = ["torch", "diffusers", "whisper", "keybert", "sentence_transformers",
 
 @pytest.fixture
 def clean_registry():
+    """An EMPTY task registry for the test, then the process-wide registry put
+    back EXACTLY as it was. ``reset_tasks()`` clears the table but leaves the
+    entry-point discovery flag set, so a bare reset on teardown left every later
+    test in the session (oracle/fleet/server) with an empty FRAMEWORK_RUNNERS
+    (suite triage 2026-09-29)."""
+    saved = engine_tasks.registered_pairs()
     engine_tasks.reset_tasks()
     yield
     engine_tasks.reset_tasks()
+    for (fw, task), spec in saved.items():
+        engine_tasks.register_task(task, runner=spec.runner, build_request=spec.build_request,
+                                   frameworks=(fw,), extra=spec.extra, source=spec.source)
 
 
 def test_register_populates_engine_task_table(clean_registry):

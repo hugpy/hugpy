@@ -142,12 +142,18 @@ def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None,
     framework = d.get("framework") or ""
     model_dir = _model_dir(d)
     dir_bytes = dir_size_bytes(model_dir)          # whole dir (every file/variant)
+    # Host discovery may know the exact effective checkpoint size even though
+    # Central cannot read that worker's path (Ollama blobs and API-served
+    # vLLM checkpoints are common examples). Use that measured catalog value
+    # when no local directory is available; local GGUF resolution below still
+    # takes precedence when the weights are on Central.
+    discovered_size = d.get("effective_bytes") or d.get("size_bytes")
 
     # A GGUF repo often holds several quantizations but only ONE serves, so the
     # dir sum badly overstates "the model" — and it flowed straight into the VRAM
     # recommendation. Resolve the single effective quant (+ its mmproj) exactly as
     # the runner will, honoring the operator's gguf_file choice, and size by that.
-    size = dir_bytes
+    size = dir_bytes or discovered_size
     gguf = {}
     if str(framework).lower() in ("gguf", "llama_cpp") and model_dir:
         try:
@@ -157,6 +163,8 @@ def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None,
             gguf = {}
         if gguf.get("effective_bytes"):
             size = gguf["effective_bytes"]
+        elif discovered_size:
+            size = discovered_size
 
     selected = selected_err = None
     gguf_sel = str(select_gguf or "").strip()
@@ -177,7 +185,7 @@ def model_meta(cfg: Any, *, vram_bytes: Optional[int] = None,
     out = {
         "model_key": d.get("model_key"),
         "size_bytes": size,                        # effective quant for GGUF
-        "dir_bytes": dir_bytes,                     # whole-dir footprint (all variants)
+        "dir_bytes": dir_bytes or (discovered_size if not model_dir else None),
         "quant": parse_quant(gguf.get("effective_gguf") or filename),
         "params_b": parse_params_b(name, hub_id, filename),
         "ctx_max": ctx_max,
