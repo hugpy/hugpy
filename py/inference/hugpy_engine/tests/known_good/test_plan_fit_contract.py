@@ -460,7 +460,8 @@ def test_snapshot_and_resident_carry_measured_facts_for_step_two():
 # fit-hotfix 2026-09-29: the operator's "15.7 MiB failed vram_fit" case, pinned
 # ---------------------------------------------------------------------------
 MIB = 1 << 20
-EXTERNAL_FLOOR = 1 * GIB                     # HUGPY_VRAM_RESERVE_GIB default
+EXTERNAL_FLOOR = 1 * GIB                     # the HUGPY_VRAM_RESERVE_GIB in force
+                                             # that day (default 0 since 2026-09-29)
 
 
 def _default_reserve(total):
@@ -715,3 +716,47 @@ def test_resident_identity_is_the_canonical_key_and_same_file_residents_stay_dis
                         _snap(1 * GIB), [distill, heretic], POLICY)
     assert sorted(plan.evicted_keys) == ["Qwen3.8-9B-Distill-GGUF",
                                          "Qwen3.8-9B-heretic-uncensored-GGUF"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-29: the per-GPU 1 GiB hold-back is gone; occupancy is MEASURED
+# ---------------------------------------------------------------------------
+def test_vram_reserve_knob_defaults_to_zero_and_still_honours_an_explicit_value(monkeypatch):
+    """INVARIANT: with HUGPY_VRAM_RESERVE_GIB unset, spill.vram_reserve_bytes()
+    is 0 — the budgetable free figure IS the device free read; no fixed slice
+    is held back "for out-of-band GPU consumers" (their bytes are already out
+    of the device read, and the context need is priced explicitly). An
+    explicit value is still honoured verbatim, so the knob remains an operator
+    lever for a known co-tenant that grows after the load. GUARD: the
+    whole-fit un-stack in autofit_gpu_layers un-stacks NOTHING by default.
+    Established: operator 2026-09-29 (the ae refusal "21.3 GB free of 23.6 GB
+    (0 B ceiling reserve + 1.0 GB already held back ...)" with 0 B measured
+    unattributed on the card)."""
+    spill = importlib.import_module("hugpy_engine.spill")
+    monkeypatch.delenv("HUGPY_VRAM_RESERVE_GIB", raising=False)
+    assert spill.vram_reserve_bytes() == 0
+    monkeypatch.setenv("HUGPY_VRAM_RESERVE_GIB", "1.5")
+    assert spill.vram_reserve_bytes() == int(1.5 * GIB)
+    monkeypatch.setenv("HUGPY_VRAM_RESERVE_GIB", "0")
+    assert spill.vram_reserve_bytes() == 0
+
+
+def test_snapshot_carries_measured_occupancy_as_reporting_only():
+    """INVARIANT: ResourceSnapshot carries the MEASURED occupancy split
+    (attributed_vram_bytes / foreign_vram_bytes) beside the budgetable free
+    figure, defaulting to None (unmeasured, never 0), and plan_fit prices
+    against free_bytes ALONE — the measured foreign figure is occupancy that is
+    already out of the device read and is never subtracted a second time.
+    Established: 2026-09-29 (double-count fix)."""
+    need = 4 * GIB
+    plain = _snap(need + 512 * (1 << 20))
+    assert plain.attributed_vram_bytes is None and plain.foreign_vram_bytes is None
+    assert plain.external_floor_bytes == 0
+    measured = _snap(need + 512 * (1 << 20),
+                     attributed_vram_bytes=3 * GIB, foreign_vram_bytes=2 * GIB)
+    policy = fit.FitPolicy(ceiling_reserve_bytes=512 * (1 << 20))
+    a = fit.plan_fit(_req(need), plain, [], policy)
+    b = fit.plan_fit(_req(need), measured, [], policy)
+    assert a.action == "proceed" and b.action == "proceed"
+    assert a.free_bytes == b.free_bytes == need + 512 * (1 << 20)
+    assert b.fits_now is True                    # 2 GiB "foreign" changed nothing

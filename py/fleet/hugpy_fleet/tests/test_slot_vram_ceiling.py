@@ -48,10 +48,11 @@ GIB = 2**30
 # reserve used to be 10% of TOTAL card VRAM, which re-charged for KV that `need`
 # already carries and refused models the box could genuinely run. It is now a
 # bounded compute/activation cushion (spill._CTX_COMPUTE_RESERVE_BYTES, 512 MiB,
-# measured 348 MiB) un-stacked against the external floor already deducted from
-# the free read (HUGPY_VRAM_RESERVE_GIB, 1.0 GiB) — so on a default box the
-# reserve on the BUDGETABLE figure is 0 and the physical guarantee is
-# "raw free after the load >= max(external floor, cushion)".
+# measured 348 MiB) un-stacked against the external floor deducted from the
+# free read (HUGPY_VRAM_RESERVE_GIB). THE FLOOR DEFAULTS TO 0 SINCE 2026-09-29
+# (it was a flat 1.0 GiB): on a default box the budgetable figure IS the device
+# free read and the reserve on it is the full 512 MiB cushion; the physical
+# guarantee is still "raw free after the load >= max(external floor, cushion)".
 # ===========================================================================
 _fv_orig = agent._free_vram_bytes
 _tv_orig = agent._total_vram_bytes
@@ -62,12 +63,13 @@ _env_saved = {k: os.environ.get(k) for k in
 for _k in _env_saved:
     os.environ.pop(_k, None)                     # an unconfigured box
 try:
-    # 24 GiB card, default cushion -> reserve on the budgetable figure = 0 GiB.
+    # 24 GiB card, default cushion, default floor 0 -> the reserve on the
+    # budgetable figure is the whole 512 MiB cushion.
     agent._total_vram_bytes = lambda: 24 * GIB
     agent._incoming_need_bytes = lambda mk: 4 * GIB          # needs 4 GiB
-    check("default reserve on a 24 GiB card is 0 (512 MiB cushion un-stacked "
-          "against the 1.0 GiB external floor)",
-          agent._vram_ceiling_reserve_bytes(24 * GIB) == 0)
+    check("default reserve on a 24 GiB card is the 512 MiB cushion (no external "
+          "floor to un-stack against since 2026-09-29)",
+          agent._vram_ceiling_reserve_bytes(24 * GIB) == 512 * 2**20)
 
     # 10 GiB free now: after a 4 GiB load, 6 GiB budgetable free left -> fits.
     agent._free_vram_bytes = lambda: 10 * GIB
@@ -82,15 +84,16 @@ try:
           "(5 GiB free, 4 GiB need, 2 GiB raw free after the load)",
           agent._worker_slot_fit_check("m") is True)
 
-    # Exactly at the boundary: free == need -> 0 budgetable free after, which is
-    # still the whole 1.0 GiB external floor of RAW device headroom.
-    agent._free_vram_bytes = lambda: 4 * GIB
+    # Exactly at the boundary: free == need + cushion -> exactly the cushion of
+    # RAW device headroom remains after the load (the floor is 0, so budgetable
+    # free IS the device read).
+    agent._free_vram_bytes = lambda: 4 * GIB + 512 * 2**20
     check("fit_check: True exactly at the boundary (>= is inclusive)",
           agent._worker_slot_fit_check("m") is True)
 
-    # A load that would genuinely leave NO working room still REFUSES: it would
-    # eat into the external floor, i.e. past the last real device headroom.
-    agent._free_vram_bytes = lambda: 4 * GIB - 1
+    # A load that would genuinely leave NO working room still REFUSES: one byte
+    # into the compute cushion is past the last real device headroom.
+    agent._free_vram_bytes = lambda: 4 * GIB + 512 * 2**20 - 1
     check("fit_check: False when the load would spend past the last headroom",
           agent._worker_slot_fit_check("m") is False)
     agent._free_vram_bytes = lambda: 0
@@ -143,14 +146,15 @@ try:
     check("_vram_ceiling_frac ignores garbage -> 0.90", agent._vram_ceiling_frac() == 0.90)
     check("garbage is NOT 'explicit' -> the default cushion governs",
           agent._vram_ceiling_frac_explicit() is None
-          and agent._vram_ceiling_reserve_bytes(24 * GIB) == 0)
+          and agent._vram_ceiling_reserve_bytes(24 * GIB) == 512 * 2**20)
     os.environ["HUGPY_VRAM_CEILING_FRAC"] = "1.5"            # out of (0,1]
     check("_vram_ceiling_frac clamps out-of-range -> 0.90", agent._vram_ceiling_frac() == 0.90)
     check("out-of-range is NOT 'explicit' -> the default cushion governs",
-          agent._vram_ceiling_reserve_bytes(24 * GIB) == 0)
+          agent._vram_ceiling_reserve_bytes(24 * GIB) == 512 * 2**20)
     os.environ.pop("HUGPY_VRAM_CEILING_FRAC", None)
 
     # --- the cushion is the OOM guard when there is no external floor -------
+    # (an EXPLICIT 0 behaves exactly like the default since 2026-09-29)
     os.environ["HUGPY_VRAM_RESERVE_GIB"] = "0"
     check("floor 0 -> the full 512 MiB cushion is the reserve",
           agent._vram_ceiling_reserve_bytes(24 * GIB) == 512 * 2**20)
@@ -165,9 +169,13 @@ try:
     # --- operator cushion lever ---------------------------------------------
     os.environ["HUGPY_VRAM_CEILING_CUSHION_GIB"] = "3"
     check("HUGPY_VRAM_CEILING_CUSHION_GIB widens the cushion (clamped to the "
-          "old 10%-of-card term, then un-stacked against the 1 GiB floor)",
+          "old 10%-of-card term; nothing to un-stack with the default floor 0)",
+          agent._vram_ceiling_reserve_bytes(24 * GIB) == int(24 * GIB * 0.10))
+    os.environ["HUGPY_VRAM_RESERVE_GIB"] = "1"
+    check("...and an EXPLICIT 1 GiB floor still un-stacks against it",
           agent._vram_ceiling_reserve_bytes(24 * GIB)
           == int(24 * GIB * 0.10) - GIB)
+    os.environ.pop("HUGPY_VRAM_RESERVE_GIB", None)
     os.environ["HUGPY_VRAM_CEILING_CUSHION_GIB"] = "nope"
     check("a garbage cushion is ignored -> the measured 512 MiB stands",
           agent._vram_ceiling_cushion_bytes() == 512 * 2**20)
@@ -188,16 +196,18 @@ try:
 
     # --- THE LIVE ae REGRESSION (the refusal the operator quoted) -----------
     # "needs 21.1 GB, 21.3 GB free of 23.6 GB (2.4 GB ceiling reserve)".
-    # _human_bytes labels 1024-based units "GB", so those are GiB.
+    # _human_bytes labels 1024-based units "GB", so those are GiB. The 21.3 was
+    # the BUDGETABLE figure under the old 1.0 GiB floor; the device read was
+    # 22.3 GiB, which is what the default box (floor 0) now prices against.
     agent._total_vram_bytes = lambda: int(23.6 * GIB)
-    agent._free_vram_bytes = lambda: int(21.3 * GIB)          # budgetable
+    agent._free_vram_bytes = lambda: int(22.3 * GIB)          # device free
     agent._incoming_need_bytes = lambda mk: int(21.1 * GIB)   # weights+KV
-    check("LIVE ae REGRESSION: 21.1 GiB need, 21.3 GiB free of 23.6 GiB is "
-          "ADMITTED (1.2 GiB of raw device headroom remains)",
+    check("LIVE ae REGRESSION: 21.1 GiB need, 22.3 GiB device free of 23.6 GiB "
+          "is ADMITTED (1.2 GiB of raw device headroom remains >= the cushion)",
           agent._worker_slot_fit_check("m") is True)
-    agent._incoming_need_bytes = lambda mk: int(22.6 * GIB)   # would eat the floor
-    check("...but 22.6 GiB on the same card still REFUSES (it would spend the "
-          "whole external floor)",
+    agent._incoming_need_bytes = lambda mk: int(22.6 * GIB)   # exceeds device free
+    check("...but 22.6 GiB on the same card still REFUSES (more than the device "
+          "has free)",
           agent._worker_slot_fit_check("m") is False)
 finally:
     agent._free_vram_bytes = _fv_orig

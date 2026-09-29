@@ -81,10 +81,19 @@ class ResourceSnapshot:
 
     ``total_bytes`` / ``free_bytes`` describe the TARGET card the load lands on
     (``devices`` carries every card when the caller knows them; ``target_device``
-    names the target's index). ``free_bytes`` is the BUDGETABLE free VRAM (the
-    external floor, ``HUGPY_VRAM_RESERVE_GIB``, is already out of it — exactly
-    what the worker's ``_free_vram_bytes()`` reports); ``external_floor_bytes``
-    is carried for honest reporting. ``ram_free_bytes`` is budgetable
+    names the target's index). ``free_bytes`` is the BUDGETABLE free VRAM —
+    the device free read less ``external_floor_bytes``, the operator hold-back
+    ``HUGPY_VRAM_RESERVE_GIB`` (DEFAULT 0 since 2026-09-29; it was a flat
+    1.0 GiB "for out-of-band GPU consumers", retired because a foreign
+    process's bytes are already out of the device free read and the context
+    need is priced explicitly) — exactly what the worker's
+    ``_free_vram_bytes()`` reports. ``external_floor_bytes`` is carried so a
+    report can put the device figure back (``free + floor``).
+    ``attributed_vram_bytes`` / ``foreign_vram_bytes`` are the MEASURED
+    occupancy split (this worker's model rows + its own CUDA context / other
+    compute processes) from the same per-pid accounting the heartbeat ships;
+    reporting only — both are occupancy, already OUT of ``free_bytes``, and
+    must never be subtracted from it again. ``ram_free_bytes`` is budgetable
     MemAvailable (reserve-adjusted), ``ram_total_bytes`` the box, and
     ``ram_reserve_bytes`` the host reserve that was held out. ``now`` is the
     clock the eviction ranking measures idleness against (never read inside
@@ -98,6 +107,8 @@ class ResourceSnapshot:
     devices: tuple = ()
     target_device: Optional[int] = None
     now: float = 0.0
+    attributed_vram_bytes: Optional[int] = None
+    foreign_vram_bytes: Optional[int] = None
 
 
 # The name the design note (and the step-1 brief) uses; the general record is

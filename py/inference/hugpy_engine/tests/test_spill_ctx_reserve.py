@@ -25,6 +25,12 @@ carry the real geometry so the header PARSE is exercised too):
     a model that genuinely does not fit, the 70B-on-24GiB llama_context OOM the
     guard was built for, and both env overrides still winning.
 
+FREE FIGURES (2026-09-29): HUGPY_VRAM_RESERVE_GIB now defaults to 0, so the
+``free_vram`` a caller passes IS the device free read — the whole-fit test no
+longer credits a 1.0 GiB floor back. Cases below that were written in the old
+"after the 1.0 reserve" budgetable framing are re-expressed as device figures
+(+1 GiB); the physical scenario each pins is unchanged.
+
 Run: venv/bin/python -m pytest tests/test_spill_ctx_reserve.py -q
 """
 from __future__ import annotations
@@ -181,11 +187,13 @@ def test_the_reserve_tracks_the_ctx_the_child_will_actually_serve(tmp_path):
 
 
 def test_a_short_context_seats_a_model_a_long_one_cannot(tmp_path):
-    """A 6.5 GiB quant on the same 8 GiB card: it cannot hold a 16k KV cache too,
-    but at 4k it fits whole. The layer count must move with the context."""
-    g = flux2_like(tmp_path, size_bytes=int(6.5 * GIB))
-    long_ctx = spill.autofit_gpu_layers(g, free_vram=int(7.0 * GIB), n_ctx=16384)
-    short_ctx = spill.autofit_gpu_layers(g, free_vram=int(7.0 * GIB), n_ctx=4096)
+    """A 6.0 GiB quant on the same 8 GiB card (7.5 GiB device free, the measured
+    empty-card figure): it cannot hold a 16k KV cache too (2.25 GiB KV + 512 MiB
+    compute), but at 4k (576 MiB KV) it fits whole. The layer count must move
+    with the context."""
+    g = flux2_like(tmp_path, size_bytes=int(6.0 * GIB))
+    long_ctx = spill.autofit_gpu_layers(g, free_vram=int(7.5 * GIB), n_ctx=16384)
+    short_ctx = spill.autofit_gpu_layers(g, free_vram=int(7.5 * GIB), n_ctx=4096)
     assert 0 < long_ctx < 36
     assert short_ctx == -1
 
@@ -217,12 +225,12 @@ def test_the_projector_reserve_still_stacks(tmp_path):
     the layers) is a REAL second tenant, not a cushion — it must still be
     subtracted on top, or an 8 GiB card OOMs when the projector lands."""
     g = flux2_like(tmp_path)
-    assert spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB)) == -1
-    plain_ctx = spill.served_ctx_for_fit(g, free_vram=int(6.5 * GIB))
+    free = int(7.5 * GIB)                  # device free (computron, empty card)
+    assert spill.autofit_gpu_layers(g, free_vram=free) == -1
+    plain_ctx = spill.served_ctx_for_fit(g, free_vram=free)
     projector_ctx = spill.served_ctx_for_fit(
-        g, free_vram=int(6.5 * GIB),
-        extra_reserve_bytes=int(1.35 * GIB))
-    n = spill.autofit_gpu_layers(g, free_vram=int(6.5 * GIB),
+        g, free_vram=free, extra_reserve_bytes=int(1.35 * GIB))
+    n = spill.autofit_gpu_layers(g, free_vram=free,
                                  extra_reserve_bytes=int(1.35 * GIB))
     # The projector is charged by shrinking context first; the weights can
     # still remain whole when that yields enough room.
@@ -343,7 +351,7 @@ def test_explicit_vram_reserve_env_still_governs_the_floor(tmp_path, monkeypatch
 def test_fit_bounded_context_preserves_whole_weights_before_spilling(tmp_path):
     """A tighter card reduces context before it spills otherwise-fitting weights."""
     g = flux2_like(tmp_path)
-    tight = int(5.0 * GIB)
+    tight = int(6.0 * GIB)                 # 4.68 GiB weights + 512 MiB compute + ~0.8 GiB KV
     roomy = int(7.5 * GIB)
     assert spill.served_ctx_for_fit(g, free_vram=tight) < \
            spill.served_ctx_for_fit(g, free_vram=roomy)
@@ -354,7 +362,7 @@ def test_safety_multiplier_still_applies(tmp_path, monkeypatch):
     """HUGPY_VRAM_SAFETY is untouched — a box that wants the old cushion back
     still gets it, and it still only ever tightens."""
     g = flux2_like(tmp_path)
-    free = int(5.5 * GIB)
+    free = int(6.5 * GIB)                  # device free; whole at safety 1.0
     assert spill.autofit_gpu_layers(g, free_vram=free) == -1
     monkeypatch.setenv("HUGPY_VRAM_SAFETY", "0.85")
     assert spill.autofit_gpu_layers(g, free_vram=free) != -1

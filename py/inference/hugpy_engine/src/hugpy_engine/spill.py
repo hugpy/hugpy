@@ -53,10 +53,11 @@ logger = logging.getLogger("abstract_hugpy_dev.spill")
 # STILL IN FORCE, so this is not "no safety": the ctx reserve (COMPUTED from the
 # model's real geometry at the real n_ctx since 2026-07-27 — see
 # vram_ctx_reserve_bytes; it was a flat 2.5 GiB when this note was written),
-# HUGPY_VRAM_RESERVE_GIB (1.0 GiB, for consumers central cannot see), and the
-# admission ceiling (agent._vram_ceiling_reserve_bytes — a bounded compute
-# cushion since 2026-07-27, HUGPY_VRAM_CEILING_FRAC to override) which is the
-# real OOM backstop. This removes a redundant fourth margin, not the floor.
+# HUGPY_VRAM_RESERVE_GIB (an operator hold-back for consumers central cannot
+# see — default 0 since 2026-09-29, it was 1.0 GiB), and the admission ceiling
+# (agent._vram_ceiling_reserve_bytes — a bounded compute cushion since
+# 2026-07-27, HUGPY_VRAM_CEILING_FRAC to override) which is the real OOM
+# backstop. This removes a redundant fourth margin, not the floor.
 # Tunable if it bites: set HUGPY_VRAM_SAFETY below 1.0 (read at CALL time by
 # _vram_safety(), not here — _env_float is defined further down this module and
 # a module-level call would NameError on import, taking every worker with it).
@@ -120,14 +121,24 @@ def _vram_safety() -> float:
 # hardware probes (best-effort, never raise)
 # ---------------------------------------------------------------------------
 def vram_reserve_bytes() -> int:
-    """VRAM kept out of every budget (HUGPY_VRAM_RESERVE_GIB, default 1.0).
+    """VRAM held OUT of the budgetable free figure (HUGPY_VRAM_RESERVE_GIB).
 
-    The box may have GPU consumers central knows nothing about (a desktop
-    session, another app). Reserving a slice at the probe layer means autofit,
-    preflights, and heartbeat-fed budgets all leave it alone, while the raw
-    per-GPU numbers shown in the console stay truthful."""
+    DEFAULT 0 since 2026-09-29 (operator). It was a flat 1.0 GiB on every card,
+    justified as room for "GPU consumers central knows nothing about" and, in
+    practice, as KV/context headroom. Both jobs are now done by measurement:
+    a foreign process's bytes are already OUT of the device free read (they are
+    not free), the worker attributes occupancy per pid every beat, and the
+    context need is priced explicitly (``_incoming_need_detail`` = weights +
+    KV at the resolved ctx; ``vram_ctx_reserve_bytes`` for autofit). A fixed
+    hold-back on top of that was an assumption charged twice — the live ae
+    refusal that retired it: "21.3 GB free of 23.6 GB (0 B ceiling reserve +
+    1.0 GB already held back ...)" with 0 B measured unattributed on the card.
+
+    The knob stays for an operator who KNOWS a grower (a desktop session that
+    will allocate later) needs a growth cushion; it is honoured verbatim and
+    reported as ``external_floor_bytes`` wherever the fit prices."""
     gib = _env_float("HUGPY_VRAM_RESERVE_GIB")
-    return int((1.0 if gib is None else gib) * 2**30)
+    return int((0.0 if gib is None else gib) * 2**30)
 
 
 def ram_reserve_bytes() -> int:
@@ -1012,9 +1023,11 @@ def autofit_gpu_layers(model_path: str,
     reproduces the loader's own choice from the GGUF header.
 
     THE STACKING DECISION (2026-07-27). Two reserves used to be charged against
-    the same card for the same load: ``vram_reserve_bytes`` (1.0 GiB, removed
-    upstream inside ``free_vram_bytes``, for "GPU consumers central knows nothing
-    about") and this context reserve. They are different CONCERNS and they still
+    the same card for the same load: ``vram_reserve_bytes`` (then a flat
+    1.0 GiB, removed upstream inside ``free_vram_bytes``, for "GPU consumers
+    central knows nothing about"; DEFAULT 0 since 2026-09-29 — the arithmetic
+    below is unchanged and simply un-stacks nothing when nothing was held back)
+    and this context reserve. They are different CONCERNS and they still
     stack — for a SPLIT. They no longer stack for the WHOLE-FIT test:
 
         whole fits?  free - max(0, context need - external floor) >= file

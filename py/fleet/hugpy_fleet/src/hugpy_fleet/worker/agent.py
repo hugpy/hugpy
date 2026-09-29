@@ -7268,11 +7268,26 @@ def _resolve_model_profile(model_key: str) -> "dict | None":
 # set_evictable / set_post_evict_hook). An on-demand model stays hot until a NEW
 # load needs its memory; then the LRU on-demand resident yields.
 # ---------------------------------------------------------------------------
+# THE WEIGHTS HEADROOM. ``_incoming_need_bytes`` prices the weights term as
+# on-disk bytes x this factor. It is the ONLY overhead the fit need carries
+# beyond the explicitly-priced KV term: it is NOT the CUDA context (that is
+# occupancy, already out of the free read and attributed per pid), NOT the
+# compute graph (the ceiling cushion, ``_vram_ceiling_reserve_bytes``), and
+# NOT context (KV at the resolved ctx, ``_kv_need_bytes``). What it covers is
+# the loader's own non-weight residency (dequant/alignment buffers, a
+# transformers dtype up-cast, mmap slop) — an uncalibrated PRIOR that the t28
+# load-and-learn correction (``_calib_correction``) replaces with the measured
+# ratio once a model has loaded here. On a 20.1 GiB file it is the whole
+# ~3.0 GiB between "20.1 GB file" and "needs 23.1 GB" — the refusal now says
+# so (``_need_split_str``) instead of leaving the operator to guess.
+_WEIGHTS_HEADROOM = 1.15
+
+
 def _incoming_need_bytes(model_key: str) -> "int | None":
-    """Best-effort bytes the incoming model's weights will want (× a small
-    headroom factor), resolved from its on-disk size the same way the loader does
-    (route_destination). None when the size is unknown — the fit-guard then fails
-    OPEN (never blocks an unmeasurable load).
+    """Best-effort bytes the incoming model's weights will want (× the
+    ``_WEIGHTS_HEADROOM`` factor), resolved from its on-disk size the same way
+    the loader does (route_destination). None when the size is unknown — the
+    fit-guard then fails OPEN (never blocks an unmeasurable load).
 
     GGUF landmine (fixed 2026-07-14, mirrors central model_meta): a GGUF repo
     commonly holds several quantizations but only ONE serves, so summing every
@@ -7305,7 +7320,7 @@ def _incoming_need_bytes(model_key: str) -> "int | None":
             except Exception:  # noqa: BLE001 — best-effort; unresolved -> fail open
                 gguf = {}
             eff = gguf.get("effective_bytes")
-            return int(eff * 1.15) if eff else None
+            return int(eff * _WEIGHTS_HEADROOM) if eff else None
         # Non-GGUF: the shared load-requirement computation (which excludes a
         # duplicate torch serialization shadowed by a safetensors set — a
         # both-formats repo was priced at the dir-sum, ~2x what loads). Falls
@@ -7320,7 +7335,7 @@ def _incoming_need_bytes(model_key: str) -> "int | None":
         if not weight:
             detail = _dir_size_detail(path)
             weight = detail.get("weight_bytes") or detail.get("model_bytes")
-        return int(weight * 1.15) if weight else None
+        return int(weight * _WEIGHTS_HEADROOM) if weight else None
     except Exception:  # noqa: BLE001 — best-effort; unknown size -> fail open
         return None
 
@@ -7773,7 +7788,13 @@ def _incoming_need_detail(model_key: str) -> dict:
     total = int(base_total * corr) if corr else base_total
     out = {"total": total, "base_total": base_total,
            "calibration_correction": (corr or 1.0),
-           "weights": int(weights), "kv": int(kv or 0), **det}
+           "weights": int(weights), "kv": int(kv or 0),
+           # The breakdown of the weights term (2026-09-29): the on-disk
+           # figure and the prior it was multiplied by, so a refusal can show
+           # where "needs 23.1 GB" for a 20.1 GB file comes from.
+           "weights_file_bytes": int(round(int(weights) / _WEIGHTS_HEADROOM)),
+           "weights_headroom": _WEIGHTS_HEADROOM,
+           **det}
     # MoE expert split (2026-07-24): when a MoE split governs this model
     # (explicit n_cpu_moe, or auto-eligible under the default placement), carry
     # the TYPED need alongside the opaque total: GPU-side = the weights the plan
@@ -7798,7 +7819,7 @@ def _incoming_need_detail(model_key: str) -> dict:
         out["moe_split"] = {
             "path": plan.get("path"),
             "n_cpu_moe": plan["n_cpu_moe"],
-            "gpu_total": int(plan["gpu_weight_bytes"] * 1.15) + int(kv or 0),
+            "gpu_total": int(plan["gpu_weight_bytes"] * _WEIGHTS_HEADROOM) + int(kv or 0),
             "cpu_bytes": plan["cpu_bytes"],
             "expert_count": (plan.get("detail") or {}).get("expert_count"),
             "expert_used_count": (plan.get("detail") or {}).get("expert_used_count"),
@@ -8174,11 +8195,14 @@ def _vram_ceiling_frac() -> float:
 # cushion stays safe as models grow.
 #
 # THE STACK. `_free_vram_bytes()` is BUDGETABLE free — spill.free_vram_bytes
-# already deducted HUGPY_VRAM_RESERVE_GIB (1.0 GiB) for GPU consumers central
-# cannot see. That floor is real device headroom the load will never touch, so
-# charging the cushion ON TOP of it would be the third margin for the second
-# concern. Same un-stacking ruling spill made for the whole-fit test
-# ("raw free - max(need, floor) >= file"): the guarantee is
+# deducts HUGPY_VRAM_RESERVE_GIB when an operator sets one (it was a flat
+# 1.0 GiB by default until 2026-09-29; DEFAULT 0 now — a foreign process's
+# bytes are already out of the device free read, occupancy is attributed per
+# pid, and context is priced explicitly, so the fixed hold-back was an
+# assumption charged twice). When a floor IS set it is real device headroom
+# the load will never touch, so charging the cushion ON TOP of it would be the
+# third margin for the second concern. Same un-stacking ruling spill made for
+# the whole-fit test ("raw free - max(need, floor) >= file"): the guarantee is
 #
 #     raw free after the load  >=  max(external floor, compute cushion)
 #
@@ -8186,9 +8210,11 @@ def _vram_ceiling_frac() -> float:
 #
 #     free_budgetable - need   >=  max(0, cushion - floor)
 #
-# On ae (floor 1.0 GiB, cushion 512 MiB) that reserve is 0 and the live case
-# admits with 1.2 GiB of RAW device headroom left — 3.4x the measured residual.
-# On a box with HUGPY_VRAM_RESERVE_GIB=0 the cushion applies in full.
+# With the default floor of 0 the cushion applies in full (512 MiB on any card
+# of 5 GiB or more; 10% of a smaller card). With the old 1.0 GiB floor the
+# reserve was 0 and the live ae case admitted with 1.2 GiB of RAW device
+# headroom left — the same load now sees that 1.2 GiB as budgetable free and
+# is asked to leave 512 MiB of it: strictly MORE admissible than before.
 #
 # NEVER STRICTER THAN BEFORE. The cushion is additionally clamped to today's
 # (1 - 0.90) x total, so max(0, min(cushion, 0.10 x total) - floor)
@@ -8229,12 +8255,15 @@ def _vram_ceiling_cushion_bytes() -> int:
 
 
 def _external_vram_floor_bytes() -> int:
-    """VRAM already held out of ``_free_vram_bytes()`` for consumers this worker
-    cannot see (spill.vram_reserve_bytes / HUGPY_VRAM_RESERVE_GIB, 1.0 GiB).
+    """VRAM held out of ``_free_vram_bytes()`` by the operator knob
+    (spill.vram_reserve_bytes / HUGPY_VRAM_RESERVE_GIB). DEFAULT 0 since
+    2026-09-29; it was a flat 1.0 GiB. This is a CONFIGURED hold-back, not a
+    measurement — the measured foreign occupancy is ``_vram_occupancy_attribution``
+    and is already out of the device free read (never subtract it again).
 
-    It is REAL post-load device headroom, which is why the cushion un-stacks
-    against it. Unreadable -> 0, i.e. the cushion applies in full (the
-    conservative direction)."""
+    When set it is REAL post-load device headroom, which is why the cushion
+    un-stacks against it. Unreadable -> 0, i.e. the cushion applies in full
+    (the conservative direction)."""
     try:
         from hugpy_engine.spill import vram_reserve_bytes
         return max(0, int(vram_reserve_bytes()))
@@ -8248,7 +8277,9 @@ def _vram_ceiling_reserve_bytes(total: "int | None") -> int:
 
     * explicit HUGPY_VRAM_CEILING_FRAC -> ``total * (1 - frac)``, verbatim,
       byte-identical to the pre-2026-07-27 gate.
-    * default -> ``max(0, min(cushion, total * 0.10) - external floor)``.
+    * default -> ``max(0, min(cushion, total * 0.10) - external floor)``, and
+      the external floor (HUGPY_VRAM_RESERVE_GIB) is 0 unless an operator set
+      one, so this is the 512 MiB compute cushion on any card >= 5 GiB.
     """
     try:
         total = int(total or 0)
@@ -8286,10 +8317,10 @@ def _vram_pressure_reserve_bytes(total: "int | None") -> int:
     different question — "is the card under pressure RIGHT NOW, with no load
     driving admission" — and its answer only ever evicts an idle resident; it
     never refuses anything. Sizing it with the admission cushion would make it
-    ~0 on any box with the default 1.0 GiB external floor (that floor is already
-    out of the free read), retiring the deadlock-breaker the addendum exists
-    for. With an explicit HUGPY_VRAM_CEILING_FRAC the two agree exactly, as
-    they always did."""
+    ~0 on any box with an external floor (HUGPY_VRAM_RESERVE_GIB) at or above
+    the cushion — that floor is already out of the free read — retiring the
+    deadlock-breaker the addendum exists for. With an explicit
+    HUGPY_VRAM_CEILING_FRAC the two agree exactly, as they always did."""
     try:
         total = int(total or 0)
     except (TypeError, ValueError):
@@ -9928,12 +9959,19 @@ def _need_split_str(det: dict) -> str:
     ' = 21.3 GB weights + 2.8 GB kv@50%ctx'. Empty when there is no ctx (kv=0),
     so a model with no ctx allocation reads exactly as today."""
     kv = int(det.get("kv") or 0)
+    # The weights term names its prior when the detail carries it (2026-09-29):
+    # "20.1 GB on disk x 1.15 weights headroom" is the whole gap between a file
+    # size and a need with no ctx term, and it must not read as a mystery.
+    wfile = det.get("weights_file_bytes")
+    hr = det.get("weights_headroom")
+    w = (f"{_human_bytes(det.get('weights'))} weights"
+         + (f" ({_human_bytes(wfile)} on disk x {hr:g} weights headroom)"
+            if wfile and hr else ""))
     if kv <= 0:
-        return ""
+        return f" = {w}" if wfile and hr else ""
     pct = det.get("ctx_pct")
     tag = f"@{pct}%ctx" if pct else ""
-    return (f" = {_human_bytes(det.get('weights'))} weights + "
-            f"{_human_bytes(kv)} kv{tag}")
+    return f" = {w} + {_human_bytes(kv)} kv{tag}"
 
 
 def _actively_replying(model_key: str, slot_busy: "set | None" = None) -> bool:
@@ -10742,11 +10780,32 @@ def _fit_snapshot(total: "int | None" = None):
     ``_fits()`` closure re-read; ``now`` is the eviction ranking's clock."""
     from hugpy_engine.fit import DeviceVram, ResourceSnapshot
     total = total if total is not None else _total_vram_bytes()
+    # ONE MEASURED PICTURE (2026-09-29). The free read is cudaMemGetInfo in
+    # THIS process (torch first, nvidia-smi fallback — hugpy_platform.hardware),
+    # so this process's own caching allocator can make cached-but-unused blocks
+    # read as occupancy. Release them before the read — but ONLY when torch is
+    # already initialised here: never import/initialise CUDA just to measure
+    # (that plants a context on the card for the sake of a number).
+    try:
+        import sys as _sys
+        _torch = _sys.modules.get("torch")
+        if _torch is not None and _torch.cuda.is_initialized():
+            _torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 — a cache release is best-effort
+        pass
     free = _free_vram_bytes()
     try:
         target = _target_device_index()
     except Exception:  # noqa: BLE001 — a device index is attribution only
         target = None
+    # The MEASURED occupancy split (this worker's rows + own CUDA context /
+    # other compute processes) from the same per-pid accounting the heartbeat
+    # ships — carried for the refusal's "who holds the card" clause. Occupancy,
+    # not a hold-back: it is already OUT of `free` and is never subtracted.
+    try:
+        _attr = _vram_occupancy_attribution() or {}
+    except Exception:  # noqa: BLE001
+        _attr = {}
     try:
         from hugpy_engine.spill import ram_reserve_bytes as _ram_reserve
         ram_reserve = int(_ram_reserve() or 0)
@@ -10760,7 +10819,9 @@ def _fit_snapshot(total: "int | None" = None):
         ram_reserve_bytes=ram_reserve,
         devices=(DeviceVram(index=target, total_bytes=total, free_bytes=free),),
         target_device=target,
-        now=time.time())
+        now=time.time(),
+        attributed_vram_bytes=_attr.get("vram_attributed_bytes"),
+        foreign_vram_bytes=_attr.get("vram_unattributed_bytes"))
 
 
 def _fit_policy(total: "int | None"):
@@ -11459,17 +11520,52 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
     if evict_failed:
         holders.append(f"{len(evict_failed)} eviction attempt(s) failed to free "
                        "their resident")
-    _attr = {"vram_attributed_bytes": None, "vram_unattributed_bytes": None}
+    _ext_floor = int(snap.external_floor_bytes or 0)
+    # THE IN-USE FIGURE IS THE DEVICE'S (2026-09-29). `fv` is BUDGETABLE free
+    # (the operator hold-back already out), so `total - fv` counted that
+    # hold-back as occupancy — the live ae refusal said "~2.3 GB in use" on a
+    # card whose device read was 1.3 GiB used, and the 1.0 GB gap was the
+    # floor, not a holder. Put the floor back before subtracting.
+    _device_free = None if fv is None else int(fv) + _ext_floor
+    _occupied = (max(0, int(total) - _device_free)
+                 if (_device_free is not None and total) else None)
+    _attr = {"vram_attributed_bytes": snap.attributed_vram_bytes,
+             "vram_unattributed_bytes": snap.foreign_vram_bytes}
+    _unaccounted = None
+    if (_occupied is not None and _attr["vram_attributed_bytes"] is not None
+            and _attr["vram_unattributed_bytes"] is not None):
+        _unaccounted = max(0, _occupied - int(_attr["vram_attributed_bytes"])
+                           - int(_attr["vram_unattributed_bytes"]))
+
+    def _occupancy_clause() -> str:
+        """'~X of the device in use = A attributed + F foreign + R in no
+        compute process' — every term MEASURED, the composition named, so
+        three readings of one card (heartbeat bar, fit, attribution) can be
+        reconciled from the sentence alone."""
+        if _occupied is None:
+            return "device occupancy is unmeasurable"
+        parts = []
+        _a, _f = _attr["vram_attributed_bytes"], _attr["vram_unattributed_bytes"]
+        if _a is not None:
+            parts.append(f"~{_human_bytes(_a)} attributed to this worker (its "
+                         f"model rows + its own CUDA context)")
+        if _f is not None:
+            parts.append(f"~{_human_bytes(_f)} measured UNATTRIBUTED (other "
+                         f"compute processes, foreign to this worker)")
+        if _unaccounted:
+            parts.append(f"~{_human_bytes(_unaccounted)} in no compute process "
+                         f"(driver reserve / display / allocator cache — "
+                         f"nvidia-smi per-process accounting does not see it)")
+        return (f"~{_human_bytes(_occupied)} of the device is in use"
+                + (" = " + " + ".join(parts) if parts else ""))
+
     if (not protected and not evict_failed and not plan.evictions and not evicted
             and not polite_spared):
         # THE ORPHAN-MESSAGE HONESTY FIX (operator, 2026-07-27): an empty
         # candidates+protected pool means "nothing EVICTABLE was enumerable",
         # not "nothing is attributable" — consult the attribution the worker
-        # already computes for the heartbeat, and say only what it supports.
-        occupied = None
-        if fv is not None and total:
-            occupied = max(0, int(total) - int(fv))
-        _attr = _vram_occupancy_attribution()
+        # already computes for the heartbeat (gathered ONCE into the
+        # snapshot), and say only what it supports.
         _unattr = _attr.get("vram_unattributed_bytes")
         _attributed = _attr.get("vram_attributed_bytes")
         if subject_held:
@@ -11478,34 +11574,29 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                 f"{model_key} is already resident with ~{_human_bytes(subject_held)} "
                 f"(pid-attributed, already credited against its own need above), "
                 f"and the subject is never evicted to make room for itself; "
-                f"~{_human_bytes(occupied)} of the card is in use")
+                f"{_occupancy_clause()}")
         elif _unattr:
             holders.append(
-                f"no evictable resident is attributable to a model, and "
-                f"~{_human_bytes(_unattr)} of the ~{_human_bytes(occupied)} in use "
-                f"is measured UNATTRIBUTED — GPU memory is held by process(es) "
-                f"this worker cannot map to a model_key (orphaned/adopted child "
-                f"or out-of-band process)")
+                f"no evictable resident is attributable to a model; "
+                f"{_occupancy_clause()} — the foreign share is held by "
+                f"process(es) this worker cannot map to a model_key "
+                f"(orphaned/adopted child or out-of-band process)")
         elif _unattr is None:
             holders.append(
-                f"no evictable resident is attributable to a model and "
-                f"~{_human_bytes(occupied)} of the card is in use; VRAM "
-                f"attribution is UNMEASURABLE on this box, so the holder cannot "
-                f"be named (degrade-not-guess)")
+                f"no evictable resident is attributable to a model; "
+                f"{_occupancy_clause()}; VRAM attribution is UNMEASURABLE on "
+                f"this box, so the holder cannot be named (degrade-not-guess)")
         elif not _attributed:
             holders.append(
                 f"no evictable resident is attributable to a model, yet "
-                f"~{_human_bytes(occupied)} of the card is in use — GPU memory is "
-                "held by process(es) this worker cannot map to a model_key "
-                "(orphaned/adopted child or out-of-band process)")
+                f"{_occupancy_clause()} — GPU memory is held by process(es) "
+                "this worker cannot map to a model_key (orphaned/adopted child "
+                "or out-of-band process)")
         else:
             holders.append(
-                f"no evictable resident is attributable to a model, but the "
-                f"~{_human_bytes(occupied)} in use IS attributed to this worker "
-                f"(~{_human_bytes(_attributed)} across its model rows and its own "
-                f"CUDA context) with 0 B measured unattributed — nothing foreign "
-                f"is squatting the card, there is simply nothing evictable left")
-    _ext_floor = int(snap.external_floor_bytes or 0)
+                f"no evictable resident is attributable to a model; "
+                f"{_occupancy_clause()}; nothing foreign is squatting the card, "
+                f"there is simply nothing evictable left")
     # BASIS-NAMING: when an offload plan GOVERNED this load, the header's
     # "needs" is the dense full-model figure — say so and quote the plan's floor.
     _pd = dict(partial or {})
@@ -11527,8 +11618,8 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                f"credited -> {_human_bytes(fv_eff)} available to it) "
                if subject_held else "")
             + f"({_human_bytes(reserve)} ceiling reserve"
-            + (f" + {_human_bytes(_ext_floor)} already held back from the free "
-               f"figure for out-of-band GPU consumers" if _ext_floor else "")
+            + (f" + {_human_bytes(_ext_floor)} held back from the free figure "
+               f"by HUGPY_VRAM_RESERVE_GIB" if _ext_floor else "")
             + "); "
             f"evicted {len(evicted)} idle resident(s) freeing "
             f"{_human_bytes(freed)}"
@@ -11552,6 +11643,14 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         "external_floor_bytes": _ext_floor,
         "free_vram_device_bytes": (None if fv is None else int(fv) + _ext_floor),
         "fit_budget_bytes": (None if fv_eff is None else max(0, int(fv_eff) - reserve)),
+        # THE ONE PICTURE (2026-09-29): device in-use = total - device free,
+        # and what attribution could NOT place (driver reserve / display /
+        # allocator cache) — None when attribution is unmeasurable.
+        "device_in_use_bytes": _occupied,
+        "vram_unaccounted_bytes": _unaccounted,
+        # The weights term's own breakdown (the x1.15 prior on the file size).
+        "needs_weights_file_bytes": _det.get("weights_file_bytes"),
+        "needs_weights_headroom": _det.get("weights_headroom"),
         "evicted": evicted,
         "evicted_freed_bytes": freed,
         "evict_failed": evict_failed,

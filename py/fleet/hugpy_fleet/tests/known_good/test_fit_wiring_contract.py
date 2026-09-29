@@ -437,3 +437,70 @@ def test_s3_shape_plain_key_is_a_new_admission_never_served_by_the_distill_resid
     rig.lru.update({"Qwen3.8-9B": 100.0})
     verdict = A._vram_evict_to_fit(_State(), "Qwen3.8-9B-GGUF")
     assert verdict["evicted"] == [] and rig.evicted == [] and "Qwen3.8-9B" in rig.residents
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-29: ONE measured picture — the refusal prices and reports the device
+# ---------------------------------------------------------------------------
+def test_refusal_reports_device_occupancy_composition_and_the_weights_prior(rig, monkeypatch):
+    """LIVE CASE (ae-worker 2026-09-29, RTX 3090, cudaMemGetInfo total 23.6 GiB):
+    a 20.1 GiB transformers file was refused "needs 23.1 GB, 21.3 GB free of
+    23.6 GB (0 B ceiling reserve + 1.0 GB already held back ... for out-of-band
+    GPU consumers) ... the ~2.3 GB in use IS attributed to this worker (~768.0 MB
+    ...) with 0 B measured unattributed". Three defects, one sentence: the
+    1.0 GB was a fixed hold-back (not a holder) counted as "in use"; the 21.3
+    was the budgetable figure, not the device's 22.3; and 2.3 - 0.768 - 0 left
+    1.5 GB unexplained. INVARIANT, on the default box (HUGPY_VRAM_RESERVE_GIB
+    unset -> 0): the quoted free IS the device read; "in use" is total - device
+    free; the composition is named term by term (attributed / measured
+    unattributed / in no compute process); no hold-back is claimed; and the
+    need names its x1.15 weights prior — the whole ~3.0 GB between the file and
+    the need. The wire carries every figure the sentence uses. Established:
+    2026-09-29 (double-count + honest-figures fix)."""
+    MIB = 1 << 20
+    total, dev_free = int(23.6 * GIB), int(22.3 * GIB)
+    wfile = int(20.1 * GIB)
+    weights = int(wfile * A._WEIGHTS_HEADROOM)
+    rig.card["total"] = total
+    rig.card["free"] = dev_free                   # floor 0: budgetable == device
+    rig.card["need"] = weights
+    monkeypatch.setattr(A, "_incoming_need_detail",
+                        lambda mk: {"total": weights, "weights": weights, "kv": 0,
+                                    "weights_file_bytes": wfile,
+                                    "weights_headroom": A._WEIGHTS_HEADROOM,
+                                    "ctx_pct": None, "ctx_resolved": None,
+                                    "ctx_max": None, "geometry_source": None})
+    monkeypatch.setattr(A, "_vram_occupancy_attribution",
+                        lambda: {"vram_attributed_bytes": 768 * MIB,
+                                 "vram_unattributed_bytes": 0})
+    verdict = A._vram_evict_to_fit(_State(), "big-transformers")
+    assert verdict["action"] == "refuse" and verdict["evicted"] == []
+    r = verdict["reason"]
+    msg = r["reason"]
+    occupied = total - dev_free                             # 1.3 GiB, the device's
+    unaccounted = occupied - 768 * MIB                      # in no compute process
+    # the figures on the wire
+    assert r["external_floor_bytes"] == 0
+    assert r["free_vram_bytes"] == dev_free
+    assert r["free_vram_device_bytes"] == dev_free
+    assert r["ceiling_reserve_bytes"] == A._vram_ceiling_reserve_bytes(total) == 512 * MIB
+    assert r["fit_budget_bytes"] == dev_free - 512 * MIB
+    assert r["needs_bytes"] == weights
+    assert r["needs_weights_file_bytes"] == wfile
+    assert r["needs_weights_headroom"] == A._WEIGHTS_HEADROOM
+    assert r["device_in_use_bytes"] == occupied
+    assert r["vram_attributed_bytes"] == 768 * MIB
+    assert r["vram_unattributed_bytes"] == 0
+    assert r["vram_unaccounted_bytes"] == unaccounted
+    assert r["fit_failure"]["kind"] == "vram_fit"
+    assert r["fit_failure"]["need_bytes"] == weights
+    assert r["fit_failure"]["budget_bytes"] == dev_free - 512 * MIB
+    # the sentence
+    hb = A._human_bytes
+    assert f"needs {hb(weights)} = {hb(weights)} weights ({hb(wfile)} on disk x 1.15 weights headroom)" in msg
+    assert f"{hb(dev_free)} free of {hb(total)}" in msg
+    assert "held back from the free figure" not in msg      # nothing is
+    assert f"~{hb(occupied)} of the device is in use = ~{hb(768 * MIB)} attributed to this worker" in msg
+    assert f"~{hb(0)} measured UNATTRIBUTED" in msg
+    assert f"~{hb(unaccounted)} in no compute process" in msg
+    assert "nothing evictable left" in msg

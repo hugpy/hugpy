@@ -165,7 +165,13 @@ def test_worker_selector_disabled_by_env():
 def test_worker_selector_uses_free_vram_budget():
     d = _mkgguf(SIZES)
     orig_fv = A._free_vram_bytes
+    orig_reserve = A._vram_ceiling_reserve_bytes
     try:
+        # A synthetic 8000-byte card: the selector is under test, not the
+        # admission reserve. Since 2026-09-29 the default reserve is the full
+        # 512 MiB compute cushion (no external floor to un-stack against), and
+        # this box's REAL total would price it against these toy sizes.
+        A._vram_ceiling_reserve_bytes = lambda total: 0
         A._free_vram_bytes = lambda: 8000        # admits q6_k, not q8_0
         pick = A._autofit_gguf_pick("fit-c", d, {"framework": "gguf"})
         assert pick == "m.i1-Q6_K.gguf", pick
@@ -173,6 +179,7 @@ def test_worker_selector_uses_free_vram_budget():
         assert A._autofit_gguf_pick("fit-c", d, {"framework": "gguf"}) is None
     finally:
         A._free_vram_bytes = orig_fv
+        A._vram_ceiling_reserve_bytes = orig_reserve
 
 
 # --------------------------------------------------------------------------- #
