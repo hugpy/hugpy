@@ -2301,7 +2301,8 @@ def fit_failure_of(load_failure: Optional[dict]) -> Optional[dict]:
     if isinstance(ff, dict):
         out.update({k: ff.get(k) for k in (
             "kind", "code", "need_bytes", "budget_bytes", "plan_n_cpu_moe",
-            "contract_n_cpu_moe", "permanent", "state_dependent") if ff.get(k) is not None})
+            "contract_n_cpu_moe", "permanent", "state_dependent",
+            "ctx_effective", "kv_bytes", "ctx_pct") if ff.get(k) is not None})
     if isinstance(ref, dict):
         for k in ("external_floor_bytes", "free_vram_device_bytes", "free_vram_bytes",
                   "fit_budget_bytes", "total_vram_bytes", "ceiling_reserve_bytes",

@@ -595,3 +595,174 @@ def test_refusal_names_kv_at_the_effective_ctx(rig, monkeypatch):
     r = A._vram_evict_to_fit(_State(), "m")["reason"]
     assert f"KV {hb(kv)} at ctx 262,144 (loader default)" in r["reason"]
     assert r["fit_failure"]["ctx_effective"] == 262144 and r["fit_failure"]["ctx_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-29 (S3b): ONE effective ctx per admission — dispatch == seat
+# ---------------------------------------------------------------------------
+_REAL_NEED_DETAIL = A._incoming_need_detail          # captured before any rig stubs it
+PER_TOK = 2 * 36 * 8 * 128 * 2                        # 36 layers / 8 kv heads / 128 head_dim, fp16
+
+
+@pytest.fixture
+def ctx_admission(rig, monkeypatch):
+    """The rig with the REAL need detail: a GGUF (framework via config), known
+    geometry, headroomed weights, and a served_ctx_for_fit fake that records
+    the free figure it was priced against and returns the fit bound exactly
+    as spill does: (free - weights - 512 MiB) // per_tok, rounded down to
+    1024, capped at the trained ctx. A call WITHOUT a free figure (a live
+    re-resolve) returns the trained max and is counted separately."""
+    spill = importlib.import_module("hugpy_engine.spill")
+    cfgmod = importlib.import_module("hugpy_engine.config.main")
+    MIB = 1 << 20
+    cells = {"pct": None, "raw": int(4.5 * GIB), "calls": [], "unhinted": 0}
+    monkeypatch.setattr(A, "_incoming_need_detail", _REAL_NEED_DETAIL)
+    monkeypatch.setattr(A, "_incoming_need_bytes", lambda mk: int(cells["raw"] * A._WEIGHTS_HEADROOM))
+    monkeypatch.setattr(A, "_calib_correction", lambda mk: None)
+    monkeypatch.setattr(A, "_moe_plan_for", lambda mk: None)
+    monkeypatch.setattr(A, "_ctx_pct", lambda mk: cells["pct"])
+    monkeypatch.setattr(A, "_model_max_ctx", lambda mk, cfg=None: 262144)
+    monkeypatch.setattr(A, "_model_kv_geometry",
+                        lambda mk, cfg=None: {"n_layers": 36, "n_kv_heads": 8, "head_dim": 128,
+                                              "ctx_train": 262144})
+    # the subject's served quant only: a resident's own KV pricing (flex inputs,
+    # no admission hint) takes the model-max branch and never re-fits the card
+    monkeypatch.setattr(A, "_served_gguf_geometry",
+                        lambda mk: ("/models/m/q4.gguf", 36) if mk == "m" else (None, None))
+    monkeypatch.setattr(cfgmod, "get_model_config",
+                        lambda mk, dict_return=False: {"framework": "gguf", "model_max_length": 262144})
+
+    def fake_served_ctx(path, *, free_vram=None, weights_on_gpu_bytes=None, **kw):
+        if free_vram is None:
+            cells["unhinted"] += 1
+            return 262144
+        cells["calls"].append((free_vram, weights_on_gpu_bytes))
+        w = weights_on_gpu_bytes or cells["raw"]
+        bound = (int(free_vram) - int(w) - 512 * MIB) // PER_TOK
+        return max(4096, min(262144, (bound // 1024) * 1024))
+    monkeypatch.setattr(spill, "served_ctx_for_fit", fake_served_ctx)
+    A._ADMISSION_TICKETS.clear()
+    return cells
+
+
+def _expected_bound(free_hint, weights, reserve):
+    MIB = 1 << 20
+    b = (free_hint - reserve - weights - 512 * MIB) // PER_TOK
+    return (b // 1024) * 1024
+
+
+def test_one_effective_ctx_per_admission_dispatch_equals_seat(ctx_admission, rig):
+    """INVARIANT (S3b, 2026-09-29): an admission resolves the effective ctx
+    ONCE, against the room it can REACH (free + evictable + own seat, less the
+    ceiling reserve) in its own basis (headroomed weights), records it on the
+    ticket, and the seat's resolver (serve._ctx_for -> the child's -c) and the
+    slot ceiling gate read THAT value — never a re-resolve on the emptied
+    card. Holds for ctx_pct unset (loader default), a pct the fit clamps, and
+    a pct within the fit. And a model that fits whole-seat at its effective
+    ctx is admitted whole: evicted, no partial, ceiling gate green at the
+    same ctx. LIVE CASE: 4B priced at 27648 by dispatch, re-priced 129024 by
+    the seat -> partial 24/36, 25 tok/s (post4: whole seat, 138 tok/s).
+    Established: 2026-09-29."""
+    cells = ctx_admission
+    weights = int(cells["raw"] * A._WEIGHTS_HEADROOM)
+    reserve = A._vram_ceiling_reserve_bytes(24 * GIB)
+    for pct, label in ((None, "unset -> loader default"), (100, "pct clamped by the fit"),
+                       (5, "pct within the fit")):
+        cells["pct"] = pct
+        cells["calls"].clear(); cells["unhinted"] = 0
+        A._ADMISSION_TICKETS.clear()
+        rig.card["total"] = 24 * GIB
+        rig.card["free"] = 1 * GIB                             # a full card
+        rig.residents.clear(); rig.residents["squatter"] = 20 * GIB
+        rig.lru.clear(); rig.lru["squatter"] = 100.0
+        rig.evicted.clear()
+        free_hint = 1 * GIB + 20 * GIB                         # free + what it may evict
+        bound = _expected_bound(free_hint, weights, reserve)
+        expect = bound if pct is None else min(bound, int(262144 * pct / 100))
+        v = A._vram_evict_to_fit(_State(), "m")
+        assert v["action"] == "evicted" and v["evicted"] == ["squatter"], (label, v.get("reason"))
+        assert v["ctx_effective"] == expect, (label, v["ctx_effective"], expect)
+        # the ctx was priced against the REACHABLE room in the admission's basis
+        assert cells["calls"] and cells["calls"][0] == (free_hint - reserve, weights), label
+        assert cells["unhinted"] == 0, label
+        n_calls = len(cells["calls"])
+        # the seat reads the ticket: same ctx, no re-resolve
+        assert A._seat_ctx_resolver("m") == expect, label
+        assert A._effective_ctx("m", {"framework": "gguf"})["source"] == "ticket"
+        assert len(cells["calls"]) == n_calls and cells["unhinted"] == 0, label
+        # whole seat: the need at that ctx fits the emptied card under the gate
+        det = A._incoming_need_detail("m")
+        assert det["ctx_effective"] == expect and det["kv"] == expect * PER_TOK
+        assert rig.card["free"] == 21 * GIB
+        assert det["total"] <= rig.card["free"] - reserve, label
+        assert A._worker_slot_fit_check("m") is True, label
+        assert v.get("n_gpu_layers") is None and v["action"] != "partial", label
+    # a NEW admission drops the old ticket and re-resolves
+    A._ADMISSION_TICKETS["m"] = {"ts": 0.0, "verdict": {"ctx_effective": 4096}}   # stale (expired)
+    assert A._effective_ctx("m", {"framework": "gguf"})["source"] != "ticket"
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-29 (S5): the REAL worker -> central -> /v1 mapping keeps the structure
+# ---------------------------------------------------------------------------
+def test_live_refusal_envelope_carries_type_and_fit_failure_through_the_real_path(rig, monkeypatch):
+    """INVARIANT (S5): a worker refusal produced by the REAL admission, wrapped
+    the way the worker's stream wraps it (LoadRefusal -> _with_load_failure ->
+    the SSE error dict), parsed by central's _event_from_worker_line, raised
+    as _LoadFailed and yielded as the hold loop's ErrorEvent, RE-WRAPPED by
+    execute_chat_stream (the drop site: it rebuilt the event from `message`
+    alone) and rendered by v1's _openai_error(cause=...) reaches the client
+    as error.type = "vram_fit" with error.fit_failure carrying kind / code /
+    need_bytes / budget_bytes / blocked_by / ctx_effective / kv_bytes and
+    the prose unchanged. LIVE: post5 S5 returned type api_error with no
+    fit_failure although the worker logged kind=vram_fit. Established:
+    2026-09-29."""
+    import json
+    flask = pytest.importorskip("flask")
+    V1 = importlib.import_module("hugpy_server.app.routes.v1_routes")
+    remote = importlib.import_module("hugpy_engine.resolvers.remote")
+    ES = importlib.import_module("hugpy_engine.schemas.event_schemas")
+    MIB = 1 << 20
+    weights, kv = int(9.1 * GIB * 1.15), 144 * MIB
+    rig.card["total"] = int(23.6 * GIB)
+    rig.card["free"] = int(343.1 * MIB)
+    rig.card["need"] = weights + kv
+    rig.residents["Qwen3.8_4B_Distilled_GGUF"] = 21 * GIB
+    monkeypatch.setattr(A, "_residency", lambda mk: "static" if mk.startswith("Qwen3.8_4B") else "on-demand")
+    monkeypatch.setattr(A, "_incoming_need_detail", lambda mk: {
+        "total": weights + kv, "weights": weights, "kv": kv, "ctx_pct": None,
+        "ctx_resolved": 4096, "ctx_effective": 4096, "ctx_source": "loader-default",
+        "ctx_max": 40960, "geometry_source": "geometry", "kv_bytes": kv,
+        "weights_file_bytes": int(9.1 * GIB), "weights_headroom": 1.15})
+    verdict = A._vram_evict_to_fit(_State(), "Qwen3.8-9B-Distill-GGUF")
+    assert verdict["action"] == "refuse"
+    # worker: the refusal leaves the stream exactly as _stream_sync ships it
+    exc = D.LoadRefusal(verdict["reason"])
+    frame = A._with_load_failure({"type": "error", "message": f"{type(exc).__name__}: {exc}"}, exc)
+    d = json.loads(json.dumps(frame))                     # the SSE wire
+    assert d["load_failure"]["class"] == "vram_fit"
+    # central: parse -> hold loop's terminal error -> execute_chat_stream re-wrap
+    ev = remote._event_from_worker_line(d, "r1")
+    lf = remote._LoadFailed(remote._humanize_worker_error("ae-worker", ev.message),
+                            load_failure=ev.load_failure, code=ev.code)
+    hold_ev = ES.ErrorEvent(request_id="r1", message=lf.message,
+                            load_failure=lf.load_failure, code=lf.code)
+    out_ev = D._rewrap_error_event(hold_ev, "r1")
+    assert out_ev.load_failure and out_ev.load_failure["class"] == "vram_fit"
+    # /v1: the envelope the client sees
+    app = flask.Flask(__name__)
+    with app.test_request_context("/v1/chat/completions"):
+        resp = V1._openai_error(out_ev.message, 500, "api_error", cause=out_ev)
+    body = resp[0].get_json()
+    err = body["error"]
+    assert err["type"] == "vram_fit" and err["code"] == 500
+    assert err["message"].startswith("The 'ae-worker' worker could not complete this request: LoadRefusal: won't fit on GPU")
+    assert "KV 144.0 MB at ctx 4,096 (loader default)" in err["message"]
+    ff = err["fit_failure"]
+    assert ff["kind"] == "vram_fit" and ff["code"] == "wont_fit"
+    assert ff["need_bytes"] == weights + kv
+    assert ff["budget_bytes"] == verdict["reason"]["fit_budget_bytes"]
+    assert ff["blocked_by"] == ["Qwen3.8_4B_Distilled_GGUF"]
+    assert ff["ctx_effective"] == 4096 and ff["kv_bytes"] == kv
+    assert ff["external_floor_bytes"] == 0
+    assert err["load_failure"]["fit_failure"]["ctx_effective"] == 4096

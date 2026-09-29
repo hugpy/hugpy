@@ -697,7 +697,25 @@ async def stream_runner(runner, req, cancel_event=None):
                         timings=getattr(result, "timings", None))
     else:
         yield ErrorEvent(request_id=req.request_id,
-                         message=getattr(result, "error", None) or "run failed")
+                         message=getattr(result, "error", None) or "run failed",
+                         load_failure=(getattr(result, "load_failure", None)
+                                       if isinstance(getattr(result, "load_failure", None), dict)
+                                       else None))
+
+
+def _rewrap_error_event(event, rid):
+    """The ONE re-wrap of an inner ErrorEvent under the outer request id
+    (S5, 2026-09-29). It used to rebuild the event from ``message`` alone, so
+    the worker's structured ``load_failure`` (class + fit_failure + refusal —
+    F3) and ``code`` were dropped HERE, on central, between the relay and the
+    /v1 envelope: the client saw ``type: api_error`` with no ``fit_failure``
+    although the worker had logged kind=vram_fit. Carry both."""
+    return ErrorEvent(request_id=rid,
+                      message=getattr(event, "message", None) or "run failed",
+                      load_failure=(getattr(event, "load_failure", None)
+                                    if isinstance(getattr(event, "load_failure", None), dict)
+                                    else None),
+                      code=(str(getattr(event, "code")) if getattr(event, "code", None) else None))
 
 
 async def execute_prompt_stream(*args, cancel_event=None, **kwargs):
@@ -948,8 +966,7 @@ async def execute_chat_stream(*args, cancel_event=None, **kwargs):
                                         output_chunks=1, finish_reason="stop",
                                         usage=usage_totals, timings=timings_last)
                     else:
-                        yield ErrorEvent(request_id=rid,
-                                         message=getattr(event, "message", None) or "run failed")
+                        yield _rewrap_error_event(event, rid)
                     errored = True
                     break
                 else:

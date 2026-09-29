@@ -7655,7 +7655,27 @@ def _moe_plan_for(model_key: str) -> "dict | None":
         return None
 
 
-def _resolved_ctx(model_key: str, cfg: dict | None = None) -> "tuple[int | None, int | None, int | None]":
+def _ctx_fit_bound(ppath: str, *, free_hint: "int | None" = None,
+                   weights_bytes: "int | None" = None,
+                   reserve_bytes: "int | None" = None) -> "int | None":
+    """The largest ctx the VRAM fit allows for ``ppath`` (spill.served_ctx_for_fit)
+    priced in the ADMISSION's basis (S3b, 2026-09-29): ``free_hint`` is the
+    room the admission can reach (free + what it may evict + the subject's own
+    seat), less the ceiling reserve; ``weights_bytes`` is the headroomed weights
+    term the need carries. With no hint the live free read and spill's own
+    weights estimate apply (the seat's pre-ticket behaviour)."""
+    from hugpy_engine import spill
+    fv = None
+    if free_hint is not None:
+        fv = max(0, int(free_hint) - int(reserve_bytes or 0))
+    return spill.served_ctx_for_fit(ppath, free_vram=fv,
+                                    weights_on_gpu_bytes=(int(weights_bytes)
+                                                          if weights_bytes else None))
+
+
+def _resolved_ctx(model_key: str, cfg: dict | None = None, *,
+                  free_hint: "int | None" = None, weights_bytes: "int | None" = None,
+                  reserve_bytes: "int | None" = None) -> "tuple[int | None, int | None, int | None]":
     """Resolve the ctx to plan/serve for this model: (ctx_resolved, pct, max).
 
     ctx_resolved = pct% × model_max (pct of the NATIVE context) — a per-model
@@ -7682,7 +7702,8 @@ def _resolved_ctx(model_key: str, cfg: dict | None = None) -> "tuple[int | None,
             except Exception:  # noqa: BLE001
                 ppath = None
             if ppath:
-                fit = spill.served_ctx_for_fit(ppath)
+                fit = _ctx_fit_bound(ppath, free_hint=free_hint,
+                                     weights_bytes=weights_bytes, reserve_bytes=reserve_bytes)
                 if fit:
                     ctx = min(ctx, int(fit))
         except Exception:  # noqa: BLE001 — a fit probe never breaks resolution
@@ -7725,8 +7746,20 @@ def _model_kv_geometry(model_key: str, cfg: dict | None = None) -> dict:
     return {}
 
 
-def _effective_ctx(model_key: str, cfg: dict | None = None) -> dict:
+def _effective_ctx(model_key: str, cfg: dict | None = None, *,
+                   free_hint: "int | None" = None, weights_bytes: "int | None" = None,
+                   reserve_bytes: "int | None" = None) -> dict:
     """THE context the fit prices KV at (operator, 2026-09-29: never zero).
+
+    ONE EFFECTIVE CTX PER ADMISSION (S3b): the admission resolves it ONCE —
+    against the room it can reach after its evictions (``free_hint``), in its
+    own need basis (``weights_bytes`` x headroom, ``reserve_bytes``) — records
+    it on the admission TICKET, and every later read for the same load (the
+    slot ceiling gate, ``serve._ctx_for`` -> the child's ``-c``) returns the
+    ticket's value instead of re-resolving against a card whose free figure
+    the evictions just changed. The live defect: dispatch priced the 4B at
+    27648 (a full card), the seat re-resolved 129024 on the emptied card and
+    landed a 24/36 partial at 25 tok/s where the whole seat ran 138.
 
     ``{"ctx", "pct", "max", "source"}``. The rule mirrors what the loader will
     ACTUALLY run with (serve._ctx_for, the single source of truth for the
@@ -7749,17 +7782,22 @@ def _effective_ctx(model_key: str, cfg: dict | None = None) -> dict:
     n_ctx 262144 — the whole KV cache was missing from the need and the
     failure moved to load time."""
     from hugpy_engine.config.main import get_model_config
+    ticket = _fresh_admission_ticket(model_key)
+    if isinstance(ticket, dict) and ticket.get("ctx_effective"):
+        return {"ctx": int(ticket["ctx_effective"]), "pct": ticket.get("ctx_pct"),
+                "max": ticket.get("ctx_max"), "source": "ticket"}
     cfg = cfg if cfg is not None else get_model_config(model_key, dict_return=True)
-    ctx, pct, mx = _resolved_ctx(model_key, cfg)
+    ctx, pct, mx = _resolved_ctx(model_key, cfg, free_hint=free_hint,
+                                 weights_bytes=weights_bytes, reserve_bytes=reserve_bytes)
     if ctx:
         return {"ctx": int(ctx), "pct": pct, "max": mx, "source": "ctx_pct"}
     framework = str((cfg or {}).get("framework") or "").lower()
     if framework in ("gguf", "llama_cpp"):
         try:
-            from hugpy_engine import spill
             ppath, _tl = _served_gguf_geometry(model_key)
             if ppath:
-                fit = spill.served_ctx_for_fit(ppath)
+                fit = _ctx_fit_bound(ppath, free_hint=free_hint,
+                                     weights_bytes=weights_bytes, reserve_bytes=reserve_bytes)
                 if fit:
                     return {"ctx": int(fit), "pct": None, "max": mx,
                             "source": "loader-default"}
@@ -7775,7 +7813,9 @@ def _effective_ctx(model_key: str, cfg: dict | None = None) -> dict:
     return {"ctx": max(1, floor), "pct": None, "max": None, "source": "floor"}
 
 
-def _kv_need_bytes(model_key: str, cfg: dict | None = None) -> "tuple[int, dict]":
+def _kv_need_bytes(model_key: str, cfg: dict | None = None, *,
+                   free_hint: "int | None" = None, weights_bytes: "int | None" = None,
+                   reserve_bytes: "int | None" = None) -> "tuple[int, dict]":
     """KV-cache bytes for this model at its EFFECTIVE ctx (``_effective_ctx``),
     plus a detail dict for honest reporting. NEVER (0, ...) for a real model
     (operator, 2026-09-29): an unset ctx_pct prices the context the loader
@@ -7784,7 +7824,8 @@ def _kv_need_bytes(model_key: str, cfg: dict | None = None) -> "tuple[int, dict]
     consumers (== the effective ctx); ``ctx_effective``/``ctx_source`` name it."""
     from hugpy_engine.config.main import get_model_config
     cfg = cfg if cfg is not None else get_model_config(model_key, dict_return=True)
-    eff = _effective_ctx(model_key, cfg)
+    eff = _effective_ctx(model_key, cfg, free_hint=free_hint,
+                         weights_bytes=weights_bytes, reserve_bytes=reserve_bytes)
     ctx, pct, mx = eff["ctx"], eff["pct"], eff["max"]
     from hugpy_engine import spill
     geo = _model_kv_geometry(model_key, cfg)
@@ -7807,7 +7848,29 @@ def _kv_need_bytes(model_key: str, cfg: dict | None = None) -> "tuple[int, dict]
                           "geometry_source": source, "kv_bytes": int(kv or 0)}
 
 
-def _incoming_need_detail(model_key: str) -> dict:
+def _call_with_basis(fn, *args, **basis):
+    """Call a pricing seam with the admission's ctx basis (free_hint /
+    weights_bytes / reserve_bytes) only when the callable takes it: every rig
+    in the tree stubs these seams as positional-only lambdas (``lambda mk:
+    {...}``, ``lambda mk, cfg=None: (kv, det)``), and a stub is a STATED
+    figure — it has no ctx to resolve."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if any(k in params for k in basis) or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(*args, **basis)
+    return fn(*args)
+
+
+def _need_detail_with_hint(model_key: str, **basis) -> dict:
+    return _call_with_basis(_incoming_need_detail, model_key, **basis)
+
+
+def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
+                          reserve_bytes: "int | None" = None) -> dict:
     """THE authoritative fit-NEED for a model: weights + KV(resolved ctx), with
     the SPLIT for honest reporting. All fit paths (contention, slot ceiling,
     vision-fit, slice-10 admission) compute need through this so no path diverges.
@@ -7823,7 +7886,8 @@ def _incoming_need_detail(model_key: str) -> dict:
                 "ctx_pct": None, "ctx_resolved": None, "ctx_max": None,
                 "geometry_source": None}
     try:
-        kv, det = _kv_need_bytes(model_key)
+        kv, det = _call_with_basis(_kv_need_bytes, model_key, free_hint=free_hint,
+                                   weights_bytes=int(weights), reserve_bytes=reserve_bytes)
     except Exception:  # noqa: BLE001 — KV is additive; never break a working fit
         kv, det = 0, {"ctx_pct": None, "ctx_resolved": None, "ctx_max": None,
                       "geometry_source": None}
@@ -11098,10 +11162,27 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     if not total:
         return {"action": "proceed", "evicted": [], "freed_bytes": 0,
                 "reason": None, "note": "no GPU / unmeasurable — gate is a no-op"}
-    # NEED = weights + KV(resolved ctx) (slice 11). An explicit caller-passed
+    # NEED = weights + KV(effective ctx) (slice 11). An explicit caller-passed
     # `need` (a test / a pre-computed total) wins; otherwise the authoritative
     # detail. The split is carried for an honest refusal.
-    _det = _incoming_need_detail(model_key)
+    # ONE EFFECTIVE CTX PER ADMISSION (S3b, 2026-09-29): a NEW admission drops
+    # any earlier ticket and resolves the ctx against the room it can REACH —
+    # free now + what it may evict (nothing, under a polite load) + the
+    # subject's own seat — in its own basis (headroomed weights, ceiling
+    # reserve). The verdict's ticket then carries that ctx to the seat.
+    _ADMISSION_TICKETS.pop(model_key, None)
+    _free_hint = None
+    try:
+        _fv0 = _free_vram_bytes()
+        if _fv0 is not None:
+            _free_hint = int(_fv0) + int(_subject_resident_vram_bytes(state, model_key) or 0)
+            if not polite:
+                _cands0, _ = _partition_residents(state, model_key)
+                _free_hint += sum(int(r.get("vram_bytes") or 0) for r in _cands0)
+    except Exception:  # noqa: BLE001 — no hint -> the live read, as before
+        _free_hint = None
+    _det = _need_detail_with_hint(model_key, free_hint=_free_hint,
+                                  reserve_bytes=_vram_ceiling_reserve_bytes(total))
     if need is None:
         need = _det.get("total")
     if not need:
@@ -11168,6 +11249,12 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     # ── EXECUTE (the only impure part) ──────────────────────────────────────
     verdict = _execute_fit_plan(state, model_key, plan, request, snap, policy,
                                 cand_rows, prot_rows)
+    # The ticket carries THE ctx this admission priced (S3b): the seat's
+    # resolver and the slot ceiling gate read it back instead of re-resolving.
+    if isinstance(verdict, dict) and _det.get("ctx_effective"):
+        verdict.setdefault("ctx_effective", int(_det["ctx_effective"]))
+        verdict.setdefault("ctx_pct", _det.get("ctx_pct"))
+        verdict.setdefault("ctx_max", _det.get("ctx_max"))
     _ADMISSION_TICKETS[model_key] = {"ts": time.time(), "verdict": verdict}
     return verdict
 
@@ -11184,6 +11271,23 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
 # passes (the eviction-aware size-up already ran). Anything else re-plans.
 _ADMISSION_TICKETS: "dict[str, dict]" = {}
 _ADMISSION_TICKET_TTL_S = 60.0
+
+
+def _seat_ctx_resolver(model_key: str, cfg=None) -> "int | None":
+    """serve._ctx_for's resolver (the child's ``-c``): THE effective ctx —
+    the admission ticket's value when a fresh one exists (S3b: one ctx per
+    admission, never re-resolved on the emptied card), else the same rule the
+    admission would apply (``_effective_ctx``)."""
+    _cfg = None
+    try:
+        from hugpy_engine.config.main import get_model_config
+        _cfg = get_model_config(model_key, dict_return=True)
+    except Exception:  # noqa: BLE001
+        _cfg = None
+    try:
+        return int(_effective_ctx(model_key, _cfg)["ctx"]) or None
+    except Exception:  # noqa: BLE001 — a broken resolver never breaks serving
+        return None
 
 
 def _fresh_admission_ticket(model_key: str) -> "dict | None":
@@ -14229,16 +14333,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from hugpy_engine.serve.serve import set_ctx_resolver
 
-        def _ctx_resolver(mk, cfg=None):
-            _cfg = None
-            try:
-                from hugpy_engine.config.main import get_model_config
-                _cfg = get_model_config(mk, dict_return=True)
-            except Exception:  # noqa: BLE001
-                _cfg = None
-            ctx, _pct, _mx = _resolved_ctx(mk, _cfg)
-            return ctx
-        set_ctx_resolver(_ctx_resolver)
+        set_ctx_resolver(_seat_ctx_resolver)
     except Exception as _exc:  # noqa: BLE001
         logger.warning("ctx resolver not registered: %s", _exc)
 
