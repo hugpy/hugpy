@@ -10655,7 +10655,25 @@ def _fit_policy(total: "int | None"):
         least_reaping=_evict_least_reaping(),
         alloc_mode=_amode(), leniency_pct=_lenpct(), priority_device=_pdev(),
         gpu_target_bytes=_gib_bytes(os.environ.get("HUGPY_GPU_MEM_GIB")),
-        ram_target_bytes=_gib_bytes(os.environ.get("HUGPY_CPU_MEM_GIB")))
+        ram_target_bytes=_gib_bytes(os.environ.get("HUGPY_CPU_MEM_GIB")),
+        ctx_cap_on_evict_pct=_ctx_cap_on_evict_pct())
+
+
+# step 2 (F7): the ctx-cap-before-evict PROPOSAL knob. DEFAULT OFF. An integer
+# percent 1..100 turns it on; anything else (unset, garbage, out of range) is
+# off — a policy lever is never guessed from a malformed value.
+_ENV_CTX_CAP_ON_EVICT = "HUGPY_CTX_CAP_ON_EVICT_PCT"
+
+
+def _ctx_cap_on_evict_pct() -> "int | None":
+    raw = (os.environ.get(_ENV_CTX_CAP_ON_EVICT) or "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return v if 1 <= v <= 100 else None
 
 
 def _fit_moe_budget(model_key: str, ppath: "str | None",
@@ -10875,19 +10893,30 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     # resident had filled). `free` is the BUDGETABLE figure (floor already
     # out); `device_free` puts the floor back so the two bases are visible.
     _fl = plan.failure
+    # step 2 (F7): the weights-vs-KV split is on the line (at max ctx the KV
+    # term dwarfs the weights — 4B -> 21.2 GB seat), and the victims / the
+    # protected rows are NAMED, not just counted (F6d).
+    _split = dict((plan.need_detail or {}).get("need_split") or {})
     logger.info(
         "plan_fit verdict: model=%s action=%s fits_now=%s kind=%s code=%s "
-        "need_bytes=%s free_bytes=%s device_free_bytes=%s free_effective_bytes=%s "
+        "need_bytes=%s weights_bytes=%s kv_bytes=%s kv_share_pct=%s ctx_pct=%s "
+        "ctx_resolved=%s self_ctx_pct=%s partial_kind=%s "
+        "free_bytes=%s device_free_bytes=%s free_effective_bytes=%s "
         "subject_held_bytes=%s ceiling_reserve_bytes=%s external_floor_bytes=%s "
-        "total_bytes=%s evictions=%d protected=%d note=%r",
+        "total_bytes=%s evictions=%d protected=%d evicted_keys=%s protected_keys=%s "
+        "note=%r",
         model_key, plan.action, plan.fits_now,
         (_fl.kind if _fl is not None else None), (_fl.code if _fl is not None else None),
-        plan.need_bytes, snap.free_bytes,
+        plan.need_bytes, _split.get("weights_bytes"), _split.get("kv_bytes"),
+        _split.get("kv_share_pct"), _split.get("ctx_pct"), _split.get("ctx_resolved"),
+        plan.self_ctx_pct, plan.partial_kind,
+        snap.free_bytes,
         (None if snap.free_bytes is None
          else int(snap.free_bytes) + int(snap.external_floor_bytes or 0)),
         plan.free_effective_bytes, plan.subject_held_bytes, plan.ceiling_reserve_bytes,
         int(snap.external_floor_bytes or 0), snap.total_bytes,
-        len(plan.evictions), sum(1 for r in residents if r.protected), plan.note)
+        len(plan.evictions), sum(1 for r in residents if r.protected),
+        plan.evicted_keys, [r.model_key for r in residents if r.protected], plan.note)
     # ── EXECUTE (the only impure part) ──────────────────────────────────────
     return _execute_fit_plan(state, model_key, plan, request, snap, policy,
                              cand_rows, prot_rows)
@@ -11025,6 +11054,21 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                 "reason": None, "note": f"flex: {plan.flex_note}",
                 "flex": dict(plan.flex or {})}
     flex_note = plan.flex_note
+    if plan.action == "partial" and plan.partial_kind == "ctx-cap":
+        # step 2 (F7): the reduced-ctx PROPOSAL. Honoured here exactly like a
+        # flex — the ctx floor is committed above (plan.self_ctx_pct), nothing
+        # is evicted; the served -c and the KV reserved agree at the cap.
+        _cap = dict(plan.partial or {})
+        logger.info("ctx cap for %s: seating at %s%% ctx instead of evicting "
+                    "(%s)", model_key, plan.self_ctx_pct, plan.note)
+        out = {"action": "proceed", "evicted": [], "freed_bytes": 0,
+               "reason": None, "note": plan.note, "ctx_cap": _cap,
+               "self_ctx_pct": plan.self_ctx_pct}
+        if moe_commit is not None:
+            out = _moe_admit_verdict([], 0)
+            out["note"] += f"; {plan.note}"
+            out["ctx_cap"] = _cap
+        return out
 
     # ── stage 2: EVICT — walk the plan, re-prove fit per victim ────────────
     polite_spared = [{"model_key": e.model_key, "vram_bytes": e.vram_bytes,

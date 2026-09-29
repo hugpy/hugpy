@@ -618,3 +618,59 @@ def test_load_refusal_reaches_the_wire_structured_not_as_prose_only():
     except RuntimeError as wrapped:
         chained = LF.load_failure_of(wrapped, classify=True)
     assert chained["class"] == "vram_fit" and chained["fit_failure"]["kind"] == "vram_fit"
+
+
+# ---------------------------------------------------------------------------
+# step 2 (F7): explicit weights-vs-KV split + the ctx-cap-before-evict proposal
+# ---------------------------------------------------------------------------
+def test_need_detail_carries_the_explicit_weights_vs_kv_split():
+    """INVARIANT (step 2, F7): every plan's need_detail["need_split"] states
+    weights_bytes / kv_bytes / kv_share_pct / ctx_pct so a 4B seat priced at
+    max ctx (KV dwarfing the weights) is legible from the plan alone; a
+    self-flex re-prices the split at the flexed ctx. Established: core
+    isolation step 2 (2026-09-29)."""
+    det = {"total": 8 * GIB, "weights": 4 * GIB, "kv": 4 * GIB, "ctx_pct": 100,
+           "ctx_resolved": 262144, "ctx_max": 262144}
+    plan = fit.plan_fit(_req(8 * GIB, detail=det), _snap(2 * GIB),
+                        [_res("cold", 8 * GIB, last_call=100.0)], POLICY)
+    split = plan.need_detail["need_split"]
+    assert split["weights_bytes"] == 4 * GIB and split["kv_bytes"] == 4 * GIB
+    assert split["kv_share_pct"] == 50.0 and split["ctx_pct"] == 100
+    assert split["ctx_resolved"] == 262144 and split["ctx_max"] == 262144
+    assert plan.weights_bytes == 4 * GIB and plan.kv_bytes == 4 * GIB
+    assert fit.need_split(det, 8 * GIB, kv_bytes=1 * GIB, ctx_pct=25)["kv_share_pct"] == 12.5
+
+
+def test_ctx_cap_knob_is_off_by_default_and_proposes_a_reduced_ctx_seat_when_on():
+    """INVARIANT (step 2, F7): with FitPolicy.ctx_cap_on_evict_pct unset the plan
+    is byte-identical to before (the eviction). With the knob set, a subject
+    whose weights + KV@cap fit the free room gets a `partial` of kind
+    `ctx-cap` (self_ctx_pct = cap, need re-priced, NO evictions, the spared
+    residents counted in the note) BEFORE any eviction is planned — a
+    plan-side proposal the executor may ignore. Established: step 2."""
+    det = {"total": 8 * GIB, "weights": 4 * GIB, "kv": 4 * GIB, "ctx_pct": 100,
+           "ctx_resolved": 262144, "ctx_max": 262144}
+    residents = [_res("cold", 8 * GIB, last_call=100.0)]
+    off = fit.plan_fit(_req(8 * GIB, detail=det), _snap(6 * GIB), residents, POLICY)
+    assert off.action == "evict" and off.evicted_keys == ["cold"]
+    assert POLICY.ctx_cap_on_evict_pct is None
+
+    on_policy = dataclasses.replace(POLICY, ctx_cap_on_evict_pct=25)
+    on = fit.plan_fit(_req(8 * GIB, detail=det), _snap(6 * GIB), residents, on_policy)
+    assert on.action == "partial" and on.partial_kind == "ctx-cap"
+    assert on.self_ctx_pct == 25
+    assert on.need_bytes == 5 * GIB                       # 4 GiB weights + KV@25% = 1 GiB
+    assert on.evictions == () and on.predicted_fits is True
+    assert on.partial["admit"] is True and on.partial["kv_bytes"] == 1 * GIB
+    assert on.partial["ctx_pct_target"] == 100 and on.partial["weights_bytes"] == 4 * GIB
+    assert on.need_detail["need_split"]["kv_bytes"] == 1 * GIB
+    assert on.need_detail["need_split"]["ctx_pct"] == 25
+    assert "1 evictable resident(s) spared" in on.note
+    # The cap never widens a ctx: a subject already at/below the cap is unaffected.
+    low = fit.plan_fit(_req(8 * GIB, detail=dict(det, ctx_pct=20)), _snap(6 * GIB),
+                       residents, on_policy)
+    assert low.action == "evict"
+    # When even the capped seat does not fit, the proposal is skipped and the
+    # eviction stands.
+    tight = fit.plan_fit(_req(8 * GIB, detail=det), _snap(3 * GIB), residents, on_policy)
+    assert tight.action == "evict" and tight.evicted_keys == ["cold"]

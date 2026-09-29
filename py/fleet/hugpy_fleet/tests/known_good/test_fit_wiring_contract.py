@@ -275,3 +275,59 @@ def test_tiny_model_against_a_gib_of_budgetable_free_proceeds_and_logs_fits_now(
     for token in ("action=proceed", "fits_now=True", "kind=None", "need_bytes=18874368",
                   "free_bytes=1185284096"):
         assert token in lines[0], (token, lines[0])
+
+
+def test_verdict_line_names_the_split_and_the_victims(rig, monkeypatch, caplog):
+    """INVARIANT (step 2, F7 / F6d): the ONE `plan_fit verdict:` line carries the
+    weights-vs-KV split (weights_bytes / kv_bytes / kv_share_pct / ctx_pct) and
+    NAMES the victims and the protected rows (evicted_keys / protected_keys),
+    not just their counts. Established: core isolation step 2 (2026-09-29)."""
+    import logging
+    monkeypatch.setattr(A, "_incoming_need_detail",
+                        lambda mk: {"total": 8 * GIB, "weights": 4 * GIB, "kv": 4 * GIB,
+                                    "ctx_pct": 100, "ctx_resolved": 262144,
+                                    "ctx_max": 262144, "geometry_source": "gguf"})
+    rig.card["free"] = 2 * GIB
+    rig.residents.update({"cold": 8 * GIB, "locked": 4 * GIB})
+    rig.lru.update({"cold": 100.0, "locked": 900.0})
+    monkeypatch.setattr(A, "_residency", lambda mk: "static" if mk == "locked" else "on-demand")
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        verdict = A._vram_evict_to_fit(_State(), "subject")
+    assert verdict["action"] == "evicted" and verdict["evicted"] == ["cold"]
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan_fit verdict:")]
+    assert len(lines) == 1
+    for token in ("action=evict", f"weights_bytes={4 * GIB}", f"kv_bytes={4 * GIB}",
+                  "kv_share_pct=50.0", "ctx_pct=100", "ctx_resolved=262144",
+                  "evictions=1", "protected=1", "evicted_keys=['cold']",
+                  "protected_keys=['locked']"):
+        assert token in lines[0], (token, lines[0])
+
+
+def test_ctx_cap_knob_reaches_the_policy_and_the_executor_honours_the_proposal(rig, monkeypatch, caplog):
+    """INVARIANT (step 2, F7): HUGPY_CTX_CAP_ON_EVICT_PCT (unset = off) rides into
+    FitPolicy.ctx_cap_on_evict_pct; a `ctx-cap` partial is executed like a flex
+    — the ctx floor is committed for the subject, nothing is evicted, the
+    verdict is a proceed carrying the proposal. Established: step 2."""
+    import logging
+    monkeypatch.setattr(A, "_incoming_need_detail",
+                        lambda mk: {"total": 8 * GIB, "weights": 4 * GIB, "kv": 4 * GIB,
+                                    "ctx_pct": 100, "ctx_resolved": 262144,
+                                    "ctx_max": 262144, "geometry_source": "gguf"})
+    rig.card["free"] = 6 * GIB
+    rig.residents.update({"cold": 8 * GIB})
+    rig.lru.update({"cold": 100.0})
+    assert A._fit_policy(rig.card["total"]).ctx_cap_on_evict_pct is None
+    monkeypatch.setenv("HUGPY_CTX_CAP_ON_EVICT_PCT", "25")
+    assert A._fit_policy(rig.card["total"]).ctx_cap_on_evict_pct == 25
+    A._FLEX_CTX_FLOOR.pop("subject", None)
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        verdict = A._vram_evict_to_fit(_State(), "subject")
+    assert verdict["action"] == "proceed" and verdict["evicted"] == [] and rig.evicted == []
+    assert verdict["self_ctx_pct"] == 25 and verdict["ctx_cap"]["kv_bytes"] == 1 * GIB
+    assert A._FLEX_CTX_FLOOR.get("subject") == 25
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan_fit verdict:")]
+    assert len(lines) == 1 and "action=partial" in lines[0] and "partial_kind=ctx-cap" in lines[0]
+    assert "self_ctx_pct=25" in lines[0]
+    A._FLEX_CTX_FLOOR.pop("subject", None)
+    monkeypatch.setenv("HUGPY_CTX_CAP_ON_EVICT_PCT", "garbage")
+    assert A._fit_policy(rig.card["total"]).ctx_cap_on_evict_pct is None

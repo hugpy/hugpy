@@ -91,6 +91,16 @@ class FitPolicy:
                                 share is checked against (the slot preflight's
                                 ``cpu_mem_gib``), now at PLAN time and at the
                                 plan's own N.
+    ``ctx_cap_on_evict_pct``    step 2 (F7), DEFAULT OFF (None). When set
+                                (1..100), a subject that would otherwise
+                                EVICT is first offered a reduced-ctx seat: if
+                                weights + KV at ``min(cap, ctx_pct)`` fits the
+                                free room, plan_fit returns a ``partial`` of
+                                kind ``ctx-cap`` (``self_ctx_pct`` = the cap,
+                                no evictions) instead of the eviction. A
+                                PROPOSAL: the executor may honour or ignore
+                                it. Motivation: at a model's max ctx the KV
+                                term dwarfs the weights (4B -> 21.2 GB seat).
     """
     ceiling_reserve_bytes: int = 0
     empty_card_budget_bytes: Optional[int] = None
@@ -102,6 +112,7 @@ class FitPolicy:
     ram_target_bytes: Optional[int] = None
     ram_safety_frac: float = 0.95
     min_offload_frac: float = 0.05
+    ctx_cap_on_evict_pct: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -278,7 +289,14 @@ class FitPlan:
       ``partial``  even after the planned evictions the full offload is short;
                    admit the hybrid described by ``partial`` / ``n_gpu_layers`` /
                    ``split`` (``partial_kind``: ``moe-first`` | ``mode-moe`` |
-                   ``dense``).
+                   ``dense``) — or, under ``FitPolicy.ctx_cap_on_evict_pct``,
+                   the reduced-ctx seat ``ctx-cap`` (``self_ctx_pct`` = the
+                   cap, NO evictions; a proposal the executor may ignore).
+
+    ``need_detail["need_split"]`` (step 2, F7) is the explicit weights-vs-KV
+    split the need was priced from: ``weights_bytes``, ``kv_bytes``,
+    ``kv_share_pct``, ``ctx_pct``, ``ctx_resolved``, ``ctx_max`` — re-priced
+    whenever a flex / ctx-cap changes the KV term.
       ``refuse``   honest refusal; ``failure`` is the structured
                    :class:`FitFailure`, ``refuse_reason`` its sentence.
 

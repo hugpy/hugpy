@@ -88,6 +88,24 @@ def _int_or_none(v: Any) -> Optional[int]:
         return None
 
 
+def need_split(det: Mapping[str, Any], need: Optional[int],
+               kv_bytes: Optional[int] = None,
+               ctx_pct: Optional[int] = None) -> dict:
+    """The explicit weights-vs-KV split of a priced need (step 2, F7). ``kv``
+    and ``ctx_pct`` default to the detail's own; a flex / ctx-cap passes the
+    re-priced figures. ``kv_share_pct`` says how much of the need is context
+    — at a model's max ctx it dwarfs the weights (4B -> 21.2 GB seat)."""
+    w = _int_or_none(det.get("weights"))
+    kv = _int_or_none(det.get("kv")) if kv_bytes is None else int(kv_bytes)
+    pct = det.get("ctx_pct") if ctx_pct is None else ctx_pct
+    out = {"weights_bytes": w, "kv_bytes": kv, "ctx_pct": pct,
+           "ctx_resolved": det.get("ctx_resolved"), "ctx_max": det.get("ctx_max")}
+    n = _int_or_none(need)
+    if n and kv is not None:
+        out["kv_share_pct"] = round(100.0 * kv / n, 1)
+    return out
+
+
 def _split_of(n_cpu_moe: Any, gpu_bytes: Any, cpu_bytes: Any, basis: str,
               contract_n: Optional[int]) -> MoeSplit:
     return MoeSplit(n_cpu_moe=int(n_cpu_moe), gpu_bytes=_int_or_none(gpu_bytes),
@@ -231,6 +249,7 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
     def _fits(n: int, extra_free: int = 0) -> bool:
         return (free_eff + extra_free - n) >= reserve
 
+    det["need_split"] = need_split(det, need)
     common = dict(model_key=mk, need_detail=det, total_bytes=total,
                   free_bytes=free, free_effective_bytes=free_eff,
                   subject_held_bytes=subject_held, ceiling_reserve_bytes=reserve,
@@ -295,6 +314,8 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
         need = int(subj_weights or 0) + int(new_kv or 0)
         if moe_commit is not None:
             moe_commit["gpu_total"] = int(need)
+        det["need_split"] = need_split(det, need, kv_bytes=int(new_kv or 0),
+                                       ctx_pct=self_ctx_pct)
         reasons.append(f"self-flex ctx -> {self_ctx_pct}%: need re-priced to {need} B")
     common["fits_now"] = False
     split = _commit_split()
@@ -311,6 +332,46 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                        ram_need_bytes=(split.cpu_bytes if split else None),
                        reasons=tuple(reasons), note=f"flex: {fplan.note}", **common)
     flex_note = fplan.note
+
+    # ── stage 1.5 (step 2, F7): ctx-cap PROPOSAL before any eviction ────────
+    # DEFAULT OFF (policy.ctx_cap_on_evict_pct None). When on: the KV term is
+    # the part of the need that can shrink without touching anyone else, so
+    # before an eviction is planned the subject is offered a seat at
+    # min(cap, its ctx_pct). If weights + KV@cap fits the free room the plan
+    # is a `partial` of kind `ctx-cap` (self_ctx_pct = the cap, no evictions).
+    # A PROPOSAL: the executor may ignore it and evict instead.
+    cap = _int_or_none(policy.ctx_cap_on_evict_pct)
+    kv_target = _int_or_none(det.get("kv"))
+    pct_target = _int_or_none(det.get("ctx_pct"))
+    if cap and kv_target and pct_target and 0 < cap < (self_ctx_pct or pct_target):
+        kv_cap = _flex.kv_at_ctx_pct(kv_target, pct_target, cap)
+        need_cap = int(subj_weights or 0) + int(kv_cap or 0)
+        if _fits(need_cap):
+            det_cap = dict(det)
+            det_cap["need_split"] = need_split(det, need_cap, kv_bytes=int(kv_cap or 0),
+                                               ctx_pct=cap)
+            common_cap = dict(common, need_detail=det_cap)
+            if moe_commit is not None:
+                moe_commit["gpu_total"] = int(need_cap)
+            note = (f"ctx cap: {self_ctx_pct or pct_target}% -> {cap}% ctx re-prices "
+                    f"KV {kv_target} B -> {kv_cap} B; need {need_cap} B fits without "
+                    f"eviction (proposal; {len(candidates)} evictable resident(s) spared)")
+            reasons.append(note)
+            return FitPlan(action="partial", partial_kind="ctx-cap",
+                           need_bytes=need_cap, self_ctx_pct=int(cap),
+                           flex=fplan.as_dict(), flex_note=flex_note,
+                           evictions=(), eviction_need_bytes=0,
+                           predicted_freed_bytes=0, predicted_fits=True,
+                           partial={"kind": "ctx-cap", "admit": True,
+                                    "ctx_pct": int(cap), "ctx_pct_target": pct_target,
+                                    "kv_bytes": int(kv_cap or 0),
+                                    "kv_bytes_target": kv_target,
+                                    "weights_bytes": int(subj_weights or 0),
+                                    "vram_need_bytes": need_cap, "note": note},
+                           moe_commit=moe_commit, split=split,
+                           n_cpu_moe=(split.n_cpu_moe if split else None),
+                           ram_need_bytes=(split.cpu_bytes if split else None),
+                           reasons=tuple(reasons), note=note, **common_cap)
 
     # ── stage 2: EVICT — the SHARED function, priority bands outermost ─────
     # A POLITE load never reaches the walk: the candidates are SPARED and the
@@ -494,4 +555,4 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                    reasons=tuple(reasons), note="refuse", **evict_common, **common)
 
 
-__all__ = ["plan_fit", "evict_order"]
+__all__ = ["plan_fit", "evict_order", "need_split"]
