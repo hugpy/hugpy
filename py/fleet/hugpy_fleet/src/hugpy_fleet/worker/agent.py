@@ -2320,6 +2320,7 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
         # slot did not say.
         if s.get("healthy") is not None:
             row["materialized"] = bool(s.get("healthy"))
+        row.update(_margin_row_fields(mk))      # measured weights margin, omit-when-unset
         if device_source is not None:
             # omit-when-unset: an old central/UI never sees the key, and a row
             # with no device basis at all carries no provenance to mislabel.
@@ -2473,6 +2474,7 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
             ram_row["materialized"] = bool(_mat)
         if mk in loading_now:
             ram_row["loading"] = True      # omit-when-false (wire shape unchanged)
+        ram_row.update(_margin_row_fields(mk))  # measured weights margin, omit-when-unset
         out.append(ram_row)
     # Cold requests whose model has NO row yet (in-process load before the
     # runner is cached, or a slot load still in the agent's admission/evict
@@ -6312,6 +6314,16 @@ class WorkerState:
             return {k: dict(v) for k, v in self._provision_progress.items()}
 
 
+def _dependency_acquisitions() -> dict:
+    """The store's live/recent on-demand dependency acquisitions (an adapter
+    pulling its base) for the heartbeat — never raises."""
+    try:
+        from hugpy_storage.provision import dependency_acquisitions
+        return dependency_acquisitions() or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _load_bytes_per_s():
     """The provisioner's measured central->worker transfer rate (bytes/s), or
     None — never raises (telemetry must not break a heartbeat)."""
@@ -7467,12 +7479,95 @@ def _resolve_model_profile(model_key: str) -> "dict | None":
 # so (``_need_split_str``) instead of leaving the operator to guess.
 _WEIGHTS_HEADROOM = 1.15
 
+# ── MEASURED WEIGHTS MARGIN (2026-09-29): measured beats assumed ────────────
+# The x1.15 above is a PRIOR — the number the fit uses for a file this box has
+# never loaded. It turned a 20.1 GiB file into a 23.1 GiB need and refused a
+# card with 21.3 GiB free. After every successful materialization the worker
+# now MEASURES what the load actually took: the free-VRAM delta from the
+# admission baseline (the card right after plan_fit's evictions, before the
+# load) to the beat that first measures the resident healthy, net of the KV
+# term the loader pre-allocates for the served ctx (llama.cpp reserves the
+# whole cache at load; a transformers cache grows on use, so nothing is
+# netted there). ratio = measured weights / file bytes, kept per (model key,
+# served file, backend, device class) with the raw bytes and a sample count:
+#
+#   _WEIGHTS_MARGINS   model_key -> the record measured ON THIS BOX
+#   _REMOTE_MARGINS    model_key -> records other workers measured, adopted
+#                      from the heartbeat reply (central relays them)
+#   _MARGIN_BASELINES  model_key -> {free_before, epoch, ...} armed by the
+#                      admission, consumed by the first measured beat
+#   _ACTIVITY_EPOCH    bumped by every eviction and every other admission —
+#                      a baseline whose epoch moved was measured with another
+#                      load/evict in flight and is DISCARDED, not averaged in
+#
+# Pricing (``_weights_margin_for``): a measured record for this (key, file)
+# wins — the local one first, else a peer's (same device class preferred) —
+# and only a file nobody has measured is priced at the prior. Implausible
+# ratios (outside _MARGIN_PLAUSIBLE) are discarded. Records persist in the
+# worker's settings file (``weights_margins``) across restarts and ride the
+# heartbeat on the allocation rows + a ``weights_margins`` map.
+_MARGIN_LOCK = threading.Lock()
+_WEIGHTS_MARGINS: dict = {}
+_REMOTE_MARGINS: dict = {}
+_MARGIN_BASELINES: dict = {}
+_MARGIN_SAMPLED: set = set()
+_ACTIVITY_EPOCH: list = [0]
+_MARGIN_PLAUSIBLE = (0.9, 2.0)
+_MARGIN_ARGS: dict = {"args": None}
+_MARGIN_SETTINGS_KEY = "weights_margins"
 
-def _incoming_need_bytes(model_key: str) -> "int | None":
-    """Best-effort bytes the incoming model's weights will want (× the
-    ``_WEIGHTS_HEADROOM`` factor), resolved from its on-disk size the same way
-    the loader does (route_destination). None when the size is unknown — the
-    fit-guard then fails OPEN (never blocks an unmeasurable load).
+
+def _bump_activity_epoch(why: str = "") -> int:
+    """Any eviction or any OTHER admission on this box moves the epoch; a
+    pending margin baseline that saw the epoch move is discarded."""
+    with _MARGIN_LOCK:
+        _ACTIVITY_EPOCH[0] += 1
+        return _ACTIVITY_EPOCH[0]
+
+
+def _device_class(index: "int | None" = None) -> "str | None":
+    """The card model name (``nvidia-smi``/torch ``name``) for a device index,
+    the box's first card when unpinned. None on a CPU-only box."""
+    try:
+        gpus = detect_gpus() or []
+    except Exception:  # noqa: BLE001
+        return None
+    if not gpus:
+        return None
+    for g in gpus:
+        if index is not None and g.get("index") == index:
+            return g.get("name") or None
+    return (gpus[0] or {}).get("name") or None
+
+
+def _margin_note_admission(model_key: str, free_before: "int | None",
+                           device_index: "int | None" = None) -> None:
+    """Arm the measurement for an ADMITTED load: the card's budgetable free
+    right now (after the plan's evictions, before the weights land) and the
+    activity epoch. Another model already loading taints it (its delta would
+    be counted into ours). A refused load arms nothing."""
+    if free_before is None:
+        return
+    try:
+        others = [k for k in (_loading_model_keys() or []) if k != model_key]
+    except Exception:  # noqa: BLE001
+        others = []
+    with _MARGIN_LOCK:
+        # A different admission on the same box moves the epoch for everyone
+        # else's pending baseline (their delta would include this load).
+        if any(k != model_key for k in _MARGIN_BASELINES):
+            _ACTIVITY_EPOCH[0] += 1
+        _MARGIN_BASELINES[model_key] = {
+            "free_before": int(free_before), "epoch": _ACTIVITY_EPOCH[0],
+            "ts": time.time(), "device_index": device_index,
+            "tainted": bool(others), "tainted_by": others}
+
+
+def _incoming_weights_file(model_key: str) -> "tuple[int | None, str | None]":
+    """``(file_bytes, served_file)`` — the on-disk bytes the load will map and
+    the basename of the served quant (GGUF; None for a weight SET). Resolved
+    the same way the loader does (route_destination). ``(None, None)`` when
+    the size is unknown — the fit-guard then fails OPEN.
 
     GGUF landmine (fixed 2026-07-14, mirrors central model_meta): a GGUF repo
     commonly holds several quantizations but only ONE serves, so summing every
@@ -7494,7 +7589,7 @@ def _incoming_need_bytes(model_key: str) -> "int | None":
         cfg = get_model_config(model_key, dict_return=True)
         path = route_destination(cfg)
         if not path:
-            return None
+            return None, None
         framework = str((cfg or {}).get("framework") or "").lower()
         if framework in ("gguf", "llama_cpp"):
             # Effective-quant-aware sizing. On any resolution miss, return None
@@ -7505,7 +7600,9 @@ def _incoming_need_bytes(model_key: str) -> "int | None":
             except Exception:  # noqa: BLE001 — best-effort; unresolved -> fail open
                 gguf = {}
             eff = gguf.get("effective_bytes")
-            return int(eff * _WEIGHTS_HEADROOM) if eff else None
+            served = gguf.get("effective_gguf") or gguf.get("effective_file")
+            served = os.path.basename(str(served)) if served else None
+            return (int(eff) if eff else None), served
         # Non-GGUF: the shared load-requirement computation (which excludes a
         # duplicate torch serialization shadowed by a safetensors set — a
         # both-formats repo was priced at the dir-sum, ~2x what loads). Falls
@@ -7520,9 +7617,284 @@ def _incoming_need_bytes(model_key: str) -> "int | None":
         if not weight:
             detail = _dir_size_detail(path)
             weight = detail.get("weight_bytes") or detail.get("model_bytes")
-        return int(weight * _WEIGHTS_HEADROOM) if weight else None
+        return (int(weight) if weight else None), None
     except Exception:  # noqa: BLE001 — best-effort; unknown size -> fail open
+        return None, None
+
+
+def _incoming_need_bytes(model_key: str) -> "int | None":
+    """The PRIOR-priced weights term: on-disk bytes (``_incoming_weights_file``)
+    × ``_WEIGHTS_HEADROOM``. None when the size is unknown (fail open). The
+    measured margin replaces the prior in ``_incoming_need_detail``; this
+    stays the uncalibrated figure a calibration sample records."""
+    wfile, _served = _incoming_weights_file(model_key)
+    return int(wfile * _WEIGHTS_HEADROOM) if wfile else None
+
+
+def _margin_record_matches(rec: dict, served_file: "str | None") -> bool:
+    """A record prices a load only when it measured the SAME served file
+    (quant); a weight SET (no file name) matches a record with no file."""
+    if not isinstance(rec, dict):
+        return False
+    rf = rec.get("file")
+    if served_file is None or rf is None:
+        return (rf is None) == (served_file is None)
+    return str(rf) == str(served_file)
+
+
+def _weights_margin_for(model_key: str, served_file: "str | None" = None,
+                        device_index: "int | None" = None) -> dict:
+    """THE pricing rule for the weights term:
+
+      1. a record this box measured for (key, served file) -> ``measured``;
+      2. else a peer's record for the same (key, file) relayed by central —
+         one from the same device class preferred, then the most samples;
+      3. else the x1.15 prior — ``source: "prior"`` with ``samples: 0``.
+
+    Returns ``{margin, source, samples, device_class, origin, measured_at}``
+    (``origin``: ``local`` | ``central`` | ``prior``)."""
+    with _MARGIN_LOCK:
+        local = _WEIGHTS_MARGINS.get(model_key)
+        remote = list(_REMOTE_MARGINS.get(model_key) or [])
+    if local and _margin_record_matches(local, served_file):
+        return {"margin": float(local["margin"]), "source": "measured",
+                "samples": int(local.get("samples") or 1),
+                "device_class": local.get("device_class"), "origin": "local",
+                "measured_at": local.get("measured_at")}
+    peers = [r for r in remote if _margin_record_matches(r, served_file)
+             and _plausible_margin(r.get("margin"))]
+    if peers:
+        here = _device_class(device_index)
+        peers.sort(key=lambda r: ((r.get("device_class") == here) if here else False,
+                                  int(r.get("samples") or 0)), reverse=True)
+        best = peers[0]
+        return {"margin": float(best["margin"]), "source": "measured",
+                "samples": int(best.get("samples") or 1),
+                "device_class": best.get("device_class"), "origin": "central",
+                "measured_at": best.get("measured_at"),
+                "worker": best.get("worker")}
+    return {"margin": _WEIGHTS_HEADROOM, "source": "prior", "samples": 0,
+            "device_class": None, "origin": "prior", "measured_at": None}
+
+
+def _plausible_margin(ratio) -> bool:
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return False
+    lo, hi = _MARGIN_PLAUSIBLE
+    return lo <= r <= hi
+
+
+def _kv_bytes_at_ctx(model_key: str, ctx: "int | None", cfg: dict | None = None) -> int:
+    """KV bytes this model's cache takes at ``ctx`` tokens (the served -c),
+    same arithmetic as ``_kv_need_bytes``; 0 when ctx is unknown."""
+    if not ctx:
+        return 0
+    try:
+        from hugpy_engine import spill
+        from hugpy_engine.config.main import get_model_config
+        cfg = cfg if cfg is not None else get_model_config(model_key, dict_return=True)
+        geo = _model_kv_geometry(model_key, cfg)
+        framework = str((cfg or {}).get("framework") or "").lower()
+        dtype_bytes = 2.0 if framework in ("gguf", "llama_cpp") \
+            else spill._kv_dtype_bytes(geo.get("dtype"))
+        kv = spill.kv_bytes(ctx_tokens=int(ctx),
+                            n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
+                            n_kv_heads=geo.get("n_kv_heads"),
+                            head_dim=geo.get("head_dim"), dtype_bytes=dtype_bytes)
+        return int(kv or 0)
+    except Exception:  # noqa: BLE001 — an unpriceable KV nets nothing
+        return 0
+
+
+def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
+                    free_after: "int | None" = None) -> "dict | None":
+    """Take the measurement for a resident the beat first measured healthy.
+    Returns the record written, or None (no baseline / not a full GPU
+    residency / in-flight activity / implausible — each logged, never
+    averaged in)."""
+    with _MARGIN_LOCK:
+        base = _MARGIN_BASELINES.pop(model_key, None)
+        epoch_now = _ACTIVITY_EPOCH[0]
+    if base is None:
+        return None                       # adopted seat / re-exec: never armed
+    row = row or {}
+    if row.get("materialized") is False or row.get("device") != "cuda" \
+            or not row.get("vram_bytes"):
         return None
+    if _calib_verdict(row.get("device"), row.get("n_gpu_layers"),
+                      row.get("total_layers")) != "full" \
+            or model_key in _MOE_SPLIT or row.get("n_cpu_moe") is not None:
+        return None                       # a split/partial is not a weights measurement
+    others = [k for k in (loading or []) if k != model_key]
+    if base.get("tainted") or others or base.get("epoch") != epoch_now:
+        logger.info("weights margin for %s DISCARDED: another load/evict was in "
+                    "flight (tainted_by=%s loading=%s epoch %s->%s)", model_key,
+                    base.get("tainted_by"), others, base.get("epoch"), epoch_now)
+        return None
+    if free_after is None:
+        free_after = _free_vram_bytes()
+    if free_after is None:
+        return None
+    wfile, served = _incoming_weights_file(model_key)
+    if not wfile:
+        return None
+    delta = int(base["free_before"]) - int(free_after)
+    framework = _model_framework(model_key)
+    kv = 0
+    ctx = None
+    if str(framework or "").lower() in ("gguf", "llama_cpp"):
+        ctx = row.get("ctx")
+        if not ctx:
+            try:
+                ctx = _effective_ctx(model_key).get("ctx")
+            except Exception:  # noqa: BLE001
+                ctx = None
+        kv = _kv_bytes_at_ctx(model_key, ctx)
+    weights_measured = delta - kv
+    ratio = (weights_measured / float(wfile)) if wfile else None
+    if ratio is None or not _plausible_margin(ratio):
+        logger.warning("weights margin for %s DISCARDED as implausible: delta=%s "
+                       "kv=%s weights_measured=%s file=%s ratio=%s (plausible %s..%s)",
+                       model_key, delta, kv, weights_measured, wfile,
+                       (None if ratio is None else round(ratio, 3)),
+                       _MARGIN_PLAUSIBLE[0], _MARGIN_PLAUSIBLE[1])
+        return None
+    dev_index = row.get("gpu_index", base.get("device_index"))
+    dev_class = _device_class(dev_index)
+    now = time.time()
+    with _MARGIN_LOCK:
+        prev = _WEIGHTS_MARGINS.get(model_key)
+        if prev and _margin_record_matches(prev, served) and prev.get("backend") == framework:
+            n = int(prev.get("samples") or 0)
+            mean = (float(prev.get("margin")) * n + ratio) / (n + 1)
+            samples = n + 1
+        else:
+            mean, samples = ratio, 1      # a different file/backend starts over
+        rec = {"model_key": model_key, "file": served, "file_bytes": int(wfile),
+               "backend": framework, "device_class": dev_class,
+               "margin": round(mean, 4), "last_ratio": round(ratio, 4),
+               "weights_measured_bytes": int(weights_measured),
+               "kv_measured_bytes": int(kv), "measured_ctx": (int(ctx) if ctx else None),
+               "delta_bytes": int(delta), "measured_at": now, "samples": samples}
+        _WEIGHTS_MARGINS[model_key] = rec
+    logger.info("weights margin measured: model=%s file=%s backend=%s device=%r "
+                "delta_bytes=%s kv_bytes=%s weights_measured_bytes=%s file_bytes=%s "
+                "ratio=%.3f margin=%.3f samples=%d (prior %.2f)", model_key, served,
+                framework, dev_class, delta, kv, weights_measured, wfile, ratio,
+                mean, samples, _WEIGHTS_HEADROOM)
+    _persist_weights_margins()
+    return dict(rec)
+
+
+def _collect_weights_margins(allocs: "list | None", loading: "list | None" = None) -> None:
+    """Heartbeat hook: measure ONCE per residency episode, on the first beat
+    a resident's footprint is measured (the same moment the calibration
+    sample is taken); re-arm when the model leaves residency."""
+    resident_now: set = set()
+    for row in (allocs or []):
+        mk = (row or {}).get("model_key")
+        if not mk:
+            continue
+        resident_now.add(mk)
+        if row.get("vram_bytes") is None:
+            continue
+        with _MARGIN_LOCK:
+            if mk in _MARGIN_SAMPLED:
+                continue
+            _MARGIN_SAMPLED.add(mk)
+        try:
+            _margin_measure(mk, row, loading)
+        except Exception:  # noqa: BLE001 — measurement must never break a beat
+            logger.debug("weights margin measure for %s failed", mk, exc_info=True)
+    with _MARGIN_LOCK:
+        _MARGIN_SAMPLED.intersection_update(resident_now)
+        # A baseline whose model never became resident (aborted load) expires.
+        stale = [k for k, b in _MARGIN_BASELINES.items()
+                 if k not in resident_now and k not in (loading or [])
+                 and (time.time() - float(b.get("ts") or 0)) > 1800]
+        for k in stale:
+            _MARGIN_BASELINES.pop(k, None)
+
+
+def _margin_row_fields(model_key: str) -> dict:
+    """The measured margin on an ALLOCATION row (omit-when-unset): what this
+    box measured for the resident, so central and its peers can price the
+    same file before they load it."""
+    with _MARGIN_LOCK:
+        rec = _WEIGHTS_MARGINS.get(model_key)
+    if not rec:
+        return {}
+    return {"weights_margin": rec.get("margin"), "weights_margin_source": "measured",
+            "weights_margin_samples": rec.get("samples"),
+            "weights_measured_bytes": rec.get("weights_measured_bytes"),
+            "kv_measured_bytes": rec.get("kv_measured_bytes"),
+            "weights_margin_ctx": rec.get("measured_ctx"),
+            "weights_margin_measured_at": rec.get("measured_at"),
+            "weights_margin_device": rec.get("device_class"),
+            "weights_margin_file": rec.get("file")}
+
+
+def _weights_margins_snapshot() -> dict:
+    with _MARGIN_LOCK:
+        return {k: dict(v) for k, v in _WEIGHTS_MARGINS.items()}
+
+
+def _adopt_weights_margins(worker: "dict | None") -> None:
+    """Adopt the PEER records central relays on the heartbeat reply
+    (``worker['weights_margins'] = {mk: [record, ...]}``). Local records are
+    never overwritten; an older central omits the key -> the map clears."""
+    raw = (worker or {}).get("weights_margins") or {}
+    parsed: dict = {}
+    if isinstance(raw, dict):
+        for mk, recs in raw.items():
+            recs = recs if isinstance(recs, list) else [recs]
+            keep = [dict(r) for r in recs
+                    if isinstance(r, dict) and _plausible_margin(r.get("margin"))]
+            if keep:
+                parsed[str(mk)] = keep
+    with _MARGIN_LOCK:
+        _REMOTE_MARGINS.clear()
+        _REMOTE_MARGINS.update(parsed)
+
+
+def _load_weights_margins(args) -> int:
+    """Boot: restore the records persisted in the worker's settings file
+    (``weights_margins``); implausible rows are dropped. Returns the count."""
+    _MARGIN_ARGS["args"] = args
+    try:
+        raw = (_load_settings(args) or {}).get(_MARGIN_SETTINGS_KEY) or {}
+    except Exception:  # noqa: BLE001
+        raw = {}
+    keep = {}
+    for mk, rec in (raw.items() if isinstance(raw, dict) else []):
+        if isinstance(rec, dict) and _plausible_margin(rec.get("margin")) \
+                and rec.get("file_bytes"):
+            keep[str(mk)] = dict(rec)
+    with _MARGIN_LOCK:
+        _WEIGHTS_MARGINS.clear()
+        _WEIGHTS_MARGINS.update(keep)
+    if keep:
+        logger.info("weights margins restored for %d model(s): %s", len(keep),
+                    {k: v.get("margin") for k, v in keep.items()})
+    return len(keep)
+
+
+def _persist_weights_margins() -> bool:
+    """Write the records into the settings file beside the operator's runtime
+    settings (the worker's one local state file). Best-effort."""
+    args = _MARGIN_ARGS.get("args")
+    if args is None:
+        return False
+    try:
+        settings = _load_settings(args)
+        settings[_MARGIN_SETTINGS_KEY] = _weights_margins_snapshot()
+        _save_settings(args, settings)
+        return True
+    except Exception as exc:  # noqa: BLE001 — persistence never breaks a beat
+        logger.warning("weights margins not persisted: %s", exc)
+        return False
 
 
 # ── Context (KV) as an allocation variable (slice 11 / t27) ─────────────────
@@ -7942,6 +8314,21 @@ def _need_total(weights: int, kv: int, corr: "float | None") -> int:
     return int(base * corr) if corr else base
 
 
+def _fit_weights_and_corr(model_key: str) -> "tuple[int | None, float | None]":
+    """(weights, correction) exactly as ``_incoming_need_detail`` prices them:
+    a measured weights margin -> (file x margin, None — never stacked with the
+    calibration correction); else (the x1.15 prior, the learned correction).
+    The whole-seat ctx bound uses this so bound and fit agree to the byte."""
+    try:
+        wfile, served = _incoming_weights_file(model_key)
+        mg = _weights_margin_for(model_key, served) if wfile else None
+        if mg and mg.get("source") == "measured":
+            return int(wfile * mg["margin"]), None
+    except Exception:  # noqa: BLE001 — pricing falls back to the prior
+        pass
+    return _incoming_need_bytes(model_key), _calib_correction(model_key)
+
+
 def _kv_at_ctx(geo: dict, ctx: int, dtype_bytes: float = 2.0) -> int:
     """KV bytes at ``ctx`` over the KV-bearing layers — the same call
     ``_kv_need_bytes`` prices with."""
@@ -8004,12 +8391,12 @@ def _need_at_ctx_target(model_key: str) -> "tuple[int, int] | None":
     ppath, _tl = _served_gguf_geometry(model_key)
     if not (ppath and geo.get("n_kv_heads") and geo.get("head_dim")):
         return None
-    w = _incoming_need_bytes(model_key)
+    w, corr = _fit_weights_and_corr(model_key)
     if not w:
         return None
     trained = int(geo.get("ctx_train") or _model_max_ctx(model_key, cfg) or 0)
     target = min(trained, _default_ctx_target()) if trained else _default_ctx_target()
-    return _need_total(int(w), _kv_at_ctx(geo, target), _calib_correction(model_key)), int(target)
+    return _need_total(int(w), _kv_at_ctx(geo, target), corr), int(target)
 
 
 def _admission_room_hint(state, model_key: str, snap, policy, residents,
@@ -8125,7 +8512,8 @@ def _effective_ctx(model_key: str, cfg: dict | None = None, *,
             geo = _model_kv_geometry(model_key, cfg) or {}
             ppath, _tl = _served_gguf_geometry(model_key)
             if ppath and geo.get("n_kv_heads") and geo.get("head_dim"):
-                w = int(weights_bytes) if weights_bytes else _incoming_need_bytes(model_key)
+                w0, corr = _fit_weights_and_corr(model_key)
+                w = int(weights_bytes) if weights_bytes else w0
                 total = _total_vram_bytes()
                 res = (int(reserve_bytes) if reserve_bytes is not None
                        else _vram_ceiling_reserve_bytes(total))
@@ -8134,7 +8522,6 @@ def _effective_ctx(model_key: str, cfg: dict | None = None, *,
                     floor = int(spill._ctx_floor())
                     upper = int(geo.get("ctx_train") or mx or floor)
                     room = max(0, int(reach) - int(res))
-                    corr = _calib_correction(model_key)
                     c, whole = _whole_seat_max_ctx(weights=int(w), corr=corr, geo=geo,
                                                    room=room, upper=upper, floor=floor)
                     bound = {"ctx": c, "whole": whole, "room": room, "corr": corr,
@@ -8246,19 +8633,32 @@ def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
     WEIGHT size is unmeasurable (fail-open, exactly as _incoming_need_bytes did).
     The kv term is 0 when ctx_pct is unset — so a model with no ctx allocation is
     byte-identical to today."""
-    weights = _incoming_need_bytes(model_key)
-    if not weights:
+    weights_prior = _incoming_need_bytes(model_key)
+    if not weights_prior:
         return {"total": None, "base_total": None, "calibration_correction": 1.0,
-                "weights": weights, "kv": 0,
+                "weights": weights_prior, "kv": 0,
                 "ctx_pct": None, "ctx_resolved": None, "ctx_max": None,
                 "geometry_source": None}
+    # MEASURED MARGIN (2026-09-29): the on-disk figure and the served file, then
+    # the margin a measurement of THIS (key, file) established — the prior only
+    # for a file nobody has loaded. `weights` is the priced term; `weights_prior`
+    # keeps the x1.15 figure for the calibration sample's base.
+    try:
+        wfile, served = _incoming_weights_file(model_key)
+    except Exception:  # noqa: BLE001
+        wfile, served = None, None
+    if not wfile:
+        wfile = int(round(int(weights_prior) / _WEIGHTS_HEADROOM))
+    mg = _weights_margin_for(model_key, served)
+    measured = mg["source"] == "measured"
+    weights = int(wfile * mg["margin"]) if measured else int(weights_prior)
     try:
         kv, det = _call_with_basis(_kv_need_bytes, model_key, free_hint=free_hint,
                                    weights_bytes=int(weights), reserve_bytes=reserve_bytes)
     except Exception:  # noqa: BLE001 — KV is additive; never break a working fit
         kv, det = 0, {"ctx_pct": None, "ctx_resolved": None, "ctx_max": None,
                       "geometry_source": None}
-    base_total = int(weights) + int(kv or 0)
+    base_total = int(weights_prior) + int(kv or 0)
     # t28 load-and-learn: consult the learned per-model correction (median
     # measured/predicted from real loads, adopted from central, clamped + gated).
     # `total` — what every fit path prices against — becomes the corrected figure;
@@ -8266,16 +8666,28 @@ def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
     # for honest reporting AND is what a calibration_sample records, so the ratio
     # tracks the true base fudge instead of collapsing to a fixpoint at the
     # current correction. None correction -> total == base_total (byte-identical).
-    corr = _calib_correction(model_key)
+    # A MEASURED weights margin is the direct observation the correction only
+    # approximates (a median of measured/predicted TOTALS), so the two are never
+    # stacked: measured -> total = measured weights + KV, correction not applied.
+    # Priced through _need_total, the one copy the whole-seat ctx bound searches.
+    corr = None if measured else _calib_correction(model_key)
     total = _need_total(int(weights), int(kv or 0), corr)
     out = {"total": total, "base_total": base_total,
            "calibration_correction": (corr or 1.0),
            "weights": int(weights), "kv": int(kv or 0),
            # The breakdown of the weights term (2026-09-29): the on-disk
-           # figure and the prior it was multiplied by, so a refusal can show
-           # where "needs 23.1 GB" for a 20.1 GB file comes from.
-           "weights_file_bytes": int(round(int(weights) / _WEIGHTS_HEADROOM)),
-           "weights_headroom": _WEIGHTS_HEADROOM,
+           # figure and the factor it was multiplied by, so a refusal can show
+           # where "needs 23.1 GB" for a 20.1 GB file comes from — and whether
+           # that factor was measured or assumed.
+           "weights_file_bytes": int(wfile),
+           "weights_file": served,
+           "weights_headroom": mg["margin"],
+           "weights_prior_bytes": int(weights_prior),
+           "weights_margin": mg["margin"],
+           "weights_margin_source": mg["source"],
+           "weights_margin_samples": mg["samples"],
+           "weights_margin_device": mg.get("device_class"),
+           "weights_margin_origin": mg.get("origin"),
            **det}
     # MoE expert split (2026-07-24): when a MoE split governs this model
     # (explicit n_cpu_moe, or auto-eligible under the default placement), carry
@@ -8301,7 +8713,7 @@ def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
         out["moe_split"] = {
             "path": plan.get("path"),
             "n_cpu_moe": plan["n_cpu_moe"],
-            "gpu_total": int(plan["gpu_weight_bytes"] * _WEIGHTS_HEADROOM) + int(kv or 0),
+            "gpu_total": int(plan["gpu_weight_bytes"] * mg["margin"]) + int(kv or 0),
             "cpu_bytes": plan["cpu_bytes"],
             "expert_count": (plan.get("detail") or {}).get("expert_count"),
             "expert_used_count": (plan.get("detail") or {}).get("expert_used_count"),
@@ -9595,6 +10007,7 @@ def _evict_model(state: "WorkerState", model_key: str,
     def _result(host_mode, evicted, reason, footprint=None, **extra):
         if evicted:
             _ADMISSION_TICKETS.pop(model_key, None)
+            _bump_activity_epoch("evict")          # taints any pending margin baseline
             # F4b (step 2): a victim leaves EVERY membership list at eviction
             # time — the dispatch wrapper, the materialized flag, the pid
             # registry — whichever path freed it. Before this only the
@@ -10436,6 +10849,24 @@ def _note_vram_eviction(victim: str, subject: str, freed: "int | None",
 from hugpy_platform.formatting import human_bytes as _human_bytes
 
 
+def _margin_tag(det: dict) -> str:
+    """The weights factor with its provenance, for a refusal / need line:
+    ``1.04 measured (3 samples on NVIDIA GeForce RTX 3090)`` or
+    ``1.15 prior (never loaded)``."""
+    hr = det.get("weights_headroom")
+    src = det.get("weights_margin_source") or "prior"
+    if src == "measured":
+        n = int(det.get("weights_margin_samples") or 1)
+        dev = det.get("weights_margin_device")
+        where = ""
+        if det.get("weights_margin_origin") == "central":
+            where = f" on {det.get('weights_margin_worker') or 'a peer worker'}"
+        elif dev:
+            where = f" on {dev}"
+        return f"{float(hr):.2f} measured ({n} sample{'s' if n != 1 else ''}{where})"
+    return f"{float(hr):g} prior (never loaded)"
+
+
 def _need_split_str(det: dict) -> str:
     """The honest weights+kv breakdown for a refusal (slice 11), e.g.
     ' = 21.3 GB weights + 2.8 GB kv@50%ctx'. Empty when there is no ctx (kv=0),
@@ -10447,7 +10878,7 @@ def _need_split_str(det: dict) -> str:
     wfile = det.get("weights_file_bytes")
     hr = det.get("weights_headroom")
     w = (f"{_human_bytes(det.get('weights'))} weights"
-         + (f" ({_human_bytes(wfile)} on disk x {hr:g} weights headroom)"
+         + (f" ({_human_bytes(wfile)} on disk x {_margin_tag(det)})"
             if wfile and hr else ""))
     if kv <= 0:
         return f" = {w}" if wfile and hr else ""
@@ -11624,6 +12055,16 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         verdict.setdefault("ctx_pct", _det.get("ctx_pct"))
         verdict.setdefault("ctx_max", _det.get("ctx_max"))
     _ADMISSION_TICKETS[model_key] = {"ts": time.time(), "verdict": verdict}
+    if verdict.get("action") != "refuse":
+        # Arm the weights-margin measurement: the card as it stands right
+        # before the weights land (the verify read after evictions, else the
+        # plan's own snapshot for a load that fit without any).
+        try:
+            _margin_note_admission(
+                model_key, verdict.get("free_vram_measured_bytes", snap.free_bytes),
+                snap.target_device)
+        except Exception:  # noqa: BLE001 — measurement never breaks admission
+            logger.debug("margin baseline for %s not armed", model_key, exc_info=True)
     return verdict
 
 
@@ -11942,11 +12383,20 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
     # budgetable free plus what the executed evictions freed.
     fv = None if snap_free is None else snap_free + freed
     fv_eff = None if fv is None else fv + subject_held
+
+    def _with_measured(out: dict) -> dict:
+        # The verify read rides every ADMIT verdict (additive) — it is the
+        # weights-margin baseline: the card right before the weights land.
+        if fv_measured is not None:
+            out["free_vram_measured_bytes"] = int(fv_measured)
+        return out
+
     if final:
         if moe_commit is not None:
-            return _moe_admit_verdict(evicted, freed)
+            return _with_measured(_moe_admit_verdict(evicted, freed))
         out = {"action": "evicted", "evicted": evicted,
                "freed_bytes": freed, "reason": None}
+        _with_measured(out)
         if _comfy_freed:
             out["comfy_freed_bytes"] = _comfy_freed
             out["note"] = (f"reclaimed {_human_bytes(_comfy_freed)} from an idle "
@@ -11973,13 +12423,13 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                 "— dense layer math skipped", model_key,
                 plan.n_cpu_moe, _human_bytes(_mplan.get("gpu_bytes")),
                 _human_bytes(_mplan.get("cpu_bytes")), _human_bytes(plan.budget_bytes))
-            return {"action": "partial", "evicted": evicted,
+            return _with_measured({"action": "partial", "evicted": evicted,
                     "freed_bytes": freed, "reason": None,
                     "n_gpu_layers": -1, "n_cpu_moe": int(plan.n_cpu_moe),
                     "note": (f"MoE dense-first split (--n-cpu-moe "
                              f"{plan.n_cpu_moe}): all layers on GPU, "
                              f"~{_human_bytes(_mplan.get('cpu_bytes'))} "
-                             f"expert tensors on CPU")}
+                             f"expert tensors on CPU")})
         if plan.partial_kind == "mode-moe":
             _mplan = dict(plan.moe_plan or {})
             _MOE_SPLIT[model_key] = {"path": ppath, "n_cpu_moe": int(plan.n_cpu_moe)}
@@ -11989,14 +12439,14 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                 "CPU; budget %s)", policy.alloc_mode, model_key, plan.n_cpu_moe,
                 _human_bytes(_mplan.get("gpu_bytes")),
                 _human_bytes(_mplan.get("cpu_bytes")), _human_bytes(plan.budget_bytes))
-            return {"action": "partial", "evicted": evicted,
+            return _with_measured({"action": "partial", "evicted": evicted,
                     "freed_bytes": freed, "reason": None,
                     "n_gpu_layers": -1, "n_cpu_moe": int(plan.n_cpu_moe),
                     "gpu_pct": _pd.get("gpu_pct"), "partial": _pd,
                     "note": (f"{policy.alloc_mode} MoE split (--n-cpu-moe "
                              f"{plan.n_cpu_moe}): dense backbone first, "
                              f"~{_human_bytes(_mplan.get('cpu_bytes'))} "
-                             f"expert tensors to CPU")}
+                             f"expert tensors to CPU")})
         if plan.partial_kind == "dense" and plan.n_gpu_layers is not None:
             # Admit the dense hybrid. Pin the honest layer count for the
             # in-process llama_cpp load AND carry it in the verdict so the slot
@@ -12013,10 +12463,10 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                 model_key, plan.n_gpu_layers, _pd.get("total_layers"), _pd.get("gpu_pct"),
                 _human_bytes(_pd.get("vram_need_bytes")), _human_bytes(_pd.get("ram_need_bytes")),
                 _human_bytes(_pd.get("vram_budget_bytes")), _human_bytes(_pd.get("ram_free_bytes")))
-            return {"action": "partial", "evicted": evicted, "freed_bytes": freed,
+            return _with_measured({"action": "partial", "evicted": evicted, "freed_bytes": freed,
                     "reason": None, "n_gpu_layers": plan.n_gpu_layers,
                     "gpu_pct": _pd.get("gpu_pct"), "partial": _pd,
-                    "note": f"partial GPU offload: {_pd.get('note')}"}
+                    "note": f"partial GPU offload: {_pd.get('note')}"})
 
     # Still short after eviction AND no admissible partial offload -> HONEST
     # refusal (never admit-then-OOM). Carry what's resident, what's protected +
@@ -12179,6 +12629,11 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         # The weights term's own breakdown (the x1.15 prior on the file size).
         "needs_weights_file_bytes": _det.get("weights_file_bytes"),
         "needs_weights_headroom": _det.get("weights_headroom"),
+        # ... and whether that factor was MEASURED (this box or a peer) or the
+        # x1.15 prior for a file nobody has loaded (2026-09-29).
+        "weights_margin": _det.get("weights_margin"),
+        "weights_margin_source": _det.get("weights_margin_source") or "prior",
+        "weights_margin_samples": int(_det.get("weights_margin_samples") or 0),
         "evicted": evicted,
         "evicted_freed_bytes": freed,
         "evict_failed": evict_failed,
@@ -14231,6 +14686,14 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             except Exception as _ce:  # noqa: BLE001 — telemetry never breaks a beat
                 logger.debug("calibration capture failed: %s", _ce)
                 _calib_samples = []
+            try:
+                # Measured weights margin (2026-09-29): the same beat that first
+                # measures a resident's footprint takes its load delta. The
+                # rows were built BEFORE the measurement, so a first sample
+                # rides the NEXT beat's rows; the map below carries it now.
+                _collect_weights_margins(_allocs, loading=_loading_keys)
+            except Exception as _me:  # noqa: BLE001
+                logger.debug("weights margin capture failed: %s", _me)
             _agg_summary = _aggregate_tick(
                 state, loading=_loading_keys, loaded=_loaded_keys,
                 calib_samples=_calib_samples, vram_split=_vram_split,
@@ -14292,6 +14755,15 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
                     # any admission refusals). Additive/optional — None when empty,
                     # omitted for a worker with HUGPY_CALIBRATION=off.
                     "calibration_samples": _calib_samples or None,
+                    # Measured weights margins (2026-09-29): every record this
+                    # box measured, resident or not, so central can price the
+                    # same file for its peers. Omitted when nothing measured.
+                    "weights_margins": _weights_margins_snapshot() or None,
+                    # On-demand DEPENDENCY acquisitions (2026-09-29): an adapter
+                    # load pulling its absent base — {adapter_key: {base_id,
+                    # stage: acquiring_dependency, status, done_bytes,
+                    # total_bytes, frac, reason}}. Omitted when none.
+                    "dependency_acquisitions": _dependency_acquisitions() or None,
                     # Precision model->PID log (2026-07-14): {"models":[{model_key,
                     # pid,host_mode,vram_bytes,alive}], "unattributed":[{pid,name,
                     # mib}]}. None on older/no-GPU boxes -> central just omits it.
@@ -14362,6 +14834,8 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             _apply_central_limits(worker)
             # t28: adopt central's learned per-model need corrections (if any).
             _adopt_calibration(worker)
+            # Peer-measured weights margins relayed by central (if any).
+            _adopt_weights_margins(worker)
             # k2: adopt central's model BLOCK set (if any) — see
             # _adopt_blocked_models. Gates only this worker's own background
             # provisioning (download) re-kick.
@@ -14661,6 +15135,7 @@ def main(argv: list[str] | None = None) -> int:
     # Operator runtime settings (console-set) project onto the env FIRST, so
     # the slot supervisor + every other reader sees them; drop-ins lose loudly.
     _apply_settings_env(args)
+    _load_weights_margins(args)      # measured weights margins survive a restart
 
     # v3 final semantics: on-demand is the DEFAULT tier, so every occupant
     # except a static one may be bumped (LRU promotion) when another model

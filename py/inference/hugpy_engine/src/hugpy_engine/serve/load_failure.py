@@ -99,16 +99,22 @@ class MissingDependencyFailure(ModelLoadFailure):
     is the operator instruction, verbatim. Both ride ``load_failure``."""
 
     def __init__(self, message: str = "", *, base_id: "str | None" = None,
-                 fix: "str | None" = None, **kw):
+                 fix: "str | None" = None, acquisition: "dict | None" = None, **kw):
         kw.setdefault("load_class", MISSING_DEPENDENCY)
         super().__init__(message, **kw)
         self.base_id = base_id
         self.fix = fix
+        # (2026-09-29) the on-demand acquisition record when the load TRIED to
+        # resolve the dependency itself and was refused / failed: {status,
+        # policy, reason, base_key, ...} — see hugpy_storage.provision.
+        # acquire_dependency. None when no attempt was made.
+        self.acquisition = dict(acquisition) if isinstance(acquisition, dict) else None
 
     @property
     def load_failure(self) -> dict:
         out = super().load_failure
-        out.update({"base_id": self.base_id, "fix": self.fix})
+        out.update({"base_id": self.base_id, "fix": self.fix,
+                    "acquisition": self.acquisition})
         return out
 
 

@@ -1962,6 +1962,175 @@ def clear_failure(model_key: str) -> None:
         _FAILURES.pop(str(model_key), None)
 
 
+# ---------------------------------------------------------------------------
+# ON-DEMAND DEPENDENCY ACQUISITION (2026-09-29): a dependency is resolved, not
+# presented as a choice.
+#
+# A PEFT adapter is a delta on a BASE model; the base is a dependency of the
+# adapter. When an adapter loads and its base is absent from the store, the
+# load acquires the base THROUGH THE SAME PATH every on-demand model takes on
+# this box — on a worker ``ensure_model_registered`` (learn the row from
+# central) + ``ensure_model_present`` (central-only transfer, storage-budget
+# gate, single-flight, verified); on central/standalone the catalog +
+# ``download_models.ensure_model`` (central's own downloader path) — and only
+# then applies the adapter. No new downloader; the policy, size and disk checks
+# are those routes' own. If the policy refuses (the switch is off, the budget
+# gate refuses, central has no such hub id, the transfer fails) the existing
+# FINAL refusal stands, now carrying WHY the acquisition was refused.
+#
+# Never loop: ONE attempt per (dependent, base) per policy window
+# (HUGPY_DEPENDENCY_ACQUIRE_WINDOW_S, default 900 s); a failed download is a
+# final refusal for the window. The live record (stage ``acquiring_dependency``
+# + bytes/total) rides the worker heartbeat (``dependency_acquisitions``) so
+# central's load-state hold shows the pull instead of "load state unknown".
+# ---------------------------------------------------------------------------
+DEPENDENCY_STAGE = "acquiring_dependency"
+_DEP_LOCK = threading.Lock()
+_DEP_ACQ: dict = {}          # dependent_key -> the live / most recent record
+_DEP_ATTEMPTS: dict = {}     # (dependent_key, base_id) -> {"ts", "ok", "reason"}
+
+
+def dependency_acquire_enabled() -> bool:
+    """Master switch (``HUGPY_DEPENDENCY_ACQUIRE``, default on)."""
+    return (os.environ.get("HUGPY_DEPENDENCY_ACQUIRE") or "on").strip().lower() not in (
+        "0", "off", "false", "no", "")
+
+
+def dependency_acquire_window_s() -> float:
+    try:
+        v = float(os.environ.get("HUGPY_DEPENDENCY_ACQUIRE_WINDOW_S") or 900.0)
+        return v if v > 0 else 900.0
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def dependency_acquisitions() -> dict:
+    """Snapshot for the heartbeat: every live acquisition plus the ones that
+    finished within the policy window (so a refusal's reason is visible for
+    as long as it is binding)."""
+    now = time.time()
+    win = dependency_acquire_window_s()
+    with _DEP_LOCK:
+        out = {}
+        for k, v in _DEP_ACQ.items():
+            fin = v.get("finished_at")
+            if fin is None or (now - float(fin)) <= win:
+                out[k] = dict(v)
+        return out
+
+
+def reset_dependency_acquisitions() -> None:
+    """Tests only."""
+    with _DEP_LOCK:
+        _DEP_ACQ.clear()
+        _DEP_ATTEMPTS.clear()
+
+
+def acquire_dependency(base_id: str, *, dependent_key: str,
+                       central_url: str | None = None) -> dict:
+    """Acquire ``base_id`` (a hub id / model key the store lacks) on behalf of
+    ``dependent_key``, through this box's on-demand path. Returns the record:
+
+      {"ok": bool, "stage": "acquiring_dependency", "status": "done"|"refused"|
+       "failed", "policy": "allowed"|"disabled"|"window"|"unknown"|"budget"|
+       "failed", "reason": str|None, "base_id", "base_key", "dependent",
+       "done_bytes", "total_bytes", "frac", "started_at", "finished_at"}
+    """
+    now = time.time()
+    rec = {"dependent": dependent_key, "base_id": base_id, "base_key": None,
+           "stage": DEPENDENCY_STAGE, "status": "running", "policy": "allowed",
+           "reason": None, "ok": False, "done_bytes": 0, "total_bytes": None,
+           "frac": None, "started_at": now, "finished_at": None}
+
+    def _finish(status: str, policy: str, reason: str | None, ok: bool = False) -> dict:
+        rec.update(status=status, policy=policy, reason=reason, ok=ok,
+                   finished_at=time.time())
+        with _DEP_LOCK:
+            _DEP_ACQ[dependent_key] = dict(rec)
+            _DEP_ATTEMPTS[(dependent_key, base_id)] = {
+                "ts": rec["started_at"], "ok": ok, "reason": reason}
+        (logger.info if ok else logger.warning)(
+            "dependency acquisition for %s (base %s): %s [%s]%s", dependent_key,
+            base_id, status, policy, (f": {reason}" if reason else ""))
+        return dict(rec)
+
+    if not base_id:
+        return _finish("refused", "unknown", "the adapter names no base model")
+    if not dependency_acquire_enabled():
+        return _finish("refused", "disabled",
+                       "on-demand dependency acquisition is off on this box "
+                       "(HUGPY_DEPENDENCY_ACQUIRE=off)")
+    with _DEP_LOCK:
+        prev = _DEP_ATTEMPTS.get((dependent_key, base_id))
+    win = dependency_acquire_window_s()
+    if prev and (now - float(prev.get("ts") or 0)) < win:
+        age = int(now - float(prev.get("ts") or 0))
+        return _finish("refused", "window",
+                       f"acquisition of {base_id!r} was already attempted {age}s ago "
+                       f"({'succeeded' if prev.get('ok') else 'failed'}: "
+                       f"{prev.get('reason') or 'no reason recorded'}); not retried "
+                       f"within the {int(win)}s policy window")
+    with _DEP_LOCK:
+        _DEP_ACQ[dependent_key] = dict(rec)
+
+    def _live(**fields):
+        rec.update(fields)
+        with _DEP_LOCK:
+            live = _DEP_ACQ.get(dependent_key)
+            if live is not None:
+                live.update(fields)
+
+    def _prog(done, total, fname=None):
+        with _DEP_LOCK:
+            live = _DEP_ACQ.get(dependent_key)
+            if live is not None:
+                frac = (float(done) / float(total)) if total else None
+                live.update(done_bytes=int(done or 0), total_bytes=(int(total) if total else None),
+                            frac=(round(frac, 4) if frac is not None else None))
+                rec.update(done_bytes=live["done_bytes"], total_bytes=live["total_bytes"],
+                           frac=live["frac"])
+
+    central = (central_url or "").strip().rstrip("/") or worker_central_url()
+    try:
+        if central:
+            base_key = ensure_model_registered(base_id, central)
+            if not base_key:
+                return _finish("refused", "unknown",
+                               f"central has no model for hub id {base_id!r}; acquire it "
+                               f"on central first (POST /llm/repos/download hub_id="
+                               f"{base_id!r}) — a worker takes weights from central only")
+            _live(base_key=base_key)
+            try:
+                ok = ensure_model_present(base_key, central, progress=_prog, purpose="demand")
+            except Exception as exc:  # noqa: BLE001
+                if type(exc).__name__ == "BudgetRefusal":
+                    why = getattr(exc, "reason", None)
+                    why = (why.get("reason") if isinstance(why, dict) else None) or str(exc)
+                    return _finish("refused", "budget", f"storage budget refused the base: {why}")
+                return _finish("failed", "failed", f"{type(exc).__name__}: {exc}")
+            if not ok or not model_is_local(base_key):
+                fail = last_failure(base_key) or last_failure(base_id) or {}
+                why = fail.get("human") or fail.get("reason") or "central did not provide the weights"
+                return _finish("failed", "failed", why)
+            return _finish("done", "allowed", None, ok=True)
+        # central / standalone: the catalog must know the base; the download
+        # is central's own ensure_model (its downloader path), never a new one.
+        base_key = catalog_canonical_key(base_id)
+        if not base_key:
+            return _finish("refused", "unknown",
+                           f"{base_id!r} is not in this box's model catalog; register it "
+                           f"(POST /llm/repos/download hub_id={base_id!r} register=true)")
+        _live(base_key=base_key)
+        try:
+            from hugpy_storage.download_models import ensure_model
+            ensure_model(base_key)
+        except Exception as exc:  # noqa: BLE001
+            return _finish("failed", "failed", f"{type(exc).__name__}: {exc}")
+        return _finish("done", "allowed", None, ok=True)
+    except Exception as exc:  # noqa: BLE001 — an acquisition never raises into a load
+        return _finish("failed", "failed", f"{type(exc).__name__}: {exc}")
+
+
 def _provision_now(canonical: str, central_url: str | None, progress=None) -> bool:
     """Do the actual fetch (central per-file -> central archive). Caller holds
     the per-model provisioning lock.

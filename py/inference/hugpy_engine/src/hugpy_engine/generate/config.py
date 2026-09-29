@@ -77,7 +77,8 @@ class DeepCoderConfig:
         )
 
 
-def adapter_base_refusal(model_key: str, exc: AdapterBaseUnavailable) -> MissingDependencyFailure:
+def adapter_base_refusal(model_key: str, exc: AdapterBaseUnavailable,
+                         acquisition: "dict | None" = None) -> MissingDependencyFailure:
     """The FINAL refusal for an adapter whose base is not in this store.
 
     It used to be a plain ``RuntimeError(f"{model_key}: {exc}")`` — which
@@ -86,10 +87,62 @@ def adapter_base_refusal(model_key: str, exc: AdapterBaseUnavailable) -> Missing
     ``MissingDependencyFailure`` (load class ``missing_dependency``) carries
     ``base_id`` and the FIX text on ``load_failure``; central reads the class
     as final and marks the job terminal; the v1 envelope's ``error.type`` is
-    the class. Chain the original so nothing is lost."""
-    return MissingDependencyFailure(f"{model_key}: {exc}", base_id=exc.base_model,
+    the class. Chain the original so nothing is lost.
+
+    ``acquisition`` (2026-09-29): the on-demand acquisition record when the
+    load tried to resolve the base itself and could not — the message then
+    ends with WHY the acquisition was refused, and the record rides
+    ``load_failure["acquisition"]``."""
+    msg = f"{model_key}: {exc}"
+    if isinstance(acquisition, dict):
+        msg += (f"; base acquisition {acquisition.get('status') or 'refused'} "
+                f"[{acquisition.get('policy') or 'unknown'}]: "
+                f"{acquisition.get('reason') or 'no reason recorded'}")
+    return MissingDependencyFailure(msg, base_id=exc.base_model,
                                     fix=getattr(exc, "fix", None), model_key=model_key,
-                                    path=exc.adapter_dir)
+                                    path=exc.adapter_dir, acquisition=acquisition)
+
+
+def _acquire_adapter_base(model_key: str, exc: AdapterBaseUnavailable, *,
+                          allowed: bool) -> dict:
+    """Try to acquire the adapter's base through the store's on-demand path
+    (``hugpy_storage.provision.acquire_dependency``). ``allowed=False`` (the
+    caller passed ``auto_download=False``) is a policy refusal of its own."""
+    if not allowed:
+        return {"ok": False, "status": "refused", "policy": "disabled",
+                "reason": "this load was built with auto_download=False, so it "
+                          "may not acquire dependencies", "base_id": exc.base_model,
+                "stage": "acquiring_dependency"}
+    from hugpy_storage.provision import acquire_dependency
+    return acquire_dependency(exc.base_model, dependent_key=model_key)
+
+
+def resolve_adapter_or_acquire(model_key: str, model_dir: str, *,
+                               allowed: bool = True, root: "str | None" = None):
+    """``(dir_to_load, adapter_dir_or_None)`` — ``resolve_adapter_pair`` with the
+    base ACQUIRED ON DEMAND when it is absent (2026-09-29: the base is a
+    dependency of the adapter; a dependency is resolved, not presented as a
+    choice). Policy-refused / failed acquisitions raise the same FINAL
+    ``MissingDependencyFailure`` as before, now naming the refusal reason.
+    Never loops: the store allows one attempt per (adapter, base) per window."""
+    kw = {"root": root} if root else {}
+    try:
+        return resolve_adapter_pair(model_dir, **kw)
+    except AdapterBaseUnavailable as exc:
+        if not exc.base_model:
+            raise adapter_base_refusal(model_key, exc) from exc
+        logger.info("%s is a PEFT adapter whose base %s is absent; acquiring it "
+                    "on demand", model_key, exc.base_model)
+        acq = _acquire_adapter_base(model_key, exc, allowed=allowed)
+        if acq and acq.get("ok"):
+            try:
+                return resolve_adapter_pair(model_dir, **kw)
+            except AdapterBaseUnavailable as again:
+                acq = dict(acq, ok=False, status="failed", policy="failed",
+                           reason=(f"the base was acquired as {acq.get('base_key') or exc.base_model!r} "
+                                   f"but the store still does not resolve it for the adapter"))
+                raise adapter_base_refusal(model_key, again, acquisition=acq) from again
+        raise adapter_base_refusal(model_key, exc, acquisition=acq) from exc
 
 
 def pick_device_and_dtype(torch, device: Optional[str], dtype) -> tuple[str, Any]:
@@ -147,18 +200,20 @@ def build_deepcoder_runtime(
     # applies it with PeftModel.from_pretrained (peft is lazy-imported by
     # require_peft, which refuses with `pip install peft` if it's missing).
     #
-    # Local store ONLY — an absent base raises AdapterBaseUnavailable naming the
-    # id to acquire. It never becomes a silent multi-GB download.
+    # An absent base is ACQUIRED ON DEMAND through the store's own path (the
+    # same central-only, budget-gated transfer every called model takes on a
+    # worker; central's downloader on central) — never a side-door pull — and
+    # a refused/failed acquisition is the FINAL missing_dependency refusal
+    # naming why (resolve_adapter_or_acquire). ``auto_download=False`` forbids
+    # the acquisition like every other download on this call.
     #
     # Ordinary model dirs come back unchanged, so this is inert for everything
     # that already worked. A dir that is neither loadable nor an adapter (a
     # bespoke-runtime repo mis-registered as transformers) is named for what it
     # is instead of dying inside from_pretrained.
     adapter_dir = None
-    try:
-        model_dir, adapter_dir = resolve_adapter_pair(model_dir)
-    except AdapterBaseUnavailable as exc:
-        raise adapter_base_refusal(model_key, exc) from exc
+    model_dir, adapter_dir = resolve_adapter_or_acquire(model_key, model_dir,
+                                                        allowed=bool(auto_download))
     if adapter_dir:
         logger.info("%s is a PEFT adapter; base=%s adapter=%s",
                     model_key, model_dir, adapter_dir)

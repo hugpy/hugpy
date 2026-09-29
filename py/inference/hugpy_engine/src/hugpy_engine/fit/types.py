@@ -317,6 +317,10 @@ class FitFailure:
                       the need was priced at and the KV term it carried — the
                       fit never prices KV at zero, so a refusal always says
                       which ctx it refused.
+    ``weights_margin`` / ``weights_margin_source`` / ``weights_margin_samples``
+                      (2026-09-29) the weights factor and its provenance:
+                      ``measured`` (a load of this file was measured) or
+                      ``prior`` (the x1.15 assumption for a never-loaded file).
     """
     kind: str
     code: str
@@ -330,6 +334,12 @@ class FitFailure:
     ctx_effective: Optional[int] = None
     kv_bytes: Optional[int] = None
     ctx_pct: Optional[int] = None
+    # (2026-09-29) the factor the weights term was priced at and whether it
+    # was MEASURED (this box or a peer loaded the same file) or the x1.15
+    # prior (``weights_margin_source``: ``measured`` | ``prior``).
+    weights_margin: Optional[float] = None
+    weights_margin_source: Optional[str] = None
+    weights_margin_samples: Optional[int] = None
 
     def as_dict(self) -> dict:
         return asdict(self)

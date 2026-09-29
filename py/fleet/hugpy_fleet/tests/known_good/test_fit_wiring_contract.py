@@ -497,7 +497,8 @@ def test_refusal_reports_device_occupancy_composition_and_the_weights_prior(rig,
     assert r["fit_failure"]["budget_bytes"] == dev_free - 512 * MIB
     # the sentence
     hb = A._human_bytes
-    assert f"needs {hb(weights)} = {hb(weights)} weights ({hb(wfile)} on disk x 1.15 weights headroom)" in msg
+    assert f"needs {hb(weights)} = {hb(weights)} weights ({hb(wfile)} on disk x 1.15 prior (never loaded))" in msg
+    assert r["weights_margin_source"] == "prior" and r["weights_margin_samples"] == 0
     assert f"{hb(dev_free)} free of {hb(total)}" in msg
     assert "held back from the free figure" not in msg      # nothing is
     assert f"~{hb(occupied)} of the device is in use = ~{hb(768 * MIB)} attributed to this worker" in msg

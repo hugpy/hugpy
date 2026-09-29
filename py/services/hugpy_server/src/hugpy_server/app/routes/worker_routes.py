@@ -477,6 +477,17 @@ class HeartbeatRequest(BaseModel):
     # needs_kv_bytes, ctx_pct, need_total_bytes, verdict, n_gpu_layers,
     # total_layers, vram_bytes, rss_bytes, load_seconds, device, ok, ts}.
     calibration_samples: list | None = None
+    # Measured weights margins (2026-09-29): {model_key: {file, file_bytes,
+    # backend, device_class, margin, samples, weights_measured_bytes,
+    # kv_measured_bytes, measured_at, ...}} — every (model, served file) the
+    # worker measured a load of. Additive + optional; stored verbatim on the
+    # worker record and relayed to peers on the reply.
+    weights_margins: dict | None = None
+    # On-demand DEPENDENCY acquisitions (2026-09-29): {adapter_key: {base_id,
+    # base_key, stage: "acquiring_dependency", status, policy, reason,
+    # done_bytes, total_bytes, frac, started_at, finished_at}}. Stored
+    # verbatim; load_state_for_model reports the pull as the adapter's stage.
+    dependency_acquisitions: dict | None = None
     # ROLLING AGGREGATE summary (operator ruling 2026-07-29). COMPACT ONLY —
     # counts plus {digest, mtime, bytes}; the document itself is pulled on read
     # via GET /llm/workers/<id>/aggregate. Shape: {schema_version, digest,
@@ -1422,6 +1433,8 @@ def workers_heartbeat(worker_id):
         environment_digest=body.environment_digest,
         doctrine_status=body.doctrine_status,
         load_bytes_per_s=body.load_bytes_per_s,
+        weights_margins=body.weights_margins,
+        dependency_acquisitions=body.dependency_acquisitions,
     )
     if worker is None:
         # The agent thinks it's registered but central forgot it (restart,
@@ -1504,6 +1517,19 @@ def workers_heartbeat(worker_id):
             reply_extra["calibration"] = corr
     except Exception:  # noqa: BLE001 — calibration is best-effort; never 5xx a beat
         logger.debug("calibration heartbeat hook failed", exc_info=True)
+    # Measured weights margins from the worker's PEERS (2026-09-29): a file
+    # another box has loaded is priced there at that box's measured margin
+    # instead of the prior. Same additive/omit-when-empty idiom as calibration.
+    try:
+        from hugpy_fleet.central.workers import peer_weights_margins
+        relevant = sorted(set(worker.get("loaded_models") or [])
+                          | set(worker.get("models") or [])
+                          | set(worker.get("models_local") or []))
+        peers = peer_weights_margins(worker_id, relevant or None)
+        if peers:
+            reply_extra["weights_margins"] = peers
+    except Exception:  # noqa: BLE001 — never 5xx a beat over a relay
+        logger.debug("weights-margin relay failed", exc_info=True)
     # p6: publish this worker's ACTIVE GPU reservations back on the reply (additive,
     # omit-when-unset — same wire idiom as calibration: a plain list the worker reads
     # with .get(), an older worker just ignores it). The WORKER-side hard admission
@@ -4147,6 +4173,21 @@ def _engine_gpu_free(worker, *, splittable, pooled):
     return pooled
 
 
+def _measured_weights_margin(model_key, worker):
+    """The measured margin record central prices this (model, worker) with, or
+    None. Module-level so tests can patch it beside ``_model_gguf_bytes``."""
+    try:
+        from hugpy_fleet.central.workers import weights_margin_for
+        dc = None
+        for g in ((worker or {}).get("gpus") or []):
+            if isinstance(g, dict) and g.get("name"):
+                dc = g.get("name")
+                break
+        return weights_margin_for(model_key, device_class=dc)
+    except Exception:  # noqa: BLE001 — a measured margin is a bonus; the prior stands
+        return None
+
+
 def _worker_fit(model_key, worker):
     """Capacity preflight for placing a model on a worker — the GPU analog of the
     local RAM preflight, but DUAL. A GPU worker holds weights in VRAM and can
@@ -4192,22 +4233,31 @@ def _worker_fit(model_key, worker):
     if moe:
         moe_gpu_bytes, expert_bytes = moe
         gpu_need_raw = moe_gpu_bytes
-    need = int(gpu_need_raw * VRAM_HEADROOM)
+    # MEASURED WEIGHTS MARGIN (2026-09-29): when any worker has measured a load
+    # of this file, price the weights at that ratio (same device class as this
+    # worker preferred) — the prior x1.15 only for a file nobody has loaded.
+    # The same rule the worker's own admission applies (_weights_margin_for).
+    margin = _measured_weights_margin(model_key, worker)
+    headroom = float(margin["margin"]) if margin else VRAM_HEADROOM
+    need = int(gpu_need_raw * headroom)
     # t28 load-and-learn: refine the VRAM-residency estimate with the learned,
     # per-model correction (median measured/predicted from real loads), clamped +
     # gated central-side. Applied to `need` (drives gpu_resident + the human hint)
     # so the preflight agrees with the worker's own corrected admission; the hard
     # combined-capacity block below stays on the raw size, so calibration can
     # only make the residency hint MORE accurate, never invent a new refusal.
+    # Never stacked on a MEASURED margin (the direct observation the correction
+    # only approximates) — exactly as the worker prices it.
     calibration_correction = None
-    try:
-        from hugpy_fleet.central.calibration import calibration_store as _cal
-        _c = _cal.correction_for(model_key)
-        if _c:
-            need = int(need * float(_c))
-            calibration_correction = float(_c)
-    except Exception:  # noqa: BLE001 — learned pricing is additive; never break fit
-        calibration_correction = None
+    if margin is None:
+        try:
+            from hugpy_fleet.central.calibration import calibration_store as _cal
+            _c = _cal.correction_for(model_key)
+            if _c:
+                need = int(need * float(_c))
+                calibration_correction = float(_c)
+        except Exception:  # noqa: BLE001 — learned pricing is additive; never break fit
+            calibration_correction = None
     capacity = (vram or 0) + (ram or 0)
     # The hard block: for a MoE only the GPU-resident share must land somewhere
     # in VRAM+RAM — refusing on the expert bytes would refuse exactly the model
@@ -4274,7 +4324,12 @@ def _worker_fit(model_key, worker):
             # Per-device GPU free the residency verdict actually priced (largest
             # single card for a non-splittable engine), beside the box-wide sum.
             "gpu_vram_free": gpu_vram, "gpu_splittable": is_gguf,
-            "headroom": VRAM_HEADROOM, "reason": reason,
+            "headroom": headroom, "reason": reason,
+            "weights_margin": headroom,
+            "weights_margin_source": ("measured" if margin else "prior"),
+            "weights_margin_samples": (int(margin.get("samples") or 1) if margin else 0),
+            "weights_margin_worker": (margin.get("worker") if margin else None),
+            "weights_margin_device": (margin.get("device_class") if margin else None),
             "calibration_correction": calibration_correction,
             "band_floor_bytes": band_floor_bytes,
             "band_floor_admissible": band_floor_admissible,
@@ -4365,6 +4420,12 @@ def _context_preview(model_key, worker, pct):
         "worker_id": worker.get("id"), "model_key": model_key,
         "ctx_max": ctx_max, "weights_bytes": weights,
         "weights_raw_bytes": verdict.get("need_raw"), "headroom": verdict.get("headroom"),
+        # The weights factor's provenance (2026-09-29) — the same source the
+        # worker's admission prices with: measured (n samples) or the prior.
+        "weights_margin": verdict.get("weights_margin", verdict.get("headroom")),
+        "weights_margin_source": verdict.get("weights_margin_source") or "prior",
+        "weights_margin_samples": int(verdict.get("weights_margin_samples") or 0),
+        "weights_margin_worker": verdict.get("weights_margin_worker"),
         "calibration_correction": verdict.get("calibration_correction"),
         "gpu_vram_free": gpu_free, "reserve_bytes": reserve, "budget_bytes": budget,
         "geometry_source": geo_info["source"],

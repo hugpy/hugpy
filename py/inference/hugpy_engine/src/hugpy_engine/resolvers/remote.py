@@ -2598,6 +2598,14 @@ def _is_worker_busy_signal(err: Any) -> bool:
     return any(m in low for m in _BUSY_MARKERS)
 
 
+class _ColdProgress(tuple):
+    """The 5-tuple ``_cold_progress`` has always returned, plus an optional
+    ``stage`` attribute (2026-09-29: ``acquiring_dependency`` while the worker
+    pulls an adapter's base on demand) so the hold's status event can name the
+    stage without changing the tuple every reader unpacks."""
+    stage: Optional[str] = None
+
+
 def _cold_progress(model_key: str, worker: Optional[dict],
                    since_ts: float) -> Tuple[bool, Optional[float], Optional[str], Optional[str], bool]:
     """Consult worker load-state → (moved, progress, message, honest_error).
@@ -2636,7 +2644,10 @@ def _cold_progress(model_key: str, worker: Optional[dict],
     # `healthy` is the provider's MATERIALIZED-gated verdict (workers.
     # load_state_for_model consults the allocation row's `materialized`): a
     # hollow loaded_models entry never reads ready here.
-    return moved, ls.get("progress"), ls.get("message"), None, bool(ls.get("healthy"))
+    out = _ColdProgress((moved, ls.get("progress"), ls.get("message"), None,
+                         bool(ls.get("healthy"))))
+    out.stage = ls.get("stage") or None
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3683,7 +3694,8 @@ def make_delegating_runner(framework: str, task: str):
                         # candidate (set above); no cold-hold accounting applies.
                         continue
                     # action == "retry": transient hold. Honest-fail / stall / ceiling.
-                    moved, _prog, _msg, honest, ready = _cold_progress(self.model_key, worker, start)
+                    _cp = _cold_progress(self.model_key, worker, start)
+                    moved, _prog, _msg, honest, ready = _cp
                     if honest:
                         # The worker's load-state names a hard failure — record
                         # it so queued/re-submitted calls fail fast (see
@@ -4061,7 +4073,8 @@ def make_delegating_runner(framework: str, task: str):
                     # wait, surfacing progress. (check-and-add is atomic on the one loop.)
                     if hold and key in _COLD_KICKING:
                         slot.release()
-                        moved, prog, msg, honest, ready = _cold_progress(self.model_key, worker, start)
+                        _cp = _cold_progress(self.model_key, worker, start)
+                        moved, prog, msg, honest, ready = _cp
                         if honest:
                             yield ErrorEvent(request_id=req.request_id,
                                              message=_humanize_worker_error(
@@ -4106,7 +4119,8 @@ def make_delegating_runner(framework: str, task: str):
                         wait_msg = msg or f"waiting for another request's load attempt for {self.model_key} on {worker.get('name') or wid}"
                         yield _loading_status(
                             req.request_id, self.model_key, worker, prog, wait_msg,
-                            stage="awaiting-capacity" if ready else "awaiting-load",
+                            stage=(getattr(_cp, "stage", None)
+                                   or ("awaiting-capacity" if ready else "awaiting-load")),
                             reason="another request currently owns the model load attempt",
                             retry_in_s=_cold_hold_poll_s(), elapsed_s=time.time() - start,
                             worker_state="loaded" if ready else "load state not confirmed")
@@ -4178,7 +4192,8 @@ def make_delegating_runner(framework: str, task: str):
                     # action == "retry": the transient hold. Consult load-state for an
                     # honest fail / progress, emit a loading status, bound by the
                     # stall/ceiling clocks, then retry.
-                    moved, prog, msg, honest, ready = _cold_progress(self.model_key, worker, start)
+                    _cp = _cold_progress(self.model_key, worker, start)
+                    moved, prog, msg, honest, ready = _cp
                     if honest:
                         # Hard load failure from the worker's load-state — record
                         # so queued/re-submitted calls answer from the cache.
@@ -4240,7 +4255,8 @@ def make_delegating_runner(framework: str, task: str):
                         wait_msg += f"; last worker response: {last_err}"
                     yield _loading_status(
                         req.request_id, self.model_key, worker, prog, wait_msg,
-                        stage="awaiting-capacity" if ready else "awaiting-load",
+                        stage=(getattr(_cp, "stage", None)
+                               or ("awaiting-capacity" if ready else "awaiting-load")),
                         reason=last_err or "worker has not confirmed model readiness",
                         retry_in_s=retry_wait, elapsed_s=now - start,
                         worker_state="loaded" if ready else "unknown/loading")

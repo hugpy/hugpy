@@ -3603,6 +3603,100 @@ def _resident_materialized(worker: Dict[str, Any], model_key: str) -> Optional[b
     return verdict
 
 
+def _margin_records_for(model_key: str, exclude_worker: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Every MEASURED weights-margin record any live worker reported for
+    ``model_key`` (heartbeat ``weights_margins`` map, else the allocation row's
+    fields), each stamped with the worker it came from. Plausible ratios only
+    (the worker's own guard band, 0.9..2.0)."""
+    wanted = _match_keys(model_key)
+    out: List[Dict[str, Any]] = []
+    for w in worker_store.all():
+        wid = w.get("id")
+        if exclude_worker and wid == exclude_worker:
+            continue
+        wname = w.get("name") or wid
+        seen = set()
+        for mk, rec in (w.get("weights_margins") or {}).items():
+            if not isinstance(rec, dict) or not (mk == model_key or (_match_keys(str(mk)) & wanted)):
+                continue
+            try:
+                ratio = float(rec.get("margin"))
+            except (TypeError, ValueError):
+                continue
+            if not (0.9 <= ratio <= 2.0):
+                continue
+            r = dict(rec)
+            r.update(worker=wname, worker_id=wid, model_key=str(mk))
+            out.append(r)
+            seen.add(str(mk))
+        for row in (w.get("allocations") or []):
+            if not isinstance(row, dict) or row.get("weights_margin") is None:
+                continue
+            mk = row.get("model_key")
+            if not mk or str(mk) in seen or not (mk == model_key or (_match_keys(str(mk)) & wanted)):
+                continue
+            try:
+                ratio = float(row.get("weights_margin"))
+            except (TypeError, ValueError):
+                continue
+            if not (0.9 <= ratio <= 2.0):
+                continue
+            out.append({"model_key": str(mk), "margin": ratio,
+                        "samples": int(row.get("weights_margin_samples") or 1),
+                        "device_class": row.get("weights_margin_device"),
+                        "file": row.get("weights_margin_file"),
+                        "measured_at": row.get("weights_margin_measured_at"),
+                        "weights_measured_bytes": row.get("weights_measured_bytes"),
+                        "kv_measured_bytes": row.get("kv_measured_bytes"),
+                        "worker": wname, "worker_id": wid})
+    return out
+
+
+def weights_margin_for(model_key: str, device_class: Optional[str] = None,
+                       exclude_worker: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """THE measured weights margin central prices ``model_key`` with, or None
+    (the x1.15 prior then stands): the record from a worker of the same device
+    class when one exists, else the one with the most samples. Read-only over
+    the heartbeat-borne records; never a store of its own."""
+    recs = _margin_records_for(model_key, exclude_worker=exclude_worker)
+    if not recs:
+        return None
+    dc = (device_class or "").strip().lower()
+    recs.sort(key=lambda r: ((str(r.get("device_class") or "").strip().lower() == dc) if dc else False,
+                             int(r.get("samples") or 0),
+                             float(r.get("measured_at") or 0)), reverse=True)
+    best = dict(recs[0])
+    best["source"] = "measured"
+    return best
+
+
+def peer_weights_margins(worker_id: str, model_keys: Optional[Iterable[str]] = None) -> Dict[str, list]:
+    """The records OTHER workers measured, keyed by model, for the heartbeat
+    reply (``weights_margins``) — so a worker prices a file a peer has loaded
+    with that peer's measurement instead of the prior. ``model_keys`` restricts
+    to the models relevant to the worker; None = every model with a record."""
+    keys = set(model_keys) if model_keys is not None else None
+    out: Dict[str, list] = {}
+    for w in worker_store.all():
+        if w.get("id") == worker_id:
+            continue
+        for mk, rec in (w.get("weights_margins") or {}).items():
+            if not isinstance(rec, dict):
+                continue
+            if keys is not None and not (mk in keys or any(_match_keys(str(mk)) & _match_keys(k) for k in keys)):
+                continue
+            try:
+                ratio = float(rec.get("margin"))
+            except (TypeError, ValueError):
+                continue
+            if not (0.9 <= ratio <= 2.0):
+                continue
+            r = dict(rec)
+            r.update(worker=(w.get("name") or w.get("id")), worker_id=w.get("id"))
+            out.setdefault(str(mk), []).append(r)
+    return out
+
+
 def _polite_admits(worker: Dict[str, Any], model_key: str) -> tuple:
     """Would a POLITE load of ``model_key`` land on ``worker`` without evicting?
 
@@ -4663,6 +4757,8 @@ class WorkerStore:
         environment_digest: Optional[Dict[str, Any]] = None,
         doctrine_status: Optional[Dict[str, Any]] = None,
         load_bytes_per_s: Optional[float] = None,
+        weights_margins: Optional[Dict[str, Any]] = None,
+        dependency_acquisitions: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Mark a worker alive and refresh its live GPU / loaded-model stats."""
         with self._transaction() as workers:
@@ -4848,6 +4944,16 @@ class WorkerStore:
                 # Unified engine-agnostic allocation view (slot-seated + in-RAM
                 # residents). Stored verbatim; _public_view spreads it through.
                 worker["allocations"] = allocations
+            if dependency_acquisitions is not None:
+                # On-demand dependency acquisitions (2026-09-29): an adapter
+                # load pulling its base; the load-state hold reads it.
+                worker["dependency_acquisitions"] = dependency_acquisitions
+            if weights_margins is not None:
+                # Measured weights margins (2026-09-29): every (model, served
+                # file) this worker measured a load of, resident or not. Stored
+                # verbatim; ``weights_margin_for`` prices the same file for any
+                # worker / the preflight from it, before it is ever loaded there.
+                worker["weights_margins"] = weights_margins
             if pid_registry is not None:
                 # Precision model->PID log (2026-07-14): per-model pid/host_mode/
                 # vram + unattributed foreign squatters. Stored verbatim;
@@ -7647,6 +7753,29 @@ def load_state_for_model(model_key: str, worker_id: str,
                         pulling_now = True
                         break
 
+        # DEPENDENCY ACQUISITION (2026-09-29): an adapter whose base is being
+        # pulled on demand is a PULL in progress for the ADAPTER's key — stage
+        # ``acquiring_dependency`` with the base's bytes, so the hold shows the
+        # dependency landing instead of "load state not confirmed".
+        stage = None
+        deps = w.get("dependency_acquisitions") or {}
+        if isinstance(deps, dict):
+            for k, v in deps.items():
+                if not isinstance(v, dict) or not (k == model_key or (_match_keys(k) & wanted)):
+                    continue
+                if v.get("status") == "running" or (
+                        v.get("stage") == "acquiring_dependency" and v.get("finished_at") is None):
+                    pulling_now = True
+                    stage = "acquiring_dependency"
+                    progress = v.get("frac")
+                    done, total = v.get("done_bytes"), v.get("total_bytes")
+                    moved = f"{_fmt_bytes_short(done)} of {_fmt_bytes_short(total)}" \
+                        if (done is not None and total) else \
+                        (f"{_fmt_bytes_short(done)} transferred" if done else "starting")
+                    message = (f"{model_key} on {wname}: acquiring its base "
+                               f"{v.get('base_id')} ({moved})")
+                break
+
         error = None
         load_failure = None
         reports = w.get("load_reports") or {}
@@ -7699,6 +7828,7 @@ def load_state_for_model(model_key: str, worker_id: str,
             "in_progress": bool(pulling_now or loading_now),
             "progress": progress,
             "message": message,
+            "stage": stage,                     # "acquiring_dependency" | None
             "error": error,
             "load_failure": load_failure,       # F3: the worker's structured cause
         }

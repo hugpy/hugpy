@@ -100,6 +100,11 @@ def need_split(det: Mapping[str, Any], need: Optional[int],
     pct = det.get("ctx_pct") if ctx_pct is None else ctx_pct
     out = {"weights_bytes": w, "kv_bytes": kv, "ctx_pct": pct,
            "ctx_resolved": det.get("ctx_resolved"), "ctx_max": det.get("ctx_max")}
+    # The weights factor + provenance (2026-09-29), when the detail carries it.
+    if det.get("weights_margin") is not None:
+        out["weights_margin"] = det.get("weights_margin")
+        out["weights_margin_source"] = det.get("weights_margin_source") or "prior"
+        out["weights_margin_samples"] = int(det.get("weights_margin_samples") or 0)
     n = _int_or_none(need)
     if n and kv is not None:
         out["kv_share_pct"] = round(100.0 * kv / n, 1)
@@ -562,7 +567,15 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                          ctx_effective=_int_or_none(det.get("ctx_effective")
                                                     or det.get("ctx_resolved")),
                          kv_bytes=_int_or_none(det.get("kv")),
-                         ctx_pct=_int_or_none(det.get("ctx_pct")))
+                         ctx_pct=_int_or_none(det.get("ctx_pct")),
+                         weights_margin=(None if det.get("weights_margin") is None
+                                         else float(det.get("weights_margin"))),
+                         weights_margin_source=(det.get("weights_margin_source")
+                                                if det.get("weights_margin") is not None
+                                                else None),
+                         weights_margin_samples=(_int_or_none(det.get("weights_margin_samples"))
+                                                 if det.get("weights_margin") is not None
+                                                 else None))
     return FitPlan(action="refuse", partial=(partial.as_dict() if partial is not None else None),
                    partial_kind=None, budget_bytes=budget, refuse_reason=why,
                    failure=failure, split=split,
