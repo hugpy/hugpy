@@ -1772,3 +1772,14 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-dist-badge b { color: var(--text); }
 .wp-dist-badge-env { color: var(--amber, #e0a44a); }
 .wp-dist-badge-where { color: var(--muted); }
+.wp-tf-filters { flex-basis: 100%; display: flex; gap: 4px; }
+.wp-tf-filter {
+  padding: 0 6px; font: inherit; font-size: 11px; line-height: 16px; color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+}
+.wp-tf-filter em { font-style: normal; opacity: 0.75; }
+.wp-tf-filter:hover { color: var(--text); }
+.wp-tf-filter-on { color: var(--text); border-color: var(--muted); }
+.wp-tf-filter-passed.wp-tf-filter-on { color: var(--green); border-color: rgba(74, 222, 128, 0.5); }
+.wp-tf-filter-failed.wp-tf-filter-on { color: var(--red); border-color: rgba(248, 113, 113, 0.5); }
+.wp-tf-skip-why { display: inline-block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
 import { hugpyFetch } from '../../runtime/config'
+import { TF_FILTERS, filterTestFireRows, loadTestFireFilter, saveTestFireFilter, testFireCounts, testFireRows } from './testFireFilter'
 
 export const TEST_FIRE_POLL_MS = 1500
 const RESULT_LIMIT = 60
@@ -44,6 +45,8 @@ export function useTestFire(worker) {
   const [busy, setBusy] = useState(false)     // start/stop request in flight
   const [error, setError] = useState(null)
   const [open, setOpen] = useState(true)
+  const [filter, setFilterState] = useState(() => loadTestFireFilter(worker?.id))
+  const setFilter = useCallback((f) => { setFilterState(f); saveTestFireFilter(worker?.id, f) }, [worker?.id])
   const activeId = useRef(null)
   const alive = useRef(true)
 
@@ -101,7 +104,7 @@ export function useTestFire(worker) {
 
   const dismiss = useCallback(() => { activeId.current = null; setJob(null); setError(null) }, [])
 
-  return { job, busy, error, open, setOpen, start, stop, dismiss }
+  return { job, busy, error, open, setOpen, start, stop, dismiss, filter, setFilter }
 }
 
 export function TestFireButton({ tf, disabled = false }) {
@@ -141,8 +144,10 @@ function chipTitle(key, pm) {
 export function TestFireStrip({ tf }) {
   const { job, error } = tf
   if (!job && !error) return null
-  const per = (job && job.summary && job.summary.per_model) || {}
-  const models = (job && job.models) || []
+  const rows = testFireRows(job)
+  const counts = testFireCounts(rows)
+  const filter = tf.filter || 'all'
+  const shown = filterTestFireRows(rows, filter)
   const skipped = (job && job.skipped) || []
   const planned = job && job.total_planned != null ? job.total_planned : '∞'
   const state = !job ? 'error' : job.running ? 'running' : (job.stop_reason === 'complete' ? 'done' : `stopped (${job.stop_reason || 'stopped'})`)
@@ -184,24 +189,34 @@ export function TestFireStrip({ tf }) {
       </div>
       {job && tf.open && (
         <div className="wp-tf-models">
-          {models.map(key => {
-            const pm = per[key]
-            const st = pm && pm.last_status
-            const cls = st === 'ok' ? 'wp-tf-chip-ok' : st === 'fail' ? 'wp-tf-chip-fail' : 'wp-tf-chip-pending'
+          <div className="wp-tf-filters" role="group" aria-label="filter test-fire results">
+            {TF_FILTERS.map(f => (
+              <button key={f.id} type="button"
+                      className={`wp-tf-filter wp-tf-filter-${f.id}${filter === f.id ? ' wp-tf-filter-on' : ''}`}
+                      aria-pressed={filter === f.id}
+                      onClick={() => tf.setFilter && tf.setFilter(f.id)}>
+                {f.label} <em>{counts[f.id]}</em>
+              </button>
+            ))}
+          </div>
+          {shown.map(({ key, pm, status, skip }) => {
+            if (status === 'skipped') {
+              return (
+                <span key={`skip:${key}`} className="wp-tf-chip wp-tf-chip-skip" title={`${key}\nskipped: ${skip.reason}`}>
+                  ⊘ {key} <em className="wp-tf-skip-why">{skip.reason}</em>
+                </span>
+              )
+            }
+            const cls = status === 'passed' ? 'wp-tf-chip-ok' : status === 'failed' ? 'wp-tf-chip-fail' : 'wp-tf-chip-pending'
             const inflight = job.in_flight && job.in_flight.some(f => f.model_key === key)
             return (
               <span key={key} className={`wp-tf-chip ${cls}${inflight ? ' wp-tf-chip-live' : ''}`} title={chipTitle(key, pm)}>
-                {st === 'ok' ? '●' : st === 'fail' ? '●' : '○'} {key}
-                {pm && pm.last_tok_s != null && st === 'ok' && <em> {pm.last_tok_s} t/s</em>}
+                {status === 'pending' ? '○' : '●'} {key}
+                {pm && pm.last_tok_s != null && status === 'passed' && <em> {pm.last_tok_s} t/s</em>}
                 {pm && pm.failed > 0 && pm.ok > 0 && <em> {pm.ok}/{pm.ok + pm.failed}</em>}
               </span>
             )
           })}
-          {skipped.map(s => (
-            <span key={`skip:${s.model_key}`} className="wp-tf-chip wp-tf-chip-skip" title={`${s.model_key}\nskipped: ${s.reason}`}>
-              ⊘ {s.model_key} <em>skipped{s.kind ? `: ${s.kind}` : ''}</em>
-            </span>
-          ))}
           {last && (
             <div className="wp-tf-last" title={last.error ? fmtErr(last.error) : (last.content80 || '')}>
               last: {last.model_key} · {last.ok ? 'ok' : (last.error_kind || 'fail')} · {last.latency_s}s
