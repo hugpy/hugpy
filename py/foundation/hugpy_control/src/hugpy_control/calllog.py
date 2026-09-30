@@ -115,6 +115,19 @@ def _err_text(err) -> str | None:
     return str(err)[:400]
 
 
+def _session_hook(phase: str, row: dict) -> None:
+    """SESSION-LEASE-20260929: bind a job to the client session it declared
+    (X-Hugpy-Client-Session/Turn/Request) at start; mark it ended at end."""
+    try:
+        from hugpy_control import sessions
+        if phase == "start" and row.get("client_session"):
+            sessions.note_job(row.get("id"), row)
+        elif phase == "end":
+            sessions.note_job_end(row.get("id"))
+    except Exception:  # noqa: BLE001
+        log.debug("session hook failed", exc_info=True)
+
+
 def record(phase: str, job, **extra) -> None:
     """Append one event for `job`. Never raises — logging must not break serving."""
     try:
@@ -152,6 +165,7 @@ def record(phase: str, job, **extra) -> None:
             row["duration_ms"] = int((time.time() - st) * 1000) if st else None
             row["error"] = _err_text(getattr(job, "error", None))
         row.update(extra)
+        _session_hook(phase, row)
         line = json.dumps(row, default=str)
         p = path()
         os.makedirs(os.path.dirname(p), exist_ok=True)

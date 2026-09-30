@@ -1071,6 +1071,14 @@ class JobStore:
                          "running, or its queue was unreachable (auto-expired). "
                          "Re-add the model once hugpy-downloader is up.")
             wedged: list[tuple] = []
+            # SESSION-LEASE-20260929: a job whose client session holds a FRESH
+            # lease is being waited on right now (long prefill looks silent) —
+            # never retire it on the no-progress clock.
+            try:
+                from hugpy_control import sessions as _sessions
+                leased = _sessions.fresh_job_ids()
+            except Exception:  # noqa: BLE001
+                leased = set()
             with self._lock:
                 for jid, job in list(self._jobs.items()):
                     status = normalize_status(job.status)
@@ -1090,6 +1098,7 @@ class JobStore:
                     # moving. Named honestly — the stage it died in and how long
                     # it sat there, so the row explains itself in the queue view.
                     if (status in _STALL_ACTIVE
+                            and jid not in leased
                             and float(job.progressed_at or 0) < wedge_cutoff):
                         idle = int(time.time() - float(job.progressed_at or 0))
                         where = f" in stage {job.stage!r}" if job.stage else ""

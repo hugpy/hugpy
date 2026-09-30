@@ -859,7 +859,26 @@ def workers_install_sh():
 def llm_queue():
     """Live in-flight chat queue (waiting/active) for the console activity view."""
     from hugpy_engine.dispatch import activity
-    return jsonify({"active": activity.snapshot(), "counts": activity.counts()})
+    rows, counts = activity.snapshot(), activity.counts()
+    # SESSION-LEASE-20260929: a job whose client session is idle/closed/
+    # abandoned is never shown as waiting/active (the client said it is done,
+    # or stopped renewing); counts stay consistent with the rows shown.
+    try:
+        from hugpy_control import sessions
+        sessions.sweep()
+        info = sessions.job_sessions([r.get("request_id") for r in rows])
+        hidden = [r for r in rows
+                  if (info.get(r.get("request_id")) or {}).get("state") in sessions.QUIET_STATES]
+        if hidden:
+            rows = [r for r in rows if r not in hidden]
+            counts = dict(counts)
+            for r in hidden:
+                bucket = "waiting" if r.get("state") == "waiting" else "active"
+                counts[bucket] = max(0, counts.get(bucket, 0) - 1)
+                counts["total"] = max(0, counts.get("total", 0) - 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"active": rows, "counts": counts})
 
 
 # ALIAS-MANIFEST-20260910: alias-tolerant manifest lookup for the per-model operator verbs.
@@ -2099,6 +2118,15 @@ def chat_cancel(request_id):
     from hugpy_fleet.central import worker_http
     from hugpy_control.bus import bus, TOPIC_CONTROL_CANCEL
     from hugpy_control.jobs import job_store
+
+    # SESSION-LEASE-20260929: the Calls panel (and clients) send the CLIENT's
+    # request id first; map it to the job id central minted.
+    if job_store.get_dict(request_id) is None:
+        try:
+            from hugpy_control import sessions
+            request_id = sessions.resolve_job_id(request_id) or request_id
+        except Exception:  # noqa: BLE001
+            pass
 
     # Direct store cancel first — its return is cross-process truth (live
     # here, or flagged on the shared mirror for the sibling gunicorn worker

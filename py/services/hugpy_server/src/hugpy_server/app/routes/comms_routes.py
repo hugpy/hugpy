@@ -117,7 +117,63 @@ def llm_calls():
     except ValueError:
         since = None
     rows = calllog.read(limit=limit, since=since)
+    _annotate_session_state(rows)
     return jsonify({"calls": rows, "count": len(rows), "path": calllog.path()})
+
+
+def _annotate_session_state(rows) -> None:
+    """SESSION-LEASE-20260929: the caller block shows the client's DECLARED
+    session state (and lease age) next to the identity it sent."""
+    try:
+        from hugpy_control import sessions
+        info = sessions.job_sessions([r.get("id") for r in rows if r.get("client_session")])
+        for r in rows:
+            s = info.get(r.get("id"))
+            if s:
+                r["client_session_state"] = s["state"]
+                r["client_session_lease_fresh"] = s["lease_fresh"]
+                r["client_session_lease_age_s"] = s.get("lease_age_s")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------------------
+# SESSION-LEASE-20260929 — client-declared session state (hugpy_control.sessions)
+# ---------------------------------------------------------------------------
+@comms_bp.route("/llm/sessions", methods=["GET"])
+def llm_sessions():
+    from hugpy_control import sessions
+    sessions.sweep()
+    state = (request.args.get("state") or "").strip() or None
+    rows = sessions.list_sessions(state=state)
+    return jsonify({"sessions": rows, "count": len(rows), "states": list(sessions.STATES)})
+
+
+@comms_bp.route("/llm/sessions/<session_id>", methods=["GET"])
+def llm_session(session_id):
+    from hugpy_control import sessions
+    sessions.sweep()
+    row = sessions.get(session_id)
+    if row is None:
+        return jsonify({"error": f"no session {session_id!r}"}), 404
+    return jsonify(row)
+
+
+@comms_bp.route("/llm/sessions/<session_id>/lease", methods=["POST"])
+def llm_session_lease(session_id):
+    """Renew a client session's lease / declare a transition. Body:
+    {state: waiting|active|idle|closed, event: lease|turn_done|session_closed,
+     turn_id, request_ids, ttl, client_process, pid, user, host, platform, client}."""
+    from hugpy_control import sessions
+    if sessions.db_path() is None:
+        return jsonify({"ok": False, "error": "sessions disabled"}), 503
+    res = sessions.lease(session_id, request.get_json(silent=True) or {})
+    if not res.get("ok"):
+        return jsonify(res), 400
+    if res.get("cancelled"):
+        audit("session.cancel_orphans", {"session_id": session_id,
+                                         "jobs": res["cancelled"]})
+    return jsonify(res)
 
 
 @comms_bp.route("/llm/jobs", methods=["GET"])
@@ -135,6 +191,11 @@ def llm_jobs():
         job_store.expire_pending_orphans()
     except Exception:
         pass
+    try:  # SESSION-LEASE: lapsed client leases -> abandoned + cancelled
+        from hugpy_control import sessions as _sessions
+        _sessions.sweep()
+    except Exception:
+        pass
     rows = job_store.snapshot(kinds={kind} if kind else None,
                               live_only=live)
     if transport:
@@ -150,6 +211,20 @@ def llm_jobs():
 # cooperative 'cancelling'). The media_bus import lives HERE (the flask route),
 # never in comms/, so comms stays free of any video_intel coupling.
 # ---------------------------------------------------------------------------
+def _resolve_client_request(some_id):
+    """SESSION-LEASE-20260929: a client cancels by ITS request id
+    (X-Hugpy-Client-Request); central minted its own job id (v1-...). An id
+    the store knows is used as-is; otherwise the session table maps it."""
+    try:
+        from hugpy_control.jobs import job_store
+        if job_store.get_dict(some_id) is not None:
+            return some_id
+        from hugpy_control import sessions
+        return sessions.resolve_job_id(some_id) or some_id
+    except Exception:  # noqa: BLE001
+        return some_id
+
+
 @comms_bp.route("/llm/jobs/<job_id>/cancel", methods=["POST"])
 def llm_job_cancel(job_id):
     from hugpy_control.jobs import job_store
@@ -160,6 +235,7 @@ def llm_job_cancel(job_id):
     # force-marked terminal in the store — persisted, surviving restarts. The
     # `mode` says which happened, and a cancel that changes NOTHING returns
     # cancelled:false (no more lying cancelled:true on a stuck job).
+    job_id = _resolve_client_request(job_id)
     res = job_store.cancel_authoritative(job_id, reason)
     ok = bool(res.get("cancelled"))
     mode = res.get("mode")

@@ -193,7 +193,7 @@ export default function CallsPanel() {
                   <div><b>Caller:</b> {r.client_process || 'process not reported'}{r.client_pid ? ` (pid ${r.client_pid})` : ''} · <b>OS user:</b> {r.client_user || 'not reported'} · <b>HugPy identity:</b> {r.principal || 'unauthenticated'}</div>
                   <div><b>Source:</b> {r.client || '—'} · <b>direct peer:</b> {r.peer || '—'} · <b>forwarded for:</b> {r.forwarded_for || '—'}</div>
                   <div><b>Via:</b> {r.method || '—'} {r.host || ''}{r.route || ''} · <b>client:</b> {r.ua || '—'} · <b>platform:</b> {r.client_platform || '—'}</div>
-                  <div><b>Hermes session:</b> {r.client_session || '—'} · <b>turn:</b> {r.client_turn || '—'} · <b>request:</b> {r.client_request || '—'} · <b>task:</b> {r.client_task || '—'}</div>
+                  <div><b>Hermes session:</b> {r.client_session || '—'} · <b>turn:</b> {r.client_turn || '—'} · <b>request:</b> {r.client_request || '—'} · <b>task:</b> {r.client_task || '—'}{r.client_session_state ? <> · <b>session state:</b> {r.client_session_state}{r.client_session_lease_fresh ? ' (lease fresh)' : ''}</> : null}</div>
                 </div>
                 {r.request
                   ? <div className="cp-json-tree"><JsonNode name="request" value={r.request} root /></div>
