@@ -2204,25 +2204,14 @@ def planned_split(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
         side with split=False, never a fabricated ratio.
     size_bytes reflects the 4-bit lever, so ticking it visibly shrinks the row."""
     out = {"gpu_bytes": None, "ram_bytes": None, "size_bytes": None,
-           "mode": None, "split": False, "source": "derived"}
+           "mode": None, "split": False}
     try:
         from hugpy_engine.alloc_modes import bnb_effective_bytes
         size = _model_size_bytes(model_key)
         if size and bnb_enabled(worker, model_key):
             size = bnb_effective_bytes(size) or size
         out["size_bytes"] = size
-        # An explicit MoE allocation is a contract.  Do not re-derive it from
-        # the worker's current capacity: that can turn an explicit split into
-        # max-ram/max-gpu in the forecast while the next load still receives
-        # the persisted n_cpu_moe contract.
-        persisted = (worker.get("spill_by_model") or {}).get(str(model_key))
-        if isinstance(persisted, dict) and persisted:
-            d = {"mode": "explicit", "spill": dict(persisted)}
-            if persisted.get("n_cpu_moe") is not None:
-                out["n_cpu_moe"] = int(persisted["n_cpu_moe"])
-            out["source"] = "contract"
-        else:
-            d = derived_default_allocation(worker, model_key) or {}
+        d = derived_default_allocation(worker, model_key) or {}
         mode = d.get("mode")
         out["mode"] = mode
         spill = d.get("spill") or {}
@@ -2233,7 +2222,6 @@ def planned_split(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
             out["gpu_bytes"] = int(float(g) * gib) if g is not None else 0
             out["ram_bytes"] = int(float(c) * gib) if c is not None else 0
             out["split"] = True
-            out["split_basis"] = "moe_contract"
         elif mode == "ram-only":
             out["ram_bytes"] = size
         elif mode == "gpu-only":
