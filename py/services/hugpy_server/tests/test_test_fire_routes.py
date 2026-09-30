@@ -7,9 +7,9 @@ are faked on the module.
 
 Pinned here:
   * SELECTION reads the catalog's ``tasks``/``primary_task``: text-generation /
-    text2text-generation rows are targets; anything carrying a vision / image /
-    video / audio / embedding task is NOT (a VL row that also lists
-    text-generation is excluded); operator-blocked, archive-marked and
+    text2text-generation rows are targets, including a VL row that also lists
+    text-generation; rows with only vision / image / video / audio / embedding
+    tasks are NOT; operator-blocked, archive-marked and
     off-catalog keys are skipped with a reason; candidates come from the
     worker's designations + local files + storage rows, de-duplicated.
   * RUN LOOP: every model exactly once per round in a seeded random order (a
@@ -95,8 +95,8 @@ WORKER = {
 def test_is_text_gen_reads_tasks_and_primary_task():
     assert tf.is_text_gen(CATALOG["tg-a"])
     assert tf.is_text_gen(CATALOG["t2t"]), "text2text-generation counts as text gen"
-    assert not tf.is_text_gen(CATALOG["vl"]), "vision-language is excluded"
-    assert not tf.is_text_gen(CATALOG["vl2"]), "primary text-gen + VL task is still VL"
+    assert tf.is_text_gen(CATALOG["vl"]), "VL + text-generation is text-capable"
+    assert tf.is_text_gen(CATALOG["vl2"]), "primary text-gen + VL task is text-capable"
     assert not tf.is_text_gen(CATALOG["img"])
     assert not tf.is_text_gen(CATALOG["asr"])
     assert not tf.is_text_gen(CATALOG["emb"])
@@ -116,15 +116,13 @@ def test_worker_model_keys_unions_designations_local_and_storage_dedup():
 def test_select_text_gen_models_keeps_text_gen_and_explains_every_skip():
     selected, skipped = tf.select_text_gen_models(
         WORKER, CATALOG, blocked={"blocked-tg"}, archived={"tg-b"})
-    assert [m["model_key"] for m in selected] == ["tg-a", "qual-tg", "t2t"]
+    assert [m["model_key"] for m in selected] == ["tg-a", "vl", "qual-tg", "t2t", "vl2"]
     assert selected[0] == {"model_key": "tg-a", "framework": "gguf",
                            "tasks": ["text-generation"]}
     reasons = {s["model_key"]: s["reason"] for s in skipped}
     assert reasons["blocked-tg"] == "operator-blocked"
     assert reasons["tg-b"] == "archive-marked"
     assert reasons["ghost"] == "not in catalog"
-    assert reasons["vl"].startswith("not text-gen:") and "image-text-to-text" in reasons["vl"]
-    assert reasons["vl2"].startswith("not text-gen:")
     assert reasons["img"].startswith("not text-gen:")
     assert reasons["asr"].startswith("not text-gen:")
     assert reasons["emb"].startswith("not text-gen:")
@@ -388,19 +386,19 @@ def test_start_selects_text_gen_models_and_returns_job_id(h):
     assert r.status_code == 202, r.get_json()
     body = r.get_json()
     assert body["ok"] and body["job_id"]
-    assert sorted(body["models"]) == ["qual-tg", "t2t", "tg-a", "tg-b"]
-    assert body["total_planned"] == 8 and body["rounds"] == 2 and body["max_tokens"] == 8
+    assert sorted(body["models"]) == ["qual-tg", "t2t", "tg-a", "tg-b", "vl", "vl2"]
+    assert body["total_planned"] == 12 and body["rounds"] == 2 and body["max_tokens"] == 8
     skipped = {s["model_key"]: s["reason"] for s in body["skipped"]}
     assert skipped["blocked-tg"] == "operator-blocked"
-    assert skipped["vl"].startswith("not text-gen")
+    assert skipped["img"].startswith("not text-gen")
     s = h.wait_done(body["job_id"])
-    assert s["done_calls"] == 8 and s["round"] == 2
-    assert s["summary"]["ok"] == 6 and s["summary"]["failed"] == 2
+    assert s["done_calls"] == 12 and s["round"] == 2
+    assert s["summary"]["ok"] == 10 and s["summary"]["failed"] == 2
     assert s["summary"]["per_model"]["t2t"]["last_status"] == "fail"
     assert s["summary"]["per_model"]["t2t"]["last_error_kind"] == "fit_failure"
     assert s["summary"]["per_model"]["tg-a"]["last_status"] == "ok"
     assert s["stop_reason"] == "complete" and s["in_flight"] == []
-    assert sorted(h.calls) == sorted(["qual-tg", "t2t", "tg-a", "tg-b"] * 2)
+    assert sorted(h.calls) == sorted(["qual-tg", "t2t", "tg-a", "tg-b", "vl", "vl2"] * 2)
     # the worker's current/last job is readable without the id
     cur = h.client.get("/llm/workers/wid/test-fire").get_json()
     assert cur["job_id"] == body["job_id"]

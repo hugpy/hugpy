@@ -14,6 +14,7 @@ Routes (bare and under /api, like the rest of the worker surface):
     POST /llm/workers/<id>/test-fire                    {rounds?, concurrency?, max_tokens?, seed?}
                                                         -> {job_id, ...}   409 if one is already running
     GET  /llm/workers/<id>/test-fire                    the worker's current/last job (or 404)
+    GET  /llm/workers/<id>/test-fire/current            same (explicit alias; never read as a job id)
     GET  /llm/workers/<id>/test-fire/<job_id>           {running, round, done_calls, total_planned,
                                                          results[], summary{ok, failed, per_model}}
     POST /llm/workers/<id>/test-fire/<job_id>/stop      stop after in-flight calls finish
@@ -22,7 +23,9 @@ Routes (bare and under /api, like the rest of the worker surface):
 Model SELECTION reads the catalog rows the console already renders
 (``get_models_dict(dict_return=True)`` -> ``tasks`` / ``primary_task``): a
 model is text-gen when it carries ``text-generation`` / ``text2text-generation``
-AND no vision / image / video / audio / embedding / rerank task. Operator-
+— even alongside a vision task (a VL chat model answers a text prompt too);
+rows whose tasks are ONLY non-text (embedding, image gen, ASR, ...) are not
+targets. Operator-
 blocked and archive-marked keys are skipped. The candidate set is the worker's
 designations plus what it holds locally (``models``, ``models_local`` and the
 storage rows), i.e. "that worker's models" as the row shows them.
@@ -49,8 +52,9 @@ test_fire_bp, logger = get_bp("test_fire_bp", __name__)
 
 # ── selection vocabulary ─────────────────────────────────────────────────────
 TEXT_GEN_TASKS = frozenset({"text-generation", "text2text-generation"})
-# Any of these on a row makes it NOT a plain text-gen target for this button
-# (vision-language, image/video generation, audio, embeddings, rerank, parts).
+# Non-text task vocabulary (vision-language, image/video generation, audio,
+# embeddings, rerank, parts). A row carrying ONLY these is not a target; a row
+# that ALSO carries a TEXT_GEN_TASKS entry (e.g. a VL chat model) still is.
 NON_TEXT_TASKS = frozenset({
     "image-text-to-text", "visual-question-answering", "image-to-text",
     "text-to-image", "image-to-image", "image-to-video", "text-to-video",
@@ -90,13 +94,12 @@ def model_tasks(row: dict) -> set:
 
 
 def is_text_gen(row: dict) -> bool:
-    """Plain text generation: has a text-gen task and no vision/image/audio/
-    embedding task (a ``['image-text-to-text', 'text-generation']`` VL row is
-    NOT a target here — it is exercised by the vision tooling)."""
+    """Text-capable: carries ``text-generation`` / ``text2text-generation``.
+    A ``['image-text-to-text', 'text-generation']`` VL row IS a target (it
+    answers a text-only prompt); rows with only NON_TEXT_TASKS are not."""
     if not isinstance(row, dict):
         return False
-    tasks = model_tasks(row)
-    return bool(tasks & TEXT_GEN_TASKS) and not (tasks & NON_TEXT_TASKS)
+    return bool(model_tasks(row) & TEXT_GEN_TASKS)
 
 
 def worker_model_keys(worker: dict) -> list:
@@ -197,7 +200,7 @@ def select_text_gen_models(worker: dict, catalog: dict,
             continue
         if not is_text_gen(row):
             skipped.append({"model_key": key,
-                            "reason": "not text-gen: " + ",".join(sorted(model_tasks(row))) or "no task"})
+                            "reason": "not text-gen: " + (",".join(sorted(model_tasks(row))) or "no task")})
             continue
         why = unserveable_reason(row)
         if why:
@@ -680,6 +683,7 @@ def test_fire_start(worker_id):
 
 
 @test_fire_bp.route("/llm/workers/<worker_id>/test-fire", methods=["GET"])
+@test_fire_bp.route("/llm/workers/<worker_id>/test-fire/current", methods=["GET"])
 def test_fire_current(worker_id):
     job = _latest_job_for(worker_id)
     if job is None:
