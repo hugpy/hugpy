@@ -912,3 +912,68 @@ def test_offline_replay_of_the_acceptance_scenarios(row, rig, overlay_reset, mon
             assert [p["model_key"] for p in v["reason"]["protected"]] == keys, name
     else:
         assert v["evicted"] == [], name
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-30 (keeper): an UNREQUESTED context never costs a neighbour —
+# target = min(trained, HUGPY_DEFAULT_CTX_TARGET=32768); evict only the minimum
+# coldest-first set that seats WHOLE at the target; ctx grows only into what
+# that leaves. Offline replay rows priced with the REAL need (x1.4426).
+# ---------------------------------------------------------------------------
+_SIXB, _SEVB = "Qwen3-0.6B-GGUF", "Qwen2.5-7B-Instruct-GGUF"
+REPLAY_REAL_NEED = [
+    # (name, free, {resident: (vram, lru)}, expected evicted, expect ctx >= target)
+    ("post10 S3b: free room holds the target -> no eviction", 21_935_226_880,
+     {_SIXB: (1_089_798_144, 100.0), _SEVB: (898_957_312, 200.0)}, [], True),
+    ("free short of the target by < one resident -> the coldest only, never the 7B",
+     13_600_000_000, {_SIXB: (1_089_798_144, 100.0), _SEVB: (898_957_312, 200.0)}, [_SIXB], True),
+    ("post8 S3b: one big on-demand resident -> evict it, ctx grows into its room",
+     8_955_232_256, {_SIXB: (14_963_179_520, 100.0)}, [_SIXB], True),
+]
+
+
+@pytest.mark.parametrize("row", REPLAY_REAL_NEED, ids=[r[0] for r in REPLAY_REAL_NEED])
+def test_ctx_target_never_evicts_for_unrequested_context(row, ctx_admission, rig, monkeypatch):
+    """INVARIANT (keeper 2026-09-30): with ctx_pct UNSET the admission
+    evicts only the minimum coldest-first set needed to seat WHOLE at the
+    target ctx (32768; none when free room already holds it), then sizes the
+    ctx on free + own seat + that set only — never an extra resident to grow
+    ctx beyond the target. The seat is whole (no partial, no CPU-only), the
+    ctx is >= the target, the reason names the target, and the bound's need
+    equals the fit's need to the byte. Established: 2026-09-30."""
+    monkeypatch.delenv("HUGPY_DEFAULT_CTX_TARGET", raising=False)
+    name, free, residents, expect_evicted, at_least_target = row
+    rig.residents.clear(); rig.lru.clear(); rig.evicted.clear()
+    rig.card["free"] = free
+    for k, (vb, lru) in residents.items():
+        rig.residents[k] = vb; rig.lru[k] = lru
+    reserve = A._vram_ceiling_reserve_bytes(rig.card["total"])
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
+    assert v["action"] in ("proceed", "evicted"), (name, v.get("reason"))
+    assert sorted(v["evicted"]) == sorted(expect_evicted), (name, v["evicted"])
+    assert v.get("n_gpu_layers") is None and "0 B on the GPU" not in str(v.get("note")), name
+    ctx = v["ctx_effective"]
+    assert ctx >= 32768 if at_least_target else True, (name, ctx)
+    room = free + sum(residents[k][0] for k in expect_evicted) - reserve
+    need = A._need_total(ctx_admission["W"], ctx * PER_TOK, CORR)
+    assert need <= room < A._need_total(ctx_admission["W"], (ctx + 1024) * PER_TOK, CORR), name
+    assert "ctx target 32768" in v["ctx_reason"], v["ctx_reason"]
+    assert A._incoming_need_detail("Qwen3.8_4B_Distilled_GGUF")["total"] == need   # the seat, via the ticket
+
+
+def test_ctx_target_knob_and_the_floor_partial(ctx_admission, rig, monkeypatch):
+    """HUGPY_DEFAULT_CTX_TARGET moves the eviction threshold; a card that
+    cannot seat the model whole even at the floor with every evictable keeps
+    the existing partial behaviour."""
+    rig.residents.clear(); rig.lru.clear()
+    rig.card["free"] = 13_600_000_000
+    rig.residents[_SIXB] = 1_089_798_144; rig.lru[_SIXB] = 100.0
+    monkeypatch.setenv("HUGPY_DEFAULT_CTX_TARGET", "16384")      # 16k fits free room
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
+    assert v["evicted"] == [] and v["ctx_effective"] >= 16384 and "ctx target 16384" in v["ctx_reason"]
+    monkeypatch.delenv("HUGPY_DEFAULT_CTX_TARGET")
+    A._ADMISSION_TICKETS.clear()
+    rig.residents.clear(); rig.lru.clear()
+    rig.card["free"] = 2 * GIB                                   # nothing to evict, floor won't fit whole
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
+    assert v["ctx_effective"] == 4096 and v["action"] in ("partial", "refuse"), v.get("reason")

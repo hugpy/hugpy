@@ -7806,6 +7806,85 @@ def _whole_seat_max_ctx(*, weights: int, corr: "float | None", geo: dict,
     return max(int(floor), best), True
 
 
+def _default_ctx_target() -> int:
+    """HUGPY_DEFAULT_CTX_TARGET (default 32768): the context an UNSET ctx_pct
+    is entitled to evict for. Above it, ctx grows only into free room."""
+    try:
+        v = int(float(os.environ.get("HUGPY_DEFAULT_CTX_TARGET") or 32768))
+        return v if v > 0 else 32768
+    except (TypeError, ValueError):
+        return 32768
+
+
+def _need_at_ctx_target(model_key: str) -> "tuple[int, int] | None":
+    """``(need_bytes, target_ctx)`` for an UNSET-pct GGUF with full geometry,
+    priced by ``_need_total`` exactly as the fit prices it; None otherwise
+    (pct set, other engines, unreadable geometry -> the caller keeps the old
+    reachable-room hint)."""
+    if _ctx_pct(model_key) is not None:
+        return None
+    from hugpy_engine.config.main import get_model_config
+    cfg = get_model_config(model_key, dict_return=True) or {}
+    if str(cfg.get("framework") or "").lower() not in ("gguf", "llama_cpp"):
+        return None
+    geo = _model_kv_geometry(model_key, cfg) or {}
+    ppath, _tl = _served_gguf_geometry(model_key)
+    if not (ppath and geo.get("n_kv_heads") and geo.get("head_dim")):
+        return None
+    w = _incoming_need_bytes(model_key)
+    if not w:
+        return None
+    trained = int(geo.get("ctx_train") or _model_max_ctx(model_key, cfg) or 0)
+    target = min(trained, _default_ctx_target()) if trained else _default_ctx_target()
+    return _need_total(int(w), _kv_at_ctx(geo, target), _calib_correction(model_key)), int(target)
+
+
+def _admission_room_hint(state, model_key: str, snap, policy, residents,
+                         polite: bool) -> "tuple[int | None, str | None]":
+    """The room (bytes, BEFORE the ceiling reserve) the admission sizes an
+    unset-pct ctx on, and the reason (keeper rule, 2026-09-30):
+
+      (1) seats whole on FREE room (+ own seat) at >= the target ctx -> that
+          room: the largest whole-seat ctx on free room, NO eviction;
+      (2) else the MINIMUM set plan_fit itself would evict (same coldest-
+          first order — a pure dry run at the target need) -> free + own +
+          that set: never an extra resident to grow ctx past the target;
+      (3) unreachable even with every evictable -> free + own + all
+          evictables (the whole-seat bound then falls to the floor and the
+          plan's existing partial behaviour).
+    Anything unpriceable (pct set, non-GGUF, stubs) -> the old reachable room."""
+    try:
+        own = int(_subject_resident_vram_bytes(state, model_key) or 0)
+        free = snap.free_bytes
+        if free is None:
+            return None, None
+        h0 = int(free) + own
+        evictable = 0 if polite else sum(int(r.vram_bytes or 0) for r in residents
+                                        if not r.protected)
+        priced = _need_at_ctx_target(model_key)
+        if priced is None:
+            return h0 + evictable, None
+        need_t, target = priced
+        reserve = int(policy.ceiling_reserve_bytes or 0)
+        if need_t <= h0 - reserve:
+            return h0, f"ctx target {target}: seats whole on free room, no eviction for context"
+        if polite or not evictable:
+            return h0 + evictable, f"ctx target {target} does not fit free room"
+        from hugpy_engine.fit.plan import plan_fit as _dry_plan_fit   # pure; not the spied seam
+        det_t = {"total": need_t, "weights": need_t, "kv": 0, "ctx_pct": None}
+        dry = _dry_plan_fit(_fit_request(state, model_key, need_t, det_t, polite),
+                            snap, residents, policy)
+        if dry.action in ("evict", "proceed") and dry.evictions:
+            freed = sum(int(getattr(e, "vram_bytes", 0) or 0) for e in dry.evictions)
+            keys = [getattr(e, "model_key", "?") for e in dry.evictions]
+            return h0 + freed, f"ctx target {target}; evicting {keys} to reach it"
+        return h0 + evictable, (f"ctx target {target} unreachable even with every "
+                                f"evictable resident")
+    except Exception:  # noqa: BLE001 — a hint gap degrades to the old room
+        logger.debug("ctx room hint for %s failed", model_key, exc_info=True)
+        return None, None
+
+
 def _effective_ctx(model_key: str, cfg: dict | None = None, *,
                    free_hint: "int | None" = None, weights_bytes: "int | None" = None,
                    reserve_bytes: "int | None" = None) -> dict:
@@ -11275,18 +11354,19 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     # subject's own seat — in its own basis (headroomed weights, ceiling
     # reserve). The verdict's ticket then carries that ctx to the seat.
     _ADMISSION_TICKETS.pop(model_key, None)
-    _free_hint = None
-    try:
-        _fv0 = _free_vram_bytes()
-        if _fv0 is not None:
-            _free_hint = int(_fv0) + int(_subject_resident_vram_bytes(state, model_key) or 0)
-            if not polite:
-                _cands0, _ = _partition_residents(state, model_key)
-                _free_hint += sum(int(r.get("vram_bytes") or 0) for r in _cands0)
-    except Exception:  # noqa: BLE001 — no hint -> the live read, as before
-        _free_hint = None
+    # ── GATHER (once) ───────────────────────────────────────────────────────
+    snap = _fit_snapshot(total)
+    policy = _fit_policy(total)
+    residents, cand_rows, prot_rows = _fit_residents(state, model_key)
+    # THE CTX TARGET (keeper, 2026-09-30): an UNREQUESTED context never costs
+    # a neighbour. The room the ctx is sized on is free + own seat, plus ONLY
+    # the minimum coldest-first set that seats the model whole at the target.
+    _free_hint, _ctx_room_note = _admission_room_hint(
+        state, model_key, snap, policy, residents, polite)
     _det = _need_detail_with_hint(model_key, free_hint=_free_hint,
-                                  reserve_bytes=_vram_ceiling_reserve_bytes(total))
+                                  reserve_bytes=int(policy.ceiling_reserve_bytes or 0))
+    if _ctx_room_note and _det.get("ctx_source") == "loader-default":
+        _det["ctx_reason"] = _ctx_room_note + "; " + str(_det.get("ctx_reason") or "")
     if need is None:
         need = _det.get("total")
     if not need:
@@ -11302,11 +11382,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
             need = int(need * BNB_4BIT_SIZE_RATIO)
     except Exception:  # noqa: BLE001 — never break admission over the lever
         pass
-    # ── GATHER (once) ───────────────────────────────────────────────────────
-    snap = _fit_snapshot(total)
-    policy = _fit_policy(total)
     request = _fit_request(state, model_key, need, _det, polite)
-    residents, cand_rows, prot_rows = _fit_residents(state, model_key)
     if request.subject_held_bytes:
         logger.info(
             "VRAM admission for %s: the subject is ALREADY resident holding ~%s "
