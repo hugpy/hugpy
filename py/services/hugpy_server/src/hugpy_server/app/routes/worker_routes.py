@@ -4387,6 +4387,13 @@ def _model_ctx_geometry(model_key):
     out = {"geometry": {}, "ctx_max": None, "dtype_bytes": 2.0, "source": None}
     try:
         from hugpy_engine import spill
+        # Local import (as in _model_gguf_bytes): _model_file_for is NOT in the
+        # module-level serve import group, so referencing it here without this
+        # raised NameError — swallowed by the except below, which zeroed ctx_max
+        # for every GGUF model. That left KV unpriced (kv_bytes=None at every
+        # step), so the Ctx slider's "planned" need stayed frozen at the weights
+        # term and shrinking ctx never made a model fit. See ContextPreview.
+        from hugpy_engine.serve.serve import _model_file_for
         cfg = get_model_config(model_key, dict_return=True) or {}
         fw = str(cfg.get("framework") or "").lower()
         geo = {}

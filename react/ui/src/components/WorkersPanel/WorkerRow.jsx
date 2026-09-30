@@ -43,6 +43,39 @@ export function effectivePin(worker, key) {
   return !!(worker?.config?.pinned || {})[key]
 }
 
+// Per-model "context target" popover: a % slider + live pricing preview.
+// MUST live at module scope — when this was defined inside WorkerRow's body it
+// became a brand-new component type on every render, so each background poll
+// (30s catalog / 10s load / 1s jobs) remounted the menu, snapping the slider's
+// local `pct` back to the server value mid-drag and refetching the preview. As
+// a stable top-level component it keeps its state across the parent's renders.
+function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose, modelKey }) {
+  const initial = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
+  const [pct, setPct] = useState(Math.max(1, Math.min(100, initial)))
+  const tokens = Math.max(1, Math.round(Number(maxContext || 0) * pct / 100))
+  useEffect(() => {
+    const close = (e) => {
+      if (!e.target.closest?.('.wp-context-menu') && !e.target.closest?.('.wp-ctx-button')) onClose()
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [onClose])
+  const rect = anchorRef.current?.getBoundingClientRect()
+  return (
+    <div className="wp-context-menu" style={{ top: `${(rect?.bottom || 0) + 6}px`, left: `${rect?.left || 0}px` }}>
+      <div className="wp-context-title">Context target</div>
+      <input type="range" min="1" max="100" step="1" value={pct}
+             onChange={e => setPct(Number(e.target.value))} />
+      <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens</span>
+      <ContextPreview workerId={workerId} modelKey={modelKey} pct={pct} />
+      <div className="wp-context-actions">
+        <button type="button" onClick={() => onApply(pct)}>Apply</button>
+        <button type="button" onClick={() => onApply(null)}>Auto</button>
+      </div>
+    </div>
+  )
+}
+
 // A worker row: status + GPUs (with used/free) + provisioning state, the models
 // it serves with per-model load state + concise GPU allocation + free controls.
 export function WorkerRow({ worker, models, allocation, onChat = null, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null, distMode = 'feasible' }) {
@@ -271,33 +304,6 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     else next.ctx_pct = Number(pct)
     Promise.resolve(onAssign(worker, key, next)).catch(() => {})
   }, [onAssign, worker])
-
-  const ContextMenu = ({ maxContext, spill, anchorRef, onApply, onClose, modelKey }) => {
-    const initial = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
-    const [pct, setPct] = useState(Math.max(1, Math.min(100, initial)))
-    const tokens = Math.max(1, Math.round(Number(maxContext || 0) * pct / 100))
-    useEffect(() => {
-      const close = (e) => {
-        if (!e.target.closest?.('.wp-context-menu') && !e.target.closest?.('.wp-ctx-button')) onClose()
-      }
-      document.addEventListener('mousedown', close)
-      return () => document.removeEventListener('mousedown', close)
-    }, [onClose])
-    const rect = anchorRef.current?.getBoundingClientRect()
-    return (
-      <div className="wp-context-menu" style={{ top: `${(rect?.bottom || 0) + 6}px`, left: `${rect?.left || 0}px` }}>
-        <div className="wp-context-title">Context target</div>
-        <input type="range" min="1" max="100" step="1" value={pct}
-               onChange={e => setPct(Number(e.target.value))} />
-        <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens</span>
-        <ContextPreview workerId={worker.id} modelKey={modelKey} pct={pct} />
-        <div className="wp-context-actions">
-          <button type="button" onClick={() => onApply(pct)}>Apply</button>
-          <button type="button" onClick={() => onApply(null)}>Auto</button>
-        </div>
-      </div>
-    )
-  }
 
   const checkHealth = useCallback(async () => {
     setPing('checking')
@@ -632,7 +638,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                     onClick={() => setCtxMenu(open ? null : key)}>
               {value.toLocaleString()}
             </button>
-            {open && <ContextMenu maxContext={max} spill={spill} anchorRef={ctxAnchorRef} modelKey={key}
+            {open && <ContextMenu workerId={worker.id} maxContext={max} spill={spill} anchorRef={ctxAnchorRef} modelKey={key}
                                   onApply={next => applyContext(key, spill, next)}
                                   onClose={() => setCtxMenu(null)} />}
           </span>
