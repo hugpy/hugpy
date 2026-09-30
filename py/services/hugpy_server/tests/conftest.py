@@ -283,3 +283,18 @@ def _cwd_outside_package(tmp_path, monkeypatch):
     current directory when an app is built. Run every test from a scratch
     directory so those files never land in the package tree."""
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _reset_request_spill_overlay():
+    """Each test is a fresh request: clear the per-request spill overlay
+    (hugpy_engine.spill ContextVar, 2026-09-30) before and after, so one
+    test's _apply_spill never shadows another test's os.environ setup."""
+    try:
+        from hugpy_engine.spill import set_request_env
+    except Exception:  # noqa: BLE001 — an engine without the overlay
+        yield
+        return
+    set_request_env(None)
+    yield
+    set_request_env(None)

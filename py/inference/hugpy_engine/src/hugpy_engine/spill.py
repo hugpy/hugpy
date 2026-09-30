@@ -69,8 +69,41 @@ _ASSUMED_LAYERS = 32
 # ---------------------------------------------------------------------------
 # env helpers
 # ---------------------------------------------------------------------------
+# ── PER-REQUEST SPILL OVERLAY (2026-09-30) ─────────────────────────────────
+# The worker applied each request's spill by writing os.environ — PROCESS-WIDE.
+# Two concurrent requests on one worker therefore read each other's placement:
+# post10 (ae): a RAM-only, polite Qwen2.5-7B request set HUGPY_N_GPU_LAYERS=off
+# + HUGPY_NO_EVICT while the 4B's seat and the 9B's admission ran on other
+# threads — the 4B launched CPU-only (1.13 GB VRAM / 22 GB RSS, 4.7 tok/s on
+# a card with 20 GB free), the 9B read "placement intent puts 0 B on the GPU"
+# and the polite flag ("every seat is occupied and the polite flag forbids
+# bumping"). The overlay is a ContextVar: the request's thread (and the asyncio
+# tasks it schedules, which copy its context) see exactly THEIR spill; a
+# context with no overlay falls back to os.environ (today's behaviour).
+import contextvars as _cv
+_REQUEST_ENV: "_cv.ContextVar[Optional[dict]]" = _cv.ContextVar("hugpy_request_spill_env",
+                                                                default=None)
+
+
+def set_request_env(overlay: Optional[dict]):
+    """Install ``{ENV_NAME: value-or-None}`` for the current context (None
+    value = explicitly UNSET for this request). Returns the ContextVar token."""
+    return _REQUEST_ENV.set(dict(overlay) if overlay is not None else None)
+
+
+def env_get(name: str, default: Optional[str] = None) -> Optional[str]:
+    """THE read for a spill-carried env name: the current request's overlay
+    when it names ``name``, else os.environ. Use this — never os.environ
+    directly — for any HUGPY_* key the per-request spill can set."""
+    ov = _REQUEST_ENV.get()
+    if ov is not None and name in ov:
+        v = ov[name]
+        return default if v is None else v
+    return os.environ.get(name, default)
+
+
 def _env(name: str) -> Optional[str]:
-    val = os.environ.get(name)
+    val = env_get(name)
     if val is None:
         return None
     val = val.strip()
@@ -1431,7 +1464,7 @@ def bnb_4bit_env() -> bool:
     Rides the same spill wire as n_cpu_moe (HUGPY_BNB_4BIT, set per-load by the
     agent's _apply_spill and cleared when absent). Central decides; this is the
     worker-side read."""
-    return str(os.environ.get("HUGPY_BNB_4BIT", "")).strip().lower() in (
+    return str(env_get("HUGPY_BNB_4BIT", "") or "").strip().lower() in (
         "1", "true", "yes", "on")
 
 

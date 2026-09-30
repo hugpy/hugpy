@@ -757,3 +757,158 @@ def test_live_refusal_envelope_carries_type_and_fit_failure_through_the_real_pat
     assert ff["ctx_effective"] == 4096 and ff["kv_bytes"] == kv
     assert ff["external_floor_bytes"] == 0
     assert err["load_failure"]["fit_failure"]["ctx_effective"] == 4096
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-30 (post10 rollback): a concurrent request's spill never leaks into
+# this request's placement / politeness — and an offline replay of S1–S8
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+SPILL = importlib.import_module("hugpy_engine.spill")
+
+
+@pytest.fixture
+def overlay_reset():
+    yield
+    SPILL.set_request_env(None)
+
+
+def _concurrent_cpu_polite_request():
+    """Another request thread applies a RAM-only, polite spill (the post10
+    Qwen2.5-7B) AFTER this request applied its own — writing os.environ."""
+    def other():
+        A._apply_spill({"n_gpu_layers": "off", "no_evict": True})
+    t = _threading.Thread(target=other)
+    t.start(); t.join()
+
+
+def test_a_concurrent_ram_only_polite_spill_does_not_leak(rig, overlay_reset, monkeypatch):
+    """INVARIANT (post10 S3b/S3c, 2026-09-30): the per-request spill is a
+    ContextVar overlay — a concurrent request writing HUGPY_N_GPU_LAYERS=off
+    and HUGPY_NO_EVICT into os.environ changes neither THIS request's
+    placement intent (planned GPU bytes == need, never "puts 0 B on the GPU")
+    nor its politeness. LIVE: the 4B launched CPU-only (1.13 GB VRAM / 22 GB
+    RSS, 4.68 tok/s with 20 GB free) and the 9B read "polite flag forbids
+    bumping" while a RAM-only polite Qwen2.5-7B request ran on another thread.
+    Established: 2026-09-30."""
+    monkeypatch.delenv("HUGPY_N_GPU_LAYERS", raising=False)
+    monkeypatch.delenv("HUGPY_NO_EVICT", raising=False)
+    A._apply_spill({})                                 # this request: max-gpu, not polite
+    _concurrent_cpu_polite_request()
+    assert os.environ.get("HUGPY_N_GPU_LAYERS") == "off"   # the other thread DID write it
+    assert SPILL.n_gpu_layers_intent() == "auto"
+    assert SPILL.no_evict_env() is False
+    assert SPILL.planned_gpu_need_bytes(10 * GIB) == 10 * GIB
+    # ...and the other thread saw its own spill
+    seen = {}
+    def other_reads():
+        A._apply_spill({"n_gpu_layers": "off", "no_evict": True})
+        seen["intent"], seen["polite"] = SPILL.n_gpu_layers_intent(), SPILL.no_evict_env()
+    t = _threading.Thread(target=other_reads); t.start(); t.join()
+    assert seen == {"intent": "cpu", "polite": True}
+    # a context with no overlay still reads os.environ (today's behaviour)
+    SPILL.set_request_env(None)
+    assert SPILL.n_gpu_layers_intent() == "cpu"
+
+
+import os  # noqa: E402  (used by the isolation test above)
+
+
+def test_s3b_whole_seat_on_gpu_under_a_concurrent_cpu_spill(rig, overlay_reset, monkeypatch):
+    """S3b post10 shape (ae 3090, total 25298141184 B, free 21935226880 B,
+    0.6B 1089798144 B + 7B 898957312 B on-demand, need 23220221419 B at ctx
+    75776): the admission EVICTS both and seats the 4B WHOLE ON GPU — action
+    evicted, planned == need, no partial, no CPU-only proceed — although a
+    concurrent RAM-only polite request wrote os.environ in between."""
+    monkeypatch.delenv("HUGPY_N_GPU_LAYERS", raising=False)
+    monkeypatch.delenv("HUGPY_NO_EVICT", raising=False)
+    rig.card.update(total=25_298_141_184, free=21_935_226_880, need=23_220_221_419)
+    rig.residents.update({"Qwen3-0.6B-GGUF": 1_089_798_144, "Qwen2.5-7B-Instruct-GGUF": 898_957_312})
+    rig.lru.update({"Qwen3-0.6B-GGUF": 100.0, "Qwen2.5-7B-Instruct-GGUF": 200.0})
+    A._apply_spill({})
+    _concurrent_cpu_polite_request()
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
+    assert v["action"] == "evicted", v.get("reason") or v.get("note")
+    assert sorted(v["evicted"]) == ["Qwen2.5-7B-Instruct-GGUF", "Qwen3-0.6B-GGUF"]
+    assert "0 B on the GPU" not in str(v.get("note"))
+    assert v.get("n_gpu_layers") is None
+
+
+def test_s3c_is_not_polite_because_a_neighbour_was(rig, overlay_reset, monkeypatch):
+    """S3c: the 9B (need 11404964054 B) beside an ON-DEMAND 4B (23220221419 B,
+    free 92667904 B) evicts the 4B — post6/post8 behaviour — even though a
+    concurrent polite request set HUGPY_NO_EVICT process-wide."""
+    monkeypatch.delenv("HUGPY_N_GPU_LAYERS", raising=False)
+    monkeypatch.delenv("HUGPY_NO_EVICT", raising=False)
+    rig.card.update(total=25_298_141_184, free=92_667_904, need=11_404_964_054)
+    rig.residents["Qwen3.8_4B_Distilled_GGUF"] = 23_220_221_419
+    rig.lru["Qwen3.8_4B_Distilled_GGUF"] = 100.0
+    A._apply_spill({})
+    _concurrent_cpu_polite_request()
+    v = A._vram_evict_to_fit(_State(), "Qwen3.8-9B-Distill-GGUF")
+    assert v["action"] == "evicted" and v["evicted"] == ["Qwen3.8_4B_Distilled_GGUF"], v.get("reason")
+
+
+# Offline replay of the acceptance harness (evict_test.py S1–S8) at the
+# admission level, from the post10 log's measured card + resident state. Each
+# row: (scenario, worker total, free, residents {key: (vram, static)}, subject,
+# need, polite, expected action, expected evicted keys / blocked_by).
+_CT, _AE = 8_184_725_504, 25_298_141_184
+REPLAY = [
+    ("S1a evict the on-demand VL for Coder-3B", _CT, 1_469_972_480,
+     {"gemma-3-4b-it-GGUF": (3_700_000_000, False)}, "Qwen2.5-Coder-3B-Instruct-GGUF",
+     3_365_919_295, False, "evicted", ["gemma-3-4b-it-GGUF"]),
+    ("S3a /load 0.6B evicts Coder-Next", _AE, 4_193_320_960,
+     {"Qwen3-Coder-Next-GGUF": (17_530_000_000, False)}, "Qwen3-0.6B-GGUF",
+     8_120_645_904, False, "evicted", ["Qwen3-Coder-Next-GGUF"]),
+    ("S3b 4B evicts 0.6B + 7B, whole seat", _AE, 21_935_226_880,
+     {"Qwen3-0.6B-GGUF": (1_089_798_144, False), "Qwen2.5-7B-Instruct-GGUF": (898_957_312, False)},
+     "Qwen3.8_4B_Distilled_GGUF", 23_220_221_419, False, "evicted",
+     ["Qwen2.5-7B-Instruct-GGUF", "Qwen3-0.6B-GGUF"]),
+    ("S3c 9B evicts the on-demand 4B", _AE, 92_667_904,
+     {"Qwen3.8_4B_Distilled_GGUF": (23_220_221_419, False)}, "Qwen3.8-9B-Distill-GGUF",
+     11_404_964_054, False, "evicted", ["Qwen3.8_4B_Distilled_GGUF"]),
+    ("S4 polite Coder-Next beside 9B never evicts", _AE, 5_744_492_544,
+     {"Qwen3.8-9B-Distill-GGUF": (11_404_964_054, False)}, "Qwen3-Coder-Next-GGUF",
+     12_427_724_748, True, "refuse", []),
+    ("S5 static 4B blocks the 9B", _AE, 92_667_904,
+     {"Qwen3.8_4B_Distilled_GGUF": (23_343_848_688, True)}, "Qwen3.8-9B-Distill-GGUF",
+     11_404_964_054, False, "refuse", ["Qwen3.8_4B_Distilled_GGUF"]),
+    ("S6 Coder-3B already fits: no-op proceed", _CT, 7_670_333_440, {},
+     "Qwen2.5-Coder-3B-Instruct-GGUF", 3_365_919_295, False, "proceed", []),
+    ("S7 2B beside Coder-3B fits free", _CT, 4_248_698_880,
+     {"Qwen2.5-Coder-3B-Instruct-GGUF": (3_365_919_295, False)}, "Qwen3.8-2B-Distill-GGUF",
+     3_418_113_104, False, "proceed", []),
+]
+
+
+@pytest.mark.parametrize("row", REPLAY, ids=[r[0] for r in REPLAY])
+def test_offline_replay_of_the_acceptance_scenarios(row, rig, overlay_reset, monkeypatch):
+    """OFFLINE REPLAY (2026-09-30): the admission verdict for each acceptance
+    scenario from post10's measured state — action, victims (minimum set, LRU)
+    and, for a refusal, blocked_by — with a CONCURRENT RAM-only polite request
+    applied in between, so the next landing is not the first time these run.
+    (Layer counts for S1b / S4's MoE split need the GGUF header and stay live.)"""
+    name, total, free, residents, subject, need, polite, action, keys = row
+    monkeypatch.delenv("HUGPY_N_GPU_LAYERS", raising=False)
+    monkeypatch.delenv("HUGPY_NO_EVICT", raising=False)
+    rig.card.update(total=total, free=free, need=need)
+    for i, (k, (vb, static)) in enumerate(residents.items()):
+        rig.residents[k] = vb
+        rig.lru[k] = 100.0 + i
+    statics = {k for k, (_, s) in residents.items() if s}
+    monkeypatch.setattr(A, "_residency", lambda mk: "static" if mk in statics else "on-demand")
+    A._apply_spill({"no_evict": True} if polite else {})
+    _concurrent_cpu_polite_request() if not polite else None
+    v = A._vram_evict_to_fit(_State(), subject)
+    assert v["action"] == action, (name, v.get("reason") or v.get("note"))
+    assert "0 B on the GPU" not in str(v.get("note")), name
+    if action == "evicted":
+        assert sorted(v["evicted"]) == sorted(keys), name
+    elif action == "refuse":
+        assert v["evicted"] == [] and rig.evicted == [], name
+        if keys:
+            assert [p["model_key"] for p in v["reason"]["protected"]] == keys, name
+    else:
+        assert v["evicted"] == [], name

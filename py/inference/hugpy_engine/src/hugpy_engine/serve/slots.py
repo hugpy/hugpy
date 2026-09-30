@@ -21,6 +21,7 @@ import time
 
 from hugpy_engine.fit.types import key_equivalent
 
+
 logger = logging.getLogger("abstract_hugpy_dev.slots")
 
 
@@ -324,7 +325,7 @@ def alloc_mismatch(status: dict, requested: dict,
 def env_alloc_source() -> dict | None:
     """The per-request provenance the worker agent projected from central's
     spill (HUGPY_ALLOC_SOURCE, JSON; cleared when absent)."""
-    raw = os.environ.get("HUGPY_ALLOC_SOURCE")
+    raw = _spill_env_get("HUGPY_ALLOC_SOURCE")
     if not raw:
         return None
     try:
@@ -355,7 +356,7 @@ def env_request_opts(opts: dict | None = None) -> dict:
         value = os.environ.get(env)
         if value not in (None, ""):
             eff_opts.setdefault(key, value)
-    raw_ngl = os.environ.get("HUGPY_N_GPU_LAYERS", "").strip().lower()
+    raw_ngl = _spill_env_get("HUGPY_N_GPU_LAYERS", "").strip().lower()
     if "n_gpu_layers" not in eff_opts and raw_ngl not in ("", "auto"):
         try:
             eff_opts["n_gpu_layers"] = (0 if raw_ngl in ("off", "cpu", "none")
@@ -843,3 +844,11 @@ def slot_install_steps(unit_dir: str = "/etc/systemd/system",
     for i in range(_slot_count()):
         steps.append(("cmd", f"systemctl enable --now abstract-hugpy-slot@{i + 1}"))
     return steps
+
+
+def _spill_env_get(name, default=None):
+    """The current request's spill-overlay value for ``name`` (else
+    os.environ) — hugpy_engine.spill.env_get, imported lazily. See the
+    PER-REQUEST SPILL OVERLAY note in spill.py (2026-09-30)."""
+    from hugpy_engine.spill import env_get
+    return env_get(name, default)

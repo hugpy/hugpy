@@ -194,6 +194,7 @@ def torch_cuda_status() -> dict:
 # The child prints one JSON object describing the engine; the parent parses it.
 _LLAMA_PROBE_CODE = r"""
 import json, sys
+
 out = {"installed": False}
 try:
     import llama_cpp
@@ -2779,18 +2780,29 @@ def _apply_spill(spill: dict | None) -> None:
     for key in _SPILL_ENV_CLEAR_WHEN_ABSENT:
         if key not in spill or spill[key] is None:
             os.environ.pop(_SPILL_ENV[key], None)
-    if not spill:
-        return
+    # THE PER-REQUEST OVERLAY (2026-09-30): every spill env name gets an entry
+    # for THIS request — its value, an explicit unset (clear-when-absent), or
+    # the process value snapshotted now — so a concurrent request writing
+    # os.environ cannot change this request's placement / politeness.
+    overlay: dict = {}
     for key, env_name in _SPILL_ENV.items():
-        if key not in spill or spill[key] is None:
-            continue
-        val = spill[key]
-        if isinstance(val, dict):
-            os.environ[env_name] = json.dumps(val, sort_keys=True, default=str)
-            continue
-        if isinstance(val, (list, tuple)):
-            val = ",".join(str(x) for x in val)
-        os.environ[env_name] = str(val)
+        if key in spill and spill[key] is not None:
+            val = spill[key]
+            if isinstance(val, dict):
+                val = json.dumps(val, sort_keys=True, default=str)
+            elif isinstance(val, (list, tuple)):
+                val = ",".join(str(x) for x in val)
+            overlay[env_name] = str(val)
+            os.environ[env_name] = str(val)
+        elif key in _SPILL_ENV_CLEAR_WHEN_ABSENT:
+            overlay[env_name] = None
+        else:
+            overlay[env_name] = os.environ.get(env_name)
+    try:
+        from hugpy_engine.spill import set_request_env
+        set_request_env(overlay)
+    except Exception:  # noqa: BLE001 — no overlay -> os.environ, as before
+        pass
 
 
 # The dispatch cache is keyed by (model, task), while placement/precision are
@@ -7458,7 +7470,7 @@ def _gguf_ngl_intent(model_key: str) -> "tuple[str, int | None]":
     transformers reading in spill.n_gpu_layers_intent, which collapses it to
     'auto'), so we decode it here rather than reuse that transformers-shaped
     helper."""
-    raw = (os.environ.get("HUGPY_N_GPU_LAYERS") or "").strip().lower()
+    raw = (_spill_env_get("HUGPY_N_GPU_LAYERS") or "").strip().lower()
     if raw in ("", "auto"):
         return "auto", None
     if raw in ("off", "cpu", "none"):
@@ -7557,7 +7569,7 @@ def _moe_auto_gpu_budget(model_key: str, path: str) -> "int | None":
     from hugpy_engine import spill as _spill
     budget = _spill.free_vram_bytes()
     try:
-        raw = (os.environ.get("HUGPY_GPU_MEM_GIB") or "").strip()
+        raw = (_spill_env_get("HUGPY_GPU_MEM_GIB") or "").strip()
         cap = int(float(raw) * 2 ** 30) if raw else None
     except (TypeError, ValueError):
         cap = None
@@ -7626,7 +7638,7 @@ def _moe_plan_for(model_key: str) -> "dict | None":
                 ncm = _spill.MOE_ALL_LAYERS      # unmeasurable card: slot degrade
             elif not budget:
                 return None                      # no GPU budget -> slot plans no split
-            elif (os.environ.get("HUGPY_GPU_MEM_GIB") or "").strip():
+            elif (_spill_env_get("HUGPY_GPU_MEM_GIB") or "").strip():
                 # A stated per-model VRAM CONTRACT (gpu_mem_gib): the k53
                 # remainder-fill stands — the budget is a demand, not a
                 # momentary reading — same rule as the slot's free_cap path.
@@ -11058,8 +11070,8 @@ def _fit_policy(total: "int | None"):
         empty_card_budget_bytes=_vram_empty_card_budget(total),
         least_reaping=_evict_least_reaping(),
         alloc_mode=_amode(), leniency_pct=_lenpct(), priority_device=_pdev(),
-        gpu_target_bytes=_gib_bytes(os.environ.get("HUGPY_GPU_MEM_GIB")),
-        ram_target_bytes=_gib_bytes(os.environ.get("HUGPY_CPU_MEM_GIB")),
+        gpu_target_bytes=_gib_bytes(_spill_env_get("HUGPY_GPU_MEM_GIB")),
+        ram_target_bytes=_gib_bytes(_spill_env_get("HUGPY_CPU_MEM_GIB")),
         ctx_cap_on_evict_pct=_ctx_cap_on_evict_pct())
 
 
@@ -14643,3 +14655,11 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _spill_env_get(name, default=None):
+    """The current request's spill-overlay value for ``name`` (else
+    os.environ) — hugpy_engine.spill.env_get, imported lazily. See the
+    PER-REQUEST SPILL OVERLAY note in spill.py (2026-09-30)."""
+    from hugpy_engine.spill import env_get
+    return env_get(name, default)

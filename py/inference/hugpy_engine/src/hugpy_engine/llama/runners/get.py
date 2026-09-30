@@ -33,6 +33,7 @@ _LLAMA_LOCK = threading.Lock()
 # load and, if it fails, fails with THAT attempt's real loader error. Cleared the
 # moment a load succeeds.
 import time as _time
+
 _REFUSED: dict = {}            # model_key -> (ts, reason, exc_type, load_failure)
 # Builds are SLOW (slot-child spawn, evict-to-fit, a 46G cold load — minutes)
 # and used to run UNDER _LLAMA_LOCK. That serialized the data plane against
@@ -213,16 +214,16 @@ def _slot_still_holds(runner, model_key: str) -> bool:
                                               status_satisfies_opts, _asked)
         import os as _os
         opts = {}
-        raw = (_os.environ.get("HUGPY_N_GPU_LAYERS") or "").strip()
+        raw = (_spill_env_get("HUGPY_N_GPU_LAYERS") or "").strip()
         if raw and raw.lower() != "auto":
             opts["n_gpu_layers"] = raw
-        cpu_moe = (_os.environ.get("HUGPY_N_CPU_MOE") or "").strip()
+        cpu_moe = (_spill_env_get("HUGPY_N_CPU_MOE") or "").strip()
         if cpu_moe:
             opts["n_cpu_moe"] = cpu_moe
-        selected = (_os.environ.get("HUGPY_GGUF_FILE") or "").strip()
+        selected = (_spill_env_get("HUGPY_GGUF_FILE") or "").strip()
         if selected:
             opts["path"] = selected
-        mode = (_os.environ.get("HUGPY_ALLOC_MODE") or "").strip()
+        mode = (_spill_env_get("HUGPY_ALLOC_MODE") or "").strip()
         if mode:
             opts["alloc_mode"] = mode
         # the seat's recorded ask vs this request's ask (per-request overrides
@@ -342,7 +343,7 @@ def _resolve_serving_gguf(model_key: str) -> "str | None":
         mpath = None
     if not mpath:
         try:
-            _prefer = (_os.environ.get("HUGPY_GGUF_FILE") or "").strip() or None
+            _prefer = (_spill_env_get("HUGPY_GGUF_FILE") or "").strip() or None
             mpath = get_gguf_file(mdir, cfg, prefer=_prefer)
         except Exception:  # noqa: BLE001
             mpath = None
@@ -543,7 +544,7 @@ def _build_runner(model_key: str) -> "LlamaCppBaseRunner":
                     if not mpath:
                         # Central's per-worker pin is an explicit seat contract
                         # and outranks fit-aware automatic selection.
-                        _prefer = (_os.environ.get("HUGPY_GGUF_FILE") or "").strip() or None
+                        _prefer = (_spill_env_get("HUGPY_GGUF_FILE") or "").strip() or None
                         if _prefer is None:
                             try:
                                 from hugpy_engine.serve.overrides import autofit_gguf_prefer
@@ -588,7 +589,7 @@ def _build_runner(model_key: str) -> "LlamaCppBaseRunner":
                     # 'max GPU' GGUF silently serves on CPU. 'auto' is NOT shipped
                     # so slots keep autofitting from the VRAM free at seat time
                     # (slot 2 takes what slot 1 left).
-                    _ngl = (_os.environ.get("HUGPY_N_GPU_LAYERS") or "").strip().lower()
+                    _ngl = (_spill_env_get("HUGPY_N_GPU_LAYERS") or "").strip().lower()
                     if _ngl and _ngl != "auto":
                         try:
                             opts = opts or {}
@@ -793,3 +794,11 @@ def _build_runner(model_key: str) -> "LlamaCppBaseRunner":
                 "Install the engine (pip install 'hugpy[engine]'), start a model slot, "
                 "or bring a worker online for this model."
             ) from exc
+
+
+def _spill_env_get(name, default=None):
+    """The current request's spill-overlay value for ``name`` (else
+    os.environ) — hugpy_engine.spill.env_get, imported lazily. See the
+    PER-REQUEST SPILL OVERLAY note in spill.py (2026-09-30)."""
+    from hugpy_engine.spill import env_get
+    return env_get(name, default)
