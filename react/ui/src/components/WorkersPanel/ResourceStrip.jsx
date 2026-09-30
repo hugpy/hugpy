@@ -195,12 +195,26 @@ export function PidRegistry({ worker, onEvict, gpuIndex, loadedSet, loadingSet }
               // PLANNED beside MEASURED (E/M): an in-process row carries its torch
               // weight estimate; the measured figure also holds the CUDA context /
               // KV, so they legitimately differ. Show the disagreement — never blend.
-              const planned = m.vram_bytes_planned
+              // The fit-priced plan from the allocation row (THE need function:
+              // weights split + KV at the served ctx) wins over the registry's
+              // declared-weights estimate. MoE rows plan BOTH sides.
+              const moePlan = allocation?.moe || null
+              const planned = allocation?.planned_gpu_bytes ?? m.vram_bytes_planned
+              const plannedRam = allocation?.planned_ram_bytes
+              const planTitle = [
+                moePlan?.verdict || '',
+                moePlan ? `experts of ${moePlan.n_cpu_moe}/${moePlan.block_count ?? '?'} layers on CPU` : '',
+                moePlan?.gpu_weights_bytes != null ? `GPU weights ${fmtBytes(moePlan.gpu_weights_bytes)} ×${moePlan.gpu_margin ?? '?'}` : '',
+                moePlan?.ram_weights_bytes != null ? `RAM weights ${fmtBytes(moePlan.ram_weights_bytes)} ×${moePlan.ram_margin ?? '?'}` : '',
+                allocation?.kv_bytes != null ? `KV ${fmtBytes(allocation.kv_bytes)} at ctx ${Number(allocation.planned_ctx || allocation.ctx || 0).toLocaleString()}${moePlan?.state_bytes ? ` (incl. ${fmtBytes(moePlan.state_bytes)} linear-attention state)` : ''}` : '',
+                moePlan?.mmap_bytes ? `mmap ${fmtBytes(moePlan.mmap_bytes)} (whole file mapped — page cache, reclaimable)` : '',
+                allocation?.rss_bytes != null ? `measured RAM (RSS) ${fmtBytes(allocation.rss_bytes)}` : '',
+              ].filter(Boolean).join('\n')
               const measured = modelVramBytes(m)
               const combinedAcrossCards = gpuIndex != null && gpuIndex !== 'unknown'
                 && m.gpu_indexes?.length > 1 && !m.per_gpu_vram_bytes?.[String(gpuIndex)]
-              const showPlanned = planned != null && measured != null
-                && Math.abs(Number(planned) - Number(measured)) > MIB
+              const showPlanned = (planned != null && measured != null
+                && Math.abs(Number(planned) - Number(measured)) > MIB) || !!moePlan
               return (
                 <div key={`${m.model_key || m.host_mode}-${m.pid}-${i}`} className="wp-pidreg-row" title={`${rowLabel(m)} · pid ${m.pid} · ${m.host_mode || 'unknown host'}${combinedAcrossCards ? ` · process total spans GPUs ${m.gpu_indexes.join(', ')}` : ''}`}>
                   <span className={`wp-pidreg-dot ${alive ? 'wp-pidreg-alive' : 'wp-pidreg-dead'}`}
@@ -210,11 +224,15 @@ export function PidRegistry({ worker, onEvict, gpuIndex, loadedSet, loadingSet }
                   <span className="wp-pidreg-meta">pid {m.pid}</span>
                   <span className="wp-pidreg-mode" title={`host mode: ${m.host_mode || 'unknown'}`}>{m.host_mode || '—'}</span>
                   <span className="wp-pidreg-vram" title={showPlanned
-                        ? `measured ${fmtBytes(measured)} (nvidia-smi) vs planned ${fmtBytes(planned)} (declared weights) — the gap is CUDA context / KV`
+                        ? `measured ${fmtBytes(measured)} (nvidia-smi) vs planned ${moePlan ? `GPU ${fmtBytes(planned || 0)} / RAM ${fmtBytes(plannedRam || 0)}` : fmtBytes(planned)}`
+                          + (allocation?.planned_gpu_bytes != null ? ' (fit-priced: weights + KV)' : ' (declared weights) — the gap is CUDA context / KV')
+                          + (planTitle ? `\n${planTitle}` : '')
                         : 'measured VRAM from nvidia-smi per-PID'}>
                     {measured != null ? fmtBytes(measured) : '—'}
                     {combinedAcrossCards && <span className="wp-fact-est"> (combined PID)</span>}
-                    {showPlanned && <span className="wp-fact-est"> (plan ~{fmtBytes(planned)})</span>}
+                    {showPlanned && (moePlan
+                      ? <span className="wp-fact-est"> (plan GPU {fmtBytes(planned || 0)} / RAM {fmtBytes(plannedRam || 0)})</span>
+                      : <span className="wp-fact-est"> (plan ~{fmtBytes(planned)})</span>)}
                   </span>
                   <button className="wp-model-x wp-pidreg-x" disabled={busy || !onEvict || !isModel}
                           title={!isModel ? 'worker infrastructure / external — not an evictable model'
