@@ -977,3 +977,52 @@ def test_ctx_target_knob_and_the_floor_partial(ctx_admission, rig, monkeypatch):
     rig.card["free"] = 2 * GIB                                   # nothing to evict, floor won't fit whole
     v = A._vram_evict_to_fit(_State(), "Qwen3.8_4B_Distilled_GGUF")
     assert v["ctx_effective"] == 4096 and v["action"] in ("partial", "refuse"), v.get("reason")
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-30 (post12): computron's REAL card in the replay — an 8 GB 4060
+# (total 8184725504 B as the worker measures it), 0.32 GB free, the on-demand
+# flux2-klein text encoder (a non-text resident, 6.81 GB) holding the card.
+# ---------------------------------------------------------------------------
+_CT_TOTAL, _CT_FREE, _KLEIN = 8_184_725_504, 347_996_160, "flux2-klein-9b-uncensored-text-encoder"
+REPLAY_COMPUTRON = [
+    # (name, subject, need, stored spill, expected action, expected evicted)
+    ("S1a Coder-3B, default placement -> evicts the encoder, whole on GPU",
+     "Qwen2.5-Coder-3B-Instruct-GGUF", 3_365_919_295, {}, "evicted", [_KLEIN]),
+    ("S7 2B-Distill, default placement -> evicts the encoder, whole on GPU",
+     "Qwen3.8-2B-Distill-GGUF", 3_418_113_104, {}, "evicted", [_KLEIN]),
+    # Cannot seat whole even with the encoder gone. Live (GGUF header present)
+    # that is partial 27/28; this rig has no header, so the plan refuses and
+    # spends nothing — never a whole-seat claim, never CPU-only.
+    ("S1b Qwen2-7B cannot seat whole even with the encoder gone -> no whole seat",
+     "Qwen2-7B-Instruct-GGUF", 7_243_754_998, {}, "refuse", []),
+    ("post12 stored RAM-only contract {'n_gpu_layers': 'off'} -> honoured, no eviction",
+     "Qwen2.5-Coder-3B-Instruct-GGUF", 3_365_919_295, {"n_gpu_layers": "off"}, "proceed", []),
+]
+
+
+@pytest.mark.parametrize("row", REPLAY_COMPUTRON, ids=[r[0] for r in REPLAY_COMPUTRON])
+def test_offline_replay_computron(row, rig, monkeypatch):
+    """OFFLINE REPLAY, computron (post12 measured state): with the default
+    placement a text model on a card held by an on-demand diffusers text
+    encoder EVICTS the encoder and seats whole on GPU (no CPU-only, no
+    partial); a model that cannot seat whole even after evicting everything
+    keeps the partial path; a STORED RAM-only contract is honoured (0 B on the
+    GPU, nothing evicted). LIVE: post12 S1a/S6/S7 ran CPU-only at 23-25 tok/s
+    because central persisted {"n_gpu_layers": "off"} for Coder-3B and
+    2B-Distill on computron between post10 and post12 — the fit honoured it.
+    Established: 2026-09-30."""
+    name, subject, need, spill, action, evicted = row
+    monkeypatch.delenv("HUGPY_N_GPU_LAYERS", raising=False)
+    monkeypatch.delenv("HUGPY_ALLOC_MODE", raising=False)
+    rig.card.update(total=_CT_TOTAL, free=_CT_FREE, need=need)
+    rig.residents[_KLEIN] = 7_322_337_280
+    rig.lru[_KLEIN] = 100.0
+    A._apply_spill(spill)
+    v = A._vram_evict_to_fit(_State(), subject)
+    assert v["action"] == action, (name, v.get("reason") or v.get("note"))
+    assert v["evicted"] == evicted, name
+    if action == "evicted":
+        assert v.get("n_gpu_layers") is None and "0 B on the GPU" not in str(v.get("note")), name
+    if action == "proceed":
+        assert "0 B on the GPU" in str(v.get("note")) and rig.evicted == [], name

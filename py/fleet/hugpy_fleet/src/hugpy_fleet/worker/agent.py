@@ -7865,6 +7865,17 @@ def _admission_room_hint(state, model_key: str, snap, policy, residents,
         if priced is None:
             return h0 + evictable, None
         need_t, target = priced
+        try:
+            from hugpy_engine.spill import planned_gpu_need_bytes
+            if planned_gpu_need_bytes(need_t) == 0:
+                # A CPU/RAM-only placement contract: nothing lands on the card,
+                # so nothing is evicted for it (post12 computron: a stored
+                # {"n_gpu_layers": "off"} — the dry plan's no-op is NOT
+                # "target unreachable").
+                return h0, (f"ctx target {target}; placement contract is CPU/RAM-only "
+                            f"— no eviction")
+        except Exception:  # noqa: BLE001
+            pass
         reserve = int(policy.ceiling_reserve_bytes or 0)
         if need_t <= h0 - reserve:
             return h0, f"ctx target {target}: seats whole on free room, no eviction for context"
