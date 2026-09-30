@@ -35,6 +35,9 @@ dependencies = [
     "hugpy-storage",
     "hugpy-engine",
     "flask>=3",
+    # the ONE shared toolserver: client/discovery + the PgMetricsStore DB arm
+    # (stdlib-only client side; see abstract-toolserver CENTRALIZATION.md)
+    "abstract-toolserver~=0.0.31",
 ]
 
 [project.urls]

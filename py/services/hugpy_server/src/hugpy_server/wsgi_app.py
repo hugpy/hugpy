@@ -35,6 +35,7 @@ _VIDEO_DAEMON_STARTED = False
 _ADMISSION_RUNNER_STARTED = False
 _WORKER_RENAME_MIGRATED = False
 _WORKER_UNPINNED_PRUNED = False
+_TOOLSERVER_DISCOVERED = False
 
 
 class ApiPrefixMiddleware:
@@ -627,6 +628,17 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
             _WORKER_UNPINNED_PRUNED = True
         except Exception as _exc:  # noqa: BLE001 — must never break app boot
             logger.error("worker allocation startup prune failed: %s", _exc)
+    # TOOLSERVER DISCOVERY (abstract-toolserver CENTRALIZATION.md): find the ONE
+    # toolserver configured/advertised on this host — never start or embed one.
+    # Bounded + fail-open; once per process.
+    global _TOOLSERVER_DISCOVERED
+    if not _TOOLSERVER_DISCOVERED:
+        _TOOLSERVER_DISCOVERED = True
+        try:
+            from hugpy_fleet.central import toolserver_link
+            app.config["HUGPY_TOOLSERVER"] = toolserver_link.discover()
+        except Exception as _exc:  # noqa: BLE001 — must never break app boot
+            logger.error("toolserver discovery hook failed: %s", _exc)
     return app
 
 
