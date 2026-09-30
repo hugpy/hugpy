@@ -692,38 +692,7 @@ def _gguf_kv_geometry(model_path: str) -> dict:
             out["n_kv_layers"] = int(kvl)
     except Exception:  # noqa: BLE001 — a tensor-name scan must never break geometry
         pass
-    # The served file itself: kv_bytes_for_geo prices the context from its
-    # per-layer attention structure (full / sliding-window / linear state).
-    out["gguf_path"] = str(model_path)
     return out
-
-
-def kv_bytes_for_geo(geo: dict, ctx: Optional[int], dtype_bytes: float = 2.0) -> int:
-    """THE context cost for a model geometry (2026-09-30): for a GGUF, priced
-    from the file's attention structure (``fit.gguf_need.kv_breakdown``: full
-    attention x ctx, sliding-window blocks capped at the window, linear-attention
-    blocks a fixed recurrent state); otherwise the dense formula over the
-    KV-bearing layer count (``kv_bytes``)."""
-    geo = geo or {}
-    p = geo.get("gguf_path")
-    if p:
-        try:
-            from hugpy_engine.fit.gguf_need import kv_breakdown, structure_for
-            st = structure_for(p)
-            if st and any(int(L.get("kv_elems_per_token") or 0) or int(L.get("state_bytes") or 0)
-                          for L in (st.get("layers") or {}).values()):
-                return int(kv_breakdown(st, ctx, dtype_bytes=dtype_bytes)["kv_bytes"])
-        except Exception:  # noqa: BLE001 — structure gap -> the dense formula
-            pass
-    try:
-        if not ctx or int(ctx) <= 0:
-            return 0
-    except (TypeError, ValueError):
-        return 0
-    return int(kv_bytes(ctx_tokens=int(ctx),
-                        n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
-                        n_kv_heads=geo.get("n_kv_heads"), head_dim=geo.get("head_dim"),
-                        dtype_bytes=dtype_bytes) or 0)
 
 
 def _transformers_kv_geometry(config: dict) -> dict:
@@ -973,8 +942,8 @@ def vram_ctx_reserve_bytes(model_path: str,
         # flat reserve is the stated degrade.
         return flat, "default", {"ctx": None}
     ctx = ctx_for_fit(model_path, n_ctx=n_ctx, geometry=geo)
-    # llama.cpp caches fp16; structure-priced (full / SWA / linear state).
-    kv = kv_bytes_for_geo(dict(geo, gguf_path=model_path), ctx, 2.0)
+    kv = kv_bytes(ctx_tokens=ctx, n_layers=n_kv_layers, n_kv_heads=n_kv_heads,
+                  head_dim=head_dim, dtype_bytes=2.0)   # llama.cpp caches fp16
     if not kv:
         return flat, "default", {"ctx": ctx}
     return (int(kv) + _CTX_COMPUTE_RESERVE_BYTES, "computed",
@@ -1046,22 +1015,6 @@ def served_ctx_for_fit(model_path: str, *, free_vram: Optional[int] = None,
         return max(floor, _round_down_multiple(upper))
     per_tok = (2 * int(n_kv_layers) * int(n_kv_heads) * int(head_dim)
                * float(kv_dtype_bytes) * max(1, int(parallel or 1)))
-    fixed_ctx_bytes = 0
-    try:
-        # Structure-priced (2026-09-30): only full-attention blocks grow with
-        # ctx; sliding-window caches (capped) and linear-attention state are
-        # a fixed charge against the budget.
-        from hugpy_engine.fit.gguf_need import kv_breakdown, structure_for
-        st = structure_for(model_path)
-        if st and st.get("layers"):
-            kb = kv_breakdown(st, int(upper), dtype_bytes=kv_dtype_bytes,
-                              n_seq=max(1, int(parallel or 1)))
-            if kb.get("per_token_bytes"):
-                per_tok = int(kb["per_token_bytes"]) * max(1, int(parallel or 1))
-                fixed_ctx_bytes = int(kb.get("kv_swa_bytes") or 0) + int(kb.get("state_bytes") or 0)
-    except Exception:  # noqa: BLE001 — structure gap -> the dense per-token figure
-        fixed_ctx_bytes = 0
-    extra_reserve_bytes = int(extra_reserve_bytes or 0) + fixed_ctx_bytes
     if per_tok <= 0:
         return max(floor, _round_down_multiple(upper))
     if weights_on_gpu_bytes is None:

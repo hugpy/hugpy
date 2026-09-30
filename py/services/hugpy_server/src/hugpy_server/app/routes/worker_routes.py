@@ -4181,16 +4181,6 @@ def _model_moe_fit(model_key):
         return None
 
 
-def _planned_need(model_key, worker, **kw):
-    """central.workers.planned_need (THE shared need function), None on any miss.
-    Module-level so tests can patch it like ``_model_gguf_bytes``."""
-    try:
-        from hugpy_fleet.central.workers import planned_need
-        return planned_need(worker, model_key, **kw)
-    except Exception:  # noqa: BLE001 — pricing gap -> the file-size path
-        return None
-
-
 def _engine_gpu_free(worker, *, splittable, pooled):
     """The GPU free VRAM a WHOLE model should be priced against on this box.
 
@@ -4265,19 +4255,10 @@ def _worker_fit(model_key, worker):
     # term is the non-expert backbone + mmproj, NOT the whole file — the expert
     # share is file-backed page cache (mmap-streamable), so it is never
     # hard-required against free RAM. Dense models: byte-identical to before.
-    # THE need function (2026-09-30): for a GGUF, the same gguf_need the
-    # worker's admission prices — the weights split (exact per-layer expert
-    # placement for a MoE) + KV at the model's current effective ctx.
-    pn = _planned_need(model_key, worker) if is_gguf else None
-    moe = _model_moe_fit(model_key) if not pn else None
+    moe = _model_moe_fit(model_key)
     moe_gpu_bytes = expert_bytes = None
     gpu_need_raw = need_raw
-    if pn and pn.get("is_moe"):
-        moe = True
-        moe_gpu_bytes = int(pn["gpu_weights_bytes"])
-        expert_bytes = int(pn["experts_cpu_bytes"])
-        gpu_need_raw = moe_gpu_bytes
-    elif moe:
+    if moe:
         moe_gpu_bytes, expert_bytes = moe
         gpu_need_raw = moe_gpu_bytes
     # MEASURED WEIGHTS MARGIN (2026-09-29): when any worker has measured a load
@@ -4286,10 +4267,7 @@ def _worker_fit(model_key, worker):
     # The same rule the worker's own admission applies (_weights_margin_for).
     margin = _measured_weights_margin(model_key, worker)
     headroom = float(margin["margin"]) if margin else VRAM_HEADROOM
-    need = int(pn["gpu_bytes"]) if pn else int(gpu_need_raw * headroom)
-    if pn and pn.get("is_moe"):
-        margin = margin if (margin and margin.get("moe")) else None
-        headroom = float(pn.get("gpu_margin") or headroom)
+    need = int(gpu_need_raw * headroom)
     # t28 load-and-learn: refine the VRAM-residency estimate with the learned,
     # per-model correction (median measured/predicted from real loads), clamped +
     # gated central-side. Applied to `need` (drives gpu_resident + the human hint)
@@ -4299,7 +4277,7 @@ def _worker_fit(model_key, worker):
     # Never stacked on a MEASURED margin (the direct observation the correction
     # only approximates) — exactly as the worker prices it.
     calibration_correction = None
-    if margin is None and not (pn and pn.get("is_moe")):
+    if margin is None:
         try:
             from hugpy_fleet.central.calibration import calibration_store as _cal
             _c = _cal.correction_for(model_key)
@@ -4387,12 +4365,7 @@ def _worker_fit(model_key, worker):
             # MoE basis (None/absent-meaning for dense): what the GPU term
             # priced, so a consumer can see WHICH size drove the verdict.
             "moe_split_gpu_bytes": moe_gpu_bytes,
-            "moe_expert_bytes": expert_bytes,
-            # The planned need (gguf_need) this verdict priced, when a GGUF.
-            "planned": ({k: pn.get(k) for k in (
-                "gpu_bytes", "ram_bytes", "kv_bytes", "state_bytes", "ctx", "ctx_source",
-                "n_cpu_moe", "n_cpu_moe_source", "gpu_weights_bytes", "ram_weights_bytes",
-                "mmap_bytes", "is_moe", "verdict")} if pn else None)}
+            "moe_expert_bytes": expert_bytes}
 
 
 # ── CONTEXT PREVIEW (operator, 2026-09-29): the size per context setting ────
@@ -4451,75 +4424,51 @@ def _model_ctx_geometry(model_key):
 
 
 def _context_preview(model_key, worker, pct):
-    """The model's KV cache at ``pct`` of ITS max context (and at every 5%
-    step) — the primary figure — plus the resulting planned model size
-    (weights + KV; GPU/RAM for a MoE) from THE need function
-    (central.workers.planned_need -> fit.gguf_need, the same one the worker's
-    fit prices), and a secondary does-it-fit hint against the worker's free
-    VRAM. Read-only; never assigns."""
+    """The priced need at ``pct`` (and at every 5% step) against the worker's
+    budget. Pure w.r.t. its inputs except the model facts it reads."""
     from hugpy_engine import spill
     verdict = _worker_fit(model_key, worker) or {}
+    weights = verdict.get("need")
     gpu_free = verdict.get("gpu_vram_free")
     geo_info = _model_ctx_geometry(model_key)
     geo, ctx_max = geo_info["geometry"], geo_info["ctx_max"]
-    budget = (max(0, int(gpu_free * 0.9)) if gpu_free is not None else None)
+    reserve = int(spill._CTX_COMPUTE_RESERVE_BYTES)
+    budget = (max(0, int(gpu_free) - reserve) if gpu_free is not None else None)
     try:
         pct = max(1, min(100, int(pct))) if pct not in (None, "") else None
     except (TypeError, ValueError):
         pct = None
-    base = _planned_need(model_key, worker) or {}
-    if base.get("ctx_max"):
-        ctx_max = base["ctx_max"]
 
     def _row(p):
         ctx = max(1, int(round((ctx_max or 0) * p / 100))) if ctx_max else None
-        pn = _planned_need(model_key, worker, ctx=ctx) if (ctx and base) else None
-        if pn:
-            kv = int(pn["kv_bytes"])
-            gpu, ram = int(pn["gpu_bytes"]), int(pn["ram_bytes"])
-            wg = int(pn["gpu_weights_bytes"] * float(pn.get("gpu_margin") or 1.0))
-            wr = int(pn["ram_weights_bytes"] * float(pn.get("ram_margin") or 1.0))
-            total = gpu
-        else:
-            kv = int(spill.kv_bytes_for_geo(geo, ctx, geo_info["dtype_bytes"]) or 0) if ctx else None
-            w = verdict.get("need")
-            wg, wr = w, (0 if w is not None else None)
-            gpu = total = (int(w) + int(kv or 0)) if w is not None else None
-            ram = 0 if gpu is not None else None
+        kv = (spill.kv_bytes(ctx_tokens=ctx,
+                             n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
+                             n_kv_heads=geo.get("n_kv_heads"), head_dim=geo.get("head_dim"),
+                             dtype_bytes=geo_info["dtype_bytes"]) if ctx else None)
+        total = (int(weights) + int(kv or 0)) if weights is not None else None
         fits = (total <= budget) if (total is not None and budget is not None) else None
-        return {"pct": p, "ctx_tokens": ctx, "ctx": ctx, "kv_bytes": kv,
-                "weights_gpu_bytes": wg, "weights_ram_bytes": wr,
-                "state_bytes": (pn or {}).get("state_bytes"),
-                "planned_gpu_bytes": gpu, "planned_ram_bytes": ram,
-                "planned_model_bytes": ((gpu or 0) + (ram or 0)) if gpu is not None else None,
-                "n_cpu_moe": (pn or {}).get("n_cpu_moe"),
-                "need_bytes": total, "fits": fits}
+        return {"pct": p, "ctx": ctx, "kv_bytes": kv, "need_bytes": total, "fits": fits}
 
     steps = [_row(p) for p in _CTX_PREVIEW_STEPS]
     fitting = [r["pct"] for r in steps if r["fits"]]
     out = {
         "worker_id": worker.get("id"), "model_key": model_key,
-        "ctx_max": ctx_max, "is_moe": bool(base.get("is_moe")),
-        "kv_layers": base.get("kv_layers"),
-        "weights_gpu_bytes": base.get("gpu_weights_bytes"),
-        "weights_ram_bytes": base.get("ram_weights_bytes"),
-        "weights_bytes": (base.get("gpu_weights_bytes") if base else verdict.get("need")),
+        "ctx_max": ctx_max, "weights_bytes": weights,
         "weights_raw_bytes": verdict.get("need_raw"), "headroom": verdict.get("headroom"),
+        # The weights factor's provenance (2026-09-29) — the same source the
+        # worker's admission prices with: measured (n samples) or the prior.
         "weights_margin": verdict.get("weights_margin", verdict.get("headroom")),
         "weights_margin_source": verdict.get("weights_margin_source") or "prior",
         "weights_margin_samples": int(verdict.get("weights_margin_samples") or 0),
         "weights_margin_worker": verdict.get("weights_margin_worker"),
         "calibration_correction": verdict.get("calibration_correction"),
-        "current": ({k: base.get(k) for k in ("ctx", "ctx_source", "kv_bytes", "gpu_bytes",
-                                               "ram_bytes", "n_cpu_moe", "verdict")}
-                    if base else None),
-        "gpu_vram_free": gpu_free, "budget_bytes": budget,
+        "gpu_vram_free": gpu_free, "reserve_bytes": reserve, "budget_bytes": budget,
         "geometry_source": geo_info["source"],
         "max_fitting_pct": (max(fitting) if fitting else None),
         "requested": (_row(pct) if pct is not None else None),
         "steps": steps,
     }
-    if not base and verdict.get("need") is None:
+    if weights is None:
         out["reason"] = verdict.get("reason") or "model size unknown — not priced"
     elif not ctx_max:
         out["reason"] = "model max context unknown — KV not priced"

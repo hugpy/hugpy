@@ -58,12 +58,6 @@ export function WorkerBudgetBar({ worker }) {
   const parts = [residentLabel]
   if (hasVram) parts.push(`${fmtBytes(worker.vram_used || 0)} / ${fmtBytes(vramTotal)} VRAM`)
   if (hasRam)  parts.push(`${fmtBytes(worker.ram_used || 0)} / ${fmtBytes(ramTotal)} RAM`)
-  // PLANNED beside measured: the residents' fit-priced figures (THE need
-  // function — weights split + KV at the served ctx; MoE experts on the RAM
-  // side), so drift between plan and measurement is visible.
-  const plannedGpu = residents.reduce((s, a) => s + (Number(a.planned_gpu_bytes) || 0), 0)
-  const plannedRam = residents.reduce((s, a) => s + (Number(a.planned_ram_bytes) || 0), 0)
-  if (plannedGpu || plannedRam) parts.push(`planned GPU ${fmtBytes(plannedGpu)} / RAM ${fmtBytes(plannedRam)}`)
   else if (worker.free_ram != null) parts.push(`${fmtBytes(worker.free_ram)} RAM free`)
 
   return (
