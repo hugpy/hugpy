@@ -3759,7 +3759,13 @@ def _margin_records_for(model_key: str, exclude_worker: Optional[str] = None) ->
     (the worker's own guard band, 0.9..2.0)."""
     wanted = _match_keys(model_key)
     out: List[Dict[str, Any]] = []
-    for w in worker_store.all():
+    # RAW records, never worker_store.all(): all() builds every worker's public
+    # view, whose model view prices each model through planned_need -> this
+    # function -> all() again. That cycle (2026-09-30/10-01) recursed until the
+    # stack ran out on every listing and starved central (/llm/workers hung).
+    # weights_margins and allocations are stored verbatim from the heartbeat,
+    # so the raw record carries exactly what this reads.
+    for w in worker_store.raw_all():
         wid = w.get("id")
         if exclude_worker and wid == exclude_worker:
             continue
@@ -6066,6 +6072,11 @@ class WorkerStore:
 
     def all(self) -> List[Dict[str, Any]]:
         return [_public_view(w) for w in self._load().values()]
+
+    def raw_all(self) -> List[Dict[str, Any]]:
+        """The stored records as-is (read-only; do not mutate) — for readers
+        that run INSIDE a public-view build and so must not build views."""
+        return list(self._load().values())
 
     def storage_view(self, worker_id: str) -> Optional[Dict[str, Any]]:
         """The derived storage view + LRU eviction proposal for one worker,
