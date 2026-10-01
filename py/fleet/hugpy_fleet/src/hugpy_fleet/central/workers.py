@@ -4351,6 +4351,10 @@ class WorkerStore:
     def __init__(self, path: Optional[str] = None) -> None:
         self._path = path or _default_workers_path()
         self._lock = threading.RLock()
+        # The raw records a _materialize_storage pass is deriving views FROM.
+        # raw_all() serves these while a pass runs on this thread, so a
+        # view-building reader never re-enters _load -> _materialize_storage.
+        self._tls = threading.local()
         self._cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._cache_at = 0.0
         self._pg = None
@@ -4422,7 +4426,21 @@ class WorkerStore:
 
     def _materialize_storage(self, workers: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """Persist derived views without holding the registry DB lock during
-        model-size and filesystem lookups."""
+        model-size and filesystem lookups.
+
+        Re-entrancy guard (2026-10-01): deriving a model view prices models via
+        planned_split -> planned_need -> weights_margin_for -> raw_all(). With
+        PostgreSQL, raw_all() -> _load() re-materialized while the views were
+        still stale and recursed without bound (RLock), hanging central on the
+        first cold/expired model-view cache. raw_all() now reads ``workers``."""
+        prev = getattr(self._tls, "raw", None)
+        self._tls.raw = workers
+        try:
+            return self._materialize_storage_pass(workers)
+        finally:
+            self._tls.raw = prev
+
+    def _materialize_storage_pass(self, workers: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         pending = {}
         for worker_id, worker in workers.items():
             storage_changed = _refresh_storage_view(worker)
@@ -6081,6 +6099,9 @@ class WorkerStore:
     def raw_all(self) -> List[Dict[str, Any]]:
         """The stored records as-is (read-only; do not mutate) — for readers
         that run INSIDE a public-view build and so must not build views."""
+        raw = getattr(self._tls, "raw", None)
+        if raw is not None:
+            return list(raw.values())
         return list(self._load().values())
 
     def storage_view(self, worker_id: str) -> Optional[Dict[str, Any]]:

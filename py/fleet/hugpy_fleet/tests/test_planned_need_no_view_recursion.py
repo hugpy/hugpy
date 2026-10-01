@@ -71,3 +71,50 @@ def test_listing_with_planned_need_does_not_recurse(store, monkeypatch):
     raw.pop("_model_view_cache", None)
     views = s.all()
     assert len(views) == 1 and calls["n"] == 1
+
+
+class _FakePG:
+    """The PostgreSQL backend's read/transaction shape over the file store, so
+    _load() takes the materializing path the live registry takes."""
+
+    def __init__(self, store):
+        self.s = store
+
+    def read(self, fn):
+        return fn()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def transaction(self, fn):
+        workers = fn()
+        yield workers
+
+
+def test_cold_model_view_with_pg_backend_does_not_recurse(store, monkeypatch):
+    """2026-10-01 second hang: raw_all() -> _load() -> _materialize_storage ->
+    planned_split -> ... -> raw_all() recursed (RLock) whenever a model view was
+    stale, i.e. on the first listing after a landing or after the hourly expiry."""
+    s, wid = store
+    with s._transaction() as workers:
+        workers[wid]["models"] = [MK]
+    depth = {"now": 0, "max": 0}
+    real = s._materialize_storage_pass
+
+    def counting(workers):
+        depth["now"] += 1
+        depth["max"] = max(depth["max"], depth["now"])
+        try:
+            return real(workers)
+        finally:
+            depth["now"] -= 1
+
+    monkeypatch.setattr(s, "_materialize_storage_pass", counting)
+    monkeypatch.setattr(W, "planned_split",
+                        lambda worker, mk: {"margin": W.weights_margin_for(mk)})
+    s._pg = _FakePG(s)
+    s._cache = None
+    for w in s._read_unlocked().values():
+        w.pop("_model_view_cache", None)
+    rows = s.all()
+    assert rows and depth["max"] == 1
