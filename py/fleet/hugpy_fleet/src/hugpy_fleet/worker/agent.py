@@ -2321,6 +2321,12 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
         if s.get("healthy") is not None:
             row["materialized"] = bool(s.get("healthy"))
         row.update(_margin_row_fields(mk))      # measured weights margin, omit-when-unset
+        if s.get("n_cpu_moe") is not None:
+            row["n_cpu_moe"] = s.get("n_cpu_moe")
+        try:
+            row.update(_planned_row_fields(mk, row))   # planned (fit-priced) figures
+        except Exception:  # noqa: BLE001 — never break the heartbeat
+            pass
         if device_source is not None:
             # omit-when-unset: an old central/UI never sees the key, and a row
             # with no device basis at all carries no provenance to mislabel.
@@ -7699,10 +7705,7 @@ def _kv_bytes_at_ctx(model_key: str, ctx: "int | None", cfg: dict | None = None)
         framework = str((cfg or {}).get("framework") or "").lower()
         dtype_bytes = 2.0 if framework in ("gguf", "llama_cpp") \
             else spill._kv_dtype_bytes(geo.get("dtype"))
-        kv = spill.kv_bytes(ctx_tokens=int(ctx),
-                            n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
-                            n_kv_heads=geo.get("n_kv_heads"),
-                            head_dim=geo.get("head_dim"), dtype_bytes=dtype_bytes)
+        kv = spill.kv_bytes_for_geo(geo, int(ctx), dtype_bytes)
         return int(kv or 0)
     except Exception:  # noqa: BLE001 — an unpriceable KV nets nothing
         return 0
@@ -7723,10 +7726,14 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
     if row.get("materialized") is False or row.get("device") != "cuda" \
             or not row.get("vram_bytes"):
         return None
-    if _calib_verdict(row.get("device"), row.get("n_gpu_layers"),
-                      row.get("total_layers")) != "full" \
-            or model_key in _MOE_SPLIT or row.get("n_cpu_moe") is not None:
-        return None                       # a split/partial is not a weights measurement
+    moe_n = None
+    if model_key in _MOE_SPLIT or row.get("n_cpu_moe") is not None:
+        moe_n = row.get("n_cpu_moe")
+        if moe_n is None:
+            moe_n = (_MOE_SPLIT.get(model_key) or {}).get("n_cpu_moe")
+    elif _calib_verdict(row.get("device"), row.get("n_gpu_layers"),
+                        row.get("total_layers")) != "full":
+        return None                       # a layer partial is not a weights measurement
     others = [k for k in (loading or []) if k != model_key]
     if base.get("tainted") or others or base.get("epoch") != epoch_now:
         logger.info("weights margin for %s DISCARDED: another load/evict was in "
@@ -7741,6 +7748,8 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
     if not wfile:
         return None
     delta = int(base["free_before"]) - int(free_after)
+    if moe_n is not None:
+        return _margin_measure_moe(model_key, row, int(moe_n), delta, wfile, served)
     framework = _model_framework(model_key)
     kv = 0
     ctx = None
@@ -7784,6 +7793,80 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
                 "ratio=%.3f margin=%.3f samples=%d (prior %.2f)", model_key, served,
                 framework, dev_class, delta, kv, weights_measured, wfile, ratio,
                 mean, samples, _WEIGHTS_HEADROOM)
+    _persist_weights_margins()
+    return dict(rec)
+
+
+def _margin_measure_moe(model_key: str, row: dict, n_cpu_moe: int, delta: int,
+                        wfile: int, served: "str | None") -> "dict | None":
+    """MoE residency (2026-09-30): measure each side against its own planned
+    raw weights (fit.gguf_need at the served ctx and N, margins 1.0):
+      GPU ratio = (VRAM delta - KV/state on GPU - cushion - mmproj) / GPU weights
+      RAM ratio = child RSS / RAM weights (mmap: RSS may include page cache of
+                  GPU-uploaded tensors — an implausible ratio is recorded as
+                  the raw delta but never priced).
+    Each side keeps its own running mean; ``margin`` mirrors the GPU side."""
+    st, ppath = _moe_struct_for(model_key)
+    if not st:
+        return None
+    from hugpy_engine.fit.gguf_need import gguf_need
+    ctx = row.get("ctx")
+    if not ctx:
+        try:
+            ctx = _effective_ctx(model_key).get("ctx")
+        except Exception:  # noqa: BLE001
+            ctx = None
+    try:
+        from hugpy_engine import spill as _spill
+        mmproj = int(_spill.vision_projector_bytes(ppath) or 0)
+    except Exception:  # noqa: BLE001
+        mmproj = 0
+    raw = gguf_need(st, ctx=ctx, n_cpu_moe=n_cpu_moe, gpu_margin=1.0, ram_margin=1.0,
+                    mmproj_bytes=mmproj)
+    gw, rw = int(raw["gpu_weights_bytes"]), int(raw["ram_weights_bytes"])
+    gpu_fixed = int(raw["kv_gpu_bytes"]) + int(raw["cushion_bytes"]) + mmproj
+    g_ratio = ((delta - gpu_fixed) / float(gw)) if gw else None
+    rss = row.get("rss_bytes")
+    r_ratio = ((int(rss) - int(raw["kv_cpu_bytes"])) / float(rw)) if (rss and rw) else None
+    g_ok = g_ratio is not None and _plausible_margin(g_ratio)
+    r_ok = r_ratio is not None and _plausible_margin(r_ratio)
+    logger.info("MoE margin sample: model=%s n_cpu_moe=%s ctx=%s gpu_delta=%s gpu_weights=%s "
+                "gpu_ratio=%s%s ram_rss=%s ram_weights=%s ram_ratio=%s%s", model_key, n_cpu_moe,
+                ctx, delta, gw, None if g_ratio is None else round(g_ratio, 3),
+                "" if g_ok else " (not priced)", rss, rw,
+                None if r_ratio is None else round(r_ratio, 3), "" if r_ok else " (not priced)")
+    if not (g_ok or r_ok):
+        return None
+    framework = _model_framework(model_key)
+    now = time.time()
+    with _MARGIN_LOCK:
+        prev = _WEIGHTS_MARGINS.get(model_key)
+        same = bool(prev and prev.get("moe") and _margin_record_matches(prev, served))
+
+        def _mean(key, ratio, ok):
+            n = int((prev or {}).get(key + "_samples") or 0) if same else 0
+            old = (prev or {}).get(key) if same else None
+            if not ok:
+                return old, n
+            if old is None or not n:
+                return round(ratio, 4), 1
+            return round((float(old) * n + ratio) / (n + 1), 4), n + 1
+
+        gm, gn = _mean("gpu_margin", g_ratio, g_ok)
+        rm, rn = _mean("ram_margin", r_ratio, r_ok)
+        rec = {"model_key": model_key, "file": served, "file_bytes": int(wfile),
+               "backend": framework, "device_class": _device_class(row.get("gpu_index")),
+               "moe": True, "n_cpu_moe": int(n_cpu_moe), "measured_ctx": ctx,
+               "margin": gm if gm is not None else _WEIGHTS_HEADROOM,
+               "gpu_margin": gm, "gpu_margin_samples": gn,
+               "ram_margin": rm, "ram_margin_samples": rn,
+               "gpu_delta_bytes": int(delta), "ram_delta_bytes": (int(rss) if rss else None),
+               "gpu_weights_planned_bytes": gw, "ram_weights_planned_bytes": rw,
+               "kv_measured_bytes": int(raw["kv_bytes"]),
+               "weights_measured_bytes": int(delta - gpu_fixed),
+               "delta_bytes": int(delta), "measured_at": now,
+               "samples": max(gn or 0, rn or 0) or 1}
+        _WEIGHTS_MARGINS[model_key] = rec
     _persist_weights_margins()
     return dict(rec)
 
@@ -7833,7 +7916,66 @@ def _margin_row_fields(model_key: str) -> dict:
             "weights_margin_ctx": rec.get("measured_ctx"),
             "weights_margin_measured_at": rec.get("measured_at"),
             "weights_margin_device": rec.get("device_class"),
-            "weights_margin_file": rec.get("file")}
+            "weights_margin_file": rec.get("file"),
+            **({"weights_margin_moe": {k: rec.get(k) for k in (
+                "gpu_margin", "gpu_margin_samples", "ram_margin", "ram_margin_samples",
+                "gpu_delta_bytes", "ram_delta_bytes", "n_cpu_moe")}} if rec.get("moe") else {})}
+
+
+_PLANNED_ROW_CACHE: dict = {}
+
+
+def _planned_row_fields(model_key: str, row: dict) -> dict:
+    """The PLANNED figures an allocation row carries beside its measured ones
+    (2026-09-30): the same need function the fit priced with
+    (hugpy_engine.fit.gguf_need) at the row's served ctx. A MoE seat reports
+    what its admission committed (``_MOE_SPLIT[...]["planned"]``) when present,
+    else the need at its running n_cpu_moe: ``moe: {n_cpu_moe, gpu_bytes,
+    ram_bytes, kv_bytes, mmap_bytes, ...}``. Dense GGUF seats fully on the GPU
+    report weights x margin + KV. Omitted when unpriceable."""
+    ctx = row.get("ctx")
+    committed = (_MOE_SPLIT.get(model_key) or {}).get("planned")
+    n = row.get("n_cpu_moe")
+    if n is None:
+        n = (_MOE_SPLIT.get(model_key) or {}).get("n_cpu_moe")
+    key = (model_key, ctx, n, row.get("n_gpu_layers"))
+    hit = _PLANNED_ROW_CACHE.get(model_key)
+    if committed is None and hit and hit[0] == key and time.time() - hit[1] < 300:
+        return dict(hit[2])
+    out: dict = {}
+    st, ppath = _moe_struct_for(model_key)
+    if committed and (ctx is None or committed.get("ctx") in (None, ctx)):
+        moe = dict(committed)
+    elif st and n is not None:
+        from hugpy_engine.fit.gguf_need import gguf_need, verdict_text
+        try:
+            _w, served = _incoming_weights_file(model_key)
+        except Exception:  # noqa: BLE001
+            served = None
+        need = gguf_need(st, ctx=ctx, n_cpu_moe=int(n),
+                         **_moe_need_kw(model_key, ppath, served))
+        need["verdict"] = verdict_text(need)
+        moe = _moe_planned_fields(need)
+    else:
+        moe = None
+    if moe:
+        out["moe"] = moe
+        out["planned_gpu_bytes"] = moe.get("gpu_bytes")
+        out["planned_ram_bytes"] = moe.get("ram_bytes")
+        out["planned_kv_bytes"] = moe.get("kv_bytes")
+        out["kv_bytes"] = moe.get("kv_bytes")
+        out["planned_ctx"] = moe.get("ctx")
+        out["planned_source"] = "admission" if committed else "need-function"
+    elif ctx and row.get("n_gpu_layers") in (-1, None) and row.get("device") == "cuda":
+        wfile, served = _incoming_weights_file(model_key)
+        if wfile:
+            mg = _weights_margin_for(model_key, served)
+            kv = _kv_bytes_at_ctx(model_key, ctx)
+            out.update(planned_gpu_bytes=int(wfile * mg["margin"]) + int(kv),
+                       planned_ram_bytes=0, planned_kv_bytes=int(kv), kv_bytes=int(kv),
+                       planned_ctx=int(ctx), planned_source="need-function")
+    _PLANNED_ROW_CACHE[model_key] = (key, time.time(), dict(out))
+    return out
 
 
 def _weights_margins_snapshot() -> dict:
@@ -8135,8 +8277,127 @@ def _moe_auto_gpu_budget(model_key: str, path: str) -> "int | None":
     return max(0, int(budget) - reserve)
 
 
-def _moe_plan_for(model_key: str) -> "dict | None":
-    """The MoE split that GOVERNS this model's next load, or None (dense path).
+def _moe_planned_fields(ms: "dict | None") -> dict:
+    """The planned MoE figures an allocation row carries (what the fit priced)."""
+    ms = ms or {}
+    return {k: ms.get(k) for k in ("n_cpu_moe", "gpu_bytes", "ram_bytes", "kv_bytes",
+                                   "state_bytes", "mmap_bytes", "ctx", "block_count",
+                                   "gpu_weights_bytes", "ram_weights_bytes",
+                                   "gpu_margin", "ram_margin", "verdict")
+            if ms.get(k) is not None}
+
+
+def _moe_struct_for(model_key: str) -> "tuple[dict | None, str | None]":
+    """``(gguf_structure, served_path)`` of a MoE GGUF (typed per-layer tensor
+    table — see hugpy_engine.fit.gguf_need), ``(None, path|None)`` otherwise."""
+    try:
+        ppath, _tl = _served_gguf_geometry(model_key)
+        if not ppath:
+            return None, None
+        from hugpy_engine.fit.gguf_need import structure_for
+        st = structure_for(ppath)
+        return (st if st.get("is_moe") else None), ppath
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _moe_margins(model_key: str, served: "str | None" = None) -> dict:
+    """Per-side weights margins for a MoE load: a MoE record measured for this
+    (key, file) prices each side with its own ratio; otherwise both sides take
+    the prior (never the dense single-number record, which measured a
+    different placement)."""
+    with _MARGIN_LOCK:
+        rec = _WEIGHTS_MARGINS.get(model_key)
+    out = {"gpu": _WEIGHTS_HEADROOM, "ram": _WEIGHTS_HEADROOM,
+           "gpu_source": "prior", "ram_source": "prior", "samples": 0}
+    if rec and rec.get("moe") and _margin_record_matches(rec, served):
+        if _plausible_margin(rec.get("gpu_margin")):
+            out["gpu"], out["gpu_source"] = float(rec["gpu_margin"]), "measured"
+        if _plausible_margin(rec.get("ram_margin")):
+            out["ram"], out["ram_source"] = float(rec["ram_margin"]), "measured"
+        out["samples"] = int(rec.get("samples") or 1)
+    return out
+
+
+def _moe_governing_n(model_key: str) -> "tuple[str | None, int | None]":
+    """Which MoE split governs the next load: ``("explicit", N)`` for a stored
+    n_cpu_moe (HUGPY_N_CPU_MOE — the override always wins), ``("auto", None)``
+    for a MoE with no explicit layer designation and no k37 mode engine, else
+    ``(None, None)`` (explicit n_gpu_layers / mode placement: dense pricing)."""
+    from hugpy_engine import spill as _spill
+    ncm = _spill.n_cpu_moe_env()
+    if ncm is not None:
+        return "explicit", max(0, int(ncm))
+    intent, requested = _gguf_ngl_intent(model_key)
+    if intent != "auto" or requested is not None:
+        return None, None
+    if _spill.alloc_mode_env() is not None:
+        return None, None
+    return "auto", None
+
+
+def _moe_gpu_room(free_hint: "int | None", reserve_bytes: "int | None") -> "int | None":
+    """GPU room a MoE split may fill: the admission's reachable room (or the
+    live free read) less the ceiling reserve, capped by a stated gpu_mem_gib
+    contract. None when the card is unmeasurable."""
+    from hugpy_engine import spill as _spill
+    reach = free_hint if free_hint is not None else _spill.free_vram_bytes()
+    if reach is None:
+        return None
+    if reserve_bytes is None:
+        try:
+            reserve_bytes = _vram_ceiling_reserve_bytes(_total_vram_bytes())
+        except Exception:  # noqa: BLE001
+            reserve_bytes = 0
+    room = max(0, int(reach) - int(reserve_bytes or 0))
+    try:
+        raw = (_spill_env_get("HUGPY_GPU_MEM_GIB") or "").strip()
+        if raw:
+            room = min(room, int(float(raw) * 2 ** 30))
+    except (TypeError, ValueError):
+        pass
+    return room
+
+
+def _moe_need_kw(model_key: str, ppath: str, served: "str | None") -> dict:
+    from hugpy_engine import spill as _spill
+    mg = _moe_margins(model_key, served)
+    try:
+        mmproj = int(_spill.vision_projector_bytes(ppath) or 0)
+    except Exception:  # noqa: BLE001
+        mmproj = 0
+    return {"gpu_margin": mg["gpu"], "ram_margin": mg["ram"], "mmproj_bytes": mmproj}
+
+
+def _moe_ctx_weights(model_key: str) -> "int | None":
+    """GPU-side weights term (x margin, + cushion + mmproj, no KV) a MoE load
+    sizes its context against: at the explicit n_cpu_moe, or — auto — with
+    every expert on the CPU (context first, then experts fill what is left).
+    None for a dense / non-governed model."""
+    st, ppath = _moe_struct_for(model_key)
+    if not st:
+        return None
+    how, n = _moe_governing_n(model_key)
+    if how is None:
+        return None
+    from hugpy_engine.fit.gguf_need import gguf_need
+    try:
+        _w, served = _incoming_weights_file(model_key)
+    except Exception:  # noqa: BLE001
+        served = None
+    n = n if how == "explicit" else int(st.get("block_count") or 0)
+    return int(gguf_need(st, ctx=0, n_cpu_moe=n,
+                         **_moe_need_kw(model_key, ppath, served))["gpu_bytes"])
+
+
+def _moe_plan_for_legacy(model_key: str) -> "dict | None":
+    """FALLBACK (2026-10-01) for a MoE whose GGUF structure cannot be read
+    (gguf_need needs the typed per-layer table): the pre-2026-09-30 pricing
+    from the marker's per-layer expert detail, so an unreadable header degrades
+    to the old split instead of to dense pricing (which refuses any MoE larger
+    than the card). Original docstring follows.
+
+    The MoE split that GOVERNS this model's next load, or None (dense path).
 
     Returns {"path", "n_cpu_moe", "gpu_weight_bytes", "cpu_bytes", "detail"}:
       * explicit HUGPY_N_CPU_MOE (the n_cpu_moe spill/override wire) WINS — the
@@ -8209,6 +8470,55 @@ def _moe_plan_for(model_key: str) -> "dict | None":
                 "gpu_weight_bytes": int(split["gpu_bytes"]),
                 "cpu_bytes": int(split["cpu_bytes"]), "detail": det}
     except Exception:  # noqa: BLE001 — pricing gap -> dense path
+        return None
+
+
+def _moe_plan_for(model_key: str, *, ctx: "int | None" = None,
+                  free_hint: "int | None" = None,
+                  reserve_bytes: "int | None" = None) -> "dict | None":
+    """The MoE split that GOVERNS this model's next load, priced EXACTLY from the
+    file's structure (2026-09-30, hugpy_engine.fit.gguf_need), or None (dense).
+
+    Returns {"path", "n_cpu_moe", "gpu_weight_bytes", "cpu_bytes", "detail",
+    "need"} where ``need`` is the full gguf_need breakdown at ``ctx``:
+      * a stored n_cpu_moe (HUGPY_N_CPU_MOE) WINS — priced at exactly that N;
+      * else AUTO (no explicit layer designation, no mode engine): the SMALLEST
+        n_cpu_moe whose GPU side (always-on tensors + the experts kept on the
+        card + KV at the effective ctx + compute cushion, weights x margin)
+        fits the reachable GPU room whole. An unmeasurable card keeps every
+        expert on the CPU (the slot's own degrade).
+    The chosen N rides the admission verdict to the slot as an explicit
+    --n-cpu-moe, so admission and launch price one number."""
+    st, ppath = _moe_struct_for(model_key)
+    if not st:
+        return _moe_plan_for_legacy(model_key)
+    try:
+        from hugpy_engine.fit.gguf_need import choose_n_cpu_moe, gguf_need
+        how, n = _moe_governing_n(model_key)
+        if how is None:
+            return None
+        try:
+            _w, served = _incoming_weights_file(model_key)
+        except Exception:  # noqa: BLE001
+            served = None
+        if ctx is None:
+            try:
+                ctx = _effective_ctx(model_key).get("ctx")
+            except Exception:  # noqa: BLE001
+                ctx = None
+        kw = dict(_moe_need_kw(model_key, ppath, served), ctx=ctx)
+        if how == "explicit":
+            need = dict(gguf_need(st, n_cpu_moe=n, **kw), choice="stored n_cpu_moe override")
+        else:
+            need = choose_n_cpu_moe(st, _moe_gpu_room(free_hint, reserve_bytes), **kw)
+        need["verdict"] = __import__("hugpy_engine.fit.gguf_need",
+                                     fromlist=["verdict_text"]).verdict_text(need)
+        det = _moe_detail_for(model_key) or {}
+        return {"path": ppath, "n_cpu_moe": int(need["n_cpu_moe"] or 0),
+                "gpu_weight_bytes": int(need["gpu_weights_bytes"]),
+                "cpu_bytes": int(need["ram_bytes"]), "detail": det, "need": need}
+    except Exception:  # noqa: BLE001 — pricing gap -> dense path
+        logger.debug("MoE plan for %s failed", model_key, exc_info=True)
         return None
 
 
@@ -8320,6 +8630,12 @@ def _fit_weights_and_corr(model_key: str) -> "tuple[int | None, float | None]":
     calibration correction); else (the x1.15 prior, the learned correction).
     The whole-seat ctx bound uses this so bound and fit agree to the byte."""
     try:
+        mw = _moe_ctx_weights(model_key)
+        if mw:
+            return int(mw), None              # MoE: the GPU side, structure-priced
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         wfile, served = _incoming_weights_file(model_key)
         mg = _weights_margin_for(model_key, served) if wfile else None
         if mg and mg.get("source") == "measured":
@@ -8333,10 +8649,7 @@ def _kv_at_ctx(geo: dict, ctx: int, dtype_bytes: float = 2.0) -> int:
     """KV bytes at ``ctx`` over the KV-bearing layers — the same call
     ``_kv_need_bytes`` prices with."""
     from hugpy_engine import spill
-    return int(spill.kv_bytes(ctx_tokens=int(ctx),
-                              n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
-                              n_kv_heads=geo.get("n_kv_heads"), head_dim=geo.get("head_dim"),
-                              dtype_bytes=dtype_bytes) or 0)
+    return int(spill.kv_bytes_for_geo(geo, int(ctx), dtype_bytes) or 0)
 
 
 def _whole_seat_max_ctx(*, weights: int, corr: "float | None", geo: dict,
@@ -8593,9 +8906,10 @@ def _kv_need_bytes(model_key: str, cfg: dict | None = None, *,
         logger.warning("kv: no full geometry for %s — using conservative "
                        "heuristic for the ctx reserve (%s tok @ %s%%)",
                        model_key, ctx, pct)
-    kv = spill.kv_bytes(ctx_tokens=ctx, n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
-                        n_kv_heads=geo.get("n_kv_heads"),
-                        head_dim=geo.get("head_dim"), dtype_bytes=dtype_bytes)
+    kv = (spill.kv_bytes_for_geo(geo, ctx, dtype_bytes) if geo.get("gguf_path") else
+          spill.kv_bytes(ctx_tokens=ctx, n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
+                         n_kv_heads=geo.get("n_kv_heads"),
+                         head_dim=geo.get("head_dim"), dtype_bytes=dtype_bytes))
     return int(kv or 0), {"ctx_pct": pct, "ctx_resolved": ctx, "ctx_max": mx,
                           "ctx_effective": ctx, "ctx_source": eff["source"],
                           "ctx_reason": eff.get("reason"),
@@ -8652,9 +8966,17 @@ def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
     mg = _weights_margin_for(model_key, served)
     measured = mg["source"] == "measured"
     weights = int(wfile * mg["margin"]) if measured else int(weights_prior)
+    # MoE: the context is sized against the GPU SIDE of the split (the stored
+    # n_cpu_moe, or every expert on CPU for auto — ctx first, experts fill the
+    # rest), never against the whole file.
+    try:
+        moe_w = _moe_ctx_weights(model_key)
+    except Exception:  # noqa: BLE001
+        moe_w = None
     try:
         kv, det = _call_with_basis(_kv_need_bytes, model_key, free_hint=free_hint,
-                                   weights_bytes=int(weights), reserve_bytes=reserve_bytes)
+                                   weights_bytes=int(moe_w or weights),
+                                   reserve_bytes=reserve_bytes)
     except Exception:  # noqa: BLE001 — KV is additive; never break a working fit
         kv, det = 0, {"ctx_pct": None, "ctx_resolved": None, "ctx_max": None,
                       "geometry_source": None}
@@ -8706,15 +9028,37 @@ def _incoming_need_detail(model_key: str, *, free_hint: "int | None" = None,
     # split figure: corrections are learned from FULL loads only (a MoE-split
     # residency reports verdict "partial" and never feeds the ratio).
     try:
-        plan = _moe_plan_for(model_key)
+        plan = _call_with_basis(_moe_plan_for, model_key, ctx=det.get("ctx_effective"),
+                                free_hint=free_hint, reserve_bytes=reserve_bytes)
     except Exception:  # noqa: BLE001 — additive; never break a working fit
         plan = None
     if plan:
+        n = plan.get("need") or {}
+        if not n:
+            # Legacy (structure-unreadable) plan: the pre-2026-09-30 pricing —
+            # GPU weights x the weights margin + the whole KV; RAM = the experts.
+            _g = int(plan["gpu_weight_bytes"] * mg["margin"]) + int(kv or 0)
+            n = {"gpu_bytes": _g, "ram_bytes": int(plan["cpu_bytes"]),
+                 "kv_bytes": int(kv or 0), "choice": "legacy (structure unreadable)"}
         out["moe_split"] = {
             "path": plan.get("path"),
             "n_cpu_moe": plan["n_cpu_moe"],
-            "gpu_total": int(plan["gpu_weight_bytes"] * mg["margin"]) + int(kv or 0),
-            "cpu_bytes": plan["cpu_bytes"],
+            # EXACT (2026-09-30, fit.gguf_need): GPU = always-on tensors + the
+            # experts kept on the card (x GPU margin) + KV/state at the
+            # effective ctx + compute cushion (+ mmproj); RAM = the experts
+            # moved to CPU + token_embd (x RAM margin).
+            "gpu_total": int(n.get("gpu_bytes") or 0),
+            "cpu_bytes": int(n.get("ram_bytes") or plan["cpu_bytes"]),
+            "gpu_bytes": int(n.get("gpu_bytes") or 0),
+            "ram_bytes": int(n.get("ram_bytes") or 0),
+            "kv_bytes": n.get("kv_bytes"), "state_bytes": n.get("state_bytes"),
+            "mmap_bytes": n.get("mmap_bytes"), "ctx": n.get("ctx"),
+            "block_count": n.get("block_count"),
+            "gpu_weights_bytes": n.get("gpu_weights_bytes"),
+            "ram_weights_bytes": n.get("ram_weights_bytes"),
+            "gpu_margin": n.get("gpu_margin"), "ram_margin": n.get("ram_margin"),
+            "fits": n.get("fits"), "choice": n.get("choice"),
+            "verdict": n.get("verdict"),
             "expert_count": (plan.get("detail") or {}).get("expert_count"),
             "expert_used_count": (plan.get("detail") or {}).get("expert_used_count"),
             "sparsity": (plan.get("detail") or {}).get("sparsity"),
@@ -12225,14 +12569,18 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         rides the verdict to the slot child; the _MOE_SPLIT marker keeps the
         calibration verdict honest ("partial", never the full-load ratio)."""
         _MOE_SPLIT[model_key] = {"path": moe_commit.get("path"),
-                                 "n_cpu_moe": moe_commit["n_cpu_moe"]}
+                                 "n_cpu_moe": moe_commit["n_cpu_moe"],
+                                 "planned": _moe_planned_fields(moe_commit)}
         return {"action": "partial", "evicted": evicted_list,
                 "freed_bytes": freed_bytes, "reason": None,
                 "n_gpu_layers": -1, "n_cpu_moe": moe_commit["n_cpu_moe"],
                 "moe": {k: moe_commit.get(k) for k in
-                        ("n_cpu_moe", "gpu_total", "cpu_bytes", "expert_count",
+                        ("n_cpu_moe", "gpu_total", "cpu_bytes", "gpu_bytes", "ram_bytes",
+                         "kv_bytes", "state_bytes", "mmap_bytes", "ctx", "block_count",
+                         "choice", "verdict", "expert_count",
                          "expert_used_count", "sparsity")},
-                "note": (f"MoE expert split (--n-cpu-moe "
+                "note": ((moe_commit.get("verdict") + " — ") if moe_commit.get("verdict") else "")
+                        + (f"MoE expert split (--n-cpu-moe "
                          f"{moe_commit['n_cpu_moe']}): all layers on GPU "
                          f"(~{_human_bytes(moe_commit.get('gpu_total'))} of "
                          f"dense backbone + the expert layers the budget bought "
