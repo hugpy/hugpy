@@ -7280,8 +7280,11 @@ def prune_designations(worker_id: str, *, max_age_s: Optional[float] = None,
         include_unrecorded=include_unrecorded, apply=apply)
 
 
-def set_moe(worker_id: str, model_key: str, value) -> Optional[Dict[str, Any]]:
-    return worker_store.set_moe(worker_id, model_key, value)
+def set_moe(worker_id: str, model_key: str, value, **kw) -> Optional[Dict[str, Any]]:
+    # Pass keyword options (public_view=False from the /moe route) through to
+    # WorkerStore.set_moe; the route/wrapper signatures drifted and every MoE
+    # toggle raised TypeError (2026-10-01).
+    return worker_store.set_moe(worker_id, model_key, value, **kw)
 
 
 def set_bnb(worker_id: str, model_key: str, enabled: bool) -> Optional[Dict[str, Any]]:
