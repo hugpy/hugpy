@@ -4228,6 +4228,10 @@ _STORAGE_VIEW_INPUTS = (
 )
 _STORAGE_VIEW_MAX_AGE = 60.0
 _MODEL_VIEW_MAX_AGE = 3600.0
+# Bump when the CODE that derives model-view fields (planned_split, moe_*)
+# changes: the cache is persisted in the registry, so without this a landing
+# keeps serving the previous code's figures for up to _MODEL_VIEW_MAX_AGE.
+_MODEL_VIEW_VERSION = "2026-10-01.planned-need"
 
 
 def _model_view_signature(worker: Dict[str, Any]) -> str:
@@ -4236,6 +4240,7 @@ def _model_view_signature(worker: Dict[str, Any]) -> str:
         "models", "spill_by_model", "bnb_by_model", "moe_by_model",
         "ram_total", _RAM_TOTAL_DURABLE_KEY, _GPU_TOTAL_DURABLE_KEY,
     )}
+    inputs["_code"] = _MODEL_VIEW_VERSION
     inputs["gpu_total"] = _worker_gpu_total_bytes(worker)
     payload = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
