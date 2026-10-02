@@ -223,6 +223,7 @@ def worker_totals(payload: dict | None) -> dict:
     except (TypeError, ValueError):
         ram = 0
     lim = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
+    encroach = external_vram_bytes(payload)
     def _gib(v):
         try:
             return int(float(v) * _GIB) if v is not None else None
@@ -230,7 +231,40 @@ def worker_totals(payload: dict | None) -> dict:
             return None
     return {"gpu_total": gpu or None, "ram_total": ram or None,
             "gpu_limit": _gib(lim.get("gpu_mem_gib")), "ram_limit": _gib(lim.get("cpu_mem_gib")),
+            "vram_encroach": encroach,
             "pkg_version": payload.get("pkg_version")}
+
+
+ENCROACH_QUANTUM = 128 * 2 ** 20
+
+
+def external_vram_bytes(payload: dict | None) -> int:
+    """ENCROACHMENT the planner budgets around (operator 2026-10-02: "encroachment
+    is an immutable"): VRAM held on the worker's cards by processes that are not
+    the worker — ComfyUI's process rows and the genuinely foreign/unattributed
+    pids, measured per pid by the worker's registry. The driver's reserved share
+    is NOT here (gpu_total already excludes it), nor the worker's own CUDA
+    context (worker usage). Rounded UP to 128 MiB so a few MiB of drift does not
+    bump the earmark rev and re-walk every ladder. 0 when nothing is reported."""
+    reg = (payload or {}).get("pid_registry")
+    if not isinstance(reg, dict):
+        return 0
+    total = 0
+    for row in reg.get("models") or []:
+        if isinstance(row, dict) and row.get("host_mode") == "comfy":
+            try:
+                total += int(row.get("vram_bytes") or 0)
+            except (TypeError, ValueError):
+                pass
+    for row in reg.get("unattributed") or []:
+        if isinstance(row, dict):
+            try:
+                total += int(row.get("mib") or 0) * 2 ** 20
+            except (TypeError, ValueError):
+                pass
+    if total <= 0:
+        return 0
+    return -(-total // ENCROACH_QUANTUM) * ENCROACH_QUANTUM
 
 
 def worker_earmark(totals: dict) -> dict:
@@ -239,7 +273,11 @@ def worker_earmark(totals: dict) -> dict:
     reading) -> None totals; the caller keeps the stored earmark then."""
     vr, rr = _spill.vram_reserve_bytes(), _spill.ram_reserve_bytes()
     gpu, ram = totals.get("gpu_total"), totals.get("ram_total")
-    gb = None if gpu is None else max(0, int(gpu) - vr)
+    # Budget = what the worker's models may hold: the card less the driver
+    # (gpu_total), the operator reserve and the measured ENCROACHMENT, capped by
+    # the operator limit — the same figure the console bar's "remaining + worker
+    # usage" draws (spill.budget_bar: min(limit, physical - external)).
+    gb = None if gpu is None else max(0, int(gpu) - vr - int(totals.get("vram_encroach") or 0))
     rb = None if ram is None else max(0, int(ram) - rr)
     if gb is not None and totals.get("gpu_limit") is not None:
         gb = min(gb, int(totals["gpu_limit"]))

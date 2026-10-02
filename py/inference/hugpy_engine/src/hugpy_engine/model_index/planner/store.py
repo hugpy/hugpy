@@ -142,14 +142,16 @@ ON CONFLICT (model_id, worker_id, file) DO UPDATE SET fits = EXCLUDED.fits, mode
 
 BUDGET_UPSERT = """
 INSERT INTO worker_budgets (worker_id, name, gpu_total, ram_total, gpu_limit, ram_limit, vram_reserve, ram_reserve,
-                            gpu_budget, ram_budget, pkg_version, rev, last_change, observed_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                            gpu_budget, ram_budget, pkg_version, rev, last_change, vram_encroach, observed_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
 ON CONFLICT (worker_id) DO UPDATE SET name = EXCLUDED.name, gpu_total = EXCLUDED.gpu_total, ram_total = EXCLUDED.ram_total,
   gpu_limit = EXCLUDED.gpu_limit, ram_limit = EXCLUDED.ram_limit, vram_reserve = EXCLUDED.vram_reserve, ram_reserve = EXCLUDED.ram_reserve,
   gpu_budget = EXCLUDED.gpu_budget, ram_budget = EXCLUDED.ram_budget, pkg_version = EXCLUDED.pkg_version,
-  rev = EXCLUDED.rev, last_change = EXCLUDED.last_change, observed_at = now()
+  rev = EXCLUDED.rev, last_change = EXCLUDED.last_change, vram_encroach = EXCLUDED.vram_encroach, observed_at = now()
 """
-_EARMARK_KEYS = ("gpu_total", "ram_total", "gpu_limit", "ram_limit", "vram_reserve", "ram_reserve", "gpu_budget", "ram_budget", "pkg_version")
+_EARMARK_KEYS = ("gpu_total", "ram_total", "gpu_limit", "ram_limit", "vram_reserve", "ram_reserve", "gpu_budget", "ram_budget", "pkg_version",
+                 "vram_encroach")
+_ENCROACH_COLUMN_OK = False
 
 
 def refresh_worker_budgets(cur, reg):
@@ -157,8 +159,12 @@ def refresh_worker_budgets(cur, reg):
     change of totals / limits / reserves / budgets; last_change records whether a
     budget EXPANDED or REDUCED (either may be true). An offline worker (no
     reading) keeps its stored earmark. Returns {worker_id: earmark row}."""
+    global _ENCROACH_COLUMN_OK
+    if not _ENCROACH_COLUMN_OK:              # once per process: the planner host may predate central's migration
+        cur.execute("ALTER TABLE worker_budgets ADD COLUMN IF NOT EXISTS vram_encroach BIGINT")
+        _ENCROACH_COLUMN_OK = True
     cur.execute("SELECT worker_id, name, gpu_total, ram_total, gpu_limit, ram_limit, vram_reserve, ram_reserve, gpu_budget, ram_budget,"
-                " pkg_version, rev, last_change FROM worker_budgets")
+                " pkg_version, vram_encroach, rev, last_change FROM worker_budgets")
     have = {r[0]: dict(zip(("worker_id", "name") + _EARMARK_KEYS + ("rev", "last_change"), r)) for r in cur.fetchall()}
     out = {}
     for wid, payload in reg.items():
@@ -184,7 +190,7 @@ def refresh_worker_budgets(cur, reg):
                       "prev": {"gpu_budget": old.get("gpu_budget"), "ram_budget": old.get("ram_budget"), "rev": old["rev"]}}
         cur.execute(BUDGET_UPSERT, (wid, e["name"], e.get("gpu_total"), e.get("ram_total"), e.get("gpu_limit"), e.get("ram_limit"),
                                     e.get("vram_reserve"), e.get("ram_reserve"), e.get("gpu_budget"), e.get("ram_budget"),
-                                    e.get("pkg_version"), rev, J(change) if change else None))
+                                    e.get("pkg_version"), rev, J(change) if change else None, e.get("vram_encroach")))
         e.update(worker_id=wid, rev=rev, last_change=change)
         out[wid] = e
     return out

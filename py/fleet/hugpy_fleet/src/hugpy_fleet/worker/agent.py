@@ -1503,9 +1503,15 @@ def _apply_central_limits(worker: dict | None) -> None:
             # Neither side sets it: clear a previously-applied central limit.
             if local_raw in (None, "") and env in os.environ:
                 os.environ.pop(env, None)
+            if key == "gpu_mem_gib":
+                _RUNTIME_SETTINGS.pop("gpu_limit_bytes", None)
             continue
         eff = min(vals)
         os.environ[env] = str(int(eff)) if key == "threads" else str(eff)
+        if key == "gpu_mem_gib":
+            # The WORKER-WIDE GPU limit, kept apart from HUGPY_GPU_MEM_GIB
+            # (that env is also the per-load spill band, overwritten per request).
+            _RUNTIME_SETTINGS["gpu_limit_bytes"] = int(eff * 2**30)
 
 
 # ---------------------------------------------------------------------------
@@ -12413,6 +12419,24 @@ def _size_up_for_eviction(state: "WorkerState", model_key: str, plan: dict,
 # The decision lives in hugpy_engine.fit.plan_fit (notes/CORE-ISOLATION-DESIGN.md
 # Part A). The four helpers below are the GATHER half: every live read the old
 # orchestrator did mid-decision now happens here, once, before the plan.
+def _limit_capped_free(free: "int | None", worker_usage: "int | None") -> "int | None":
+    """The budget-bar ``remaining`` for VRAM (encroachment, 2026-10-02) — the
+    same arithmetic RAM admission uses (spill.free_ram_bytes):
+
+        remaining = limit - worker_usage - encroachment
+                  = min(limit - worker_usage, physical - worker_usage - external)
+
+    and the second term IS the device free read (external, driver and the
+    worker's own usage are all out of it). So admission's free is
+    ``min(device free, central GPU limit - worker usage)``: a limit below the
+    card now binds, and external occupants spill into the worker's budget only
+    past the headroom above the limit. No limit / unmeasured usage -> free."""
+    limit = _RUNTIME_SETTINGS.get("gpu_limit_bytes")
+    if free is None or not limit or worker_usage is None:
+        return free
+    return max(0, min(int(free), int(limit) - int(worker_usage)))
+
+
 def _fit_snapshot(total: "int | None" = None):
     """Capture the card + host ONCE for a plan_fit call. ``free_bytes`` is the
     BUDGETABLE free figure (external floor already out), exactly what the old
@@ -12450,6 +12474,7 @@ def _fit_snapshot(total: "int | None" = None):
         ram_reserve = int(_ram_reserve() or 0)
     except Exception:  # noqa: BLE001
         ram_reserve = 0
+    free = _limit_capped_free(free, _attr.get("vram_attributed_bytes"))
     return ResourceSnapshot(
         total_bytes=total, free_bytes=free,
         external_floor_bytes=_external_vram_floor_bytes(),

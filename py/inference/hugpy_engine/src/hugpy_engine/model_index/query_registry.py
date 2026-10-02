@@ -325,6 +325,8 @@ class ModelQueries:
             pkg_version TEXT, rev INTEGER NOT NULL DEFAULT 1, last_change JSONB,
             observed_at TIMESTAMPTZ NOT NULL DEFAULT now());
         """,
+        # measured encroachment the gpu_budget is net of (2026-10-02)
+        "ALTER TABLE worker_budgets ADD COLUMN IF NOT EXISTS vram_encroach BIGINT",
         SYNC_WORKER_REGISTRY_FUNCTION,
         """
         INSERT INTO models (name)
