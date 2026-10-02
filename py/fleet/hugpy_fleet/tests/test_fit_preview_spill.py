@@ -39,3 +39,11 @@ def test_route_scopes_the_overlay(monkeypatch):
     assert r.status_code == 200 and r.get_json()["spill"]["n_cpu_moe"] == 7
     assert seen["bnb"] is True and str(seen["n"]) == "7"
     assert S._REQUEST_ENV.get() is None
+
+
+def test_preview_spill_carries_the_4bit_lever(monkeypatch):
+    monkeypatch.setitem(A._RUNTIME_SETTINGS, "spill_by_model_db", {})
+    monkeypatch.setitem(A._RUNTIME_SETTINGS, "bnb_by_model", {"owner~MN"})
+    assert A._preview_spill("MN")["bnb_4bit"] is True
+    assert A._preview_spill("MN", {"bnb_4bit": None})["bnb_4bit"] is None
+    assert "bnb_4bit" not in A._preview_spill("Other")

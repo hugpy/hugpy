@@ -1468,6 +1468,12 @@ def _adopt_storage_inputs(state: "WorkerState", worker: dict | None) -> None:
         # real load of the model would carry — n_cpu_moe, bnb_4bit, ...).
         _RUNTIME_SETTINGS["spill_by_model_db"] = {
             k: dict(v) for k, v in sbm.items() if isinstance(v, dict)}
+    # The 4-bit lever is its own per-model map on central (a COMPRESSION
+    # choice, not a placement) — the wire adds bnb_4bit from it; so does the
+    # fit preview.
+    bbm = worker.get("bnb_by_model")
+    if isinstance(bbm, dict):
+        _RUNTIME_SETTINGS["bnb_by_model"] = {str(k) for k, v in bbm.items() if v}
     storage = worker.get("storage")
     if isinstance(storage, dict) and storage.get("allocated_count") is not None:
         state.allocated = {
@@ -2925,6 +2931,10 @@ def _preview_spill(model_key: str, overrides: "dict | None" = None) -> dict:
         spill = next((v for k, v in sbm.items()
                       if str(k).split("~")[-1].split("/")[-1] == tail), None)
     spill = {k: v for k, v in dict(spill or {}).items() if k in _SPILL_ENV}
+    bnb_on = _RUNTIME_SETTINGS.get("bnb_by_model") or set()
+    tail = str(model_key).split("~")[-1].split("/")[-1]
+    if model_key in bnb_on or any(str(k).split("~")[-1].split("/")[-1] == tail for k in bnb_on):
+        spill["bnb_4bit"] = True
     for k, v in (overrides or {}).items():
         spill[k] = v
     return spill
