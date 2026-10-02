@@ -992,13 +992,27 @@ def stamp_marker_weights_facts(directory, marker=None, write=True, force=False):
                 pass
         for rel, quant in rels:
             path = rel if os.path.isabs(rel) else os.path.join(directory, rel)
+            key = None
             if not os.path.isfile(path):
                 base = os.path.basename(rel)
                 hit = next((os.path.join(r, base) for r, _d, fs in os.walk(directory) if base in fs), None)
                 if not hit:
-                    continue
+                    # SPLIT QUANT (2026-10-02, Qwen3-Coder-Next): the quants list
+                    # names a shard set by its LOGICAL file (shard suffix
+                    # stripped, as _gguf_variants collapses it); no such file is
+                    # on disk. The set's FIRST shard is the entrypoint the GGUF
+                    # reader sums from. Keyed by the logical name so the facts
+                    # line up with `quants` / model_quants. Before this every
+                    # sharded quant stamped files {} -> dense, no verdict.
+                    stem = base[:-5] if base.lower().endswith(".gguf") else base
+                    first = re.compile(r"^" + re.escape(stem) + r"-0*1-of-\d{5}\.gguf$", re.I)
+                    hit = next((os.path.join(r, f) for r, _d, fs in os.walk(directory)
+                                for f in sorted(fs) if first.match(f)), None)
+                    if not hit:
+                        continue
+                    key = base
                 path = hit
-            key = os.path.basename(path)
+            key = key or os.path.basename(path)
             old = prior_files.get(key)
             sig = _file_sig(path)
             if (not force and old and old.get("sig") == sig and not old.get("error")

@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
+import { hugpyFetch } from '../../runtime/config'
 import { modelTask, modelTasks } from '../ModelTable/ModelTable'
 import FixDoc from '../FixDoc/FixDoc'
 import useSessionState from '../../hooks/useSessionState'
@@ -199,7 +200,16 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
 
 // A worker row: status + GPUs (with used/free) + provisioning state, the models
 // it serves with per-model load state + concise GPU allocation + free controls.
-export function WorkerRow({ worker, models, allocation, onChat = null, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null, distMode = 'feasible' }) {
+// fetch for routes that answer a reason on non-2xx (422/500 bodies are JSON).
+async function hugpyFetchJsonLoose(url, opts = {}) {
+  const r = await hugpyFetch(url, opts)
+  let body = null
+  try { body = await r.json() } catch { body = { error: `HTTP ${r.status}` } }
+  if (r.status === 401 || r.status === 403) throw new Error('operator login required')
+  return { ok: r.ok, status: r.status, body }
+}
+
+export function WorkerRow({ worker, models, allocation, onChat = null, onAssign, onLoad, onUnassign, onRemove, onFree, onFreeAll, onFreeRam, onRestart, onUpdate = null, onAdmit, onBlock, onSetPool, onSetLimits, onSetConfig, onSetResidency, onSetResidencyMany, onSetAllocMany, onTogglePin, onPinAll, onUnpinAll, onPruneDesignations, onReap, onApproveEvictions, onEvict, onAllocateMany, onRefresh = null, onDbRefresh = null, applying = false, restarting = false, updating = false, blockedKeys = null, onToggleBlock = null, distMode = 'feasible' }) {
   // The shared per-(model, worker) state vocabulary (GET /llm/models/status):
   // the same words the Models table and the Metrics picker use. Feature-
   // detected — an older central keeps the legacy pill below.
@@ -599,6 +609,33 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       if (typeof onRefresh === 'function') onRefresh()
     }
   }, [worker.id, onRefresh, models])
+  // TARGETED DISCOVERY (operator 2026-10-02: "a targeted discovery would be
+  // ideal"): hugpy re-reads THIS model's files — resyncs its quant list,
+  // re-stamps its weights facts, recomputes every worker's verdicts — via
+  // POST /api/models/database/<id>/discover. The result line stays on the row.
+  const [discovering, setDiscovering] = useState({})   // key -> 'running' | {ok, text}
+  const discoverModel = useCallback(async (key) => {
+    setDiscovering(o => ({ ...o, [key]: 'running' }))
+    const dbId = findCatalogRow(models, key)?._modelDatabase?.id
+    const ref = encodeURIComponent(dbId != null ? String(dbId) : key)
+    let res
+    try {
+      const r = await hugpyFetchJsonLoose(`/api/models/database/${ref}/discover`, { method: 'POST' })
+      const d = r.body || {}
+      const facts = Object.entries(d.facts || {})
+      const me = (d.workers || {})[worker.id]
+      const factTxt = facts.length
+        ? facts.map(([f, v]) => `${f}${v.shards > 1 ? ` (${v.shards} shards)` : ''}${v.is_moe ? ' MoE' : ''}`).join(', ')
+        : 'no weights file found'
+      const meTxt = me ? `; here: ${me.verdicts} verdict${me.verdicts === 1 ? '' : 's'}${me.fits ? ', fits' : ', does not fit'}${me.explicit_band ? ', explicit band' : ''}${me.moe_offered ? ', MoE offered' : ''}` : ''
+      res = { ok: r.ok && !d.error, text: d.error ? `${d.error}${facts.length ? ` — ${factTxt}` : ''}` : `${factTxt}${meTxt} (${d.took_s}s)` }
+    } catch (e) {
+      res = { ok: false, text: String(e.message || e) }
+    }
+    setDiscovering(o => ({ ...o, [key]: res }))
+    if (typeof onDbRefresh === 'function') onDbRefresh()
+    if (typeof onRefresh === 'function') onRefresh()
+  }, [worker.id, models, onDbRefresh, onRefresh])
   const writeKvKnobs = useCallback(async (key, body) => {
     const nextSet = body.set || {}
     setKvOptimistic(o => ({ ...o, [key]: { ...(o[key] || {}), ...nextSet,
@@ -1522,8 +1559,19 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         const chatModel = models.find(m => (m.model_key ?? m.key) === key)
         const canChat = chatModel && modelTasks(chatModel).some(t =>
           t === 'text-generation' || t === 'image-text-to-text')
+        const disc = discovering[key]
         return (
           <>
+            <button className="wp-activate wp-discover-model" disabled={disc === 'running'}
+                    title={'Targeted discovery: re-read this model\'s files on disk — resync its quant list, re-stamp its weights facts (size, MoE structure, layer bytes, KV cost) and recompute its fit verdicts on every worker.'
+                      + (disc && disc !== 'running' ? `\nLast run: ${disc.text}` : '')}
+                    onClick={e => { e.stopPropagation(); discoverModel(key) }}>
+              {disc === 'running' ? '⟳ discovering…' : '⟳ discover'}
+            </button>
+            {disc && disc !== 'running' && (
+              <span className="wp-lt-muted" style={{ fontSize: 11, color: disc.ok ? undefined : 'var(--danger, #d33)' }}
+                    title={disc.text}>{disc.ok ? '✓' : '✗'} {disc.text.length > 70 ? disc.text.slice(0, 70) + '…' : disc.text}</span>
+            )}
             {onChat && canChat && (
               <button className="wp-activate wp-chat-model" title={`Chat with ${key} in Compute`}
                       onClick={e => { e.stopPropagation(); onChat(key) }}>💬 chat</button>

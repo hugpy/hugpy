@@ -319,6 +319,8 @@ _SENSITIVE = [
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/knobs$")),
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/assigned$")),
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/pinned$")),
+    # Targeted discovery (2026-10-02): re-stamps a model's marker + recomputes its verdicts.
+    ({"POST"},                   re.compile(r"^/models/database/[^/]+/discover$")),
     ({"POST"},                   re.compile(r"^/models/discover$")),
     # Hugging Face credentials (k29): the stored HF token is a secret and the
     # write path mutates central's auth to HF — operator-only for GET/POST/DELETE.

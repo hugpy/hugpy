@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
 import { useFeed } from '../../runtime/feeds'
 import { resolveApiOrigin } from '../../runtime/config'
@@ -44,21 +44,24 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
   // Hydrate the rows actually rendered in this panel from Hugpy's canonical
   // model table. The DB record supplies each worker's persisted knob values;
   // writes still go through the worker API, which mirrors them to model_workers.
+  // reloadModelDb is also handed to each WorkerRow (targeted discovery, quant
+  // writes) so a row can re-read the DB at once instead of waiting for the poll.
+  const modelDbAlive = useRef(true)
+  const reloadModelDb = useCallback(() => fetchJson('/api/models/database?limit=1000')
+    .then(data => {
+      if (!modelDbAlive.current) return
+      if (Array.isArray(data?.rows)) {
+        setModelDbRows(data.rows)
+        setModelDbStatus('connected')
+      } else setModelDbStatus('unavailable')
+    })
+    .catch(() => { if (modelDbAlive.current) setModelDbStatus('unavailable') }), [])
   useEffect(() => {
-    let alive = true
-    const refresh = () => fetchJson('/api/models/database?limit=1000')
-      .then(data => {
-        if (!alive) return
-        if (Array.isArray(data?.rows)) {
-          setModelDbRows(data.rows)
-          setModelDbStatus('connected')
-        } else setModelDbStatus('unavailable')
-      })
-      .catch(() => { if (alive) setModelDbStatus('unavailable') })
-    refresh()
-    const timer = setInterval(refresh, 15000)
-    return () => { alive = false; clearInterval(timer) }
-  }, [])
+    modelDbAlive.current = true
+    reloadModelDb()
+    const timer = setInterval(reloadModelDb, 15000)
+    return () => { modelDbAlive.current = false; clearInterval(timer) }
+  }, [reloadModelDb])
 
   const displayModels = useMemo(() => {
     const byName = new Map()
@@ -1181,6 +1184,7 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
               key={w.id}
               worker={w}
               models={displayModels}
+              onDbRefresh={reloadModelDb}
               onChat={onChat}
               allocation={allocationMap}
               onAssign={assign}

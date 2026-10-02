@@ -178,6 +178,33 @@ def model_database_knobs_all_workers(model_key):
     return jsonify({"model_id": model_id, "workers": results, "ok": ok, "total": len(results)}), (200 if ok == len(results) else 207)
 
 
+@llm_bp.route("/models/database/<model_key>/discover", methods=["POST"])
+def model_database_discover(model_key):
+    """TARGETED DISCOVERY for one model (operator 2026-10-02: "a targeted
+    discovery would be ideal"): re-read the model's dir — resync the marker's
+    quant list, re-stamp its weights facts (forced), mirror the quants into
+    model_quants — then recompute its facts and every pair's verdicts with the
+    hugpy planner (hugpy_engine.model_index.planner). Synchronous: GGUF headers
+    only, seconds. Operator-gated (operator_auth._SENSITIVE)."""
+    from hugpy_engine.model_index import enabled, last_db_error, resolve_model_id
+    if not enabled():
+        return jsonify({"error": "model database is not enabled"}), 503
+    model_id = resolve_model_id(model_key)
+    if model_id is None:
+        return jsonify({"error": f"unknown model {model_key!r}", "db": last_db_error()}), 404
+    try:
+        from hugpy_engine.model_index.client import resolve_dsn
+        from hugpy_engine.model_index.planner.store import _connect, discover_model
+        with _connect(resolve_dsn()) as conn, conn.cursor() as cur:
+            out = discover_model(cur, model_id)
+    except Exception as exc:  # noqa: BLE001 — the console shows the reason
+        logger.warning("targeted discovery of %s failed: %s", model_key, exc)
+        return jsonify({"error": f"{type(exc).__name__}: {exc}", "model_id": model_id}), 500
+    logger.info("targeted discovery %s: facts=%s workers=%s took %ss", out.get("name"),
+                list((out.get("facts") or {}).keys()), len(out.get("workers") or {}), out.get("took_s"))
+    return jsonify(out), (200 if not out.get("error") else 422)
+
+
 @llm_bp.route("/models/database/<model_key>/workers/<worker_id>/assigned", methods=["POST"])
 def model_database_pair_assigned(model_key, worker_id):
     """Console designation write for ONE (model, worker) pair — straight to the
@@ -498,6 +525,18 @@ def _run_discovery(state: dict):
         # the table — so the console's next /models is correct AND warm instead
         # of paying the whole walk inside one request.
         state["physical"] = rebuild_physical(manifest, source="discover")
+        # PLANNER (2026-10-02): discovery re-reads the files, so it also
+        # re-stamps changed weights facts and recomputes verdicts — the step a
+        # split-shard model (Qwen3-Coder-Next) fell through. Best-effort.
+        try:
+            from hugpy_engine.model_index import enabled as _idx_on
+            if _idx_on():
+                from hugpy_engine.model_index.client import resolve_dsn
+                from hugpy_engine.model_index.planner.store import discover_all
+                state["planner"] = discover_all(resolve_dsn())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("discovery planner pass failed: %s", exc)
+            state["planner"] = {"error": f"{type(exc).__name__}: {exc}"}
     except Exception as exc:  # noqa: BLE001 — state must always resolve
         logger.warning("model discovery sweep failed: %s", exc)
         state["error"] = f"{type(exc).__name__}: {exc}"
