@@ -36,6 +36,7 @@ job plus per-model last status; finished jobs stay readable until
 """
 from __future__ import annotations
 
+import os
 import random
 import threading
 import time
@@ -243,6 +244,28 @@ def classify_error(message: Optional[str]) -> Optional[str]:
     return "error"
 
 
+# ── history (2026-10-02): runs + results persisted, fail-open ────────────────
+def _history():
+    """The persistence module, or None when disabled (HUGPY_TEST_FIRE_HISTORY=0)."""
+    if (os.environ.get("HUGPY_TEST_FIRE_HISTORY") or "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    try:
+        from hugpy_server.app import test_fire_store
+        return test_fire_store
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _persist(fn_name: str, *args) -> None:
+    h = _history()
+    if h is None:
+        return
+    try:
+        getattr(h, fn_name)(*args)
+    except Exception:  # noqa: BLE001 — history never breaks a run
+        logger.debug("test-fire history %s failed", fn_name, exc_info=True)
+
+
 # ── bookkeeping ──────────────────────────────────────────────────────────────
 class TestFireJob:
     """In-memory state for one test-fire run (thread-safe snapshot/record)."""
@@ -323,6 +346,8 @@ class TestFireJob:
             pm["last_latency_s"] = result.get("latency_s")
             pm["last_tok_s"] = result.get("tok_s")
             pm["last_at"] = result.get("started")
+        _persist("save_result", self, result)
+        _persist("save_run", self)
 
     def snapshot(self, limit: int = RESULT_RING) -> dict:
         with self._lock:
@@ -365,6 +390,7 @@ def run_job(job: TestFireJob, call_fn: Callable[..., dict],
     rng = random.Random(job.seed)
     job.started = time.time()
     job.running = True
+    _persist("save_run", job)
     try:
         if not job.models:
             job.request_stop("no text-gen models")
@@ -397,6 +423,7 @@ def run_job(job: TestFireJob, call_fn: Callable[..., dict],
         job.finished = time.time()
         if job.stop_reason is None:
             job.stop_reason = "complete"
+        _persist("save_run", job)
 
 
 def _guarded_call(call_fn, key, prompt, job) -> dict:
@@ -621,6 +648,14 @@ def _cancel_request(request_id: str, reason: str) -> bool:
 
 
 # ── body validation ──────────────────────────────────────────────────────────
+def _arg_int(name: str, default: int, lo: int, hi: int) -> int:
+    """A query-string int, clamped; garbage -> default (read routes never 400)."""
+    try:
+        return max(lo, min(hi, int(request.args.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
 def _int_field(body: dict, name: str, default: int, lo: int, hi: int) -> int:
     v = body.get(name, default)
     if v is None:
@@ -689,6 +724,41 @@ def test_fire_current(worker_id):
     if job is None:
         return jsonify({"ok": False, "error": "no test-fire job for this worker"}), 404
     return jsonify(job.snapshot())
+
+
+@test_fire_bp.route("/llm/workers/<worker_id>/test-fire/history", methods=["GET"])
+def test_fire_history(worker_id):
+    """Past runs for this worker, newest first (persisted). A run with no
+    ``finished`` that is not live here was cut off (central restarted)."""
+    h = _history()
+    limit = _arg_int("limit", 50, 1, 500)
+    runs = h.list_runs(worker_id, limit) if h else []
+    live = _running_job_for(worker_id)
+    for r in runs:
+        r["live"] = bool(live and live.job_id == r["job_id"])
+        r["state"] = ("running" if r["live"] else "interrupted" if not r.get("finished")
+                      else (r.get("stop_reason") or "complete"))
+    return jsonify({"worker_id": worker_id, "runs": runs, "stored": h is not None,
+                    "live_job_id": live.job_id if live else None})
+
+
+@test_fire_bp.route("/llm/workers/<worker_id>/test-fire/analysis", methods=["GET"])
+def test_fire_analysis(worker_id):
+    """Per-model inference over the stored runs (test_fire_store.analyze)."""
+    h = _history()
+    if h is None:
+        return jsonify({"error": "test-fire history disabled"}), 503
+    runs = _arg_int("runs", 20, 1, 200)
+    return jsonify(h.analyze(worker_id, runs))
+
+
+@test_fire_bp.route("/llm/workers/<worker_id>/test-fire/history/<job_id>", methods=["GET"])
+def test_fire_history_run(worker_id, job_id):
+    h = _history()
+    run = h.get_run(job_id) if h else None
+    if not run or run.get("worker_id") != worker_id:
+        return jsonify({"error": f"no stored test-fire run {job_id!r} for this worker"}), 404
+    return jsonify(run)
 
 
 @test_fire_bp.route("/llm/workers/<worker_id>/test-fire/<job_id>", methods=["GET"])

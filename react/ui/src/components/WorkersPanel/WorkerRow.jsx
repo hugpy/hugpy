@@ -21,6 +21,7 @@ import {
 import { fmtBytes, fmtServed, midTrunc } from './formatters'
 import { ExternalLeases } from './ExternalLeases'
 import { TestFireButton, TestFireStrip, useTestFire } from './TestFire'
+import TestFireHistory from './TestFireHistory'
 import { ResidencyMenu } from './ResidencyMenu'
 import { ResourceStrip } from './ResourceStrip'
 import { SpillBadge } from './SpillBadge'
@@ -2085,6 +2086,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
 
       {/* Test-fire strip: round, done/planned, ok/failed, per-model last status. */}
       <TestFireStrip tf={testFire} />
+      <TestFireHistory worker={worker} tf={testFire} />
 
       {/* Two-tier resource governance: the box's OWN config (caps) is the hard
           ceiling; central-set limits are clamped to it server-side. */}

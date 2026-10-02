@@ -298,3 +298,11 @@ def _reset_request_spill_overlay():
     set_request_env(None)
     yield
     set_request_env(None)
+
+
+@pytest.fixture(autouse=True)
+def _no_test_fire_history(monkeypatch):
+    """Test fires in tests never persist to the real hugpy DB (2026-10-02):
+    history tests inject their own store over tf._history."""
+    monkeypatch.setenv("HUGPY_TEST_FIRE_HISTORY", "0")
+    yield

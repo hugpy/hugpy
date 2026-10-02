@@ -1811,3 +1811,33 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 }
 .wp-vram-fill { flex: none; }
 .wp-pidreg-driver { color: var(--muted, #8b949e); font-size: 11px; padding: 2px 0; }
+
+/* test-fire history (2026-10-02) */
+.wp-tfh { margin-top: 4px; font-size: 11px; }
+.wp-tfh-runs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.wp-tfh-run { display: inline-flex; gap: 6px; align-items: center; font-size: 11px; padding: 1px 7px;
+  border: 1px solid var(--border, #444); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+.wp-tfh-run:hover { border-color: var(--accent, #6aa0ff); }
+.wp-tfh-run em { color: var(--warn, #c90); font-style: normal; }
+.wp-tfh-run-running { border-color: var(--accent, #6aa0ff); }
+.wp-tfh-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 1000;
+  display: flex; align-items: center; justify-content: center; }
+.wp-tfh-popup { background: var(--panel, #1b1d22); color: var(--fg, #ddd); border: 1px solid var(--border, #444);
+  border-radius: 8px; width: min(1100px, 94vw); max-height: 86vh; display: flex; flex-direction: column; }
+.wp-tfh-popup-head { display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border, #444); }
+.wp-tfh-popup-title { font-weight: 600; }
+.wp-tfh-popup-body { overflow: auto; padding: 10px 12px; font-size: 12px; }
+.wp-tfh-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.wp-tfh-rule { margin-bottom: 8px; font-size: 11px; }
+.wp-tfh-sub { margin: 12px 0 4px; color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+.wp-tfh-table { width: 100%; border-collapse: collapse; }
+.wp-tfh-table th { text-align: left; color: var(--muted); font-weight: normal; border-bottom: 1px solid var(--border, #444); padding: 3px 6px; }
+.wp-tfh-table td { padding: 3px 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); vertical-align: top; }
+.wp-tfh-result { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wp-tfh-bad td { color: var(--danger, #d33); }
+.wp-tfh-warn td { color: var(--warn, #c90); }
+.wp-tfh-v { padding: 0 6px; border-radius: 8px; border: 1px solid currentColor; font-size: 11px; }
+.wp-tfh-v-healthy { color: var(--ok, #3a3); }
+.wp-tfh-v-flaky, .wp-tfh-v-regressed { color: var(--warn, #c90); }
+.wp-tfh-v-failing { color: var(--danger, #d33); }
+.wp-tfh-v-untested { color: var(--muted); }
