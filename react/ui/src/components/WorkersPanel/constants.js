@@ -16,7 +16,7 @@
 export const SERV_LAYOUT_KEY = 'hugpy.workers.servtable.layout.v2'
 
 export const SERV_DEFAULT_ORDER = [
-  'name', 'memory', 'alloc', 'size', 'ctx', 'task', 'framework',
+  'name', 'memory', 'alloc', 'size', 'quant', 'ctx', 'task', 'framework',
   'fourbit', 'moe', 'state', 'seat', 'residency', 'pin', 'actions',
 ]
 

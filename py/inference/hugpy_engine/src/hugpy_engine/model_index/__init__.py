@@ -72,6 +72,14 @@ read_pair_knobs = _service.read_pair_knobs
 pair_knobs_by_worker = _service.pair_knobs_by_worker
 set_pair_assigned = _service.set_pair_assigned
 fetch_assigned_by_worker = _service.fetch_assigned_by_worker
+set_pair_pinned = _service.set_pair_pinned
+record_worker_presence = _service.record_worker_presence
+fetch_all_serving_settings = _service.fetch_all_serving_settings
+set_model_serving_settings = _service.set_model_serving_settings
+fetch_worker_presence = _service.fetch_worker_presence
+fetch_allocation_candidates = _service.fetch_allocation_candidates
+fetch_presence_catalog = _service.fetch_presence_catalog
+fetch_pairs_by_worker = _service.fetch_pairs_by_worker
 
 
 def last_db_error():
@@ -92,5 +100,8 @@ __all__ = [
     "fetch_models_for_display",
     "fetch_worker_settings",
     "resolve_model_id", "write_pair_knobs", "read_pair_knobs", "pair_knobs_by_worker", "PAIR_KNOB_KEYS", "set_pair_assigned", "fetch_assigned_by_worker",
+    "set_pair_pinned", "fetch_pairs_by_worker",
+    "record_worker_presence", "fetch_worker_presence", "fetch_allocation_candidates", "fetch_presence_catalog",
+    "fetch_all_serving_settings", "set_model_serving_settings",
     "last_db_error",
 ]

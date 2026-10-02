@@ -318,6 +318,7 @@ _SENSITIVE = [
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/knobs$")),
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/knobs$")),
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/assigned$")),
+    ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/pinned$")),
     ({"POST"},                   re.compile(r"^/models/discover$")),
     # Hugging Face credentials (k29): the stored HF token is a secret and the
     # write path mutates central's auth to HF — operator-only for GET/POST/DELETE.

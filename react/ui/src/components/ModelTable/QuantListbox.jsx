@@ -61,11 +61,18 @@ export function useDbModelRow(modelKey, refreshKey = 0) {
   return [row, err]
 }
 
-export default function QuantListbox({ variants, order, allocated, fitFor, disabled = false, busy = false, onChange, title = '' }) {
-  const files = (variants || []).map(v => v.filename)
+export default function QuantListbox({ variants, order, allocated, fitFor, disabled = false, busy = false, onChange, title = '', minWidth = 320 }) {
+  // RANKED PRIORITY LIST, NAME-SORTED DISPLAY (operator 2026-10-02: "sort by
+  // name and keep the numbered designation … that's cleaner"). The checked
+  // quants form a ranked preference — #1 is served when it fits; the ranks
+  // below it are the evict-to-fit ladder (a polite eviction may step down to a
+  // smaller quant rather than evict a neighbour). The ROWS never move: every
+  // variant sits in filename order; the rank badge (#n) carries the priority
+  // and ▲▼ change it. The allocated quant is marked in place (→ allocated).
+  const files = (variants || []).map(v => v.filename).slice().sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }))
   const byFile = Object.fromEntries((variants || []).map(v => [v.filename, v]))
   const checked = (order || []).filter(f => files.includes(f))
-  const unchecked = files.filter(f => !checked.includes(f))
+  const locked = disabled || busy
   const move = (f, dir) => {
     const i = checked.indexOf(f); const j = i + dir
     if (i < 0 || j < 0 || j >= checked.length) return
@@ -73,45 +80,40 @@ export default function QuantListbox({ variants, order, allocated, fitFor, disab
     onChange(next)
   }
   const toggle = (f) => onChange(checked.includes(f) ? checked.filter(x => x !== f) : [...checked, f])
-  const Row = ({ f, idx }) => {
+  const Row = ({ f }) => {
     const v = byFile[f] || {}
-    const on = checked.includes(f)
+    const idx = checked.indexOf(f)
+    const on = idx >= 0
     const fit = fitFor ? fitFor(f) : { ok: null, text: '' }
     const isAlloc = allocated && f === allocated
     const grey = fit && fit.ok === false
     return (
       <div className={`mt-ql-row${on ? ' mt-ql-on' : ''}${isAlloc ? ' mt-ql-alloc' : ''}`}
            style={{ display: 'flex', alignItems: 'center', gap: 6, opacity: grey ? 0.55 : 1, padding: '2px 0' }}
-           title={fit?.text || (on ? `preference #${idx + 1}` : 'not in the list')}>
-        <input type="checkbox" checked={on} disabled={disabled || busy} onChange={() => toggle(f)} />
+           title={fit?.text || (on ? `priority #${idx + 1}` : 'not in the list')}>
+        <input type="checkbox" checked={on} disabled={locked} onChange={() => toggle(f)} />
         <span style={{ width: 34, textAlign: 'right', fontSize: 10, color: 'var(--muted)' }}>
-          {isAlloc ? '→' : (on ? `#${idx + 1}` : '')}
+          {on ? `#${idx + 1}` : ''}
         </span>
+        <span className="mt-quant-eff" style={{ width: 12, fontSize: 11 }} title={isAlloc ? 'the quant this pair serves now' : ''}>{isAlloc ? '→' : ''}</span>
         <span className="mt-ql-file" style={{ fontWeight: isAlloc ? 600 : 400 }}>{f}</span>
         {v.bytes ? <span style={{ fontSize: 11, color: 'var(--muted)' }}>{fmtGiB(v.bytes)}</span> : null}
         {isAlloc && <span className="mt-quant-eff" style={{ fontSize: 11 }}>allocated</span>}
         {fit?.text && <span style={{ fontSize: 11, color: grey ? 'var(--danger, #d33)' : 'var(--muted)' }}>{fit.text}</span>}
-        {on && (
-          <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 2 }}>
-            <button disabled={disabled || busy || idx <= 0} onClick={() => move(f, -1)} title="prefer more">▲</button>
-            <button disabled={disabled || busy || idx >= checked.length - 1} onClick={() => move(f, +1)} title="prefer less">▼</button>
-          </span>
-        )}
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 2, visibility: on ? 'visible' : 'hidden' }}>
+          <button disabled={locked || idx <= 0} onClick={() => move(f, -1)} title="raise priority">▲</button>
+          <button disabled={locked || idx >= checked.length - 1} onClick={() => move(f, +1)} title="lower priority">▼</button>
+        </span>
       </div>
     )
   }
-  // allocated first (if it is a known variant), then the rest of the preference order, then unchecked
-  const ordered = [
-    ...(allocated && files.includes(allocated) ? [allocated] : []),
-    ...checked.filter(f => f !== allocated),
-    ...unchecked.filter(f => f !== allocated),
-  ]
   return (
-    <div className="mt-ql" title={title} style={{ display: 'flex', flexDirection: 'column', minWidth: 320 }}>
-      {ordered.map(f => <Row key={f} f={f} idx={checked.indexOf(f)} />)}
+    <div className="mt-ql" role="listbox" aria-label="quant priority" title={title}
+         style={{ display: 'flex', flexDirection: 'column', minWidth }}>
+      {files.map(f => <Row key={f} f={f} />)}
       <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
         {checked.length
-          ? `serves the first listed quant that fits; a quant you never tuned runs at auto allocation${busy ? ' · saving…' : ''}`
+          ? `#1 serves when it fits; lower ranks are the evict-to-fit ladder${busy ? ' · saving…' : ''}`
           : 'nothing checked = the verdict default'}
       </div>
     </div>

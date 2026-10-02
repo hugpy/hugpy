@@ -18,7 +18,7 @@ from hugpy_engine.model_index.repositories import (
 )
 import os.path as _osp
 _os_path_basename = _osp.basename
-from hugpy_engine.model_index.query_registry import (PAIR_KNOB_KEYS, KV_CACHE_TYPES, KV_CACHE_TYPES_NEED_FLASH, MODE_FALLBACK_ORDER, EXPLICIT_SPILL_CHOICES, quant_fit_walk, PLACEMENT_KNOB_KEYS, ModelQueries,
+from hugpy_engine.model_index.query_registry import (PresenceQueries, PAIR_KNOB_KEYS, KV_CACHE_TYPES, KV_CACHE_TYPES_NEED_FLASH, MODE_FALLBACK_ORDER, EXPLICIT_SPILL_CHOICES, quant_fit_walk, PLACEMENT_KNOB_KEYS, ModelQueries,
                                                      PairKnobQueries)
 
 logger = logging.getLogger("abstract_hugpy_dev.model_index")
@@ -136,6 +136,39 @@ class ModelIndexService:
             return True
         except Exception as exc:  # noqa: BLE001 — settings still persist to JSON
             self.db.mark_unavailable(exc, "syncing model worker settings")
+            return False
+
+    # ── serve overrides store (detach step 3, 2026-10-02) ────────────────
+    def fetch_all_serving_settings(self):
+        """{model name: serving_settings dict} for every model with a non-empty
+        override — the serve-overrides map in serve_overrides.json's shape. None
+        when the DB is off/faulted (callers fall back to the JSON file)."""
+        if not enabled():
+            return None
+        try:
+            with self.db.lock:
+                with self.db.cursor() as cur:
+                    cur.execute(ModelQueries.FETCH_ALL_SERVING_SETTINGS)
+                    return {str(n): (dict(s) if isinstance(s, dict) else {}) for n, s in cur.fetchall()}
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "reading serving settings")
+            return None
+
+    def set_model_serving_settings(self, model_name: str, settings: dict) -> bool:
+        """Write ONE model's serving_settings ({} clears). Used by
+        serve/overrides._save for the entries a bulk rewrite (migrations) changed;
+        set_override's own path goes through sync_worker_settings."""
+        if not enabled() or not model_name:
+            return False
+        import json as _json
+        try:
+            with self.db.lock:
+                with self.db.transaction(), self.db.cursor() as cur:
+                    cur.execute(ModelQueries.UPSERT_MODEL_SETTINGS,
+                                (str(model_name), _json.dumps(settings or {}, sort_keys=True)))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "writing serving settings")
             return False
 
     def fetch_models_for_display(self, search: str = "", limit: int = 500):
@@ -534,14 +567,20 @@ class ModelIndexService:
             self.db.mark_unavailable(exc, "writing pair knobs")
             return "unavailable", f"{type(exc).__name__}: {exc}"
 
-    def set_pair_assigned(self, model_id: int, worker_id: str, assigned: bool):
+    def set_pair_assigned(self, model_id: int, worker_id: str, assigned: bool,
+                          source: str = "operator", actor: str = "operator"):
         """DB-owned designation write for ONE pair (operator ruling 2026-10-02:
         the DB, not central's JSON, is the designation of record; central
         converges to it in the background — see hugpy_server designation_relay).
-          assigned=True  -> upsert the pair row with assigned=true
-          assigned=False -> assigned=false; the row is DELETED unless the pair is
-                            live (loaded/loading/allocated) — no residue.
-        Returns ("ok", {"assigned", "row"}) or ("unavailable", err)."""
+          assigned=True  -> upsert the pair row with assigned=true; `source` is
+                            stamped on a NEW row only (provenance never retagged)
+          assigned=False -> assigned=false AND pinned=false; the row is DELETED
+                            unless the pair is live (loaded/loading/allocated).
+        PINS (ruling 2026-10-02 "respect the pins"): an unassign by any actor
+        other than "operator" is REFUSED while the pair is pinned →
+        ("pinned", {...}). The operator's own unassign clears the pin (operator
+        intent wins over the earlier operator intent).
+        Returns ("ok", {"assigned", "row"}), ("pinned", detail) or ("unavailable", err)."""
         if not enabled():
             return "unavailable", "model database is not enabled"
         try:
@@ -549,10 +588,17 @@ class ModelIndexService:
                 with self.db.transaction():
                     with self.db.cursor() as cur:
                         if assigned:
-                            cur.execute(PairKnobQueries.INSERT_PAIR_ASSIGNED, (int(model_id), str(worker_id)))
+                            cur.execute(PairKnobQueries.INSERT_PAIR_ASSIGNED,
+                                        (int(model_id), str(worker_id), (str(source or "").strip().lower() or None)))
                             cur.fetchone()
                             return "ok", {"assigned": True, "row": "kept"}
-                        cur.execute(PairKnobQueries.SET_PAIR_ASSIGNED, (False, int(model_id), str(worker_id)))
+                        if str(actor or "operator") != "operator":
+                            cur.execute(PairKnobQueries.FETCH_PAIR_PIN, (int(model_id), str(worker_id)))
+                            pin = cur.fetchone()
+                            if pin is not None and bool(pin[1]):
+                                return "pinned", {"assigned": bool(pin[0]), "pinned": True, "source": pin[2],
+                                                  "actor": actor, "reason": "pair is pinned by the operator; automation may not unassign it"}
+                        cur.execute(PairKnobQueries.SET_PAIR_ASSIGNED, (False, False, False, False, int(model_id), str(worker_id)))
                         row = cur.fetchone()
                         if row is None:
                             return "ok", {"assigned": False, "row": "absent"}
@@ -562,6 +608,161 @@ class ModelIndexService:
         except Exception as exc:  # noqa: BLE001
             self.db.mark_unavailable(exc, "writing pair designation")
             return "unavailable", f"{type(exc).__name__}: {exc}"
+
+    # ── drive presence (detach step 2, 2026-10-02) ──────────────────────
+    _presence_digest: dict = {}
+
+    def record_worker_presence(self, worker_id: str, rows: list, source: str = "storage", complete: bool = True):
+        """Snapshot what a worker reports ON ITS DRIVE into model_worker_presence.
+        rows: [{model_key, bytes?, store?, protected?, detail?}] (storage survey)
+        or [{model_key, name, hub_id, framework, filename, external_location /
+        worker_location, api_url, …}] (discovered report; everything but
+        model_key/bytes lands in detail). complete=True retires rows of the SAME
+        source the report no longer lists. Change-driven: an identical report
+        (per worker+source) is a no-op. Returns ("ok", {"rows", "changed"}),
+        ("unavailable", err)."""
+        if not enabled():
+            return "unavailable", "model database is not enabled"
+        import hashlib as _hashlib, json as _json
+        clean = []
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            key = str(r.get("model_key") or r.get("key") or "").strip()
+            if not key:
+                continue
+            detail = {k: v for k, v in r.items()
+                      if k not in ("model_key", "key", "bytes", "size_bytes", "store", "protected") and v is not None
+                      and k not in ("assigned", "pinned", "loaded", "loading", "provisioning", "granted",
+                                    "counts_toward_budget", "last_picked", "tok_n", "tok_s_avg", "tok_s_last", "why")}
+            b = r.get("bytes", r.get("size_bytes"))
+            clean.append((key, int(b) if isinstance(b, (int, float)) and b >= 0 else None,
+                          (str(r["store"]) if r.get("store") is not None else None),
+                          (bool(r["protected"]) if r.get("protected") is not None else None),
+                          _json.dumps(detail, sort_keys=True, default=str)))
+        digest = _hashlib.sha1(_json.dumps(clean, sort_keys=True).encode()).hexdigest()
+        dk = (str(worker_id), str(source))
+        if self._presence_digest.get(dk) == digest:
+            return "ok", {"rows": len(clean), "changed": False}
+        try:
+            with self.db.lock:
+                with self.db.transaction():
+                    with self.db.cursor() as cur:
+                        for key, b, store, protected, detail in clean:
+                            cur.execute(PresenceQueries.UPSERT,
+                                        (str(worker_id), key, name_forms(key), key, str(source), b, store, protected, detail))
+                        if complete:
+                            if source == "storage":
+                                cur.execute(PresenceQueries.DELETE_STALE, (str(worker_id), [k for k, *_ in clean]))
+                            else:
+                                cur.execute(PresenceQueries.DELETE_STALE + " AND source = %s",
+                                            (str(worker_id), [k for k, *_ in clean], str(source)))
+            self._presence_digest[dk] = digest
+            return "ok", {"rows": len(clean), "changed": True}
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "writing worker presence")
+            return "unavailable", f"{type(exc).__name__}: {exc}"
+
+    def fetch_worker_presence(self, worker_id: str):
+        """[{model_key, model_id, source, bytes, store, protected, detail, first_seen, seen_at}] or None."""
+        if not enabled():
+            return None
+        try:
+            with self.db.lock:
+                with self.db.cursor() as cur:
+                    cur.execute(PresenceQueries.FETCH_BY_WORKER, (str(worker_id),))
+                    return [{"model_key": r[0], "model_id": r[1], "source": r[2], "bytes": r[3], "store": r[4],
+                             "protected": r[5], "detail": r[6] or {},
+                             "first_seen": r[7].isoformat() if r[7] else None,
+                             "seen_at": r[8].isoformat() if r[8] else None} for r in cur.fetchall()]
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "reading worker presence")
+            return None
+
+    def fetch_allocation_candidates(self, worker_id: str):
+        """Present on the worker's drive but NOT an assigned pair: [{model_key,
+        model_id, source, bytes, store, protected, detail, fits}] (fits None =
+        no verdict yet). None when the DB is off."""
+        if not enabled():
+            return None
+        try:
+            with self.db.lock:
+                with self.db.cursor() as cur:
+                    cur.execute(PresenceQueries.FETCH_CANDIDATES, (str(worker_id),))
+                    return [{"model_key": r[0], "model_id": r[1], "source": r[2], "bytes": r[3], "store": r[4],
+                             "protected": r[5], "detail": r[6] or {}, "fits": r[7]} for r in cur.fetchall()]
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "reading allocation candidates")
+            return None
+
+    def fetch_presence_catalog(self):
+        """The discovered-models catalog in worker_model_catalog.json's shape —
+        {worker_id: {"at": epoch, "models": {key: {…detail, model_key}}}} — so
+        models_config._apply_worker_catalog can overlay worker-only models from
+        the DB. None when the DB is off."""
+        if not enabled():
+            return None
+        try:
+            with self.db.lock:
+                with self.db.cursor() as cur:
+                    cur.execute(PresenceQueries.FETCH_DISCOVERED)
+                    out: dict = {}
+                    for wid, key, detail, seen in cur.fetchall():
+                        ent = out.setdefault(str(wid), {"at": 0.0, "models": {}})
+                        row = dict(detail or {}); row["model_key"] = key
+                        ent["models"][key] = row
+                        ts = seen.timestamp() if seen else 0.0
+                        if ts > ent["at"]:
+                            ent["at"] = ts
+                    return out
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "reading presence catalog")
+            return None
+
+    def set_pair_pinned(self, model_id: int, worker_id: str, pinned: bool, by: str = "operator"):
+        """Operator LOCK on ONE pair (ruling 2026-10-02 06:05). Rides an ASSIGNED
+        row only — pinning an unassigned pair is refused ("unassigned") because a
+        pin is not a third state of assigned. pinned_by / pinned_at are their own
+        columns (activity is heartbeat-owned and rewritten every beat). An unpin
+        records who unpinned in pinned_by with pinned_at NULL.
+        Returns ("ok", {"pinned","source","pinned_by","pinned_at"}), ("unassigned",
+        None) or ("unavailable", err)."""
+        if not enabled():
+            return "unavailable", "model database is not enabled"
+        try:
+            with self.db.lock:
+                with self.db.transaction():
+                    with self.db.cursor() as cur:
+                        cur.execute(PairKnobQueries.SET_PAIR_PINNED,
+                                    (bool(pinned), str(by or "operator"), bool(pinned), bool(pinned),
+                                     int(model_id), str(worker_id)))
+                        row = cur.fetchone()
+                        if row is None:
+                            return "unassigned", None
+                        return "ok", {"pinned": bool(row[0]), "source": row[1], "pinned_by": row[2],
+                                      "pinned_at": (row[3].isoformat() if row[3] is not None else None)}
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "writing pair pin")
+            return "unavailable", f"{type(exc).__name__}: {exc}"
+
+    def fetch_pairs_by_worker(self):
+        """{worker_id: {model name: {"assigned", "pinned", "source"}}} for every
+        pair row, or None when the DB is off/faulted. Same absence semantics as
+        fetch_assigned_by_worker (no entry = nothing known)."""
+        if not enabled():
+            return None
+        try:
+            with self.db.lock:
+                with self.db.cursor() as cur:
+                    cur.execute(PairKnobQueries.FETCH_PAIRS_BY_WORKER)
+                    out: dict = {}
+                    for wid, name, flag, pinned, source, pinned_by in cur.fetchall():
+                        out.setdefault(str(wid), {})[str(name)] = {
+                            "assigned": bool(flag), "pinned": bool(pinned), "source": source, "pinned_by": pinned_by}
+                    return out
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "reading pair designations")
+            return None
 
     def fetch_assigned_by_worker(self):
         """{worker_id: {model name: assigned bool}} for every pair row, or None

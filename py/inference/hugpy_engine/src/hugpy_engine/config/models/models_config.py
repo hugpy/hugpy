@@ -1618,14 +1618,30 @@ def record_worker_models(worker_id: str, rows: dict) -> list[str]:
                 clean[key]["worker_location"] = location
         old = (data.get(worker_id) or {}).get("models")
         changed = old != clean
-        if changed:
+        # DETACH STEP 2 (operator 2026-10-02): the catalog's home is the DB
+        # (model_worker_presence, source 'discovered'); the JSON is written only
+        # with HUGPY_WORKER_CATALOG_JSON=1 (frozen otherwise).
+        db_changed = False
+        try:
+            from hugpy_engine.model_index import record_worker_presence
+            rows = []
+            for key, row in clean.items():
+                r = dict(row); r["model_key"] = key
+                if r.get("worker_location"):
+                    r["external_location"] = r["worker_location"]
+                rows.append(r)
+            st, det = record_worker_presence(worker_id, rows, source="discovered", complete=True)
+            db_changed = bool(st == "ok" and (det or {}).get("changed"))
+        except Exception:  # noqa: BLE001 — a DB miss never breaks a heartbeat
+            db_changed = False
+        if changed and os.environ.get("HUGPY_WORKER_CATALOG_JSON", "0") == "1":
             data[worker_id] = {"at": time.time(), "models": clean}
             tmp = path + f".{os.getpid()}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh)
             os.replace(tmp, path)
         fcntl.flock(lock, fcntl.LOCK_UN)
-    _apply_worker_catalog(force=changed)
+    _apply_worker_catalog(force=(changed or db_changed))
     # The canonical keys may differ from worker-local scan keys when central
     # already has a same-named model from another hub. Return those identities
     # so heartbeat placement uses the same keys as the shared model catalog.
@@ -1639,14 +1655,27 @@ def _apply_worker_catalog(force=False) -> None:
     registry_dict = globals().get("MODEL_REGISTRY_DICT")
     if registry is None or registry_dict is None:
         return  # import-time base build
+    data = None
+    # DB first (detach step 2): the discovered catalog lives in
+    # model_worker_presence; the JSON file is the no-DB fallback only.
     try:
-        stamp = os.stat(_WORKER_CATALOG_PATH).st_mtime_ns
+        from hugpy_engine.model_index import fetch_presence_catalog
+        data = fetch_presence_catalog()
+    except Exception:  # noqa: BLE001
+        data = None
+    if data is not None:
+        stamp = hash(json.dumps(data, sort_keys=True, default=str))
         if not force and stamp == _WORKER_CATALOG_SEEN:
             return
-        with open(_WORKER_CATALOG_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return
+    else:
+        try:
+            stamp = os.stat(_WORKER_CATALOG_PATH).st_mtime_ns
+            if not force and stamp == _WORKER_CATALOG_SEEN:
+                return
+            with open(_WORKER_CATALOG_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return
     locations: dict[str, dict[str, str]] = {}
     external_apis: dict[str, dict[str, dict]] = {}
     candidates: dict[str, dict] = {}

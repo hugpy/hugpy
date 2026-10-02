@@ -236,6 +236,12 @@ class ModelQueries:
     INSERT INTO models (name) VALUES (%s) ON CONFLICT (name) DO NOTHING;
     """
 
+    # DETACH STEP 3 (operator 2026-10-02 06:45): models.serving_settings IS the
+    # serve-overrides store; serve/overrides.py reads it here and
+    # serve_overrides.json is frozen (write only with HUGPY_SERVE_OVERRIDES_JSON=1).
+    FETCH_ALL_SERVING_SETTINGS = """
+    SELECT name, serving_settings FROM models WHERE serving_settings <> '{}'::jsonb
+    """
     UPSERT_MODEL_SETTINGS = """
     INSERT INTO models (name, serving_settings, updated_at)
     VALUES (%s, %s::jsonb, now())
@@ -254,6 +260,36 @@ class ModelQueries:
         "ALTER TABLE model_workers ADD COLUMN IF NOT EXISTS assigned "
         "BOOLEAN NOT NULL DEFAULT false;",
         "ALTER TABLE model_workers ADD COLUMN IF NOT EXISTS fits BOOLEAN;",
+        # PIN + PROVENANCE on the pair row (operator ruling 2026-10-02 06:05,
+        # "respect the pins"): `pinned` is the operator LOCK — automation may
+        # neither unassign nor retune a pinned pair; `source` is who designated
+        # it (operator | wildcard | inventory | relay | benchmark; NULL =
+        # unrecorded, pre-dates the column). A pin is not a third state of
+        # assigned: unassign clears it, and pinning an unassigned pair is
+        # refused. Replaces central's designation_meta + worker_assignments.json.
+        "ALTER TABLE model_workers ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false;",
+        "ALTER TABLE model_workers ADD COLUMN IF NOT EXISTS source TEXT;",
+        # who/when for the pin — own columns, NOT activity (the heartbeat
+        # rewrites activity wholesale; verified 06:04 the stamp vanished in 1 s)
+        "ALTER TABLE model_workers ADD COLUMN IF NOT EXISTS pinned_by TEXT;",
+        "ALTER TABLE model_workers ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;",
+        # PRESENCE (detach step 2, operator 2026-10-02 06:20): what is ON a
+        # worker's drive, per (worker, model key), from the heartbeat — the
+        # storage survey (source 'storage': bytes, store class, protected) and
+        # the discovered-models report (source 'discovered': hub/framework/
+        # filename/location/api). NOT an allocation: the roster's allocation
+        # candidates = presence − assigned pairs; the Adopt-inventory button
+        # reads it. Replaces worker_model_catalog.json. model_id is resolved when
+        # the key matches a models row (NULL = worker-only model).
+        """
+        CREATE TABLE IF NOT EXISTS model_worker_presence (
+            worker_id TEXT NOT NULL, model_key TEXT NOT NULL, model_id BIGINT,
+            source TEXT NOT NULL DEFAULT 'storage',
+            bytes BIGINT, store TEXT, protected BOOLEAN, detail JSONB,
+            first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+            seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (worker_id, model_key));
+        """,
         "ALTER TABLE models ADD COLUMN IF NOT EXISTS hub JSONB;",
         # ── facts / verdicts / budgets (one table per model, operator ruling
         # 2026-10-02) — central OWNS this DDL; the testshell only reads/writes
@@ -885,6 +921,47 @@ KV_CACHE_TYPES_NEED_FLASH = ("q8_0", "q4_0")
 MODE_FALLBACK_ORDER = ("gpu-only", "max-ram", "explicit", "ram-only")
 
 
+class PresenceQueries:
+    """model_worker_presence — the heartbeat's drive-presence snapshot per worker."""
+
+    UPSERT = """
+    INSERT INTO model_worker_presence (worker_id, model_key, model_id, source, bytes, store, protected, detail, first_seen, seen_at)
+    VALUES (%s, %s, (SELECT id FROM models WHERE name = ANY(%s) ORDER BY (name = %s) DESC LIMIT 1), %s, %s, %s, %s, %s::jsonb, now(), now())
+    ON CONFLICT (worker_id, model_key) DO UPDATE
+       SET model_id = COALESCE(EXCLUDED.model_id, model_worker_presence.model_id),
+           source = CASE WHEN EXCLUDED.source = 'discovered' OR model_worker_presence.source = 'discovered'
+                         THEN 'discovered' ELSE EXCLUDED.source END,
+           bytes = COALESCE(EXCLUDED.bytes, model_worker_presence.bytes),
+           store = COALESCE(EXCLUDED.store, model_worker_presence.store),
+           protected = COALESCE(EXCLUDED.protected, model_worker_presence.protected),
+           detail = COALESCE(model_worker_presence.detail, '{}'::jsonb) || COALESCE(EXCLUDED.detail, '{}'::jsonb),
+           seen_at = now()
+    """
+    # a COMPLETE report for a worker retires rows it no longer lists
+    DELETE_STALE = """
+    DELETE FROM model_worker_presence WHERE worker_id = %s AND NOT (model_key = ANY(%s))
+    """
+    FETCH_BY_WORKER = """
+    SELECT model_key, model_id, source, bytes, store, protected, detail, first_seen, seen_at
+      FROM model_worker_presence WHERE worker_id = %s ORDER BY model_key
+    """
+    # allocation CANDIDATES: present on the drive but not an assigned pair;
+    # `fits` = any quant verdict for the pair says it fits (NULL = no verdict yet)
+    FETCH_CANDIDATES = """
+    SELECT p.model_key, p.model_id, p.source, p.bytes, p.store, p.protected, p.detail,
+           (SELECT bool_or(q.fits) FROM model_worker_quants q
+             WHERE q.model_id = p.model_id AND q.worker_id = p.worker_id) AS fits
+      FROM model_worker_presence p
+      LEFT JOIN model_workers w ON w.model_id = p.model_id AND w.worker_id = p.worker_id
+     WHERE p.worker_id = %s AND COALESCE(w.assigned, false) = false
+     ORDER BY p.model_key
+    """
+    # the discovered-models catalog in worker_model_catalog.json's shape
+    FETCH_DISCOVERED = """
+    SELECT worker_id, model_key, detail, seen_at FROM model_worker_presence WHERE source = 'discovered'
+    """
+
+
 class PairKnobQueries:
     """Knob reads/writes on model_workers.user_settings for ONE pair."""
 
@@ -906,16 +983,41 @@ class PairKnobQueries:
 
     # Designation (DB-owned, 2026-10-02). Unassign: flip the flag and drop the
     # row when nothing live remains (no residue); assign: upsert the pair.
+    # unassign also drops the pin (a pin is operator intent to have it HERE;
+    # an unassigned pinned row is meaningless). RETURNING the prior pin so the
+    # service can refuse an automated unassign of a pinned pair.
     SET_PAIR_ASSIGNED = """
-    UPDATE model_workers SET assigned = %s, updated_at = now()
+    UPDATE model_workers SET assigned = %s, pinned = (pinned AND %s),
+           pinned_by = CASE WHEN %s THEN pinned_by END, pinned_at = CASE WHEN %s THEN pinned_at END,
+           updated_at = now()
      WHERE model_id = %s AND worker_id = %s
     RETURNING allocation, activity
     """
+    FETCH_PAIR_PIN = """
+    SELECT assigned, pinned, source FROM model_workers WHERE model_id = %s AND worker_id = %s
+    """
     INSERT_PAIR_ASSIGNED = """
-    INSERT INTO model_workers (model_id, worker_id, allocation, user_settings, activity, assigned, updated_at)
-    VALUES (%s, %s, NULL, '{}'::jsonb, '{}'::jsonb, true, now())
-    ON CONFLICT (model_id, worker_id) DO UPDATE SET assigned = true, updated_at = now()
+    INSERT INTO model_workers (model_id, worker_id, allocation, user_settings, activity, assigned, source, updated_at)
+    VALUES (%s, %s, NULL, '{}'::jsonb, '{}'::jsonb, true, %s, now())
+    ON CONFLICT (model_id, worker_id) DO UPDATE
+       SET assigned = true, source = COALESCE(model_workers.source, EXCLUDED.source), updated_at = now()
     RETURNING allocation, activity
+    """
+    # pin rides an ASSIGNED row only (rowcount 0 → the service 409s).
+    # params: pinned, pinned_by, pinned(for at), pinned(for source), model_id, worker_id
+    SET_PAIR_PINNED = """
+    UPDATE model_workers
+       SET pinned = %s,
+           pinned_by = %s,
+           pinned_at = CASE WHEN %s THEN now() ELSE NULL END,
+           source = CASE WHEN %s THEN COALESCE(source, 'operator') ELSE source END,
+           updated_at = now()
+     WHERE model_id = %s AND worker_id = %s AND assigned
+    RETURNING pinned, source, pinned_by, pinned_at
+    """
+    FETCH_PAIRS_BY_WORKER = """
+    SELECT w.worker_id, m.name, w.assigned, w.pinned, w.source, w.pinned_by
+      FROM model_workers w JOIN models m ON m.id = w.model_id
     """
     DELETE_PAIR_RESIDUE = """
     DELETE FROM model_workers

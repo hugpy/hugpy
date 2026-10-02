@@ -64,7 +64,18 @@ def _load_assign_memory() -> Dict[str, Any]:
 
 
 def _remember_assignments(worker: Dict[str, Any]) -> None:
-    """Snapshot one worker's designations (models + spill) into the memory."""
+    """Snapshot one worker's designations (models + spill) into the memory.
+
+    RETIRED 2026-10-02 06:05 (operator: deprecate and fully detach from the
+    non-DB archetype): the designation of record is model_workers (assigned /
+    pinned / source / user_settings) and the relay re-converges central from it
+    after any row loss, so this sidecar (worker_assignments.json) is no longer
+    WRITTEN. The file is frozen at its last state; _load_assign_memory still
+    reads it only for the advance-only hardware totals until worker_budgets
+    takes that over (detach step 5). Set HUGPY_ASSIGN_SIDECAR_WRITE=1 to
+    re-enable the write temporarily."""
+    if os.environ.get("HUGPY_ASSIGN_SIDECAR_WRITE", "0") != "1":
+        return
     wid = worker.get("id")
     if not wid:
         return
@@ -1067,6 +1078,9 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
     return {
         **{k: v for k, v in worker.items()
            if k not in ("_storage_view_cache", "_model_view_cache")},
+        # placement per model as the DB holds it (detach step 4): the console's
+        # Alloc/Memory cells and ResourceStrip read worker.spill_by_model
+        "spill_by_model": _db_spill_map(worker),
         **_vram_summary(worker),
         **_ram_summary(worker),
         # Materialized from stored worker state. Approval uses storage_view()
@@ -1585,6 +1599,47 @@ def _human_bytes_central(n: Any) -> str:
 # DB pair knobs that ride the load-time spill (see _placement_spill_for)
 _DB_SPILL_OVERLAY_KEYS = ("alloc_mode", "n_gpu_layers", "n_cpu_moe", "llama_ctx", "ctx_pct", "threads",
                           "gpu_mem_gib", "cpu_mem_gib", "gguf_file", "kv_cache_type", "flash_attn")
+
+
+def _db_spill_overlay(worker: Dict[str, Any], model_key: str, spill: Dict[str, Any]) -> Dict[str, Any]:
+    """DETACH STEP 4 (operator 2026-10-02 07:00): the (worker, model) placement
+    is the DB pair row (model_workers.user_settings); the in-store
+    ``spill_by_model`` entry is only a cache / pre-DB residue. Overlay every
+    _DB_SPILL_OVERLAY_KEYS value the DB holds onto ``spill`` (DB wins) and return
+    it. Reads go through _model_worker_settings (2 s cache per worker). Never
+    raises — the DB is an optional read source."""
+    out = dict(spill or {})
+    try:
+        _db = _model_worker_settings(worker) or {}
+        _canon = _canonical_registry_key(str(model_key))
+        _vals = _db.get(str(model_key)) or _db.get(_canon) or next(
+            (v for n, v in _db.items() if _canonical_registry_key(str(n)) == _canon), None)
+        if isinstance(_vals, dict):
+            for _k in _DB_SPILL_OVERLAY_KEYS:
+                if _vals.get(_k) is not None:
+                    out[_k] = _vals[_k]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _spill_for_model(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
+    """The effective persisted placement for one (worker, model): DB pair knobs
+    over the in-store spill cache. {} when neither holds anything."""
+    return _db_spill_overlay(worker, str(model_key),
+                             (worker.get("spill_by_model") or {}).get(str(model_key)) or {})
+
+
+def _db_spill_map(worker: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """``spill_by_model`` as the PUBLIC view reports it — DB-first for every
+    designated model (detach step 4). Empty entries are dropped."""
+    keys = set(map(str, worker.get("models") or [])) | set(map(str, (worker.get("spill_by_model") or {})))
+    out: Dict[str, Dict[str, Any]] = {}
+    for mk in keys:
+        sp = _spill_for_model(worker, mk)
+        if sp:
+            out[mk] = sp
+    return out
 _PLACEMENT_SPILL_KEYS = frozenset({
     "alloc_mode", "n_gpu_layers", "leniency_pct", "priority", "priority_device",
     "gpu_mem_gib", "cpu_mem_gib", "gpu_mem_gib_deviation_pct",
@@ -2259,7 +2314,7 @@ def planned_need(worker: Dict[str, Any], model_key: str, *,
             mmproj = 0
         kw = {"gpu_margin": gm, "ram_margin": rm, "mmproj_bytes": mmproj,
               "n_gpu_layers": n_gpu_layers}
-        spill = (worker.get("spill_by_model") or {}).get(str(model_key)) or {}
+        spill = _spill_for_model(worker, model_key)   # DB pair knobs over the cache (step 4)
         row = _resident_row(worker, model_key) or {}
         ctx_max = int(cfg.get("model_max_length") or 0) or int(st.get("ctx_train") or 0) or None
         if pct is None and spill.get("ctx_pct") is not None:
@@ -2348,7 +2403,7 @@ def planned_split(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
         spill = d.get("spill") or {}
         # Context is an independent per-model override. Preserve it even when
         # placement itself is still derived from the worker's default plan.
-        persisted = (worker.get("spill_by_model") or {}).get(model_key) or {}
+        persisted = _spill_for_model(worker, model_key)   # DB pair knobs over the cache (step 4)
         # The old projection always used `derived_default_allocation`, even
         # when the operator had a persisted placement. That made the Memory
         # column show the default dense/max-GPU numbers after a MoE or
@@ -2592,7 +2647,7 @@ def moe_effective(worker: Dict[str, Any], model_key: str) -> bool:
     if ov is not None:
         return ov
     try:
-        persisted = (worker.get("spill_by_model") or {}).get(str(model_key))
+        persisted = _spill_for_model(worker, model_key) or None   # DB-first (step 4)
         if persisted:
             spill = _strip_wire_inert_mode(dict(persisted))
             apply_moe_override_to_spill(worker, model_key, spill)  # no-op for auto
@@ -2750,8 +2805,7 @@ def _drop_stale_alloc_stamp(worker: Dict[str, Any], model_key: str) -> bool:
     the explicit split, OFF falls back to the non-MoE mode, ⟲ follows the
     derivation."""
     try:
-        by = worker.get("spill_by_model") or {}
-        spill = by.get(model_key)
+        spill = _spill_for_model(worker, model_key) or None   # DB-first (step 4)
         if not isinstance(spill, dict) or not spill:
             return False
         # A real split or an explicit-budget pin is a deliberate contract — keep.
@@ -5544,6 +5598,35 @@ class WorkerStore:
         encoding collided with the clear signal, so choosing it deleted the row
         and the model silently fell through to whatever the derivation said.
         """
+        # DETACH STEP 4 (operator 2026-10-02): a supplied spill is a PLACEMENT
+        # write and placement lives on the DB pair row — so with the DB on, the
+        # legacy /assign spill becomes a DB relay (designate the pair, then
+        # write / clear its placement knobs) and the in-store spill_by_model is
+        # NOT written (it is a cache the public view overlays from the DB).
+        # Done BEFORE the store transaction: never DB I/O under the store lock
+        # (the 04:36 hang mode). Falls back to the cache when the DB is off or
+        # the model has no models row (worker-only key).
+        spill_to_db = False
+        if spill is not None:
+            try:
+                from hugpy_engine import model_index as _mi
+                if _mi.enabled():
+                    _mid = _mi.resolve_model_id(model_key)
+                    if _mid is not None:
+                        _mi.set_pair_assigned(_mid, worker_id, True, source=(_norm_source(source) or "operator"))
+                        _place = {k: v for k, v in (spill or {}).items() if k in _DB_SPILL_OVERLAY_KEYS}
+                        if _place:
+                            _st, _det = _mi.write_pair_knobs(_mid, worker_id, _place, [])
+                        else:   # {} = clear the PLACEMENT back to auto — ctx / KV / quant pick / threads
+                                # stay (PLACEMENT REVERT ruling), and Alloc "Auto" never unpins MoE
+                            from hugpy_engine.model_index.query_registry import PLACEMENT_KNOB_KEYS as _PK
+                            _st, _det = _mi.write_pair_knobs(_mid, worker_id, {}, [k for k in _PK if k not in ("moe", "tuned_for")])
+                        spill_to_db = (_st == "ok")
+                        if not spill_to_db:
+                            logger.warning("assign_model %s/%s: DB placement write %s: %s — kept in the store cache",
+                                           worker_id[:8], model_key, _st, str(_det)[:200])
+            except Exception as exc:  # noqa: BLE001 — the cache path still works
+                logger.warning("assign_model %s/%s: DB placement relay skipped: %s", worker_id[:8], model_key, exc)
         with self._transaction() as workers:
             worker = workers.get(worker_id)
             if worker is None:
@@ -5552,13 +5635,16 @@ class WorkerStore:
             is_new = model_key not in models
             models.add(model_key)
             worker["models"] = sorted(models)
-            if spill is not None:
+            if spill is not None and not spill_to_db:
                 by_model = worker.setdefault("spill_by_model", {})
                 # An empty dict clears any override back to autofit.
                 if spill:
                     by_model[model_key] = spill
                 else:
                     by_model.pop(model_key, None)
+            elif spill_to_db:
+                # the DB holds it now; drop the stale cache entry so the overlay is the only source
+                (worker.get("spill_by_model") or {}).pop(model_key, None)
             src = _norm_source(source)
             # R3 (operator, 2026-09-25): an operator's explicit NON-SPLIT
             # placement pick (gpu-only / max-gpu / max-ram / ram-only) for a MoE
@@ -6124,24 +6210,12 @@ class WorkerStore:
         worker = self._load().get(worker_id)
         if worker is None:
             return {}
-        spill = dict(worker.get("spill_by_model", {}).get(model_key, {}))
-        # DB-OWNED PAIR KNOBS OVERLAY (operator ruling 2026-10-02: the DB, not
-        # this JSON, is the truth): model_workers.user_settings for this pair
-        # wins over the persisted spill for every placement key it carries —
-        # alloc_mode / n_gpu_layers / n_cpu_moe (incl. the per-class derivation),
-        # budgets, llama_ctx / ctx_pct, the GGUF pin, KV cache type + flash
-        # attention. moe / bnb_4bit keep their own readers below.
-        try:
-            _db = _model_worker_settings(worker) or {}
-            _canon = _canonical_registry_key(str(model_key))
-            _vals = _db.get(str(model_key)) or _db.get(_canon) or next(
-                (v for n, v in _db.items() if _canonical_registry_key(str(n)) == _canon), None)
-            if isinstance(_vals, dict):
-                for _k in _DB_SPILL_OVERLAY_KEYS:
-                    if _vals.get(_k) is not None:
-                        spill[_k] = _vals[_k]
-        except Exception:  # noqa: BLE001 — the DB is an optional read source
-            pass
+        # DB-OWNED PAIR KNOBS OVERLAY (operator ruling 2026-10-02): the pair row
+        # wins over the in-store spill cache for every placement key it carries
+        # (alloc_mode / n_gpu_layers / n_cpu_moe incl. the per-class derivation,
+        # budgets, llama_ctx / ctx_pct, GGUF pin, KV type + flash attention).
+        # moe / bnb_4bit keep their own readers below. (step 4: one helper.)
+        spill = _spill_for_model(worker, model_key)
         # CAPABILITY-AWARE BLANK DEFAULT (operator ruling 2026-07-24): when
         # NOTHING placement-affecting is persisted for this (worker, model), the
         # blank default is derived by FEASIBILITY instead of the flat max-gpu.

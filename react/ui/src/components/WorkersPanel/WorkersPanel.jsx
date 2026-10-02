@@ -880,23 +880,36 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
     } catch (err) { alert(`Set alloc failed: ${err.message}`) }
   }, [load, models])
 
-  // Tiers v2 FILES axis: pin toggles ride the same settings channel.
-  // Per-model 📌: central's record now, via POST /llm/workers/<id>/pin
-  // {model_key, pinned:bool} — writes designation_meta (pinned/pinned_by/
-  // pinned_at); no agent restart, no load, no eviction. (Was the legacy
-  // /config {pinned:{...}} agent-settings write.)
+  // Per-model 📌 — a DATABASE relay (operator ruling 2026-10-02 06:05, "respect
+  // the pins"): model_workers.pinned on the pair row, via
+  // POST /api/models/database/<key>/workers/<wid>/pinned {pinned:bool}.
+  // The pin is the operator LOCK: automation may neither unassign nor retune
+  // the pair. 409 when the pair is not assigned (a pin is not a third state of
+  // assigned — assign first). Central's designation_meta is a cache now; no
+  // agent restart, no load, no eviction. (Was POST /llm/workers/<id>/pin.)
+  const pinOne = useCallback(async (worker, modelKey, pin) => {
+    const r = await fetchJson(`/api/models/database/${encodeURIComponent(modelKey)}/workers/${encodeURIComponent(worker.id)}/pinned`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: !!pin }),
+    })
+    if (r && r.error) throw new Error(r.error)
+    return r
+  }, [])
+  // pin state for a pair: the DB pair row wins; central / agent 📌 read through
+  // only while the pair has no row (same rule as WorkerRow's cell)
+  const isPinnedPair = useCallback((worker, k) => {
+    const row = (displayModels.find(mm => (mm.model_key ?? mm.key) === k)?._modelDatabase?.workers || [])
+      .find(r => r && r.worker_id === worker.id)
+    return row ? !!row.pinned : effectivePin(worker, k)
+  }, [displayModels])
   const togglePin = useCallback(async (worker, modelKey, pin) => {
     try {
-      const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/pin`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_key: modelKey, pinned: !!pin }),
-      })
-      if (r && r.ok === false) alert(`Pin on ${worker.name} failed: ${responseReason(r)}`)
+      await pinOne(worker, modelKey, pin)
       load()
     } catch (err) {
-      alert(`Pin failed: ${err.message}`)
+      alert(`Pin on ${worker.name} failed: ${err.message}`)
     }
-  }, [load])
+  }, [load, pinOne, isPinnedPair])
 
   // Bulk pin: 📌 pin EVERY model designated to this worker in one settings-write
   // (central relays a single /ops/config with the full pinned map — same code
@@ -905,7 +918,7 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
   const pinAll = useCallback(async (worker) => {
     const keys = worker.models || []
     if (keys.length === 0) { alert(`${worker.name} has no assigned models to pin.`); return }
-    const unpinned = keys.filter(k => !effectivePin(worker, k))
+    const unpinned = keys.filter(k => !isPinnedPair(worker, k))
     if (unpinned.length === 0) {
       alert(`All ${keys.length} model${keys.length === 1 ? '' : 's'} on ${worker.name} are already pinned.`)
       return
@@ -916,54 +929,36 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
       '("unpin first") until you Unpin all, and stays allocated to this worker ' +
       'across restarts. Pinning never loads anything into VRAM/RAM — a model ' +
       'loads when it is called. No agent restart, no load, no eviction.')) return
-    try {
-      const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/pin-all`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-      })
-      if (r && r.restarting) markApplying(worker.id, { kind: 'pin_all', models: keys, value: true })
-      const okN = r?.counts?.ok ?? 0, errN = r?.counts?.error ?? 0
-      if (errN > 0) {
-        const failed = Object.entries(r.results || {}).filter(([, v]) => v !== 'ok')
-        alert(`Pinned ${okN}/${okN + errN} on ${worker.name}.\n\nFailed:\n` +
-          failed.map(([mk, v]) => `  • ${mk} — ${v}`).join('\n'))
-      }
-      load()
-    } catch (err) {
-      alert(applying[worker.id]
-        ? 'The agent is restarting to apply the previous change — retry in a few seconds.'
-        : `Pin all failed: ${err.message}`)
+    // one DB pin write per pair (the DB relay has no bulk route; central's
+    // /pin-all wrote designation_meta, which is a cache now)
+    const results = await Promise.all(unpinned.map(k => pinOne(worker, k, true).then(() => [k, 'ok']).catch(e => [k, e.message])))
+    const failed = results.filter(([, v]) => v !== 'ok')
+    if (failed.length) {
+      alert(`Pinned ${results.length - failed.length}/${results.length} on ${worker.name}.\n\nFailed:\n` +
+        failed.map(([mk, v]) => `  • ${mk} — ${v}`).join('\n'))
     }
-  }, [load, markApplying, applying])
+    load()
+  }, [load, pinOne])
 
   // Unpin all — the undo for Pin all. Unpins every model on the worker in one
   // call (central records pinned=false per model); afterward they can be
   // unassigned. No agent restart.
   const unpinAll = useCallback(async (worker) => {
     const keys = worker.models || []
-    const pinnedKeys = keys.filter(k => effectivePin(worker, k))
+    const pinnedKeys = keys.filter(k => isPinnedPair(worker, k))
     if (pinnedKeys.length === 0) { alert(`No pinned models on ${worker.name}.`); return }
     if (!confirm(
       `Unpin all ${pinnedKeys.length} pinned model${pinnedKeys.length === 1 ? '' : 's'} on ${worker.name}?\n\n` +
       'This is the undo for Pin all — the models can be unassigned again afterward. ' +
       'No agent restart.')) return
-    try {
-      const r = await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/unpin-all`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-      })
-      if (r && r.restarting) markApplying(worker.id, { kind: 'pin_all', models: keys, value: false })
-      const okN = r?.counts?.ok ?? 0, errN = r?.counts?.error ?? 0
-      if (errN > 0) {
-        const failed = Object.entries(r.results || {}).filter(([, v]) => v !== 'ok')
-        alert(`Unpinned ${okN}/${okN + errN} on ${worker.name}.\n\nFailed:\n` +
-          failed.map(([mk, v]) => `  • ${mk} — ${v}`).join('\n'))
-      }
-      load()
-    } catch (err) {
-      alert(applying[worker.id]
-        ? 'The agent is restarting to apply the previous change — retry in a few seconds.'
-        : `Unpin all failed: ${err.message}`)
+    const results = await Promise.all(pinnedKeys.map(k => pinOne(worker, k, false).then(() => [k, 'ok']).catch(e => [k, e.message])))
+    const failed = results.filter(([, v]) => v !== 'ok')
+    if (failed.length) {
+      alert(`Unpinned ${results.length - failed.length}/${results.length} on ${worker.name}.\n\nFailed:\n` +
+        failed.map(([mk, v]) => `  • ${mk} — ${v}`).join('\n'))
     }
-  }, [load, markApplying, applying])
+    load()
+  }, [load, pinOne, isPinnedPair])
 
   // Prune AUTOMATED (non-pinned) designations on ONE worker. Two calls: a
   // DRY-RUN (POST .../designations/prune with no apply) whose plan we show

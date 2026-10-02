@@ -125,13 +125,60 @@ def _strip_retired(data: dict) -> dict:
     return data
 
 
-def _load() -> dict:
+# DETACH STEP 3 (operator 2026-10-02 06:45, "deprecate and fully detach from the
+# non-db archetype"): the store is models.serving_settings in the Hugpy
+# database. In PostgreSQL mode (hugpy_engine.model_index.enabled()) _load()
+# reads the DB — through a short TTL cache, since get_override sits in hot
+# paths (runners, serve_spec_for, placement) — and _save() writes the DB and
+# leaves serve_overrides.json FROZEN unless HUGPY_SERVE_OVERRIDES_JSON=1.
+# Boxes without the DB flag (worker agents) stay on their local JSON exactly as
+# before. Verified 06:40 that the DB mirror and the JSON were identical for all
+# 77 entries, so the flip changes no effective setting.
+_DB_CACHE: dict = {"at": 0.0, "data": None}
+_DB_CACHE_TTL_S = 2.0
+
+
+def _db_enabled() -> bool:
+    try:
+        from hugpy_engine import model_index
+        return bool(model_index.enabled())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _load_json() -> dict:
     try:
         with open(_OVERRIDES_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         return _strip_retired(data) if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _load() -> dict:
+    if not _db_enabled():
+        return _load_json()
+    import time as _time
+    now = _time.monotonic()
+    if _DB_CACHE["data"] is not None and now - _DB_CACHE["at"] < _DB_CACHE_TTL_S:
+        return {k: dict(v) for k, v in _DB_CACHE["data"].items()}
+    try:
+        from hugpy_engine import model_index
+        data = model_index.fetch_all_serving_settings()
+    except Exception:  # noqa: BLE001
+        data = None
+    if data is None:
+        # DB faulted: the frozen JSON is the last known projection
+        return _load_json()
+    data = _strip_retired(data)
+    _DB_CACHE["data"] = {k: dict(v) for k, v in data.items()}
+    _DB_CACHE["at"] = now
+    return data
+
+
+def _invalidate_cache() -> None:
+    _DB_CACHE["data"] = None
+    _DB_CACHE["at"] = 0.0
 
 
 def all_overrides() -> dict:
@@ -823,6 +870,7 @@ def set_override(model_key: str, fields: dict) -> dict:
                     model_key, worker_settings, model_settings=current):
                 raise RuntimeError(
                     "model settings were not saved: the Hugpy database is unavailable")
+            _invalidate_cache()
         _save(data)
     # ``gguf_file`` picks WHICH quant serves, so it changes effective_bytes /
     # effective_gguf / mmproj_bytes / moe — the persisted size half. It is an
@@ -973,6 +1021,23 @@ def effective_alloc_mode(model_key: str) -> str:
 
 
 def _save(data: dict) -> None:
+    """Persist the whole overrides map. DB mode: upsert every entry that differs
+    from the DB (and clear the ones that vanished), then invalidate the read
+    cache; the JSON is written only with HUGPY_SERVE_OVERRIDES_JSON=1. JSON
+    mode (no DB flag): the file, as before."""
+    if _db_enabled():
+        try:
+            from hugpy_engine import model_index
+            before = model_index.fetch_all_serving_settings() or {}
+            for mk, ov in (data or {}).items():
+                if isinstance(ov, dict) and before.get(mk) != ov:
+                    model_index.set_model_serving_settings(mk, ov)
+            for mk in set(before) - set(data or {}):
+                model_index.set_model_serving_settings(mk, {})
+        finally:
+            _invalidate_cache()
+        if os.environ.get("HUGPY_SERVE_OVERRIDES_JSON", "0") != "1":
+            return
     os.makedirs(os.path.dirname(_OVERRIDES_PATH) or ".", exist_ok=True)
     tmp = _OVERRIDES_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

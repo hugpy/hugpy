@@ -27,6 +27,7 @@ import { isMeasuredResident } from './workerMetrics'
 import { TIER_VIEW, storageRowsByKey, workerTierOf } from './workerTier'
 import { findCatalogRow } from './catalogRow'
 import { getServing } from '../ModelTable/servingCache'
+import QuantListbox, { quantFitReason } from '../ModelTable/QuantListbox'
 import { WorkerLoadTable } from './WorkerLoadTable'
 import { useModelStatus } from '../ModelTable/useModelStatus'
 import { statusFor } from '../ModelTable/modelStatus'
@@ -221,6 +222,18 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   // Alloc cell beside it re-derives from the SERVER's answer, so the two settle
   // together on the next workers refresh.
   const [bnbOptimistic, setBnbOptimistic] = useState({})
+  // QUANT LISTBOX in the allocation row (operator 2026-10-02: "the quant lists
+  // would be in the models row for the worker allocations … the allocation rows
+  // are mostly all I ever use"). Same listbox as the Models tab, fed by the pair
+  // DB row: `quants` = ordered preference list; the server derives gguf_file =
+  // the first listed quant whose verdict fits at this pair's ctx + KV type.
+  // The optimistic list STAYS until the DB row (WorkersPanel's own 15 s
+  // /api/models/database poll — onRefresh does not re-read it) agrees with it;
+  // clearing it in `finally` made a tick fade back for up to 15 s (operator
+  // 2026-10-02: "it stays clicked then faded back before I can move them").
+  // `quantSaving` is the short in-flight flag that disables the controls.
+  const [quantOptimistic, setQuantOptimistic] = useState({})
+  const [quantSaving, setQuantSaving] = useState({})
   // The models on THIS worker that can actually take the specialization. Drives
   // both the bulk buttons' visibility and their count, so the label never
   // promises to change models it will skip.
@@ -484,21 +497,38 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     const pair = m?._modelDatabase?.workers?.find(row => row.worker_id === worker.id) || null
     const quants = m?._modelDatabase?.quants || []
     const knobs = { ...(pair?.user_settings || {}), ...(kvOptimistic[key] || {}) }
-    const wantFile = String(knobs.gguf_file || pair?.plan?.default_variant || '').split('/').pop()
+    let wantFile = String(knobs.gguf_file || pair?.plan?.default_variant || '').split('/').pop()
+    // An in-flight quant-list edit re-prices the row at once (operator
+    // 2026-10-02: "a change to the quant doesn't register with the memory
+    // alloc"): mirror the server's write-time walk — the first listed quant
+    // whose verdict fits at this pair's ctx + KV type (else the first listed) —
+    // until the DB poll lands the derived gguf_file.
+    const optList = quantOptimistic[key]
+    if (Array.isArray(optList) && optList.length) {
+      const bnbOpt = key in bnbOptimistic ? !!bnbOptimistic[key] : knobs.bnb_4bit === true
+      const trainedOf = (f) => { const q = quants.find(x => x.file === f); return q?.kv_geo?.ctx_train ?? q?.kv_cost?.ctx_train ?? null }
+      const hit = optList.find(f => quantFitReason((pair?.verdicts || []).find(v => v.file === f)?.memory,
+        { ctxPct: knobs.ctx_pct ?? null, trained: trainedOf(f), kvType: knobs.kv_cache_type || 'f16', bnbOn: bnbOpt }) === null)
+      wantFile = hit || optList[0]
+    }
     const quant = quants.find(q => q.file === wantFile) || quants.find(q => q.kv_cost) || null
     const kvCost = quant?.kv_cost || null
     const moeOn = key in moeOptimistic ? !!moeOptimistic[key]
       : (typeof knobs.moe === 'boolean' ? knobs.moe : !!worker.moe_effective?.[key])
-    const auto = pair?.plan?.auto || null
     // 4-bit (bitsandbytes) is a DB pair knob like MoE: it selects the verdict's
     // memory.bnb_4bit[mode] / auto.bnb_4bit (or bnb_moe_explicit with MoE on).
     const bnbOn = key in bnbOptimistic ? !!bnbOptimistic[key]
       : (typeof knobs.bnb_4bit === 'boolean' ? knobs.bnb_4bit : !!worker.bnb_by_model?.[key])
+    const verdict = (pair?.verdicts || []).find(v => v.file === (quant?.file || wantFile)) || (pair?.verdicts || [])[0] || null
+    // The AUTO mode is PER QUANT (operator 2026-10-02: "the size changes but
+    // not the memory"): each verdict carries its own `auto` (q4 → gpu-only, q8
+    // → max-ram, f16 → max-gpu on an 8 GiB card). plan.auto is the default
+    // variant's and is only the fallback for a verdict without one.
+    const auto = verdict?.auto || pair?.plan?.auto || null
     const autoMode = knobs.alloc_mode
       || (auto ? (bnbOn
         ? ((moeOn ? auto.bnb_moe_explicit?.mode : null) || auto.bnb_4bit?.mode || null)
         : ((moeOn ? auto.moe_explicit?.mode : null) || auto.standard?.mode || null)) : null)
-    const verdict = (pair?.verdicts || []).find(v => v.file === (quant?.file || wantFile)) || (pair?.verdicts || [])[0] || null
     const memTable = verdict?.memory ? (bnbOn ? (verdict.memory.bnb_4bit || null) : verdict.memory) : null
     const kvType = knobs.kv_cache_type || 'f16'
     const kvKey = kvType === 'bf16' ? 'f16' : kvType
@@ -551,6 +581,24 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   // KV cache knobs (kv_cache_type / flash_attn), DB pair knobs written through
   // the same knobs route; optimistic per model key until the refetch lands.
   const [kvOptimistic, setKvOptimistic] = useState({})
+  const writeQuantList = useCallback(async (key, order) => {
+    setQuantOptimistic(o => ({ ...o, [key]: order }))
+    setQuantSaving(o => ({ ...o, [key]: true }))
+    try {
+      const dbId = findCatalogRow(models, key)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : key)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(order.length ? { set: { quants: order } } : { unset: ['quants'] }),
+      })
+    } catch (e) {
+      setQuantOptimistic(o => { const n = { ...o }; delete n[key]; return n })
+      alert(`Quant list failed: ${e.message}`)
+    } finally {
+      setQuantSaving(o => { const n = { ...o }; delete n[key]; return n })
+      if (typeof onRefresh === 'function') onRefresh()
+    }
+  }, [worker.id, onRefresh, models])
   const writeKvKnobs = useCallback(async (key, body) => {
     const nextSet = body.set || {}
     setKvOptimistic(o => ({ ...o, [key]: { ...(o[key] || {}), ...nextSet,
@@ -671,10 +719,15 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     // to ram-only still displayed "⚡ Max GPU · auto". The tree was right and
     // already shipped; its answer simply never reached this cell.
     const derivedMode = worker.model_alloc_modes?.[key] || null
-    // 📌 pin = PERMANENT attribution to this worker — blocks unassign. Central's
-    // recorded decision (designations[].pinned) wins; the legacy agent 📌 reads
-    // through only while central holds none (effectivePin).
-    const isPinned = effectivePin(worker, key)
+    // 📌 pin = the operator LOCK on this (worker, model) pair — blocks unassign
+    // and automated retuning. DB-owned since 2026-10-02 06:05 (operator:
+    // "respect the pins"; model_workers.pinned beside assigned, written via
+    // POST /api/models/database/<key>/workers/<wid>/pinned). Central's
+    // designations[].pinned / the legacy agent 📌 (effectivePin) are read
+    // through ONLY while the pair has no DB row (pre-migration / DB off).
+    const dbPairRow = (models.find(mm => (mm.model_key ?? mm.key) === key)?._modelDatabase?.workers || [])
+      .find(r => r && r.worker_id === worker.id) || null
+    const isPinned = dbPairRow ? !!dbPairRow.pinned : effectivePin(worker, key)
     // Full attribution ladder (each stage reported by the worker):
     //   pulling n%  — files downloading from central/HF (live progress)
     //   heating     — weights loading into VRAM/RAM right now
@@ -926,7 +979,49 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         if (db.bnbOn && db.sizeBytes) {
           return <span title={`4-bit (bitsandbytes) load size from the DB facts; ${declared != null ? fmtBytes(declared) : '?'} on disk`}>{fmtBytes(db.sizeBytes)} <span className="wp-lt-muted">4-bit</span></span>
         }
+        // GGUF pair: the size of THIS pair's quant (DB facts), which the quant
+        // listbox changes — central's effective_gguf is model-wide and lags.
+        if (si?.isGguf && db.pair && db.quant && db.sizeBytes) {
+          return <span title={`${db.quant.file}: ${fmtBytes(db.sizeBytes)} on disk (this pair's quant, from the DB)`}>{fmtBytes(db.sizeBytes)}</span>
+        }
         return declared == null ? '—' : fmtBytes(declared)
+      },
+    },
+    quant: {
+      // Quant — the GGUF preference listbox for THIS pair (DB row). Non-GGUF
+      // models have one artifact (shown as —); a GGUF model with no pair row
+      // yet cannot carry a list (assign first).
+      label: 'Quant', sortable: false, cls: 'wp-lt-quant',
+      render: ({ key, m }) => {
+        const fw = String(m?.framework || '').toLowerCase()
+        if (fw !== 'gguf' && fw !== 'llama_cpp') {
+          return <span className="wp-4bit-na" title="Not a GGUF model: one artifact, no quant choice.">—</span>
+        }
+        const pair = m?._modelDatabase?.workers?.find(row => row.worker_id === worker.id) || null
+        const dbQuants = (m?._modelDatabase?.quants || []).filter(q => q && q.file && q.file !== 'dir')
+        if (!pair || !dbQuants.length) {
+          return <span className="wp-4bit-na" title={!pair ? 'No pair row in the DB yet — assign this model to the worker first.' : 'No GGUF quant facts in the DB for this model yet.'}>—</span>
+        }
+        const ks = pair.user_settings || {}
+        const dbList = ks.quants || []
+        const opt = quantOptimistic[key]
+        const order = (opt && JSON.stringify(opt) !== JSON.stringify(dbList)) ? opt : dbList
+        const variants = dbQuants.map(q => ({ filename: q.file, bytes: q.bytes ?? q.size_bytes ?? null }))
+        const trained = Object.fromEntries(dbQuants.map(q => [q.file, q.kv_geo?.ctx_train ?? q.kv_cost?.ctx_train ?? null]))
+        const bnbOn = key in bnbOptimistic ? !!bnbOptimistic[key] : ks.bnb_4bit === true
+        const fitFor = (f) => {
+          const v = (pair.verdicts || []).find(x => x.file === f)
+          const reason = quantFitReason(v?.memory, { ctxPct: ks.ctx_pct ?? null, trained: trained[f], kvType: ks.kv_cache_type || 'f16', bnbOn })
+          return { ok: reason === null, text: reason || '✓ fits' }
+        }
+        return (
+          <QuantListbox variants={variants} order={order}
+                        allocated={pairDb(key, m).quant?.file || ks.gguf_file || pair.plan?.default_variant || null}
+                        fitFor={fitFor} disabled={applying} busy={!!quantSaving[key]}
+                        minWidth={0}
+                        onChange={next => writeQuantList(key, next)}
+                        title={`Quant preference list for ${worker.name || worker.id} (pair knob quants); the allocated quant is the first listed that fits at this pair's context + KV cache. Empty = the verdict default.`} />
+        )
       },
     },
     ctx: {
@@ -1851,11 +1946,11 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
             <span className="wp-limits-title" title="This box's resource ceiling across ALL models it hosts — not a per-model budget.">
               worker budget — this box's resource ceiling (all models combined):
             </span>
-            <input type="number" step="1" min="0" placeholder="RAM GiB" value={limitsForm.ram_max_gib}
+            <input type="number" step="0.01" min="0" placeholder="RAM GiB" value={limitsForm.ram_max_gib}
                    onChange={e => setLimitsForm(f => ({ ...f, ram_max_gib: e.target.value }))} />
-            <input type="number" step="1" min="0" placeholder="VRAM GiB" value={limitsForm.gpu_mem_gib}
+            <input type="number" step="0.01" min="0" placeholder="VRAM GiB" value={limitsForm.gpu_mem_gib}
                    onChange={e => setLimitsForm(f => ({ ...f, gpu_mem_gib: e.target.value }))} />
-            <input type="number" step="1" min="0" placeholder="disk cache GiB" title="Local model-cache ceiling for this worker. Over it, not-loaded local models become eviction candidates in the storage proposal. Clamped to the box's own caps.disk_cache_gib — the worker's stated delegation wins."
+            <input type="number" step="0.01" min="0" placeholder="disk cache GiB" title="Local model-cache ceiling for this worker. Over it, not-loaded local models become eviction candidates in the storage proposal. Clamped to the box's own caps.disk_cache_gib — the worker's stated delegation wins."
                    value={limitsForm.disk_cache_gib}
                    onChange={e => setLimitsForm(f => ({ ...f, disk_cache_gib: e.target.value }))} />
             <input type="number" step="1" min="1" placeholder="threads" value={limitsForm.threads}

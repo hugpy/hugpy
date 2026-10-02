@@ -196,11 +196,53 @@ def model_database_pair_assigned(model_key, worker_id):
     model_id = resolve_model_id(model_key)
     if model_id is None:
         return jsonify({"error": f"unknown model {model_key!r}", "db": last_db_error()}), 404
-    status, detail = set_pair_assigned(model_id, worker_id, body["assigned"])
+    # provenance (ruling 2026-10-02 06:05): the console's own writes are
+    # "operator"; an automated caller names itself (wildcard | inventory | …)
+    # and is refused on a pinned pair.
+    source = str(body.get("source") or "operator").strip().lower()
+    actor = "operator" if source == "operator" else source
+    status, detail = set_pair_assigned(model_id, worker_id, body["assigned"], source=source, actor=actor)
     if status == "ok":
         return jsonify({"model_id": model_id, "worker_id": worker_id, **detail,
                         "note": "central converges to the DB designation within the relay interval"})
+    if status == "pinned":
+        return jsonify({"error": "pair is pinned", "model_id": model_id, "worker_id": worker_id, **detail}), 409
     return jsonify({"error": "model database is unavailable", "detail": detail}), 503
+
+
+@llm_bp.route("/models/database/<model_key>/workers/<worker_id>/pinned", methods=["POST"])
+def model_database_pair_pinned(model_key, worker_id):
+    """Console 📌 for ONE pair — the DB pair row's `pinned` column (operator
+    ruling 2026-10-02 06:05: pins live beside the assignment in model_workers;
+    central's designation_meta is a cache). Body: {"pinned": true|false}.
+    A pin is the operator LOCK: automation may not unassign or retune the pair.
+    Pinning an UNASSIGNED pair → 409 (a pin is not a third state of assigned;
+    assign first). Operator-gated (operator_auth._SENSITIVE)."""
+    from hugpy_engine.model_index import enabled, last_db_error, resolve_model_id, set_pair_pinned
+
+    if not enabled():
+        return jsonify({"error": "model database is not enabled"}), 503
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get("pinned"), bool):
+        return jsonify({"error": "body must be {\"pinned\": true|false}"}), 400
+    model_id = resolve_model_id(model_key)
+    if model_id is None:
+        return jsonify({"error": f"unknown model {model_key!r}", "db": last_db_error()}), 404
+    status, detail = set_pair_pinned(model_id, worker_id, body["pinned"], by=_operator_name_or("operator"))
+    if status == "ok":
+        return jsonify({"model_id": model_id, "worker_id": worker_id, **detail})
+    if status == "unassigned":
+        return jsonify({"error": "pair is not assigned — assign it before pinning",
+                        "model_id": model_id, "worker_id": worker_id}), 409
+    return jsonify({"error": "model database is unavailable", "detail": detail}), 503
+
+
+def _operator_name_or(default):
+    try:
+        from .worker_routes import _operator_name
+        return _operator_name() or default
+    except Exception:  # noqa: BLE001
+        return default
 
 
 @llm_bp.route("/llm/peers", methods=["GET"])

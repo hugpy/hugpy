@@ -610,13 +610,36 @@ def workers_payload():
                                    if w["unreachable"] else None)
         # Drive presence is a picker input, not an allocation. Surface every
         # local-only model with the feasibility-derived modes used by /assign.
+        # DB-first (detach step 2, 2026-10-02): model_worker_presence − assigned
+        # pairs, with the DB verdict's `fits`; models_local (assignment-scoped,
+        # so near-empty here by construction) is only the no-DB fallback.
         try:
             from hugpy_fleet.central.workers import (
                 feasible_modes_for, feasibility_context, worker_can_hold,
             )
             assigned = set(w.get("models") or [])
             candidates = {}
-            for key in sorted(set(w.get("models_local") or []) - assigned):
+            _db_cands = None
+            try:
+                from hugpy_engine.model_index import fetch_allocation_candidates
+                _db_cands = fetch_allocation_candidates(w.get("id"))
+            except Exception:  # noqa: BLE001
+                _db_cands = None
+            if _db_cands is not None:
+                for c in _db_cands:
+                    key = c["model_key"]
+                    if key in assigned:
+                        continue
+                    candidates[key] = {
+                        "feasible": (["db"] if c.get("fits") else []),
+                        "fits": c.get("fits"),
+                        "bytes": c.get("bytes"), "store": c.get("store"),
+                        "protected": c.get("protected"), "source": c.get("source"),
+                        "model_id": c.get("model_id"),
+                        "reason": (None if c.get("fits") else
+                                   ("no fit verdict yet" if c.get("fits") is None else "no feasible allocation mode for this worker")),
+                    }
+            for key in ([] if _db_cands is not None else sorted(set(w.get("models_local") or []) - assigned)):
                 modes = list(feasible_modes_for(w.get("id"), key) or [])
                 ctx = feasibility_context(w.get("id"), key)
                 if worker_can_hold(w, key) is False:
@@ -1467,6 +1490,17 @@ def workers_heartbeat(worker_id):
         # these models as operator-selectable candidates; assignment and pinning
         # happen only after explicit user action and feasibility validation.
         pass
+    # DRIVE PRESENCE → DB (detach step 2, operator 2026-10-02): the worker's
+    # storage survey (storage.models — every model on its hot drive, NOT
+    # assignment-scoped) is snapshotted into model_worker_presence. Change-driven
+    # (identical report = no write). It is a picker input, never an allocation:
+    # the roster's allocation_candidates = presence − assigned pairs.
+    if isinstance(body.storage, dict) and isinstance(body.storage.get("models"), list):
+        try:
+            from hugpy_engine.model_index import record_worker_presence
+            record_worker_presence(worker_id, body.storage["models"], source="storage", complete=True)
+        except Exception:  # noqa: BLE001 — presence never breaks a beat
+            logger.exception("worker presence sync failed for %s", worker_id)
     if body.models_discovered is not None:
         try:
             from hugpy_engine.config.models.models_config import record_worker_models
