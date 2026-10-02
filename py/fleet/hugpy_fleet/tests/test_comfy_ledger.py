@@ -134,7 +134,9 @@ def test_need_detail_prices_the_checkpoint_file(monkeypatch, tmp_path, fresh_led
     assert d["checkpoint"] == "big.safetensors"
     assert d["checkpoint_bytes"] == 4096
     assert d["held"] is False
-    assert d["need"] == 4096 + GIB
+    # no ComfyUI process yet: the first image job starts one -> + compute
+    assert d["compute"] == 512 * 2**20
+    assert d["need"] == 4096 + GIB + d["compute"]
 
 
 def test_need_detail_held_when_ledger_and_process_agree(monkeypatch, tmp_path, fresh_ledger):
@@ -146,12 +148,12 @@ def test_need_detail_held_when_ledger_and_process_agree(monkeypatch, tmp_path, f
     # comfy's process covers the weights -> held -> cushion only
     monkeypatch.setattr(A, "_comfy_process_vram", lambda *a, **k: 5 * GIB)
     d = A._comfy_need_detail(object(), "comfy-big")
-    assert d["held"] is True and d["need"] == GIB
+    assert d["held"] is True and d["need"] == GIB and d["compute"] == 0
     # comfy no longer backs the claim (restarted / freed behind our back):
     # the row is dropped and the full need applies
     monkeypatch.setattr(A, "_comfy_process_vram", lambda *a, **k: 0)
     d = A._comfy_need_detail(object(), "comfy-big")
-    assert d["held"] is False and d["need"] == 4096 + GIB
+    assert d["held"] is False and d["need"] == 4096 + GIB + 512 * 2**20
     assert not fresh_ledger.holds("comfy-big")
 
 

@@ -8974,7 +8974,7 @@ def _effective_ctx(model_key: str, cfg: dict | None = None, *,
                 w = int(weights_bytes) if weights_bytes else w0
                 total = _total_vram_bytes()
                 res = (int(reserve_bytes) if reserve_bytes is not None
-                       else _vram_ceiling_reserve_bytes(total))
+                       else _vram_ceiling_reserve_bytes(total, model_key))
                 reach = free_hint if free_hint is not None else _free_vram_bytes()
                 if w and reach is not None:
                     floor = int(spill._ctx_floor())
@@ -9654,7 +9654,29 @@ def _external_vram_floor_bytes() -> int:
         return 0
 
 
-def _vram_ceiling_reserve_bytes(total: "int | None") -> int:
+def _load_starts_process(model_key: "str | None") -> bool:
+    """Does loading ``model_key`` start a NEW process with its own CUDA context?
+
+    Operator ruling 2026-10-02 ("should be considered 512 then only with the
+    initial image process"): the compute cushion is charged only when a new
+    process's CUDA context + graph land beside the weights — a llama-server
+    child for GGUF (the 348 MiB llama.cpp residual the cushion was sized from),
+    ComfyUI's first image job (priced in _comfy_need_detail). A torch load
+    INSIDE the worker reuses the worker's own context (measured: in-process
+    MN-GRAND residual ~0) and is not charged. Unknown model -> True (the
+    conservative direction)."""
+    if not model_key:
+        return True
+    try:
+        fw = str(_model_framework(model_key) or "").lower()
+    except Exception:  # noqa: BLE001
+        return True
+    if not fw:
+        return True
+    return fw in ("gguf", "llama_cpp")
+
+
+def _vram_ceiling_reserve_bytes(total: "int | None", model_key: "str | None" = None) -> int:
     """THE admission reserve: BUDGETABLE free VRAM that must remain after the
     incoming need lands. See the note above for the derivation.
 
@@ -9673,6 +9695,8 @@ def _vram_ceiling_reserve_bytes(total: "int | None") -> int:
     frac = _vram_ceiling_frac_explicit()
     if frac is not None:
         return int(total * (1.0 - frac))
+    if not _load_starts_process(model_key):
+        return 0                          # in-worker load: no new CUDA context to cushion
     cushion = min(_vram_ceiling_cushion_bytes(),
                   int(total * (1.0 - _DEFAULT_VRAM_CEILING_FRAC)))
     return max(0, cushion - _external_vram_floor_bytes())
@@ -9762,7 +9786,7 @@ def _worker_slot_fit_check(model_key: str) -> bool:
     # under the ceiling?" — from two entry points (slot routing vs the admission
     # choke point). They must never disagree, or the slot pool refuses a seat the
     # admission gate just granted (and spins the ceiling loop for nothing).
-    headroom = _vram_ceiling_reserve_bytes(total)
+    headroom = _vram_ceiling_reserve_bytes(total, model_key)
     # Loading consumes ~need; the card is OK if free-after-load still leaves the
     # cushion. Equivalent to "post-load fill <= ceiling".
     # MoE: when a split governs the plan the load lands only the non-expert
@@ -10338,8 +10362,19 @@ def _comfy_need_detail(state: "WorkerState", model_key: str) -> dict:
         else:
             ledger.forget(model_key)    # comfy no longer backs the claim
     need = _cl.predicted_need_bytes(size, held)
+    # The FIRST image job starts ComfyUI's own process — a new CUDA context
+    # (operator ruling 2026-10-02: the 512 MiB compute charge applies "only with
+    # the initial image process"). A running ComfyUI already holds it.
+    compute = 0
+    try:
+        if not _comfy_process_vram():
+            compute = _vram_ceiling_cushion_bytes()
+    except Exception:  # noqa: BLE001 — unreadable: charge it (conservative)
+        compute = _vram_ceiling_cushion_bytes()
+    if need is not None:
+        need = int(need) + compute
     return {"checkpoint": filename, "checkpoint_bytes": size, "held": held,
-            "cushion": _cl.gen_cushion_bytes(), "need": need}
+            "cushion": _cl.gen_cushion_bytes(), "compute": compute, "need": need}
 
 
 def _comfy_headroom_target(detail: dict) -> int:
@@ -12336,7 +12371,7 @@ def _fit_snapshot(total: "int | None" = None):
         foreign_vram_bytes=_attr.get("vram_unattributed_bytes"))
 
 
-def _fit_policy(total: "int | None"):
+def _fit_policy(total: "int | None", model_key: "str | None" = None):
     """The admission knobs, resolved from env / settings ONCE: the ceiling
     reserve (THE one binding every stage prices against), the k37 mode wire,
     the explicit targets, the fleet-wide least-reaping switch."""
@@ -12354,7 +12389,7 @@ def _fit_policy(total: "int | None"):
             return None
 
     return FitPolicy(
-        ceiling_reserve_bytes=_vram_ceiling_reserve_bytes(total),
+        ceiling_reserve_bytes=_vram_ceiling_reserve_bytes(total, model_key),
         empty_card_budget_bytes=_vram_empty_card_budget(total),
         least_reaping=_evict_least_reaping(),
         alloc_mode=_amode(), leniency_pct=_lenpct(), priority_device=_pdev(),
@@ -12539,7 +12574,7 @@ def _fit_preview(state: "WorkerState", model_key: str, bnb: "bool | None" = None
         return {"model_key": model_key, "gpu": False,
                 "note": "no GPU / unmeasurable — a real load proceeds without a VRAM gate"}
     snap = _fit_snapshot(total)
-    policy = _fit_policy(total)
+    policy = _fit_policy(total, model_key)
     residents, _cand_rows, _prot_rows = _fit_residents(state, model_key)
     free_hint, room_note = _admission_room_hint(state, model_key, snap, policy, residents, False)
     det = _need_detail_with_hint(model_key, free_hint=free_hint,
@@ -12659,7 +12694,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     _ADMISSION_TICKETS.pop(model_key, None)
     # ── GATHER (once) ───────────────────────────────────────────────────────
     snap = _fit_snapshot(total)
-    policy = _fit_policy(total)
+    policy = _fit_policy(total, model_key)
     residents, cand_rows, prot_rows = _fit_residents(state, model_key)
     # THE CTX TARGET (keeper, 2026-09-30): an UNREQUESTED context never costs
     # a neighbour. The room the ctx is sized on is free + own seat, plus ONLY

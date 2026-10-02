@@ -225,7 +225,7 @@ def test_refusal_logs_one_structured_verdict_and_names_both_free_bases(rig, monk
     monkeypatch.setattr(A, "_residency",
                         lambda mk: "static" if mk == "Qwen2.5-VL-7B-Instruct-GGUF" else "on-demand")
     monkeypatch.setattr(A, "_external_vram_floor_bytes", lambda: 1 * GIB)
-    monkeypatch.setattr(A, "_vram_ceiling_reserve_bytes", lambda total: 0)
+    monkeypatch.setattr(A, "_vram_ceiling_reserve_bytes", lambda total, model_key=None: 0)
 
     with caplog.at_level(logging.INFO, logger=A.logger.name):
         verdict = A._vram_evict_to_fit(_State(), "test-save-tiny-random-llama3-smashed-pro")
