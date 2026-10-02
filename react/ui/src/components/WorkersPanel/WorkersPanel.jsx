@@ -1031,16 +1031,20 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
 
   // Fleet rollup: VRAM used/total and models loaded across ONLINE workers.
   const fleet = useMemo(() => {
-    let total = 0, free = 0, serving = 0, hasVram = false
+    let total = 0, free = 0, driver = 0, serving = 0, hasVram = false
     for (const w of workers) {
       if (w.status !== 'online') continue
       serving += (w.loaded_models || []).length
       for (const g of (w.gpus || [])) {
-        if (g.memory_total != null) { total += g.memory_total; hasVram = true }
+        // Driver-reserved VRAM: an immutable occupant, never "used", never budgetable.
+        if (g.memory_total != null) {
+          const d = Number(g.memory_reserved) || 0
+          total += g.memory_total - d; driver += d; hasVram = true
+        }
         if (g.memory_free != null) free += g.memory_free
       }
     }
-    return { total, free, used: Math.max(total - free, 0), serving, hasVram }
+    return { total, free, driver, used: Math.max(total - free, 0), serving, hasVram }
   }, [workers])
 
   // The setup disclosure is forced open while the pool is empty (the install
@@ -1110,7 +1114,7 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
         </span>
         {fleet.hasVram && (
           <span className="wp-fleet" title="VRAM used / total across online workers">
-            VRAM {fmtBytes(fleet.used)} / {fmtBytes(fleet.total)} · {fmtBytes(fleet.free)} free
+            VRAM {fmtBytes(fleet.used)} / {fmtBytes(fleet.total)} · {fmtBytes(fleet.free)} free{fleet.driver ? ` · 🔒 ${fmtBytes(fleet.driver)} driver` : ''}
           </span>
         )}
         {fleet.serving > 0 && (

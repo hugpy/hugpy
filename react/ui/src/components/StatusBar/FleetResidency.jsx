@@ -105,7 +105,8 @@ export default function FleetResidency({ workers = [], queue = {} }) {
       const prog = w.provision_progress || {}
 
       const gpus = Array.isArray(w.gpus) ? w.gpus : []
-      const gpuTotal = gpus.reduce((s, g) => s + num(g.memory_total), 0)
+      // Driver-reserved VRAM is an immutable occupant: out of the usable total.
+      const gpuTotal = gpus.reduce((s, g) => s + num(g.memory_total) - num(g.memory_reserved), 0)
       const gpuFree  = gpus.reduce((s, g) => s + num(g.memory_free), 0)
       const gpuUsed  = Math.max(0, gpuTotal - gpuFree)
       const gpuName  = gpus.map(g => g.name).filter(Boolean).join(' + ')

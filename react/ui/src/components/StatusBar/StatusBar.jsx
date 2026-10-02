@@ -92,7 +92,9 @@ export default function StatusBar({ models = [], workers = [] }) {
     for (const w of workers) {
       if (w.status !== 'online') continue
       for (const g of (w.gpus || [])) {
-        if (g.memory_total != null) { vt += g.memory_total; hasV = true }
+        // The driver's reserved VRAM is an immutable occupant: never "used",
+        // never budgetable — out of both sides of the meter.
+        if (g.memory_total != null) { vt += g.memory_total - (Number(g.memory_reserved) || 0); hasV = true }
         if (g.memory_free != null) vf += g.memory_free
       }
     }
