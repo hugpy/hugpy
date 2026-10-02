@@ -94,6 +94,17 @@ def _min_samples() -> int:
         return 3
 
 
+def _plausible_band() -> "tuple[float, float]":
+    """Ratios (measured / predicted) outside this band are a basis mismatch,
+    never a calibration observation. Wider than the clamp band on purpose."""
+    try:
+        lo = float(os.environ.get("HUGPY_CALIBRATION_PLAUSIBLE_LO", "0.5"))
+        hi = float(os.environ.get("HUGPY_CALIBRATION_PLAUSIBLE_HI", "2.0"))
+        return (lo, hi) if 0 < lo < hi else (0.5, 2.0)
+    except ValueError:
+        return (0.5, 2.0)
+
+
 def _max_spread() -> float:
     """Max relative-MAD spread for a correction to be trusted. Above this the
     observations are too noisy — fall back to static."""
@@ -241,19 +252,32 @@ class CalibrationStore:
         """Newest-window ratios (measured VRAM / predicted need) for the rows that
         legitimately calibrate the fudge: a SUCCESSFUL, verdict='full' load with a
         positive measured VRAM and a positive prediction. Partial/cpu/refuse rows
-        are deliberately excluded (they don't measure the full need)."""
+        are deliberately excluded (they don't measure the full need).
+
+        SAME BASIS ONLY (2026-10-02): a row whose prediction carried no KV term
+        predates KV pricing — its measured VRAM includes the KV the prediction
+        left out, so its ratio IS the missing KV (MN-GRAND GGUF: 18.5 GiB measured
+        / 15.37 GiB weights-only = x1.203), and applying it to today's need, which
+        prices KV explicitly, counts the KV twice. A ratio outside the plausible
+        band (a 0.01 GiB "full" read, a 4-bit load measured against a
+        full-precision prediction = 0.25) is a basis mismatch, not a fudge — the
+        clamp would turn it into a confident x0.8. Both are dropped."""
+        lo, hi = _plausible_band()
         cur = conn.execute(
             "SELECT need_total_bytes, vram_bytes FROM calibration_samples "
             "WHERE model_key=? AND ok=1 AND verdict='full' "
             "  AND vram_bytes IS NOT NULL AND vram_bytes>0 "
             "  AND need_total_bytes IS NOT NULL AND need_total_bytes>0 "
+            "  AND needs_kv_bytes IS NOT NULL AND needs_kv_bytes>0 "
             "ORDER BY ts DESC LIMIT ?", (model_key, _window()))
         out = []
         for need, vram in cur.fetchall():
             try:
-                out.append(float(vram) / float(need))
+                r = float(vram) / float(need)
             except (TypeError, ValueError, ZeroDivisionError):
                 continue
+            if lo <= r <= hi:
+                out.append(r)
         return out
 
     @staticmethod

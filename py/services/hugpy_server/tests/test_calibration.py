@@ -267,3 +267,25 @@ def test_heartbeat_reply_without_calibration_key_is_tolerated(worker):
     worker._adopt_calibration({"calibration": {"m": {"correction": 1.2}}})
     worker._adopt_calibration({"limits": {}, "required_pkg_version": "0.1.191"})
     assert worker._incoming_need_detail("m")["total"] == 1000
+
+
+def test_pre_kv_and_implausible_rows_excluded_from_ratio(store):
+    """Same basis only (2026-10-02): a row whose prediction priced no KV measured
+    the KV it left out (MN-GRAND GGUF 18.5 GiB / 15.37 GiB = x1.203, then stacked
+    on today's explicit KV), and a ratio outside the plausible band (a 0.01 GiB
+    'full' read, a 4-bit load vs a full-precision prediction = 0.25) is a basis
+    mismatch the clamp would turn into a confident x0.8 — neither feeds it."""
+    st = store()
+    for _ in range(6):
+        s = _sample(need=1000, vram=1203)
+        s["needs_kv_bytes"] = 0                                 # pre-KV pricing
+        st.record(None, s)
+    for v in (1, 250):                                          # implausible reads
+        for _ in range(3):
+            st.record(None, _sample(need=1000, vram=v))
+    agg = st.aggregate("m")
+    assert agg["usable_count"] == 0 and agg["correction"] is None
+    for _ in range(3):
+        st.record(None, _sample(need=1000, vram=1000))          # same basis
+    agg = st.aggregate("m")
+    assert agg["usable_count"] == 3 and agg["correction"] == 1.0

@@ -201,6 +201,7 @@
 .wp-memory-bar-ram { display:block; min-width:0; height:100%; background:var(--teal,#34d399); }
 .wp-memory-values { display:flex; justify-content:space-between; gap:8px; color:var(--muted,#8b949e); font-size:10px; line-height:1.2; white-space:nowrap; }
 .wp-memory-allocation.is-planned .wp-memory-values { color:var(--text,#d7dee8); }
+.wp-memory-parts { display:block; color:var(--muted,#8b949e); font-size:9px; line-height:1.2; white-space:nowrap; }
 .wp-db-status { font-size:11px; opacity:.85; }
 .wp-db-connected { color:var(--success,#3fb950); }
 .wp-db-loading { color:var(--muted,#8b949e); }

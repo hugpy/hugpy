@@ -1589,13 +1589,19 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                       onClick={e => { e.stopPropagation(); revertPlacement(key, pinnedPlacement) }}>⟲</button>
             )}
           <span className={`wp-memory-allocation${hasPlan || hasDbSplit ? ' is-planned' : ''}`} title={title} style={overBudget ? { color: 'var(--danger, #d33)' } : undefined}>
+            {/* Literal layout (operator 2026-10-02): where it lives on top, the parts
+                below — every figure stands alone, nothing is implied-included. */}
+            <span className="wp-memory-values">
+              <span>{fmtBytes(gpuWithKv)} VRAM{overBudget ? ' ⚠' : ''}</span>
+              <span>{fmtBytes(ramWithKv)} RAM</span>
+            </span>
             <span className="wp-memory-bar" aria-hidden="true">
               <span className="wp-memory-bar-gpu" style={{ width: `${gpuPct}%` }} />
               <span className="wp-memory-bar-ram" style={{ width: `${100 - gpuPct}%` }} />
             </span>
-            <span className="wp-memory-values">
-              <span>{fmtBytes(gpuWithKv - (kvOnGpu ? computeM : 0))} GPU{kvM && kvOnGpu ? ` (KV ${fmtBytes(kvM)}${kvTypeM !== 'f16' ? ` ${kvTypeM}` : ''})` : ''}{kvOnGpu && computeM ? <span className="wp-lt-muted"> +{fmtBytes(computeM)} reserve</span> : null}{overBudget ? ' ⚠' : ''}</span>
-              <span>{fmtBytes(ramWithKv)} RAM{kvM && !kvOnGpu ? ` (KV ${fmtBytes(kvM)})` : ''}</span>
+            <span className="wp-memory-parts"
+                  title={`total = model weights + KV cache at ctx ${ctxM.toLocaleString()} (${kvTypeM}, ${kvOnGpu ? 'VRAM' : 'RAM'}) + compute reserve`}>
+              {fmtBytes(total)} = {fmtBytes((gpu || 0) + (ram || 0))} size + {fmtBytes(kvM)} kv{kvOnGpu && computeM ? ` + ${fmtBytes(computeM)} reserve` : ''}
             </span>
           </span>
           </>
@@ -1622,7 +1628,17 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
           const verdict = fp.action === 'refuse' ? `✗ would REFUSE (${fp.failure?.kind || 'refuse'})`
             : fp.action === 'evict' ? `↻ would EVICT ${fp.would_evict.length} to fit`
             : fp.action === 'partial' ? '◐ would load PARTIAL (offload)' : '✓ would fit now'
-          const head = `${verdict} · load gate needs ${fmtBytes(fp.need_bytes)} = weights ${fmtBytes(fp.weights_bytes)} + KV ${fmtBytes(fp.kv_bytes)}`
+          // Show the gate's whole arithmetic: file x weights margin, + KV, x the learned
+          // correction — omitting a factor printed sums that did not add up (29.9 = 15.4 + 9.5).
+          const nd = fp.need_detail || {}
+          const corr = Number(nd.calibration_correction || 1)
+          const wFile = nd.weights_file_bytes, wMargin = nd.weights_margin
+          const wPart = (wFile && wMargin && Math.abs(wMargin - 1) > 1e-3)
+            ? `weights ${fmtBytes(fp.weights_bytes)} (file ${fmtBytes(wFile)} ×${wMargin} ${nd.weights_margin_source || ''} margin)`
+            : `weights ${fmtBytes(fp.weights_bytes)}`
+          const sum = `${wPart} + KV ${fmtBytes(fp.kv_bytes)}`
+          const head = `${verdict} · load gate needs ${fmtBytes(fp.need_bytes)} = `
+            + (Math.abs(corr - 1) > 1e-3 ? `(${sum}) ×${corr.toFixed(3)} learned correction` : sum)
             + `${fp.bnb_4bit_ratio ? ` (×${fp.bnb_4bit_ratio} 4-bit)` : ''}`
           const body = [
             `ctx ${x.resolved != null ? Number(x.resolved).toLocaleString() : '?'}${x.pct != null ? ` (${x.pct}% of ${Number(x.max || 0).toLocaleString()})` : ''} · source ${x.source || '?'}${x.reason ? ` — ${x.reason}` : ''}`,
