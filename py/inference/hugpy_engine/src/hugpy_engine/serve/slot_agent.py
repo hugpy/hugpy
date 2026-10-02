@@ -686,7 +686,7 @@ def _moe_gpu_budget(path, n_gpu_layers, free_cap, extra_reserve_bytes):
                          f"{budget / 2 ** 30:.2f} GiB")
 
 
-def _slot_parallel(ctx=None, model_bytes=None):
+def _slot_parallel(ctx=None, model_bytes=None, path=None, kv_cache_type=None):
     """Concurrent sequences per slot (llama-server --parallel), DERIVED per node.
 
     HUGPY_SLOT_PARALLEL forces a value (bypasses derivation). Otherwise derive
@@ -694,7 +694,18 @@ def _slot_parallel(ctx=None, model_bytes=None):
     KV cache per sequence, capped by CPU cores and a ceiling — so a 4x3090 box
     earns more concurrency than an 8GB 4060, with no per-node hardcoding. Every
     constant below is an env-overridable FALLBACK, never a hardcode; anything
-    unprobeable degrades to 1 (today's single-sequence behavior)."""
+    unprobeable degrades to 1 (today's single-sequence behavior).
+
+    REAL KV PER SEQUENCE (2026-10-02): llama-server allocates KV for the whole
+    -c (= ctx x N) at load. The flat 160 KiB/token guess under-priced MN-GRAND
+    (324 KiB/token): it derived N=3, -c 61440 asked for 19,440 MiB of KV on a
+    card the gate had priced for ONE 6.3 GiB sequence -> cudaMalloc OOM ->
+    SIGSEGV -> in-process fallback. Each sequence is now priced from the served
+    file's own attention structure (spill.kv_bytes_for_geo, the gate's source),
+    and the first sequence is the one the gate admitted: extras are added only
+    while a FULL further sequence fits in what remains after weights + one
+    sequence (operator ruling 2026-10-02: keep the chosen context, fit the
+    slot count to the room)."""
     env = os.environ.get("HUGPY_SLOT_PARALLEL")
     if env:
         try:
@@ -722,8 +733,21 @@ def _slot_parallel(ctx=None, model_bytes=None):
         free = int(_fvb() or 0)                      # free VRAM bytes on this card
         if free <= 0:
             return 1                                 # unprobeable -> safe fallback
-        headroom = max(0, free - int(model_bytes or 0)) * kv_frac
-        per_seq = max(1, int(ctx or 4096)) * kv_per_tok
+        per_seq = 0
+        if path:
+            try:
+                from hugpy_engine.spill import (_gguf_kv_geometry, kv_bytes_for_geo,
+                                                _kv_dtype_bytes)
+                geo = _gguf_kv_geometry(path)
+                if geo:
+                    per_seq = int(kv_bytes_for_geo(geo, int(ctx or 4096),
+                                                   dtype_bytes=_kv_dtype_bytes(kv_cache_type)) or 0)
+            except Exception:  # noqa: BLE001 — geometry gap -> the flat fallback
+                per_seq = 0
+        if per_seq <= 0:
+            per_seq = max(1, int(ctx or 4096)) * kv_per_tok
+        # the admitted sequence first, then whole extra sequences in what is left
+        headroom = max(0, free - int(model_bytes or 0) - per_seq) * kv_frac
         n = 1 + int(headroom // per_seq)
         cores = os.cpu_count() or 1
         n = min(n, max(1, cores // 2), ceiling)      # CPU + ceiling caps
@@ -1278,7 +1302,8 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
         # of serializing them; -c is scaled by N so each sequence keeps its full
         # context (the derivation already budgeted the ~Nx KV). Docs #performance.
         _model_bytes = os.path.getsize(path) if (path and os.path.isfile(path)) else None
-        n_par = _slot_parallel(ctx=ctx, model_bytes=_model_bytes)
+        n_par = _slot_parallel(ctx=ctx, model_bytes=_model_bytes, path=path,
+                               kv_cache_type=kv_cache_type or os.environ.get("HUGPY_SLOT_KV_CACHE_TYPE"))
         c_val = ctx if n_par <= 1 else int(ctx) * n_par
         argv = [
             server_bin, "-m", path,
