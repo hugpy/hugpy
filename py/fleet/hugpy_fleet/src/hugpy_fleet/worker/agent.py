@@ -1464,6 +1464,10 @@ def _adopt_storage_inputs(state: "WorkerState", worker: dict | None) -> None:
                 except (TypeError, ValueError):
                     pass
         _RUNTIME_SETTINGS["ctx_pct_db"] = cmap
+        # The whole per-model spill, for the fit preview (it must price what a
+        # real load of the model would carry — n_cpu_moe, bnb_4bit, ...).
+        _RUNTIME_SETTINGS["spill_by_model_db"] = {
+            k: dict(v) for k, v in sbm.items() if isinstance(v, dict)}
     storage = worker.get("storage")
     if isinstance(storage, dict) and storage.get("allocated_count") is not None:
         state.allocated = {
@@ -2888,6 +2892,42 @@ def _apply_spill(spill: dict | None) -> None:
         set_request_env(overlay)
     except Exception:  # noqa: BLE001 — no overlay -> os.environ, as before
         pass
+
+
+def _spill_overlay(spill: "dict | None") -> dict:
+    """The request overlay _apply_spill would set for ``spill`` — WITHOUT
+    touching os.environ (the fit preview's read-only twin)."""
+    spill = spill or {}
+    overlay: dict = {}
+    for key, env_name in _SPILL_ENV.items():
+        if key in spill and spill[key] is not None:
+            val = spill[key]
+            if isinstance(val, dict):
+                val = json.dumps(val, sort_keys=True, default=str)
+            elif isinstance(val, (list, tuple)):
+                val = ",".join(str(x) for x in val)
+            overlay[env_name] = str(val)
+        elif key in _SPILL_ENV_CLEAR_WHEN_ABSENT:
+            overlay[env_name] = None
+        else:
+            overlay[env_name] = os.environ.get(env_name)
+    return overlay
+
+
+def _preview_spill(model_key: str, overrides: "dict | None" = None) -> dict:
+    """The spill a real load of ``model_key`` would carry: central's per-model
+    map from the last heartbeat reply (exact key, else the same repo name),
+    then explicit overrides (a None override clears the key)."""
+    sbm = _RUNTIME_SETTINGS.get("spill_by_model_db") or {}
+    spill = sbm.get(model_key)
+    if spill is None:
+        tail = str(model_key).split("~")[-1].split("/")[-1]
+        spill = next((v for k, v in sbm.items()
+                      if str(k).split("~")[-1].split("/")[-1] == tail), None)
+    spill = {k: v for k, v in dict(spill or {}).items() if k in _SPILL_ENV}
+    for k, v in (overrides or {}).items():
+        spill[k] = v
+    return spill
 
 
 # The dispatch cache is keyed by (model, task), while placement/precision are
@@ -5178,11 +5218,27 @@ def build_app(state: "WorkerState") -> Flask:
     @app.route("/fit-preview/<path:model_key>", methods=["GET"])
     def fit_preview(model_key):
         # Read-only dry run of the VRAM admission (no load, no eviction).
-        bnb = request.args.get("bnb") in ("1", "true", "yes")
+        # Priced under the spill a REAL load of this model carries (central's
+        # per-model map; ?<spill key>=v overrides), as a request-scoped overlay
+        # — never written to os.environ.
+        bnb_arg = request.args.get("bnb")
+        overrides = {k: request.args.get(k) for k in _SPILL_ENV if request.args.get(k) not in (None, "")}
+        if bnb_arg is not None:
+            overrides["bnb_4bit"] = "1" if bnb_arg in ("1", "true", "yes") else None
+        token = None
         try:
-            return jsonify(_fit_preview(state, model_key, bnb=bnb))
+            from hugpy_engine.spill import _REQUEST_ENV, set_request_env
+            spill = _preview_spill(model_key, overrides)
+            token = set_request_env(_spill_overlay(spill))
+            bnb = str((spill or {}).get("bnb_4bit") or "").lower() in ("1", "true", "yes", "on")
+            out = _fit_preview(state, model_key, bnb=bnb)
+            out["spill"] = {k: v for k, v in spill.items() if v is not None}
+            return jsonify(out)
         except Exception as exc:  # noqa: BLE001 — a preview must answer, not 500
             return jsonify({"model_key": model_key, "error": f"{type(exc).__name__}: {exc}"}), 200
+        finally:
+            if token is not None:
+                _REQUEST_ENV.reset(token)
 
     @app.route("/probe/<path:model_key>", methods=["POST", "GET"])
     def probe(model_key):
