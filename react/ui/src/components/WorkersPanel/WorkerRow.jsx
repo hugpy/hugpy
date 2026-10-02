@@ -1622,8 +1622,8 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
               <span className="wp-memory-bar-ram" style={{ width: `${100 - gpuPct}%` }} />
             </span>
             <span className="wp-memory-parts"
-                  title={`total = model weights + KV cache at ctx ${ctxM.toLocaleString()} (${kvTypeM}, ${kvOnGpu ? 'VRAM' : 'RAM'}) + compute reserve`}>
-              {fmtBytes(total)} = {fmtBytes((gpu || 0) + (ram || 0))} size + {fmtBytes(kvM)} kv{kvOnGpu && computeM ? ` + ${fmtBytes(computeM)} reserve` : ''}
+                  title={`total = model weights + KV cache at ctx ${ctxM.toLocaleString()} (${kvTypeM}, ${kvOnGpu ? 'VRAM' : 'RAM'}) + compute (llama.cpp: the new llama-server process's CUDA context + graph; transformers: activation workspace)`}>
+              {fmtBytes(total)} = {fmtBytes((gpu || 0) + (ram || 0))} size + {fmtBytes(kvM)} kv{kvOnGpu && computeM ? ` + ${fmtBytes(computeM)} compute` : ''}
             </span>
           </span>
           </>
