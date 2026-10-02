@@ -15493,6 +15493,20 @@ def _register(client: CentralClient, state: WorkerState, args) -> None:
     _adopt_studio_weights_root(state, worker)
     _apply_central_limits(worker)
     logger.info("registered as worker id=%s serving models=%s", state.worker_id, worker.get("models"))
+    # STARTUP RACE (2026-10-02 live test): the DB context map (spill_by_model
+    # ctx_pct), the alloc modes and the storage inputs used to arrive only on the
+    # first HEARTBEAT reply, so a request in the first beat after a restart —
+    # every pipeline build restarts the worker — priced a transformers model at
+    # its model-max ctx and refused it (Qwythos: ctx_pct None, 262,144 tokens,
+    # 8 GB KV; 30 s later the same request loaded at 2,621). The register reply
+    # is the same worker view: adopt it here, before anything is served.
+    try:
+        _adopt_storage_inputs(state, worker)
+        if isinstance(worker, dict) and isinstance(worker.get("spill_by_model"), dict):
+            logger.info("adopted DB context for %d model(s) from the register reply",
+                        len(_RUNTIME_SETTINGS.get("ctx_pct_db") or {}))
+    except Exception:  # noqa: BLE001 — the first heartbeat adopts it anyway
+        logger.debug("register-reply adoption failed", exc_info=True)
     # Converge to central's required package version before serving (restarts).
     _self_update_if_needed(worker.get("required_pkg_version"), args, state,
                            constraints_url=worker.get("constraints_url"),
