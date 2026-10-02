@@ -312,6 +312,12 @@ _SENSITIVE = [
     ({"POST"},                   re.compile(r"^/civitai/download$")),
     # Disk discovery sweep — rebuilds the discovery report (walks the whole
     # model tree + hub enrichment); the GET state poll stays open.
+    # Per-pair operator KNOBS written straight to the DB (2026-10-01): the
+    # console's replacement for /llm/workers/<id>/{moe,bnb}; same registry-
+    # write tier as those, so operator-only.
+    ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/knobs$")),
+    ({"POST"},                   re.compile(r"^/models/database/[^/]+/knobs$")),
+    ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/assigned$")),
     ({"POST"},                   re.compile(r"^/models/discover$")),
     # Hugging Face credentials (k29): the stored HF token is a secret and the
     # write path mutates central's auth to HF — operator-only for GET/POST/DELETE.

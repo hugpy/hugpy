@@ -1,14 +1,16 @@
-"""Progressively edit Discord messages as tokens stream in.
+"""Progressively edit a chat message as tokens stream in.
 
-Discord rate-limits edits and caps messages at 2000 chars, so the streamer
-throttles edits and rolls over to a fresh message when a chunk fills up.
+A transport (Discord, chatshare, …) rate-limits edits and caps a single message,
+so the streamer throttles edits and rolls over to a fresh message when a chunk
+fills up. It is transport-neutral: ``send(content)`` returns any object with an
+async ``edit(content=...)`` method (a ``discord.Message``, or a chatshare message
+handle), and the per-message character limit is a constructor parameter (Discord
+1900, chatshare 8000).
 """
 from __future__ import annotations
 
 import time
-from typing import Awaitable, Callable
-
-import discord
+from typing import Any, Awaitable, Callable
 
 from hugpy_discord.config import MESSAGE_CHAR_LIMIT
 
@@ -16,14 +18,15 @@ EDIT_INTERVAL_SECONDS = 1.2
 CURSOR = " ▌"
 
 # Anything we can call with text that returns a message we can later edit:
-# channel.send, interaction.followup.send, message.reply, ...
-Sender = Callable[[str], Awaitable[discord.Message]]
+# channel.send, interaction.followup.send, message.reply, a chatshare handle, ...
+Sender = Callable[[str], Awaitable[Any]]
 
 
 class MessageStreamer:
-    def __init__(self, send: Sender):
+    def __init__(self, send: Sender, *, char_limit: int = MESSAGE_CHAR_LIMIT):
         self._send = send
-        self._message: discord.Message | None = None
+        self._limit = char_limit
+        self._message: Any | None = None
         self._chunk = ""        # text belonging to the message currently being edited
         self._pending = ""      # text not yet flushed to discord
         self._last_edit = 0.0
@@ -48,7 +51,7 @@ class MessageStreamer:
 
     async def _flush(self, *, final: bool) -> None:
         while self._pending:
-            room = MESSAGE_CHAR_LIMIT - len(self._chunk)
+            room = self._limit - len(self._chunk)
             take, self._pending = self._pending[:room], self._pending[room:]
             self._chunk += take
 

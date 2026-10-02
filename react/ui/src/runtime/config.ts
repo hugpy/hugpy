@@ -44,6 +44,39 @@ const defaults: HugpyRuntimeConfig = {
 
 let current: HugpyRuntimeConfig = { ...defaults };
 
+const TRACE_ID_KEY = 'hugpy.console.trace.id';
+const TRACE_ENABLED_KEY = 'hugpy.console.trace.enabled';
+function traceEnabled(): boolean {
+  try { return typeof window !== 'undefined' && window.localStorage.getItem(TRACE_ENABLED_KEY) === '1'; } catch { return false; }
+}
+export function setConsoleTraceEnabled(enabled: boolean): void {
+  try { window.localStorage.setItem(TRACE_ENABLED_KEY, enabled ? '1' : '0'); } catch { /* private mode */ }
+}
+export function consoleTraceEnabled(): boolean { return traceEnabled(); }
+function traceId(): string {
+  try {
+    let id = window.localStorage.getItem(TRACE_ID_KEY);
+    if (!id) { id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`; window.localStorage.setItem(TRACE_ID_KEY, id); }
+    return id;
+  } catch { return 'browser-session'; }
+}
+export function sendConsoleTraceEvent(kind: string, payload: Record<string, unknown>): void {
+  if (!traceEnabled() || typeof navigator === 'undefined' || typeof window === 'undefined') return;
+  try {
+    const body = JSON.stringify({ trace_id: traceId(), kind, payload });
+    navigator.sendBeacon(resolveApiUrl('/api/console/trace/events'), new Blob([body], { type: 'application/json' }));
+  } catch { /* tracing must never affect the console */ }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', (event) => sendConsoleTraceEvent('browser.error', {
+    message: event.message, source: event.filename, line: event.lineno, column: event.colno,
+  }));
+  window.addEventListener('unhandledrejection', (event) => sendConsoleTraceEvent('browser.rejection', {
+    message: String(event.reason?.stack || event.reason || ''),
+  }));
+}
+
 /** Merge a partial config into the active runtime config. */
 export function configureHugpy(partial: Partial<HugpyRuntimeConfig>): void {
   current = { ...current, ...partial };
@@ -101,6 +134,10 @@ async function withHugpyRequest(init?: RequestInit): Promise<RequestInit> {
   }
   const merged: RequestInit = { ...init, headers };
   if (cfg.credentials && merged.credentials == null) merged.credentials = cfg.credentials;
+  if (traceEnabled() && !headers.has('X-Hugpy-Trace')) {
+    headers.set('X-Hugpy-Trace', '1');
+    headers.set('X-Hugpy-Trace-Id', traceId());
+  }
   return merged;
 }
 

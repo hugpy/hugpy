@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Primary -->
+    <title>Hugpy — Inference You Own · Self-Hosted LLM Server with an OpenAI-Compatible API</title>
+    <meta
+      name="description"
+      content="Hugpy is a self-hosted LLM platform. Pull models from the Hugging Face Hub, serve an OpenAI-compatible API (/v1/chat/completions, /v1/models) on your own box, mint and revoke your own API keys, and pool GPUs across machines with llama.cpp RPC. Point any OpenAI SDK at it — inference you own, on your hardware."
+    />
+    <meta
+      name="keywords"
+      content="self-hosted LLM, OpenAI-compatible API, llama.cpp, local LLM server, private AI inference, GPU worker pool, Hugging Face models, on-prem inference, self hosted ChatGPT alternative, hugpy"
+    />
+    <meta name="author" content="Hugpy" />
+    <meta name="theme-color" content="#0b0b0f" />
+    <link rel="canonical" href="https://hugpy.ai/" />
+
+    <!-- Open Graph (social link previews) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Hugpy" />
+    <meta property="og:title" content="Hugpy — Inference You Own" />
+    <meta
+      property="og:description"
+      content="A self-hosted LLM console. Pull models from the Hugging Face Hub, serve an OpenAI-compatible API on your own box, mint your own keys, and pool GPUs across machines — all on your hardware."
+    />
+    <meta property="og:url" content="https://hugpy.ai/" />
+    <meta property="og:image" content="https://hugpy.ai/og-image.png" />
+    <meta property="og:image:alt" content="Hugpy — self-hosted LLM inference you own." />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Hugpy — Inference You Own" />
+    <meta
+      name="twitter:description"
+      content="Self-hosted LLM server + OpenAI-compatible API on your own hardware. Pull HF models, mint your own keys, pool GPUs across machines."
+    />
+    <meta name="twitter:image" content="https://hugpy.ai/og-image.png" />
+
+    <!-- Structured data -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://hugpy.ai/#website",
+            "url": "https://hugpy.ai/",
+            "name": "Hugpy",
+            "description": "Self-hosted LLM platform with an OpenAI-compatible API.",
+            "publisher": { "@id": "https://hugpy.ai/#org" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://hugpy.ai/#org",
+            "name": "Hugpy",
+            "url": "https://hugpy.ai/",
+            "logo": "https://hugpy.ai/hugpy-favicon-hex.svg",
+            "sameAs": [
+              "https://pypi.org/project/hugpy/",
+              "https://pypi.org/project/hugpy-agent/",
+              "https://pypi.org/project/abstract-hugpy-dev/",
+              "https://pypi.org/project/abstract-hugpy/",
+              "https://github.com/hugpy/hugpy",
+              "https://github.com/AbstractEndeavors/abstract_hugpy"
+            ]
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://hugpy.ai/#app",
+            "name": "Hugpy",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": "Linux, macOS, Windows",
+            "url": "https://hugpy.ai/",
+            "description": "Hugpy is a self-hosted LLM server and console: pull models from the Hugging Face Hub, serve an OpenAI-compatible API on your own hardware, mint and revoke API keys, and pool GPUs across machines with llama.cpp RPC.",
+            "publisher": { "@id": "https://hugpy.ai/#org" },
+            "softwareVersion": "0.1.162",
+            "downloadUrl": "https://pypi.org/project/hugpy/",
+            "sameAs": [
+              "https://pypi.org/project/hugpy/",
+              "https://github.com/hugpy/hugpy"
+            ],
+            "isBasedOn": "https://pypi.org/project/abstract-hugpy/",
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+            "featureList": [
+              "OpenAI-compatible API (/v1/chat/completions, /v1/models)",
+              "Pull and serve Hugging Face Hub models",
+              "GPU worker fleet with llama.cpp RPC sharding",
+              "Self-minted, revocable API keys",
+              "Runs entirely on your own hardware"
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Crawlable / no-JS fallback: real content so search and social see more than an empty shell. -->
+    <noscript>
+      <main>
+        <h1>Hugpy — Inference You Own</h1>
+        <p>
+          A self-hosted LLM console. Pull models from the Hugging Face Hub, chat with them,
+          mint API keys yourself, and pool GPUs across machines — all on your hardware.
+        </p>
+        <h2>OpenAI-compatible API on your own box</h2>
+        <p>
+          Serve <code>/v1/chat/completions</code> and <code>/v1/models</code> on your own box.
+          Point any OpenAI SDK at it. Mint and revoke API keys from the console — or run it open.
+        </p>
+        <h2>GPU worker fleet</h2>
+        <p>
+          Models too big for any single GPU split across the fleet via llama.cpp RPC — a
+          deterministic allocator picks the placement, and hugpy runs the lead.
+        </p>
+        <h2>Phone &amp; edge workers</h2>
+        <p>
+          Add phones as workers, not just GPUs. The phone-brick pool runs an ONNX-YOLO vision
+          worker on each handset and resolves a live consensus verdict across the fleet.
+        </p>
+        <p><a href="/docs">Read the docs</a> · <a href="/console">Open the console</a></p>
+      </main>
+    </noscript>
+  </body>
+</html>

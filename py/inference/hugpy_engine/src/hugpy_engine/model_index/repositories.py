@@ -15,6 +15,7 @@ from hugpy_engine.model_index.query_registry import (
     CallQueries,
     DiscoveryQueries,
     MetricsQueries,
+    ModelQueries,
     QuantQueries,
 )
 
@@ -41,6 +42,38 @@ class DiscoveryRepository:
         return {name: row for name, row in cur.fetchall()}
 
 
+class ModelsRepository:
+    """Canonical model rows; child model-index records carry ``model_id``."""
+
+    def __init__(self, db: DatabaseClient):
+        self.db = db
+
+    def create_table(self, cur) -> None:
+        # bounded lock waits (see ModelQueries.INSTALL_WORKER_REGISTRY_TRIGGER)
+        cur.execute(ModelQueries.DDL_LOCK_TIMEOUT_ON)
+        try:
+            cur.execute(ModelQueries.CREATE_TABLE)
+            for query in ModelQueries.MIGRATIONS:
+                cur.execute(query)
+            cur.execute(ModelQueries.CREATE_MODEL_WORKERS)
+        finally:
+            try:
+                cur.execute(ModelQueries.DDL_LOCK_TIMEOUT_OFF)
+            except Exception:  # noqa: BLE001 — the connection may be in a failed tx
+                pass
+
+    def sync_worker_settings(self, cur, model_name: str, worker_id: str,
+                              rank: int | None, settings: dict) -> None:
+        """Persist per-worker model settings on the model/worker relation."""
+        cur.execute(ModelQueries.SYNC_MODEL_SETTINGS, (model_name,))
+        cur.execute(ModelQueries.SYNC_WORKER_SETTINGS,
+                    (worker_id, rank, json.dumps(settings), model_name))
+
+    def sync_model_settings(self, cur, model_name: str, settings: dict) -> None:
+        cur.execute(ModelQueries.UPSERT_MODEL_SETTINGS,
+                    (model_name, json.dumps(settings)))
+
+
 class QuantsRepository:
     def __init__(self, db: DatabaseClient):
         self.db = db
@@ -54,15 +87,24 @@ class QuantsRepository:
         cur.execute(QuantQueries.DELETE_ABSENT_MODELS, (names,))
 
     def replace_for_model(self, cur, name: str, quants) -> None:
-        cur.execute(QuantQueries.DELETE_FOR_MODEL, (name,))
-        if not isinstance(quants, list):
-            return
-        for q in quants:
-            if not isinstance(q, dict) or not q.get("file"):
+        """Bring model_quants for ``name`` in line with the marker's ``quants``
+        — CHANGE-DRIVEN (operator 2026-10-02): rows are deleted only when their
+        file left the dir, written only when a value differs. A walk that found
+        nothing new writes nothing. (Name kept for the call site.)"""
+        want = {}
+        if isinstance(quants, list):
+            for q in quants:
+                if isinstance(q, dict) and q.get("file"):
+                    want[str(q["file"])] = (q.get("quant"), q.get("bytes"), q.get("shards"))
+        cur.execute(QuantQueries.FETCH_FOR_MODEL, (name,))
+        have = {row[0]: (row[1], row[2], row[3]) for row in cur.fetchall()}
+        gone = [f for f in have if f not in want]
+        if gone:
+            cur.execute(QuantQueries.DELETE_FILES_FOR_MODEL, (name, gone))
+        for f, (quant, nbytes, shards) in want.items():
+            if have.get(f) == (quant, nbytes, shards):
                 continue
-            cur.execute(QuantQueries.UPSERT_VARIANT,
-                        (name, q.get("file"), q.get("quant"),
-                         q.get("bytes"), q.get("shards")))
+            cur.execute(QuantQueries.UPSERT_VARIANT, (name, f, quant, nbytes, shards))
 
 
 class MetricsRepository:

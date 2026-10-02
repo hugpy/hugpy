@@ -1,0 +1,24 @@
+{
+  "source": "Pasted text(354).txt",
+  "original_lines": 5706,
+  "strategy": "responsibility-based split with stateful orchestrators preserved",
+  "files": [
+    "AllocationControls.jsx",
+    "BudgetBars.jsx",
+    "GroupAssignPanel.jsx",
+    "ResidencyMenu.jsx",
+    "ResourceStrip.jsx",
+    "SpillBadge.jsx",
+    "WorkerLoadTable.jsx",
+    "WorkerRow.jsx",
+    "WorkerStorageBar.jsx",
+    "WorkersPanel.jsx",
+    "allocation.js",
+    "constants.js",
+    "formatters.js",
+    "index.js",
+    "storageBadge.js",
+    "useNarrowContainer.js",
+    "workerMetrics.js"
+  ]
+}

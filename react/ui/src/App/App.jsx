@@ -8,7 +8,7 @@ import { PrivateRoute } from './../Auth/PrivateRoute'
 import { LoginForm } from './../Auth/LoginForm'
 import Docs from './../pages/Docs/Docs'
 
-import {ModelTable,ChatPanel,HFSearch,WorkersPanel,PhoneBrickPanel,AgentNodesPanel,DiscordPanel,BridgePanel,SessionsPanel,ApiAccess,Landing,CentralConnect,AssessmentPanel,StatusBar,Navbar,SettingsPanel,EvictionsPanel,PriorityGroupsPanel,TemplatesPanel,MetricsPanel,CallsPanel,ReviewPanel} from './../components';
+import {ModelTable,ChatPanel,HFSearch,WorkersPanel,PhoneBrickPanel,AgentNodesPanel,DiscordPanel,BridgePanel,SessionsPanel,ApiAccess,Landing,CentralConnect,AssessmentPanel,StatusBar,Navbar,SettingsPanel,EvictionsPanel,PriorityGroupsPanel,TemplatesPanel,MetricsPanel,CallsPanel,ReviewPanel,ConsoleTracePanel} from './../components';
 import EvictionFeed from './../components/EvictionsPanel/EvictionFeed'
 import ModelPicker from './../components/ModelPicker/ModelPicker'
 import { useChats } from './../components/ChatPanel/useChats'
@@ -52,7 +52,7 @@ export function Console({ banner = null }) {
   // hugpy.activeChat below); unknown/stale ids fall back to the default.
   const [activeTab, setActiveTab] = useState(() => {  // overview(mobile) | models | add | compute | status | api
     const fallback = initialMobile ? 'overview' : 'status'
-    const known = ['overview', 'status', 'compute', 'models', 'add', 'api', 'nodes', 'evictions', 'metrics', 'calls', 'review', 'settings']
+    const known = ['overview', 'status', 'compute', 'models', 'add', 'api', 'nodes', 'evictions', 'metrics', 'calls', 'review', 'trace', 'settings']
     try {
       // `?tab=<id>` (shareable links, e.g. the Metrics panel's ?tab=metrics&model=…) wins over the saved tab.
       const fromUrl = new URLSearchParams(window.location.search).get('tab')
@@ -404,6 +404,7 @@ export function Console({ banner = null }) {
           { id: 'metrics', label: 'Metrics',    badge: null },
           { id: 'calls',   label: 'Calls',      badge: null },
           { id: 'review',  label: 'Grader',     badge: null },
+          { id: 'trace',   label: 'Trace',      badge: null },
           { id: 'settings',label: 'Settings',    badge: null },
         ].map(t => (
           <button
@@ -622,6 +623,10 @@ export function Console({ banner = null }) {
                 smoke-load → judge) over /api/llm/review/*. */}
             <ReviewPanel />
           </div>
+        )}
+
+        {activeTab === 'trace' && (
+          <div className="tab-pane"><ConsoleTracePanel /></div>
         )}
 
         {activeTab === 'settings' && (

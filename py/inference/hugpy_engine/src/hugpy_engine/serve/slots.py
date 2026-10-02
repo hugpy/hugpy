@@ -341,6 +341,8 @@ def env_request_opts(opts: dict | None = None) -> dict:
     worker agent's _apply_spill), exactly as endpoint_for seats with it."""
     eff_opts = dict(opts or {})
     for env, key in (("HUGPY_GPU_MEM_GIB", "gpu_mem_gib"),
+                     ("HUGPY_SLOT_KV_CACHE_TYPE", "kv_cache_type"),
+                     ("HUGPY_SLOT_FLASH_ATTN", "flash_attn"),
                      ("HUGPY_CPU_MEM_GIB", "cpu_mem_gib"),
                      ("HUGPY_N_CPU_MOE", "n_cpu_moe"),
                      ("HUGPY_ALLOC_MODE", "alloc_mode"),

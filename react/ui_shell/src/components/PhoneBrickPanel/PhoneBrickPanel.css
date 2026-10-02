@@ -1,0 +1,105 @@
+.phonebrick-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.pb-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.pb-bar:hover { background: var(--surface-2); }
+.pb-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pb-bar:hover .pb-title { color: var(--text); }
+.pb-count { color: var(--muted); font-size: 11px; }
+.pb-err { color: var(--red); margin-left: auto; }
+.pb-toggle { margin-left: auto; color: var(--muted); font-size: 10px; }
+.pb-err + .pb-toggle { margin-left: 8px; }
+
+.pb-body { padding: 10px 14px 14px; }
+.pb-howto { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.pb-howto code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.pb-empty { color: var(--muted); padding: 8px 0; }
+
+/* phone rows */
+.pb-phone {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 7px 10px;
+  margin-bottom: 7px;
+  background: var(--surface);
+}
+.pb-phone.pb-offline { opacity: 0.6; }
+.pb-phone-pick { display: flex; align-items: center; }
+.pb-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.pb-name { font-weight: 600; }
+.pb-status { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.pb-phone.pb-online .pb-status { color: var(--green); }
+.pb-url { color: var(--muted); font-size: 12px; font-family: var(--mono, monospace); }
+.pb-model { font-size: 11px; }
+.pb-model-on { color: var(--green); }
+.pb-model-off { color: var(--muted); }
+.pb-queue { font-size: 11px; color: var(--muted); }
+.pb-ping { font-size: 11px; }
+.pb-ping-ok { color: var(--green); }
+.pb-ping-bad { color: var(--red); }
+.pb-ping-btn, .pb-remove { padding: 3px 8px; font-size: 11px; }
+.pb-remove { margin-left: auto; }
+
+/* run controls */
+.pb-run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.pb-run-btn { padding: 6px 12px; font-weight: 600; }
+.pb-run-hint { color: var(--muted); font-size: 12px; }
+
+/* run result */
+.pb-run { margin-top: 12px; }
+.pb-run-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.pb-run-status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 7px; border-radius: 4px; background: var(--surface-2); }
+.pb-rs-done { color: var(--green); }
+.pb-rs-error { color: var(--red); }
+.pb-rs-running, .pb-rs-queued { color: var(--muted); }
+.pb-run-image { color: var(--muted); font-size: 12px; }
+.pb-run-busy { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.pb-run-error { color: var(--red); margin-top: 12px; }
+.pb-run-cancelled { color: var(--muted); margin-top: 8px; font-size: 12px; }
+.pb-cancel { margin-left: auto; padding: 3px 9px; font-size: 11px; color: var(--red); }
+
+/* small spinner shown while a phone is being asked */
+.pb-spin {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--muted);
+  display: inline-block; animation: pb-spin 0.8s linear infinite;
+}
+@keyframes pb-spin { to { transform: rotate(360deg); } }
+.pb-run-img { max-width: 100%; border-radius: var(--radius-lg); border: 1px solid var(--border); margin-bottom: 10px; }
+
+.pb-phases { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pb-phases th, .pb-phases td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.pb-phases th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+.pb-agr { color: var(--green); }
+.pb-dis { color: var(--red); }
+.pb-nod { color: var(--muted); }
+
+.pb-offline-note { color: var(--muted); font-size: 11px; margin-top: 8px; }

@@ -12,6 +12,7 @@ nothing.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import List, Optional
 
@@ -114,12 +115,34 @@ def _detect_gpus_torch() -> List[dict]:
         return []
 
 
+def _torch_probe_allowed() -> bool:
+    """Whether a VRAM read may go through ``torch.cuda``. A torch probe CREATES
+    a CUDA context (~256 MiB) in the calling process and never releases it —
+    fine in the worker agent, wrong in a hollow slot child (operator ruling
+    2026-10-02: hugpy's own idle CUDA contexts are residue to evict, so a child
+    with no model must not hold one). Slot children (``SLOT_ID`` set) and any
+    process with ``HUGPY_VRAM_PROBE=nvidia-smi`` read nvidia-smi only."""
+    if (os.environ.get("HUGPY_VRAM_PROBE") or "").strip().lower() in ("nvidia-smi", "smi"):
+        return False
+    if (os.environ.get("SLOT_ID") or "").strip():
+        return False
+    # Any hugpy process: read through torch only when THIS process already has
+    # a CUDA context (a model is loaded in-process) — a probe must never be the
+    # reason a context exists (the agent's idle 256 MiB lump, 2026-10-02).
+    try:
+        import sys as _sys
+        torch = _sys.modules.get("torch")
+        return bool(torch is not None and torch.cuda.is_initialized())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def free_vram_bytes(main: int = 0) -> Optional[int]:
     """Free VRAM on GPU ``main`` in bytes, or ``None`` if no GPU / can't tell."""
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if _torch_probe_allowed() and torch.cuda.is_available():
             free, _total = torch.cuda.mem_get_info(main)
             return int(free)
     except Exception:
@@ -150,7 +173,7 @@ def total_vram_bytes(main: int = 0) -> Optional[int]:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if _torch_probe_allowed() and torch.cuda.is_available():
             _free, total = torch.cuda.mem_get_info(main)
             return int(total)
     except Exception:

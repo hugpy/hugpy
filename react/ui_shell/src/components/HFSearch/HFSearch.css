@@ -1,0 +1,440 @@
+.hf-search {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.hf-strip-hint {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.75;
+}
+.hf-strip-active {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+
+.hf-source-toggle { display: flex; gap: 6px; padding: 8px 12px 0; }
+.hf-source-btn {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 8px; font-size: 12px; padding: 3px 10px; cursor: pointer;
+}
+.hf-source-btn.hf-source-active { color: var(--text); border-color: rgba(124, 196, 255, 0.45); background: rgba(124, 196, 255, 0.08); }
+
+.hf-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.hf-search-input {
+  flex: 1 1 320px;
+  min-width: 220px;
+}
+.hf-search-loading { opacity: 0.6; }
+.hf-search-error   { color: var(--red); font-weight: bold; }
+
+.hf-results {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* Expanded panel: the results list can grow to most of the viewport. */
+.hf-search-expanded .hf-results {
+  max-height: calc(100vh - 280px);
+}
+
+.hf-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.hf-results-table th,
+.hf-results-table td {
+  padding: 5px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.hf-results-table th {
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--surface-2);
+}
+.hf-results-table tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+
+.hf-sortable { cursor: pointer; user-select: none; }
+.hf-sortable:hover { color: var(--text); }
+.hf-sort-arrow { color: var(--accent); font-size: 9px; }
+
+/* ── Relevance affordance (server-ranked order) ──────────────────────── */
+.hf-relevance-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.hf-relevance-label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.hf-relevance-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.hf-relevance-active {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid rgba(86, 212, 232, 0.35);
+}
+.hf-relevance-reset {
+  color: var(--muted);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.hf-relevance-reset:hover { color: var(--text); border-color: var(--accent); }
+
+.hf-expand {
+  background: transparent;
+  border: none;
+  padding: 0 6px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+.hf-expand:hover:not(:disabled) { background: transparent; color: var(--text); }
+
+.hf-col-task { color: var(--muted); }
+.hf-col-lib  { white-space: nowrap; }
+.hf-col-num  { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.hf-size-note { font-style: normal; opacity: 0.6; font-size: 10px; }
+.hf-col-actions { text-align: right; }
+
+.hf-private { font-size: 11px; }
+
+.hf-fw {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 10px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+}
+.hf-fw.fw-transformers { color: var(--blue);   border-color: rgba(96, 165, 250, 0.4); }
+.hf-fw.fw-gguf         { color: var(--yellow); border-color: rgba(251, 191, 36, 0.4); }
+.hf-fw.fw-dataset      { color: var(--purple); border-color: rgba(192, 132, 252, 0.4); }
+
+/* ── Curated uploader-trust badge (hugpy tier, not an official HF metric) ── */
+.hf-trust {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: help;
+}
+.hf-trust-first {
+  color: var(--green);
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+}
+.hf-trust-community {
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+/* "Already on disk" — a searched repo you already have installed on this box.
+   Accent-colored (not green) so it reads distinctly from the first-party trust
+   badge sitting next to it. */
+.hf-ondisk {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: help;
+}
+.hf-ondisk-yes {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid rgba(86, 212, 232, 0.45);
+}
+.hf-ondisk-partial {
+  color: var(--amber, #e0a44a);
+  background: rgba(224, 164, 74, 0.1);
+  border: 1px solid rgba(224, 164, 74, 0.4);
+}
+
+.btn-pull {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid rgba(86, 212, 232, 0.35);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.btn-pull:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0d13;
+}
+.btn-pull:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.hf-empty {
+  padding: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* install options (expanded spec row) */
+.hf-spec-row > td {
+  background: var(--surface-1);
+  padding: 10px 14px 12px 30px;
+}
+.hf-spec-loading { color: var(--muted); font-size: 12px; }
+.hf-options { display: flex; flex-direction: column; gap: 6px; }
+.hf-spec-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.hf-gated { color: var(--yellow); }
+.hf-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hf-opt-toobig { color: var(--muted); text-decoration: line-through; cursor: not-allowed; }
+
+/* GGUF multi-select toolbar: "Select all" + auto-fit-to-space. */
+.hf-opt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 4px;
+  margin-bottom: 2px;
+  border-bottom: 1px dashed var(--border);
+}
+.hf-opt-all { font-weight: 600; }
+.hf-autofit {
+  font-size: 10px;
+  padding: 1px 8px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid rgba(86, 212, 232, 0.35);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.hf-autofit:hover:not(:disabled) { background: var(--accent-dim); }
+.hf-autofit:disabled {
+  color: var(--muted);
+  border-style: dashed;
+  border-color: var(--border);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.hf-opt-summary {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Download progress bar (install options row) ─────────────────────── */
+.dl-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.dl-bar {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  min-width: 80px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.dl-bar-fill {
+  height: 100%;
+  background: var(--blue);
+  transition: width 0.3s ease;
+}
+.dl-bar-completed .dl-bar-fill { background: var(--green); }
+.dl-bar-failed .dl-bar-fill,
+.dl-bar-cancelled .dl-bar-fill { background: var(--red); }
+.dl-bar-indet .dl-bar-fill { animation: dl-slide 1.1s ease-in-out infinite; }
+@keyframes dl-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+.dl-bar-stalled .dl-bar-fill {
+  background: var(--yellow);
+  animation: dl-pulse 1s ease-in-out infinite;
+}
+@keyframes dl-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+.dl-bar-label {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dl-cancel,
+.dl-retry {
+  padding: 1px 8px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+}
+.dl-cancel:hover { color: var(--red); border-color: var(--red); }
+.dl-retry { color: var(--blue); }
+.dl-retry:hover { border-color: var(--blue); }
+
+/* ── Consolidated downloads list (all HF pulls in one place) ──────────── */
+.hf-downloads {
+  margin: 8px 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.hf-downloads-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+.hf-downloads-title { font-weight: 600; }
+.hf-downloads-count {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.hf-downloads-count-active { color: var(--blue); border-color: var(--blue); }
+.hf-downloads-count-idle { opacity: 0.75; }
+.hf-downloads-recent { margin-left: auto; }
+
+.hf-downloads-list {
+  padding: 4px 10px 8px;
+  border-top: 1px solid var(--border);
+}
+.hf-downloads-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+.hf-downloads-name {
+  flex: 0 0 auto;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text);
+}
+.hf-downloads-row .dl-bar-wrap { flex: 1; margin-top: 0; }
+
+/* k121: enqueue refusal pinned to the row until dismissed (was a one-shot alert). */
+.hf-queue-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--red, #e06a6a);
+  background: var(--surface-1, #12151f);
+  border: 1px solid var(--red, #e06a6a);
+}
+.hf-queue-warn-dismiss {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* Worker-compatibility filter (2026-09-10): the "N hidden" note under the
+   search bar when a fits-worker selection is active. */
+.hf-fit-note {
+  margin: 2px 0 6px;
+  font-size: 0.85em;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ── Paging through the Hub ──────────────────────────────────────────────── */
+/* The unfiltered listing is effectively endless, so the table ends in either
+   an invitation to pull the next page or a plain statement that it ran out. */
+.hf-more-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.hf-more-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hf-more-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.hf-more-btn:disabled { opacity: 0.6; cursor: default; }
+.hf-more-end {
+  font-size: 11px;
+  color: var(--muted);
+}

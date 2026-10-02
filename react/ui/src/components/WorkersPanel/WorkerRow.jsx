@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
 import { modelTask, modelTasks } from '../ModelTable/ModelTable'
 import FixDoc from '../FixDoc/FixDoc'
@@ -8,6 +8,7 @@ import usePriorityGroups, { pgIndexOf, pgKeyForms } from '../../hooks/usePriorit
 import { AllocModeMenu, BulkAllocControl } from './AllocationControls'
 import { allocModeLabel, deriveAllocMode } from './allocation'
 import {
+  ALLOC_MODE_OPTIONS,
   SERV_COMPACT_COLS,
   SERV_COMPACT_PX,
   SERV_DEFAULT_ORDER,
@@ -20,7 +21,6 @@ import { ExternalLeases } from './ExternalLeases'
 import { TestFireButton, TestFireStrip, useTestFire } from './TestFire'
 import { ResidencyMenu } from './ResidencyMenu'
 import { ResourceStrip } from './ResourceStrip'
-import { ContextPreview } from './ContextPreview'
 import { SpillBadge } from './SpillBadge'
 import { useNarrowContainer } from './useNarrowContainer'
 import { isMeasuredResident } from './workerMetrics'
@@ -33,14 +33,66 @@ import { statusFor } from '../ModelTable/modelStatus'
 import { WorkerStateChips } from '../ModelTable/StatusCells'
 import { responseReason } from '../responseReason'
 
+
 // PIN state for one (worker, model), mirroring the backend's effective_pin
 // (central/workers.py): central's recorded decision on the ``designations`` row
 // wins; the legacy agent-side 📌 (worker.config.pinned) is read through ONLY
 // while central holds no decision (pin_origin absent). Returns a bool.
 export function effectivePin(worker, key) {
   const row = (worker?.designations || []).find(d => d && d.model_key === key)
-  if (row && row.pin_origin === 'central') return !!row.pinned
+  // A pin stamped by the designation relay (pinned_by "db-designation") only
+  // keeps the DB designation alive across central restarts — it is NOT an
+  // operator's 📌 and must not light the column or block the × (review 2026-10-02).
+  if (row && row.pin_origin === 'central') return !!row.pinned && row.pinned_by !== 'db-designation'
   return !!(worker?.config?.pinned || {})[key]
+}
+
+// llama.cpp KV cache types → bytes per element. Mirrors KV_CACHE_TYPES in
+// hugpy_engine.model_index.query_registry (the stored kv_cost is priced at f16
+// = dtype_bytes 2.0; the UI scales it by the selected type's bytes/elem).
+export const KV_CACHE_TYPES = { f16: 2.0, q8_0: 34 / 32, q4_0: 18 / 32 }
+// Per-class explicit split from the verdict band, in LAYER COUNTS (mirrors
+// compute.explicit_band + service.write_pair_knobs; nomenclature = llama.cpp):
+//   attention_gpu_layers a — the LAST a layers whose attention (non-expert
+//     tensors) AND KV cache sit on the GPU (--n-gpu-layers). The KV cache
+//     follows the layer's device, so this boundary dictates where KV spills.
+//   experts_cpu_layers c — the FIRST c layers whose expert tensors stay in RAM
+//     (--n-cpu-moe), c >= L-a. null → derived from explicit_spill (default prefer-ram): prefer-gpu
+//     fills the GPU budget left beside the boundary, prefer-ram keeps all in RAM.
+export const EXPLICIT_SPILL_CHOICES = ['prefer-ram', 'prefer-gpu'] // [0] = default (operator 2026-10-02)
+// Experts-in-RAM floor (layers) for a attention layers on the GPU at a KV cost
+// per layer (bytes), from the band. -1: attention alone overruns the card.
+export function perClassExpertsCpuMin(band, a, kvLayerBytes) {
+  const L = Number(band?.layers || 0)
+  if (!L) return null
+  a = Math.max(0, Math.min(L, Math.round(Number(a) || 0)))
+  const per = (band.expert_layer_bytes || []).map(Number)
+  const room = Number(band.gpu_budget) - Number(band.compute_bytes) - a * (Number(band.attn_layer_bytes) + kvLayerBytes)
+  if (room < 0) return -1
+  for (let e = a; e >= 0; e--) { if (per.slice(L - e).reduce((s, x) => s + x, 0) <= room) return L - e }
+  return L
+}
+export function perClassSplit(band, attentionLayers, expertsCpuLayers, spill, kvLayerBytes) {
+  const L = Number(band?.layers || 0)
+  if (!L) return null
+  const a = Math.max(0, Math.min(L, Math.round(Number(attentionLayers) || 0)))
+  let c
+  if (expertsCpuLayers != null && expertsCpuLayers !== '') c = Math.max(L - a, Math.min(L, Math.round(Number(expertsCpuLayers))))
+  else if ((spill || 'prefer-ram') === 'prefer-ram') c = L
+  else { const m = perClassExpertsCpuMin(band, a, Number(kvLayerBytes ?? band.kv_layer_bytes ?? 0)); c = (m == null || m < 0) ? L : m }
+  const e = L - c
+  const per = (band.expert_layer_bytes || []).map(Number)
+  const attn = Number(band.attn_layer_bytes || 0)
+  const expGpu = per.slice(L - e).reduce((s, x) => s + x, 0)
+  const expRam = per.slice(0, L - e).reduce((s, x) => s + x, 0)
+  return { a, c, e, L, weightsGpu: Math.round(a * attn + expGpu), weightsRam: Math.round((L - a) * attn + expRam),
+           kvGpuFraction: a / L, nGpuLayers: a >= L ? -1 : a, nCpuMoe: e <= 0 ? 999 : L - e }
+}
+// mirrors hugpy_engine.model_index.query_registry.MODE_FALLBACK_ORDER
+export const MODE_FALLBACK_ORDER = ['gpu-only', 'max-ram', 'explicit', 'ram-only']   // max-ram, never max-gpu: any RAM touch is the cliff
+export function kvScale(kvCost, cacheType) {
+  const per = KV_CACHE_TYPES[cacheType || 'f16'] ?? 2.0
+  return per / Number(kvCost?.dtype_bytes || 2.0)
 }
 
 // Per-model "context target" popover: a % slider + live pricing preview.
@@ -49,9 +101,42 @@ export function effectivePin(worker, key) {
 // (30s catalog / 10s load / 1s jobs) remounted the menu, snapping the slider's
 // local `pct` back to the server value mid-drag and refetching the preview. As
 // a stable top-level component it keeps its state across the parent's renders.
-function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose, modelKey }) {
+// DB-priced preview (replaces central's GET /context-preview, 2026-10-02): need =
+// weights on the KV device + KV(ctx) at the selected cache type + compute vs that
+// device's budget; the ceiling is the verdict's ctx_max for the cache type.
+function DbContextPreview({ db, pct, tokens }) {
+  if (!db || !db.kvCost) return <div className="wp-context-preview">not priced — no KV geometry in the DB</div>
+  if (!db.mem) return <div className="wp-context-preview">not priced — no verdict for {db.mode || 'this mode'} yet</div>
+  const kv = (Number(db.kvCost.fixed_bytes || 0) + Number(db.kvCost.bytes_per_token || 0) * tokens) * db.kvMul
+  const onGpu = db.kvDevice !== 'ram'
+  const weights = onGpu ? Number(db.mem.weights_gpu || 0) : Number(db.mem.weights_ram || 0)
+  const compute = onGpu ? Number(db.mem.compute_bytes || 0) : 0
+  const need = weights + kv + compute
+  const budget = onGpu ? db.gpuBudget : db.ramBudget
+  const fits = budget > 0 ? need <= budget : null
+  return (
+    <div className="wp-context-preview"
+         title={`${db.mode}: weights ${fmtBytes(weights)} + KV ${fmtBytes(kv)} at ctx ${tokens.toLocaleString()} (${db.kvType}) + compute ${fmtBytes(compute)} vs ${onGpu ? 'GPU' : 'RAM'} budget ${fmtBytes(budget || 0)} — all from the DB verdict.`}>
+      at {pct}%: {fmtBytes(need)}{budget ? ` of ${fmtBytes(budget)} ${onGpu ? 'GPU' : 'RAM'} budget` : ''}
+      {fits === false ? ' — will not fit' : ''}
+      {db.ctxMax > 0 ? ` · ceiling ${db.ctxMax.toLocaleString()} tokens (${db.maxPct}%) at ${db.kvType}` : (db.mem ? ' · no ctx fits at this cache type' : '')}
+    </div>
+  )
+}
+
+function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose, modelKey, onChange = null, kv = null, onKv = null, db = null }) {
   const initial = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
-  const [pct, setPct] = useState(Math.max(1, Math.min(100, initial)))
+  // The slider's top is the verdict's ceiling for the selected cache type
+  // (operator ruling 2026-10-02: limits by the same feasibility standards as the
+  // quant-to-worker assessment); a larger stored value is clamped on open.
+  const maxPct = db && db.maxPct != null ? Math.max(1, Math.min(100, db.maxPct)) : 100
+  const [pct, setPctState] = useState(Math.max(1, Math.min(maxPct, initial)))
+  useEffect(() => { if (pct > maxPct) { setPctState(maxPct); if (onChange) onChange(maxPct) } }, [maxPct])  // eslint-disable-line react-hooks/exhaustive-deps
+  // Every slider move is reported upward so the row's Memory column re-prices
+  // weights + KV(ctx) from the DB kv_cost while dragging (operator ask 2026-10-02).
+  const setPct = (v) => { setPctState(v); if (onChange) onChange(v) }
+  const menuRef = useRef(null)
+  const [pos, setPos] = useState(null)
   const tokens = Math.max(1, Math.round(Number(maxContext || 0) * pct / 100))
   useEffect(() => {
     const close = (e) => {
@@ -60,14 +145,49 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [onClose])
-  const rect = anchorRef.current?.getBoundingClientRect()
+  useLayoutEffect(() => {
+    const place = () => {
+      const anchor = anchorRef?.current
+      if (!anchor) return
+      const r = anchor.getBoundingClientRect()
+      const mw = menuRef.current?.offsetWidth || 280
+      const left = Math.max(4, Math.min(r.left, window.innerWidth - mw - 4))
+      setPos({ top: r.bottom + 6, left })
+    }
+    place()
+    const raf = requestAnimationFrame(place)
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [anchorRef])
   return (
-    <div className="wp-context-menu" style={{ top: `${(rect?.bottom || 0) + 6}px`, left: `${rect?.left || 0}px` }}>
+    <div ref={menuRef} className="wp-context-menu"
+         style={pos ? { position: 'fixed', top: pos.top, left: pos.left }
+           : { position: 'fixed', visibility: 'hidden', pointerEvents: 'none' }}>
       <div className="wp-context-title">Context target</div>
-      <input type="range" min="1" max="100" step="1" value={pct}
+      <input type="range" min="1" max={maxPct} step="1" value={pct}
              onChange={e => setPct(Number(e.target.value))} />
-      <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens</span>
-      <ContextPreview workerId={workerId} modelKey={modelKey} pct={pct} />
+      <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens{maxPct < 100 ? ` (max ${maxPct}%)` : ''}</span>
+      <DbContextPreview db={db} pct={pct} tokens={tokens} />
+      {kv && (
+        <div className="wp-context-kv" style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '6px 0' }}
+             title="KV cache type is a launch choice (llama-server --cache-type-k/-v), not a property of the file: f16 is exact, q8_0 ≈ half, q4_0 ≈ a quarter of the cache. A quantized cache requires flash attention, so picking one turns it on. Writes the DB pair knob immediately.">
+          <label>KV cache
+            <select value={kv.kv_cache_type || 'f16'} disabled={!onKv}
+                    onChange={e => onKv && onKv({ set: { kv_cache_type: e.target.value } })}>
+              {Object.keys(KV_CACHE_TYPES).map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+          <label title={kv.kv_cache_type && kv.kv_cache_type !== 'f16' ? 'Required by the quantized KV cache.' : 'llama-server --flash-attn on'}>
+            <input type="checkbox" checked={!!kv.flash_attn} disabled={!onKv || (kv.kv_cache_type && kv.kv_cache_type !== 'f16')}
+                   onChange={e => onKv && onKv({ set: { flash_attn: e.target.checked } })} /> flash attention
+          </label>
+        </div>
+      )}
       <div className="wp-context-actions">
         <button type="button" onClick={() => onApply(pct)}>Apply</button>
         <button type="button" onClick={() => onApply(null)}>Auto</button>
@@ -116,10 +236,16 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   const setMoe = useCallback(async (modelKey, value) => {
     setMoeOptimistic(o => ({ ...o, [modelKey]: value === null ? undefined : value }))
     try {
-      await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/moe`, {
+      // DB-owned knob (operator ruling 2026-10-01): write model_workers.user_settings
+      // straight through hugpy-server; never the WorkerStore route, which queues
+      // behind central's store lock. null = unpin (unset), true/false = pin.
+      // The DB row id is preferred; the server resolves a console key otherwise.
+      const dbId = findCatalogRow(models, modelKey)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : modelKey)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_key: modelKey, value }),
+        body: JSON.stringify(value === null ? { unset: ['moe'] } : { set: { moe: !!value } }),
       })
     } catch (e) {
       setMoeOptimistic(o => { const n = { ...o }; delete n[modelKey]; return n })
@@ -128,7 +254,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     // Refetch: the Alloc column re-derives off this (forcing the split off drops
     // coder-next from explicit to max-ram), so the two must settle together.
     if (typeof onRefresh === 'function') onRefresh()
-  }, [worker.id, onRefresh])
+  }, [worker.id, onRefresh, models])
 
   const moeCapableKeys = useMemo(
     () => Object.keys(worker.moe_capable || {}), [worker.moe_capable])
@@ -183,10 +309,16 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   const setBnb = useCallback(async (modelKey, enabled) => {
     setBnbOptimistic(o => ({ ...o, [modelKey]: enabled }))
     try {
-      await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/bnb`, {
+      // DB-owned knob (operator 2026-10-02: "4-bit also needs to register for
+      // the memory distribution and size change"): bnb_4bit on the pair row
+      // selects the verdict's memory.bnb_4bit / auto.bnb_4bit, which Size,
+      // Alloc, Ctx and Memory all read. Never central's /bnb (WorkerStore lock).
+      const dbId = findCatalogRow(models, modelKey)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : modelKey)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_key: modelKey, enabled }),
+        body: JSON.stringify(enabled == null ? { unset: ['bnb_4bit'] } : { set: { bnb_4bit: !!enabled } }),
       })
       // Refetch so the Alloc column picks up the RE-DERIVED mode; the optimistic
       // entry is dropped once the authoritative payload carries the new value.
@@ -195,7 +327,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       setBnbOptimistic(o => { const n = { ...o }; delete n[modelKey]; return n })
       alert(`Specialization failed: ${e.message}`)
     }
-  }, [worker.id, onRefresh])
+  }, [worker.id, onRefresh, models])
 
   // Per-worker WILDCARD ("take all comers") routing opt-in. Optimistic-then-
   // revert like the model-groups tick: the console has no client-side operator
@@ -288,22 +420,178 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   // then reconcile — on success the refetch's spill_by_model becomes the truth
   // and we drop the optimistic entry; on error we drop it too (revert to the
   // unchanged server value; onAssign already surfaced the reason).
-  const applyAllocMode = useCallback((key, spill) => {
+  const applyAllocMode = useCallback(async (key, spill) => {
     setAllocMenu(null)
     setAllocOptimistic(prev => ({ ...prev, [key]: spill }))
-    Promise.resolve(onAssign(worker, key, spill))
-      .finally(() => setAllocOptimistic(prev => {
-        const next = { ...prev }; delete next[key]; return next
-      }))
-  }, [onAssign, worker])
+    // DB-owned knobs (2026-10-02): the Alloc pick / explicit split write the
+    // pair row; {} (Auto) unsets the placement knobs. leniency/priority_device
+    // (the old explicit vocabulary) are replaced by the per-class layer counts.
+    // An explicit null experts_cpu_layers UNSETS it (experts follow explicit_spill).
+    const PLACEMENT = ['alloc_mode', 'attention_gpu_layers', 'experts_cpu_layers', 'explicit_spill', 'n_gpu_layers', 'n_cpu_moe', 'gpu_mem_gib', 'cpu_mem_gib']
+    // `moe` may ride WITH an explicit apply (the panel's expert-split tick) but
+    // Auto never unpins it — the MoE column's ⟲ owns that.
+    const set = {}, unset = []
+    for (const [k, v] of Object.entries(spill || {})) {
+      if (!PLACEMENT.includes(k) && k !== 'moe') continue
+      if (v === undefined || v === null || v === '') { if (k === 'experts_cpu_layers') unset.push(k); continue }
+      set[k] = v
+    }
+    const body = Object.keys(set).length ? (unset.length ? { set, unset } : { set }) : { unset: PLACEMENT }
+    try {
+      const dbId = findCatalogRow(models, key)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : key)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      })
+    } catch (e) {
+      alert(`Allocation failed: ${e.message}`)
+    } finally {
+      setAllocOptimistic(prev => { const next = { ...prev }; delete next[key]; return next })
+      if (typeof onRefresh === 'function') onRefresh()
+    }
+  }, [worker.id, onRefresh, models])
 
-  const applyContext = useCallback((key, currentSpill, pct) => {
+  // Placement revert (operator 2026-10-02: "an auto rollback button … more apt
+  // to have it to the left of the memory in that column"): ONE ⟲ in the Memory
+  // cell that unsets every placement pin on the pair row — the Alloc mode, the
+  // explicit per-class layer counts + spill, the derived llama.cpp knobs, the
+  // budgets AND the MoE tick (it lives inside explicit now) — so the pair
+  // tracks the read-time derivation again. Shown only while something is pinned.
+  const PLACEMENT_PINS = ['alloc_mode', 'attention_gpu_layers', 'experts_cpu_layers', 'explicit_spill', 'moe',
+                          'n_gpu_layers', 'n_cpu_moe', 'gpu_mem_gib', 'cpu_mem_gib']
+  const revertPlacement = useCallback(async (key, pinned) => {
+    setAllocOptimistic(prev => ({ ...prev, [key]: {} }))
+    setMoeOptimistic(o => { const n = { ...o }; delete n[key]; return n })
+    try {
+      const dbId = findCatalogRow(models, key)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : key)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unset: pinned.length ? pinned : PLACEMENT_PINS }),
+      })
+    } catch (e) {
+      alert(`Revert to auto failed: ${e.message}`)
+    } finally {
+      setAllocOptimistic(prev => { const next = { ...prev }; delete next[key]; return next })
+      if (typeof onRefresh === 'function') onRefresh()
+    }
+  }, [worker.id, onRefresh, models])
+
+  // ONE DB view of a (model, worker) pair for the Ctx and Memory cells: the
+  // pair row, selected quant + its kv_cost, the mode the Alloc cell shows, that
+  // mode's verdict memory, KV device/type/scale and the ctx ceiling.
+  const pairDb = (key, m) => {
+    const pair = m?._modelDatabase?.workers?.find(row => row.worker_id === worker.id) || null
+    const quants = m?._modelDatabase?.quants || []
+    const knobs = { ...(pair?.user_settings || {}), ...(kvOptimistic[key] || {}) }
+    const wantFile = String(knobs.gguf_file || pair?.plan?.default_variant || '').split('/').pop()
+    const quant = quants.find(q => q.file === wantFile) || quants.find(q => q.kv_cost) || null
+    const kvCost = quant?.kv_cost || null
+    const moeOn = key in moeOptimistic ? !!moeOptimistic[key]
+      : (typeof knobs.moe === 'boolean' ? knobs.moe : !!worker.moe_effective?.[key])
+    const auto = pair?.plan?.auto || null
+    // 4-bit (bitsandbytes) is a DB pair knob like MoE: it selects the verdict's
+    // memory.bnb_4bit[mode] / auto.bnb_4bit (or bnb_moe_explicit with MoE on).
+    const bnbOn = key in bnbOptimistic ? !!bnbOptimistic[key]
+      : (typeof knobs.bnb_4bit === 'boolean' ? knobs.bnb_4bit : !!worker.bnb_by_model?.[key])
+    const autoMode = knobs.alloc_mode
+      || (auto ? (bnbOn
+        ? ((moeOn ? auto.bnb_moe_explicit?.mode : null) || auto.bnb_4bit?.mode || null)
+        : ((moeOn ? auto.moe_explicit?.mode : null) || auto.standard?.mode || null)) : null)
+    const verdict = (pair?.verdicts || []).find(v => v.file === (quant?.file || wantFile)) || (pair?.verdicts || [])[0] || null
+    const memTable = verdict?.memory ? (bnbOn ? (verdict.memory.bnb_4bit || null) : verdict.memory) : null
+    const kvType = knobs.kv_cache_type || 'f16'
+    const kvKey = kvType === 'bf16' ? 'f16' : kvType
+    const kvMul = kvScale(kvCost, kvType)
+    const ctxTrain = Number(m?.model_max_length || kvCost?.ctx_train || 0)
+    // AUTO mode is ctx-aware (same rule as the knobs route, 2026-10-02): with no
+    // operator alloc_mode pin, if the auto mode's ceiling cannot hold the ctx
+    // target, fall through the mode order to the first fitting verdict mode.
+    let mode = autoMode
+    if (!knobs.alloc_mode && memTable && mode && knobs.ctx_pct != null && ctxTrain) {
+      const wantCtx = Math.max(1024, Math.floor(ctxTrain * Number(knobs.ctx_pct) / 100 / 1024) * 1024)
+      const cap = Number(memTable[mode]?.ctx_max?.[kvKey] ?? -1)
+      if (cap >= 0 && wantCtx > cap) {
+        const alt = MODE_FALLBACK_ORDER.find(x => x !== mode && memTable[x]?.fits && Number(memTable[x]?.ctx_max?.[kvKey] ?? -1) >= wantCtx)
+        if (alt) mode = alt
+      }
+    }
+    let mem = (memTable && mode) ? (memTable[mode] || null) : null
+    // PER-CLASS explicit placement (operator 2026-10-02): attention_gpu_layers /
+    // experts_cpu_layers / explicit_spill price the split from the verdict's band
+    // primitives (attention bytes + KV per layer follow a, expert bytes per layer
+    // follow e). The server-derived n_cpu_moe is the stored truth for experts
+    // when experts_cpu_layers is absent (spill-derived).
+    const band = memTable?.explicit?.band || null
+    const perClassKvLayer = (band && kvCost && band.layers)
+      ? ((Number(kvCost.fixed_bytes || 0) + Number(kvCost.bytes_per_token || 0) * Math.max(1024, Math.floor(ctxTrain * (knobs.ctx_pct != null ? Number(knobs.ctx_pct) : 100) / 100 / 1024) * 1024)) * kvMul) / band.layers
+      : Number(band?.kv_layer_bytes || 0)
+    const storedCpu = knobs.experts_cpu_layers != null ? knobs.experts_cpu_layers
+      : (knobs.n_cpu_moe != null && band ? (Number(knobs.n_cpu_moe) >= 999 ? Number(band.layers) : Number(knobs.n_cpu_moe)) : null)
+    const perClass = (band && mode === 'explicit' && knobs.attention_gpu_layers != null)
+      ? perClassSplit(band, Number(knobs.attention_gpu_layers), storedCpu, knobs.explicit_spill, perClassKvLayer) : null
+    if (perClass && mem) mem = { ...mem, weights_gpu: perClass.weightsGpu, weights_ram: perClass.weightsRam, kv_gpu_fraction: perClass.kvGpuFraction }
+    const ctxMax = Number(mem?.ctx_max?.[kvKey] ?? -1)
+    const maxPct = (ctxMax >= 0 && ctxTrain) ? Math.floor(ctxMax * 100 / ctxTrain) : null
+    // AUTO context (no ctx_pct knob) = the ceiling for this mode + cache type —
+    // the largest ctx that FITS, never 100% of the trained window (operator
+    // 2026-10-02: MN-GRAND showed 330 GB at 1,024,000 tokens until adjusted).
+    const autoPct = maxPct != null ? Math.max(1, Math.min(100, maxPct)) : 100
+    const pct = key in ctxOptimistic
+      ? (ctxOptimistic[key] == null ? autoPct : Number(ctxOptimistic[key]))
+      : (knobs.ctx_pct != null ? Number(knobs.ctx_pct) : autoPct)
+    const bnbBytes = Number(quant?.bnb_4bit?.bytes || 0)
+    return { pair, quant, verdict, kvCost, knobs, moeOn, bnbOn, mode, mem, band, perClass, kvType, kvMul, ctxTrain, autoPct, pct,
+             sizeBytes: bnbOn && bnbBytes ? bnbBytes : Number(quant?.size_bytes || quant?.bytes || 0),
+             kvDevice: mem?.kv_device || (mode === 'ram-only' ? 'ram' : 'gpu'),
+             gpuBudget: Number(pair?.plan?.budgets?.gpu_budget || 0), ramBudget: Number(pair?.plan?.budgets?.ram_budget || 0),
+             ctxMax: ctxMax < 0 ? 0 : ctxMax, maxPct, flashAttn: !!knobs.flash_attn }
+  }
+
+  // KV cache knobs (kv_cache_type / flash_attn), DB pair knobs written through
+  // the same knobs route; optimistic per model key until the refetch lands.
+  const [kvOptimistic, setKvOptimistic] = useState({})
+  const writeKvKnobs = useCallback(async (key, body) => {
+    const nextSet = body.set || {}
+    setKvOptimistic(o => ({ ...o, [key]: { ...(o[key] || {}), ...nextSet,
+      ...(nextSet.kv_cache_type && nextSet.kv_cache_type !== 'f16' ? { flash_attn: true } : {}) } }))
+    try {
+      const dbId = findCatalogRow(models, key)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : key)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      })
+    } catch (e) {
+      setKvOptimistic(o => { const n = { ...o }; delete n[key]; return n })
+      alert(`KV cache knob failed: ${e.message}`)
+    }
+    if (typeof onRefresh === 'function') onRefresh()
+  }, [worker.id, onRefresh, models])
+
+  // Optimistic context target per model key: pct while the slider is dragged
+  // and until the DB refetch lands (null = Auto = trained ctx). The Ctx and
+  // Memory cells both read it so they move together.
+  const [ctxOptimistic, setCtxOptimistic] = useState({})
+  const applyContext = useCallback(async (key, currentSpill, pct) => {
     setCtxMenu(null)
-    const next = { ...(currentSpill || {}) }
-    if (pct == null) delete next.ctx_pct
-    else next.ctx_pct = Number(pct)
-    Promise.resolve(onAssign(worker, key, next)).catch(() => {})
-  }, [onAssign, worker])
+    setCtxOptimistic(o => ({ ...o, [key]: pct == null ? null : Number(pct) }))
+    try {
+      // DB-owned knob (ruling 2026-10-02): ctx_pct is a per-pair knob in
+      // model_workers.user_settings, written through hugpy-server's knobs
+      // route — never central's spill/WorkerStore path.
+      const dbId = findCatalogRow(models, key)?._modelDatabase?.id
+      const ref = encodeURIComponent(dbId != null ? String(dbId) : key)
+      await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pct == null ? { unset: ['ctx_pct'] } : { set: { ctx_pct: Number(pct) } }),
+      })
+    } catch (e) {
+      setCtxOptimistic(o => { const n = { ...o }; delete n[key]; return n })
+      alert(`Context target failed: ${e.message}`)
+    }
+    if (typeof onRefresh === 'function') onRefresh()
+  }, [worker.id, onRefresh, models])
 
   const checkHealth = useCallback(async () => {
     setPing('checking')
@@ -584,7 +872,19 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       // from the serving pool. The character budget tightens in compact mode,
       // where the column is only ~28vw of a phone-width table.
       label: 'Model', sortable: true, cls: 'wp-servtable-name',
-      title: ({ key }) => key,
+      title: ({ key }) => {
+        const db = findCatalogRow(models, key)?._modelDatabase
+        if (!db) return `${key}\nNo canonical model row returned by the database.`
+        const state = (db.workers || []).find(w =>
+          w.worker_id === worker.id || w.worker_id === worker.name)
+        return [
+          key,
+          `Database model: ${db.name} (id ${db.id})`,
+          `Attributes: ${Object.keys(db.attributes || {}).length} fields; ${db.quants?.length || 0} quant rows; ${db.metrics?.length || 0} metric rows`,
+          state ? `Worker ${state.worker_id}: allocation=${JSON.stringify(state.allocation)}, settings=${JSON.stringify(state.user_settings)}, activity=${JSON.stringify(state.activity)}`
+            : `No database association for worker ${worker.name || worker.id}`,
+        ].join('\n')
+      },
       render: ({ key, isBlocked, isPairBlocked, isAutoBlocked, compact }) => (
         <>
           {/* Compact keeps the full 14-char TAIL (it is what discriminates
@@ -592,6 +892,10 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
               cell wraps rather than ellipsising, so 23 chars costs two lines,
               not a cut-off tail. */}
           {compact ? midTrunc(nameFor(key), 8, 14) : midTrunc(nameFor(key))}
+          {findCatalogRow(models, key)?._modelDatabase && (
+            <span className="wp-model-db-pill"
+                  title="Model attributes and per-worker state loaded from Hugpy's canonical database row.">DB</span>
+          )}
           {isBlocked && (
             <span className="wp-blocked-chip"
                   title="⛔ Globally blocked from the serving pool.">
@@ -614,10 +918,14 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         return declared == null ? 'size unknown — not on disk / not reported by the feed'
           : `${fmtBytes(declared)} on disk${si && si.isGguf ? ` (effective quant${si.effGguf ? ` ${si.effGguf}` : ''}, not the all-quants dir sum)` : ''}`
       },
-      render: ({ key }) => {
+      render: ({ key, m }) => {
         const si = sizeInfo(key)
         const det = worker.loaded_detail?.[key]
         const declared = (si && si.bytes != null) ? si.bytes : det?.model_bytes
+        const db = pairDb(key, m)
+        if (db.bnbOn && db.sizeBytes) {
+          return <span title={`4-bit (bitsandbytes) load size from the DB facts; ${declared != null ? fmtBytes(declared) : '?'} on disk`}>{fmtBytes(db.sizeBytes)} <span className="wp-lt-muted">4-bit</span></span>
+        }
         return declared == null ? '—' : fmtBytes(declared)
       },
     },
@@ -625,20 +933,52 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       label: 'Ctx', sortable: true, num: true, cls: 'wp-lt-num',
       render: ({ key, m, d }) => {
         const max = Number(m?.model_max_length || 0)
-        if (!max) return '—'
+        const active = Number(d.alloc?.ctx || worker.loaded_detail?.[key]?.ctx || 0)
         const spill = key in allocOptimistic ? allocOptimistic[key] : d.override
-        const pct = spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct)
-        const value = Math.max(1, Math.min(max, Math.round(max * pct / 100)))
+        // DB-FIRST KV pricing (operator ruling 2026-10-02): the selected quant's
+        // precalculated kv_cost (fixed state + bytes/token, exact at the trained
+        // ctx) prices the KV for the shown context — no call to central.
+        const dbPairCtx = m?._modelDatabase?.workers?.find(row => row.worker_id === worker.id)
+        const dbCtxView = pairDb(key, m)
+        const pct = dbCtxView.pair ? dbCtxView.pct
+          : (spill?.ctx_pct == null ? 100 : Number(spill.ctx_pct))     // no DB pair: central's spill
+        const dbQuants = m?._modelDatabase?.quants || []
+        const wantFile = String(dbPairCtx?.user_settings?.gguf_file || dbPairCtx?.plan?.default_variant || '').split('/').pop()
+        const dbQuant = dbQuants.find(q => q.file === wantFile) || dbQuants.find(q => q.kv_cost) || null
+        const kvCost = dbQuant?.kv_cost || null
+        const dbMax = Number(kvCost?.ctx_train || 0)
+        const ctxMax = max || dbMax
+        // While the target is being edited, show the TARGET (not the active
+        // ctx) so the number tracks the slider; ctx = largest multiple of 1024
+        // ≤ trained*pct (the ruling's grain), floor 1024.
+        const target = ctxMax ? Math.max(Math.min(1024, ctxMax), Math.floor(ctxMax * pct / 100 / 1024) * 1024) : 0
+        // DB-first (operator 2026-10-02: "ctx isn't capped until touched"):
+        // the TARGET from the DB (knob, else the fitting ceiling) is the value;
+        // only a LIVE loaded ctx (measured on the worker) overrides it. Central's
+        // planned_split ctx is never shown — it is the uncapped trained window.
+        const value = (key in ctxOptimistic || ctxMenu === key) ? target : (active || target)
+        if (!value) return '—'
+        const kvKnobs = { ...(dbPairCtx?.user_settings || {}), ...(kvOptimistic[key] || {}) }
+        const kvType = kvKnobs.kv_cache_type || 'f16'
+        const kvMul = kvScale(kvCost, kvType)
+        const kvAt = kvCost ? (Number(kvCost.fixed_bytes || 0) + Number(kvCost.bytes_per_token || 0) * value) * kvMul : null
+        const kvNote = kvAt != null
+          ? ` KV ${fmtBytes(kvAt)} at this context (${(Number(kvCost.bytes_per_token || 0) * kvMul / 1048576).toFixed(2)} MiB/token at ${kvType}${kvKnobs.flash_attn ? ', flash attention' : ''}, ${kvCost.basis}, from the DB).`
+          : ''
         const open = ctxMenu === key
         return (
           <span className="wp-ctx-anchor">
             <button type="button" className="wp-ctx-button" ref={open ? ctxAnchorRef : undefined}
-                    title={`Context target: ${value.toLocaleString()} of ${max.toLocaleString()} tokens (${pct}%). Click to adjust; applies on the next load.`}
+                    title={`${active ? 'Active context' : 'Context target'}: ${value.toLocaleString()}${ctxMax ? ` of ${ctxMax.toLocaleString()} tokens` : ' tokens'}${active ? '' : ` (${pct}%${dbCtxView.knobs?.ctx_pct == null ? ', auto = largest that fits' : ''})`}.${kvNote} Click to adjust the target.`}
                     disabled={applying}
                     onClick={() => setCtxMenu(open ? null : key)}>
               {value.toLocaleString()}
             </button>
-            {open && <ContextMenu workerId={worker.id} maxContext={max} spill={spill} anchorRef={ctxAnchorRef} modelKey={key}
+            {open && ctxMax > 0 && <ContextMenu workerId={worker.id} maxContext={ctxMax} spill={{ ctx_pct: pct }} anchorRef={ctxAnchorRef} modelKey={key}
+                                  onChange={next => setCtxOptimistic(o => ({ ...o, [key]: next }))}
+                                  db={pairDb(key, m)}
+                                  kv={kvCost ? { kv_cache_type: kvType, flash_attn: !!kvKnobs.flash_attn } : null}
+                                  onKv={body => writeKvKnobs(key, body)}
                                   onApply={next => applyContext(key, spill, next)}
                                   onClose={() => setCtxMenu(null)} />}
           </span>
@@ -702,7 +1042,10 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       },
     },
     moe: {
-      // MoE — the EXPERT-SPLIT lever (operator ask 2026-07-26). Tri-state, but
+      // MoE — show the MODEL'S ARCHITECTURE separately from the expert-split
+      // placement lever. The old checkbox alone was misleading: checked meant
+      // experts were currently split, not that the model had a particular MoE
+      // shape.
       // presented as a plain checkbox on purpose: AUTO renders TICKED whenever
       // the derivation actually produced a split, so the operator sees the real
       // behaviour instead of an empty box that secretly means "on"
@@ -710,18 +1053,55 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       // checked box under the correct column, that could be switched by the
       // user"). Clicking pins the opposite state; ⟲ returns it to auto.
       label: 'MoE', sortable: false, cls: '',
-      render: ({ key }) => {
+      render: ({ key, m }) => {
         if (!worker.moe_capable?.[key]) {
           return <span className="wp-4bit-na" title={
             'No expert structure — this model is dense, so there is nothing to '
             + 'split.'}>—</span>
         }
-        const ov = worker.moe_by_model?.[key]
+        // The canonical model_workers row is the persisted UI setting. The
+        // worker heartbeat can lag it (and may retain an older owner~repo
+        // spelling), so prefer the database association when present.
+        const dbWorker = m?._modelDatabase?.workers?.find(
+          row => row.worker_id === worker.id)
+        // NOT OFFERED (operator 2026-10-02): the selected quant's DB verdict says
+        // the expert split cannot be served here (a transformers/safetensors MoE —
+        // the loader cannot keep experts in RAM). Structure is still a fact, so
+        // the box stays, disabled, with the reason as its tooltip; no write.
+        const notOffered = (() => { const v = pairDb(key, m).verdict; return !!(v && v.moe_offered === false) })()
+        if (notOffered) {
+          const isGguf = /\.gguf$/i.test(String(dbWorker?.user_settings?.gguf_file || dbWorker?.plan?.default_variant || ''))
+          return (
+            <span className="wp-moe">
+              <span className="wp-moe-arch" title="Model has expert structure (a fact of the weights)." style={{ opacity: 0.6 }}>MoE</span>
+              <label title={isGguf
+                ? 'Expert split not offered for this quant on this worker: the verdict found no split that fits (experts in RAM + the rest on the GPU within the budgets).'
+                : 'Expert split not offered: the transformers loader cannot keep expert tensors in RAM while the rest runs on the GPU. Serve the GGUF form of this model for an expert split; 4-bit is the lever here.'}
+                     style={{ opacity: 0.5, cursor: 'not-allowed' }}>
+                <input type="checkbox" className="wp-moe-box" checked={false} disabled readOnly />
+              </label>
+            </span>
+          )
+        }
+        const dbMoe = dbWorker?.user_settings?.moe
+        const hasDbMoe = typeof dbMoe === 'boolean'
+        const ov = hasDbMoe ? dbMoe : worker.moe_by_model?.[key]
         const pinned = ov !== undefined && ov !== null
         const on = key in moeOptimistic ? moeOptimistic[key]
                  : (pinned ? !!ov : !!worker.moe_effective?.[key])
+        // Worker detail is authoritative: it is the same physical metadata
+        // central used to price/derive the placement. Catalog `m.moe` is only
+        // a fallback because older catalog responses may omit it.
+        const arch = worker.moe_detail?.[key] || m?.moe || {}
+        const expertCount = Number(arch.expert_count ?? arch.n_experts ?? 0)
+        const activeExperts = Number(arch.expert_used_count ?? arch.expert_used ?? arch.active_experts ?? 0)
+        const archLabel = 'MoE'
+        const archTitle = expertCount && activeExperts
+          ? `Model architecture: ${expertCount} total experts, ${activeExperts} active per token${arch.sparsity != null ? ` (${(Number(arch.sparsity) * 100).toFixed(2)}% routed density)` : ''}. The allocation is shown in Planned Memory.`
+          : 'Model has expert structure. The checkbox is placement only: expert tensors in RAM vs GPU.'
         return (
           <span className="wp-moe">
+            <span className="wp-moe-arch" title={archTitle}>{archLabel}</span>
             <label title={
               pinned
                 ? `Expert split PINNED ${on ? 'on' : 'off'} by you. Click to flip; ⟲ restores auto.`
@@ -757,7 +1137,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       // CUDA-only), not an already-quantized repo. Elsewhere the cell is a
       // quiet em-dash rather than a disabled control nobody can use.
       label: '4-bit', sortable: false, cls: '',
-      render: ({ key }) => {
+      render: ({ key, m }) => {
         const avail = !!worker.bnb_available?.[key]
         if (!avail) {
           return <span className="wp-4bit-na" title={
@@ -765,7 +1145,10 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
             + 'quantization, the 4-bit kernels need a CUDA worker, and an '
             + 'already-quantized repo cannot be re-quantized.'}>—</span>
         }
-        const on = key in bnbOptimistic ? bnbOptimistic[key] : !!worker.bnb_by_model?.[key]
+        // DB knob first (pairDb.bnbOn): the tick writes bnb_4bit to the pair row,
+        // so it must read it back from there, not central's bnb_by_model mirror
+        // (review 2026-10-02: tick reverted on the next poll)
+        const on = pairDb(key, m).bnbOn
         return (
           <label className="wp-4bit" title={
             on ? 'bitsandbytes 4-bit (nf4) ON — the model is priced at ~30% of '
@@ -803,9 +1186,28 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         // in-flight optimistic pick derives locally, so the cell still flips
         // instantly before the refetch lands; a pre-model_alloc_modes central
         // falls back to the local derivation.
+        // DB-FIRST (operator ruling 2026-10-01: the UI reflects the DB, not
+        // central's materialized view, which refreshes only on the heartbeat
+        // path and lags a knob edit by minutes while it re-reads GGUF headers).
+        // The pair row's user_settings.alloc_mode is the operator's pin; else the
+        // stored verdict's auto mode for the MoE state the DB knob selects
+        // (plan.auto.moe_explicit when the split is on, plan.auto.standard off).
+        // Central's planned_split mode remains the fallback for pairs without a
+        // DB plan yet.
+        const dbPair = m?._modelDatabase?.workers?.find(row => row.worker_id === worker.id)
+        const dbKnobMoe = dbPair?.user_settings?.moe
+        const dbMoeOn = key in moeOptimistic
+          ? !!moeOptimistic[key]
+          : (typeof dbKnobMoe === 'boolean' ? dbKnobMoe : !!worker.moe_effective?.[key])
+        const dbAuto = dbPair?.plan?.auto || null
+        // ONE derivation with the Memory cell (pairDb): operator pin, else the
+        // verdict's auto mode for the DB knobs — 4-bit selects auto.bnb_4bit /
+        // bnb_moe_explicit (operator 2026-10-02: Alloc said ram-only while
+        // Memory priced the 4-bit gpu-only plan).
+        const dbMode = pairDb(key, m).mode
         const mode = (key in allocOptimistic)
           ? deriveAllocMode(effSpill)
-          : (d.derivedMode || deriveAllocMode(effSpill))
+          : (dbMode || worker.planned_split?.[key]?.mode || d.derivedMode || deriveAllocMode(effSpill))
         const engineGguf = /^(gguf|llama_cpp)$/.test(String(m?.framework || '').toLowerCase())
         const isOpen = allocMenu === key
         // Ruling 2 (2026-07-24) — DERIVED vs PINNED at a glance. A model with NO
@@ -833,6 +1235,45 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
           : feasibleUnion   // fall back to the model-level union when unscoped
         const derivedMode = (byWorker && byWorker.derived_default)
           || (sd && sd.alloc_mode_derived && sd.alloc_mode) || null
+        // DB-FIRST feasibility (operator 2026-10-02: "instead of throwing the
+        // error popup for an alloc selection that is infeasible, it should simply
+        // be disabled with a tooltip; possible override later on"): per mode, the
+        // stored verdict's reason it cannot serve this pair — not offered, does
+        // not fit (the verdict's own `why`), or the pinned context target above
+        // that mode's ceiling for the selected KV cache type (the same 409 the
+        // server would raise). null = pickable. Missing verdict ⇒ {} (fail-open).
+        const dbFeasible = (() => {
+          const db = pairDb(key, m)
+          const v = db.verdict
+          if (!v) return {}
+          const table = (db.bnbOn ? (v.memory?.bnb_4bit || {}) : (v.memory || {}))
+          const want = (db.knobs.ctx_pct != null && db.ctxTrain)
+            ? Math.max(1024, Math.floor(db.ctxTrain * Number(db.knobs.ctx_pct) / 100 / 1024) * 1024) : null
+          const kvKey = db.kvType === 'bf16' ? 'f16' : (db.kvType || 'f16')
+          const out = {}
+          // explicit is ALWAYS pickable while the GGUF is feasible on this worker
+          // in ANY mode (operator ruling 2026-10-02: "explicit is always an option
+          // if the gguf is feasible"; when attention alone overruns the card it is
+          // the EXPERT SPLIT that is out — the MoE column greys from moe_offered).
+          const anyFits = Object.values(table).some(mm => mm && typeof mm === 'object' && mm.fits === true)
+          for (const [mode] of ALLOC_MODE_OPTIONS) {
+            const mem = table[mode]
+            if (mode === 'explicit') {
+              if (!anyFits && Object.keys(table).length) { out[mode] = 'this quant does not fit on this worker in any mode'; continue }
+            } else {
+              if (Array.isArray(v.modes) && !v.modes.includes(mode)) { out[mode] = `${mode} is not offered for this quant on this worker`; continue }
+              if (mem && mem.fits === false) { out[mode] = mem.why || `${mode} does not fit on this worker`; continue }
+            }
+            if (!mem) { out[mode] = null; continue }
+            const cap = mem.ctx_max?.[kvKey]
+            if (want != null && cap != null && (Number(cap) <= 0 || want > Number(cap))) {
+              out[mode] = `context target ${want.toLocaleString()} exceeds the ${mode} ceiling of ${Number(cap).toLocaleString()} tokens at KV ${kvKey} — lower Ctx or pick a smaller KV cache`
+              continue
+            }
+            out[mode] = null
+          }
+          return out
+        })()
         return (
           <span className="wp-allocmode-anchor">
             <button className={`wp-alloc-edit${isDerived ? ' wp-alloc-derived' : ''}`} disabled={applying}
@@ -854,11 +1295,13 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                 need={need}
                 engineGguf={engineGguf}
                 feasible={feasible}
+                dbFeasible={dbFeasible}
                 feasibleCtx={{ modelBytes: need?.bytes ?? null,
                                vramTotal: worker.vram_total ?? null,
                                ramTotal: worker.ram_total ?? null }}
                 derivedMode={derivedMode}
                 anchorRef={allocAnchorRef}
+                perClass={(() => { const db = pairDb(key, m); return db.band ? { band: db.band, knobs: db.knobs, moeCapable: !!worker.moe_capable?.[key], moeOn: db.moeOn, kvLayerBytes: (db.kvCost && db.band.layers) ? ((Number(db.kvCost.fixed_bytes || 0) + Number(db.kvCost.bytes_per_token || 0) * Math.max(1024, Math.floor(db.ctxTrain * db.pct / 100 / 1024) * 1024)) * db.kvMul) / db.band.layers : Number(db.band.kv_layer_bytes || 0) } : null })()}
                 onPick={(next) => applyAllocMode(key, { alloc_mode: next })}
                 onApplyExplicit={(s) => applyAllocMode(key, s)}
                 onRevertDerived={() => applyAllocMode(key, {})}
@@ -870,122 +1313,106 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       },
     },
     memory: {
-      // Memory — the HONEST THREE-QUANTITY display (ruling 3, 2026-07-24):
-      //   "<disk> disk · <resident> resident (<vram> VRAM + <anon> RAM) · <n>/<total> layers"
-      // when the shipped 0.1.198+ fields are present on the row (vram_bytes,
-      // rss_anon_bytes, n_gpu_layers/total_layers — all on the measured
-      // allocations view d.alloc, with loaded_detail as fallback). Resident =
-      // VRAM + anon RAM (the true footprint; disk is a separate universe). The
-      // cell stays COMPACT — "disk · resident" — and the full breakdown rides
-      // the title. Absent fields degrade to what exists (never invented): VRAM
-      // 0 means resident-but-on-CPU; no measured figures fall back to the
-      // declared-split line the cell always showed.
+      // Memory is only the VRAM/RAM allocation. Model size and context have
+      // their own columns; the bar makes a MoE ratio visible at a glance.
       label: 'Memory', sortable: false, cls: 'wp-servtable-mem',
-      render: ({ key, d }) => {
+      render: ({ key, m, d }) => {
         const det = worker.loaded_detail?.[key]
         const a = d.alloc || null
-        // Prefer the measured allocations view; fall back to loaded_detail.
         const vram = a && a.vram_bytes != null ? a.vram_bytes
           : det && det.vram_bytes != null ? det.vram_bytes : null
-        // Host-RAM occupancy: a slot child's anon RSS, or — for an in-process
-        // (kind:'ram') model — the worker's MEASURED ram_resident_bytes (ships
-        // with the next release; absent on older workers, which then degrade to
-        // the disk-only line exactly as before). Either way this is a
-        // measurement, never a declared/file figure.
         const anon = a && a.rss_anon_bytes != null ? a.rss_anon_bytes
           : a && a.ram_resident_bytes != null ? a.ram_resident_bytes
           : det && det.rss_anon_bytes != null ? det.rss_anon_bytes
           : det && det.ram_resident_bytes != null ? det.ram_resident_bytes : null
-        const ngl = a && a.n_gpu_layers != null ? a.n_gpu_layers
-          : det && det.n_gpu_layers != null ? det.n_gpu_layers : null
-        const totalLayers = a && a.total_layers != null ? a.total_layers
-          : det && det.total_layers != null ? det.total_layers : null
-        const measuredVram = vram   // legacy name kept for the declared-split fallback below
-        const si = sizeInfo(key)
-        const declared = (si && si.bytes != null) ? si.bytes : det?.model_bytes
-        if (declared == null && det?.gpu_pct == null && measuredVram == null) return <span className="wp-lt-muted">—</span>
-        // Resident footprint = measured VRAM + anon RAM (only when at least one
-        // measured figure exists; a bare declared size is NOT residency).
-        const resident = (vram != null || anon != null)
-          ? (vram || 0) + (anon || 0) : null
-        // Keep the desired placement visible even while the model is resident.
-        // A MoE/Alloc change updates this plan immediately; the worker compares
-        // the next request's spill contract with the resident contract and
-        // evicts/reloads before serving when they differ. Measured residency
-        // below remains the truthful *current* footprint until that request.
         const plan = worker.planned_split?.[key]
-        const planGpu = plan?.gpu_bytes
-        const planRam = plan?.ram_bytes
-        const planParts = []
-        if (planGpu) planParts.push(`${fmtBytes(planGpu)} VRAM`)
-        if (planRam) planParts.push(`${fmtBytes(planRam)} RAM`)
-        const plannedTitle = plan && planParts.length
-          ? (plan.split
-            ? `Desired MoE split: ${planParts.join(' + ')}; applies on next load.`
-            : `Desired placement under '${plan.mode}': ${planParts.join(' + ')}; applies on next load.`)
+        const hasPlan = plan && (plan.gpu_bytes != null || plan.ram_bytes != null)
+        const databaseWorker = m?._modelDatabase?.workers?.find(
+          row => row.worker_id === worker.id)
+        const databaseMoe = databaseWorker?.user_settings?.moe
+        const override = typeof databaseMoe === 'boolean'
+          ? databaseMoe : worker.moe_by_model?.[key]
+        const moeOn = key in moeOptimistic
+          ? !!moeOptimistic[key]
+          : (override !== undefined && override !== null
+            ? !!override : !!worker.moe_effective?.[key])
+        const architecture = worker.moe_detail?.[key] || m?.moe || {}
+        const experts = Number(architecture.expert_bytes || 0)
+        const shared = Number(architecture.non_expert_bytes || 0)
+        const totalModelBytes = Number(plan?.size_bytes || sizeInfo(key)?.bytes || det?.model_bytes || 0)
+        // DB-FIRST weights split (operator 2026-10-02: "these distributions are
+        // off" — central's planned_split priced MoE-off as 9.6 GiB GPU + 20.2 GiB
+        // RAM for a 19.9 GiB file). The pair's stored verdict for the selected
+        // quant carries memory[mode] = {weights_gpu, weights_ram}; the mode is the
+        // same one the Alloc cell shows (operator pin, else the auto mode for the
+        // DB MoE knob). Central's split is only the fallback without a verdict.
+        const db = pairDb(key, m)
+        const dbModeM = db.mode
+        const memM = db.mem
+        const hasDbSplit = !!(memM && (memM.weights_gpu != null || memM.weights_ram != null))
+        const hasMoeRatio = !hasDbSplit && moeOn && totalModelBytes > 0 && experts > 0 && shared > 0
+        const gpu = hasDbSplit ? Number(memM.weights_gpu || 0)
+          : hasMoeRatio ? Math.round(totalModelBytes * shared / (shared + experts))
+          : (hasPlan ? Number(plan.gpu_bytes || 0) : vram)
+        const ram = hasDbSplit ? Number(memM.weights_ram || 0)
+          : hasMoeRatio ? totalModelBytes - gpu
+          : (hasPlan ? Number(plan.ram_bytes || 0) : anon)
+        if (gpu == null && ram == null) return <span className="wp-lt-muted">—</span>
+        // KV at the context target from the DB kv_cost of the selected quant,
+        // scaled by the KV cache type; ctx = largest multiple of 1024 ≤ trained*pct.
+        const kvCostM = db.kvCost
+        const ctxTrainM = db.ctxTrain
+        const pctM = db.pct
+        const ctxM = ctxTrainM ? Math.max(Math.min(1024, ctxTrainM), Math.floor(ctxTrainM * pctM / 100 / 1024) * 1024) : 0
+        const kvTypeM = db.kvType
+        const kvMulM = db.kvMul
+        const kvM = (kvCostM && ctxM) ? (Number(kvCostM.fixed_bytes || 0) + Number(kvCostM.bytes_per_token || 0) * ctxM) * kvMulM : 0
+        const gpuWeights = gpu
+        const computeM = hasDbSplit ? Number(memM.compute_bytes || 0) : 0
+        // KV placement follows the stored verdict's mode: the cache sits where
+        // attention runs. ram-only (CPU inference) keeps it in RAM; every GPU
+        // mode (incl. MoE explicit with experts in RAM) keeps it in VRAM.
+        const kvOnGpu = hasDbSplit ? db.kvDevice !== 'ram' : true
+        const kvFrac = (db.perClass && kvOnGpu) ? db.perClass.kvGpuFraction : (kvOnGpu ? 1 : 0)
+        const gpuWithKv = (gpu || 0) + kvM * kvFrac + (kvOnGpu ? computeM : 0)
+        const ramWithKv = (ram || 0) + kvM * (1 - kvFrac)
+        const total = gpuWithKv + ramWithKv
+        const gpuBudgetM = db.gpuBudget
+        const overBudget = gpuBudgetM > 0 && gpuWithKv > gpuBudgetM
+        const gpuPct = total > 0 ? (gpuWithKv / total) * 100 : 0
+        const measured = (vram != null || anon != null)
+          ? `Current measured residency: ${fmtBytes(vram || 0)} VRAM and ${fmtBytes(anon || 0)} RAM.` : ''
+        const kvNoteM = kvM
+          ? ` Plus KV ${fmtBytes(kvM)} in ${kvOnGpu ? 'VRAM' : 'RAM'} at ctx ${ctxM.toLocaleString()} (${pctM}% of ${ctxTrainM.toLocaleString()}; ${(Number(kvCostM.bytes_per_token || 0) * kvMulM / 1048576).toFixed(2)} MiB/token at ${kvTypeM} cache, from the DB).`
           : ''
-        const layersTxt = ngl == null ? ''
-          : `${ngl === -1 ? 'all' : ngl}${totalLayers ? `/${totalLayers}` : ''} layers on GPU`
-        const declaredTitle = declared != null
-          ? `${fmtBytes(declared)} on disk${si && si.isGguf ? ` (effective quant${si.effGguf ? ` ${si.effGguf}` : ''}, not the all-quants dir sum)` : ''}`
-          : ''
-        // The FULL breakdown for the tooltip — the honest three quantities named.
-        const fullTitle = [
-          declaredTitle,
-          resident != null ? `${fmtBytes(resident)} resident = ${vram != null ? fmtBytes(vram) : '0'} VRAM + ${anon != null ? fmtBytes(anon) : '0'} anon RAM` : '',
-          layersTxt,
-          (vram != null || anon != null)
-            ? 'VRAM/RAM figures are MEASURED (nvidia-smi / rss_anon / ram_resident); VRAM 0 = running on CPU'
-            : (det?.gpu_pct != null ? 'GPU split is DECLARED by the loader, not a measured VRAM read' : ''),
-        ].filter(Boolean).join(' · ')
-        // NOT-YET-RESIDENT: show the PLANNED division, not the on-disk size.
-        // The old fallback rendered "<X> disk" — the exact number the Size
-        // column already shows, which is the redundancy the operator flagged.
-        // planned_split answers the question this column exists for ("where will
-        // this actually go") and moves with the Alloc mode, the 4-bit lever and
-        // the MoE lever, so flipping any switch visibly updates the row.
-        if (resident == null && measuredVram == null && plan
-            && (plan.gpu_bytes != null || plan.ram_bytes != null)) {
-          const g = plan.gpu_bytes, r = plan.ram_bytes
-          const parts = []
-          if (g) parts.push(`${fmtBytes(g)} VRAM`)
-          if (r) parts.push(`${fmtBytes(r)} RAM`)
-          return (
-            <span className="wp-model-facts wp-fact-planned" title={
-              (plan.split
-                ? `PLANNED expert split: ${fmtBytes(g || 0)} of non-expert tensors on the GPU, `
-                  + `${fmtBytes(r || 0)} of experts in RAM. `
-                : `PLANNED placement under '${plan.mode}': `)
-              + (plan.split ? '' : `${fmtBytes(g || r || 0)} on ${g ? 'the GPU' : 'the CPU'}`
-                 + (plan.mode === 'max-gpu' ? ' (spills whatever will not fit at load time)' : '')
-                 + '. ')
-              + 'Not resident yet — this is what the current Alloc mode and the '
-              + '4-bit / MoE switches add up to, not a measurement.'}>
-              {parts.join(' + ')}
-              <span className="wp-fact-planned-tag"> planned</span>
-            </span>
-          )
-        }
+        const title = `${hasDbSplit ? `Stored verdict (${dbModeM}${db.bnbOn ? ', 4-bit' : ''}, from the DB)` : hasMoeRatio ? 'MoE model-size ratio' : hasPlan ? 'Planned allocation' : 'Measured allocation'}: ${fmtBytes(gpuWeights || 0)} VRAM weights and ${fmtBytes(ram || 0)} RAM.${kvNoteM}`
+          + (computeM ? ` Plus ${fmtBytes(computeM)} compute allowance.` : '')
+          + (gpuBudgetM ? ` GPU budget ${fmtBytes(gpuBudgetM)}${overBudget ? ' — EXCEEDED at this context' : ''}.` : '')
+          + (hasMoeRatio ? ` Shared tensors are ${(shared / (shared + experts) * 100).toFixed(1)}% of model size; experts are ${(experts / (shared + experts) * 100).toFixed(1)}%.` : '')
+          + (!hasMoeRatio && plan?.split ? ' MoE weight split.' : '')
+          + (!hasMoeRatio && hasPlan ? ' Applies on the next load.' : '')
+          + (measured ? ` ${measured}` : '')
+        const pinnedPlacement = PLACEMENT_PINS.filter(k => {
+          const v = databaseWorker?.user_settings?.[k]; return v !== undefined && v !== null
+        })
         return (
-          <span className="wp-model-facts" title={fullTitle}>
-            {declared != null && <span className="wp-fact-disk">{fmtBytes(declared)} disk</span>}
-            {resident != null ? (
-              <span className="wp-fact-resident">
-                {' · '}{fmtBytes(resident)} resident
-                <span className="wp-fact-split"> ({vram != null ? fmtBytes(vram) : '0'} VRAM + {anon != null ? fmtBytes(anon) : '0'} RAM)</span>
-                {totalLayers != null && ngl != null && (
-                  <span className="wp-fact-layers"> · {ngl === -1 ? totalLayers : ngl}/{totalLayers} layers</span>
-                )}
-              </span>
-            ) : measuredVram != null
-              ? (measuredVram > 0 ? ` · ${fmtBytes(measuredVram)} VRAM` : ' · 0 VRAM · on CPU')
-              : det?.gpu_pct != null ? ` · ~${det.gpu_pct}% GPU / ${100 - det.gpu_pct}% spill` : ''}
-            {resident != null && planParts.length > 0 && (
-              <span className="wp-fact-planned" title={plannedTitle}>
-                {' · '}{planParts.join(' + ')}<span className="wp-fact-planned-tag"> planned</span>
-              </span>
+          <>
+            {pinnedPlacement.length > 0 && (
+              <button className="wp-moe-auto" disabled={applying} style={{ marginRight: 4, verticalAlign: 'middle' }}
+                      title={`Restore AUTO placement — clears ${pinnedPlacement.join(', ')} on this pair so it follows the derivation again. Context, KV cache and quant picks stay.`}
+                      onClick={e => { e.stopPropagation(); revertPlacement(key, pinnedPlacement) }}>⟲</button>
             )}
+          <span className={`wp-memory-allocation${hasPlan || hasDbSplit ? ' is-planned' : ''}`} title={title} style={overBudget ? { color: 'var(--danger, #d33)' } : undefined}>
+            <span className="wp-memory-bar" aria-hidden="true">
+              <span className="wp-memory-bar-gpu" style={{ width: `${gpuPct}%` }} />
+              <span className="wp-memory-bar-ram" style={{ width: `${100 - gpuPct}%` }} />
+            </span>
+            <span className="wp-memory-values">
+              <span>{fmtBytes(gpuWithKv - (kvOnGpu ? computeM : 0))} GPU{kvM && kvOnGpu ? ` (KV ${fmtBytes(kvM)}${kvTypeM !== 'f16' ? ` ${kvTypeM}` : ''})` : ''}{kvOnGpu && computeM ? <span className="wp-lt-muted"> +{fmtBytes(computeM)} reserve</span> : null}{overBudget ? ' ⚠' : ''}</span>
+              <span>{fmtBytes(ramWithKv)} RAM{kvM && !kvOnGpu ? ` (KV ${fmtBytes(kvM)})` : ''}</span>
+            </span>
           </span>
+          </>
         )
       },
     },

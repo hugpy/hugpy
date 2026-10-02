@@ -1,0 +1,61 @@
+{
+  "base_url": "http://127.0.0.1:7002",
+  "created_utc": "20260928T004335Z",
+  "captures": [
+    {
+      "name": "models",
+      "url": "http://127.0.0.1:7002/api/models",
+      "accept": "application/json",
+      "timeout_s": 120.0,
+      "http_status": 200,
+      "elapsed_s": 0.56,
+      "content_type": "application/json",
+      "body_bytes": 437103,
+      "raw_body_file": "models.body",
+      "json": true,
+      "pretty_json_file": "models.json",
+      "ok": true
+    },
+    {
+      "name": "workers",
+      "url": "http://127.0.0.1:7002/api/llm/workers",
+      "accept": "application/json",
+      "timeout_s": 120.0,
+      "http_status": 200,
+      "elapsed_s": 0.563,
+      "content_type": "application/json",
+      "body_bytes": 593221,
+      "raw_body_file": "workers.body",
+      "json": true,
+      "pretty_json_file": "workers.json",
+      "ok": true
+    },
+    {
+      "name": "snapshot",
+      "url": "http://127.0.0.1:7002/api/llm/snapshot",
+      "accept": "application/json",
+      "timeout_s": 120.0,
+      "http_status": 200,
+      "elapsed_s": 0.015,
+      "content_type": "application/json",
+      "body_bytes": 977433,
+      "raw_body_file": "snapshot.body",
+      "json": true,
+      "pretty_json_file": "snapshot.json",
+      "ok": true
+    },
+    {
+      "name": "events_initial_snapshot",
+      "url": "http://127.0.0.1:7002/api/llm/events",
+      "accept": "text/event-stream",
+      "timeout_s": 120.0,
+      "ok": true,
+      "http_status": 200,
+      "elapsed_s": 0.024,
+      "content_type": "text/event-stream; charset=utf-8",
+      "raw_sse_file": "events_initial_snapshot.sse",
+      "pretty_json_file": "events_initial_snapshot.json",
+      "body_bytes": 1037210
+    }
+  ]
+}

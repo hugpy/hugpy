@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react'
 import ModelLiveState from '../ModelLiveState/ModelLiveState'
-import { uploadFile } from '../../api'
+import { fetchJson, uploadFile } from '../../api'
 import * as chatStore from './chatStore'
 import { CopyButton, DiagnosticsView, toJsonText } from '../Diagnostics/Diagnostics'
 import { holdingWorkers } from './workers'
@@ -72,6 +72,7 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
   const [system, setSystem]         = useState('')
   const [maxTokens, setMaxTokens]   = useState(null)   // null = model max (auto-continued)
   const [attachment, setAttachment] = useState(null)   // {name, isImage, dataUrl?, path?, uploading?}
+  const [voiceState, setVoiceState] = useState('idle') // idle | recording | transcribing
   // '' = system decides (no alloc sent); else a worker name -> alloc: {worker}
   const [workerPin, setWorkerPinState] = useState(() => chatStore.getWorkerPin(modelKey))
   const setWorkerPin = useCallback((w) => { setWorkerPinState(w); chatStore.setWorkerPin(modelKey, w) }, [modelKey])
@@ -80,6 +81,8 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
   const fileRef   = useRef(null)
+  const recorderRef = useRef(null)
+  const voiceChunksRef = useRef([])
 
   const storeSnapshot = useSyncExternalStore(chatStore.subscribe, chatStore.getSnapshot, chatStore.getSnapshot)
   const streaming  = !!storeSnapshot.streaming[modelKey]
@@ -139,6 +142,64 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
       setAttachment(null)
     }
   }, [])
+
+  const transcribeVoice = useCallback(async (blob) => {
+    setVoiceState('transcribing')
+    try {
+      const ext = blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'
+      const file = new File([blob], `station-voice.${ext}`, { type: blob.type || 'audio/webm' })
+      const uploaded = await uploadFile(file)
+      const result = await fetchJson('/api/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task: 'automatic-speech-recognition',
+          file: uploaded.path,
+        }),
+      })
+      const text = result?.text || result?.transcription || result?.result?.text || ''
+      if (!String(text).trim()) throw new Error('Whisper returned no transcript')
+      setInput(prev => prev.trim() ? `${prev.trim()} ${String(text).trim()}` : String(text).trim())
+      requestAnimationFrame(() => inputRef.current?.focus())
+    } catch (err) {
+      alert(`Voice transcription failed: ${err?.message ?? err}`)
+    } finally {
+      setVoiceState('idle')
+    }
+  }, [])
+
+  const toggleVoice = useCallback(async () => {
+    if (voiceState === 'transcribing') return
+    if (voiceState === 'recording') {
+      recorderRef.current?.stop()
+      return
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      alert('This browser does not support microphone recording.')
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
+        .find(t => MediaRecorder.isTypeSupported(t)) || ''
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined)
+      voiceChunksRef.current = []
+      recorder.ondataavailable = e => { if (e.data.size) voiceChunksRef.current.push(e.data) }
+      recorder.onstop = () => {
+        stream.getTracks().forEach(track => track.stop())
+        const blob = new Blob(voiceChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+        recorderRef.current = null
+        if (blob.size) transcribeVoice(blob)
+        else setVoiceState('idle')
+      }
+      recorderRef.current = recorder
+      setVoiceState('recording')
+      recorder.start()
+    } catch (err) {
+      setVoiceState('idle')
+      alert(`Microphone access failed: ${err?.message ?? err}`)
+    }
+  }, [transcribeVoice, voiceState])
 
   // Building the request and driving the fetch/SSE-stream-reading loop both
   // now live in chatStore.sendMessage — a plain module-level function, not a
@@ -302,11 +363,16 @@ export default function ChatPanel({ modelKey, model, onClose, messages = [], set
 
       <div className="chat-input-row">
         <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={onPickFile} />
-        <button className="btn-attach" onClick={() => fileRef.current?.click()} disabled={streaming} title="Attach file">📎</button>
+        <button className="btn-attach" onClick={() => fileRef.current?.click()} disabled={streaming || voiceState !== 'idle'} title="Attach file">📎</button>
+        <button className={`btn-voice${voiceState === 'recording' ? ' is-recording' : ''}`} onClick={toggleVoice}
+                disabled={streaming || voiceState === 'transcribing'}
+                title={voiceState === 'recording' ? 'Stop recording and transcribe' : voiceState === 'transcribing' ? 'Transcribing with Whisper…' : 'Record voice with local Whisper'}>
+          {voiceState === 'recording' ? '⏹' : voiceState === 'transcribing' ? '…' : '🎙'}
+        </button>
         <textarea
           ref={inputRef} className="chat-input" rows={3} value={input}
           onChange={e => setInput(e.target.value)} onKeyDown={onKey}
-          placeholder="Message… (Enter to send, Shift+Enter for newline)" disabled={streaming}
+          placeholder={voiceState === 'transcribing' ? 'Transcribing with Whisper…' : 'Message… (Enter to send, Shift+Enter for newline)'} disabled={streaming || voiceState !== 'idle'}
         />
         {streaming ? (
           <button className="btn-stop" onClick={stop} title="Stop generating">

@@ -187,6 +187,11 @@ def test_gguf_inspect_reads_metadata_and_dense_vs_moe(tmp_path):
     d = gi.gguf_moe_detail(moe)
     assert d["is_moe"] is True and d["expert_count"] == 8 and d["sparsity"] == 0.25
     assert d["expert_bytes"] > 0 and set(d["expert_bytes_by_layer"]) == {0, 1}
+    # Impossible active counts are malformed metadata, not a valid >100% ratio.
+    invalid = str(tmp_path / "invalid-ratio.gguf")
+    _gguf(invalid, [("qwen.expert_count", 4, 8), ("qwen.expert_used_count", 4, 9)],
+          [("blk.0.ffn_gate_exps.weight", (2, 2, 8), 16)])
+    assert gi.gguf_moe_detail(invalid)["sparsity"] is None
     assert gi.gguf_moe_detail(str(tmp_path / "missing.gguf")) == {"is_moe": False}
     assert gi.gguf_metadata(str(tmp_path / "missing.gguf"), (".x",)) == {}
     # the marker writer sees the same truth

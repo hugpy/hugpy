@@ -29,6 +29,7 @@ from hugpy_engine.model_index.service import ModelIndexService, name_forms
 # ============================================================
 
 from hugpy_engine.model_index.query_registry import (
+    PAIR_KNOB_KEYS,
     CallQueries,
     DiscoveryQueries,
     MetricsQueries,
@@ -62,6 +63,15 @@ record_cold_load = _service.record_cold_load
 fetch_model_metrics = _service.fetch_model_metrics
 fetch_model_calls = _service.fetch_model_calls
 fetch_worker_averages = _service.fetch_worker_averages
+sync_worker_settings = _service.sync_worker_settings
+fetch_models_for_display = _service.fetch_models_for_display
+fetch_worker_settings = _service.fetch_worker_settings
+resolve_model_id = _service.resolve_model_id
+write_pair_knobs = _service.write_pair_knobs
+read_pair_knobs = _service.read_pair_knobs
+pair_knobs_by_worker = _service.pair_knobs_by_worker
+set_pair_assigned = _service.set_pair_assigned
+fetch_assigned_by_worker = _service.fetch_assigned_by_worker
 
 
 def last_db_error():
@@ -78,5 +88,9 @@ __all__ = [
     "save_discovery", "load_discovery", "record_metric", "record_call",
     "record_grade", "record_cold_load",
     "fetch_model_metrics", "fetch_model_calls", "fetch_worker_averages", "fetch_call_stats",
+    "sync_worker_settings",
+    "fetch_models_for_display",
+    "fetch_worker_settings",
+    "resolve_model_id", "write_pair_knobs", "read_pair_knobs", "pair_knobs_by_worker", "PAIR_KNOB_KEYS", "set_pair_assigned", "fetch_assigned_by_worker",
     "last_db_error",
 ]

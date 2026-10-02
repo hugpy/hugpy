@@ -276,6 +276,17 @@
 .btn-send:hover:not(:disabled) { background: #7be5f5; border-color: #7be5f5; }
 .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
+.btn-voice {
+  padding: 9px 11px;
+  font-size: 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.btn-voice.is-recording { color: #ff7b8b; border-color: #ff7b8b; animation: voice-pulse 1.2s ease-in-out infinite; }
+.btn-voice:disabled { opacity: 0.5; cursor: wait; }
+@keyframes voice-pulse { 50% { opacity: 0.55; } }
+
 /* ── attachment ──────────────────────────────────────────────────────── */
 .btn-attach {
   padding: 9px 11px;

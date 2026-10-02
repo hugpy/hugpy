@@ -50,10 +50,21 @@ MEMBERS_INTENT = _env_flag("HUGPY_BOT_MEMBERS_INTENT", False)
 
 # Discord caps a single message at 2000 chars; leave headroom for markdown.
 MESSAGE_CHAR_LIMIT = 1900
+# chatshare caps a message body at 8000 chars (PROTOCOL.md). Leave headroom for
+# the streamer's cursor glyph exactly as Discord leaves headroom under 2000.
+CHATSHARE_CHAR_LIMIT = 8000
 # Largest attachment we will pull from Discord and forward to hugpy.
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 # Conversation turns kept per channel for chat context.
 HISTORY_MAX_TURNS = 20
+
+# ── chatshare front end (abstractendeavors.com /chat) ─────────────────────
+# The adapter is the chatshare face of the SAME hugpy-bot process. It connects to
+# the chat service's bot websocket. It starts ONLY when a token is set (so the
+# Discord arm is wholly unaffected until the chat service is deployed). In
+# production both run on the same host, so the default URL is loopback.
+CHATSHARE_BOT_URL = os.getenv("CHATSHARE_BOT_URL") or "ws://127.0.0.1:6013/chat/bot"
+CHATSHARE_BOT_TOKEN = (os.getenv("CHATSHARE_BOT_TOKEN") or "").strip()
 
 
 def _read_legacy_token(name: str) -> str | None:

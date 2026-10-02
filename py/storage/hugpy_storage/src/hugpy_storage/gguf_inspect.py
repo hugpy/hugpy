@@ -427,7 +427,12 @@ def gguf_moe_detail(model_path) -> dict:
     # RAM bandwidth reproduces the measured ~24 tok/s). Carried for the
     # placement evaluator; None when either count is unreadable.
     sparsity = None
-    if expert_count and expert_used:
+    # A routed-expert ratio is meaningful only when both metadata values are
+    # positive and the active count fits within the declared expert pool.
+    # Treat inconsistent header values as unknown instead of emitting a ratio
+    # above 100% (or dividing by zero).
+    if (expert_count and expert_count > 0 and expert_used and expert_used > 0
+            and expert_used <= expert_count):
         try:
             sparsity = float(expert_used) / float(expert_count)
         except (TypeError, ValueError, ZeroDivisionError):

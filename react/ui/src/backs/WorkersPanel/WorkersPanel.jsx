@@ -1192,7 +1192,8 @@ function ContextMenu({ anchorRef, maxContext, value, onApply, onClose }) {
     : Math.max(1, Math.round(Number(maxContext) * shownPct / 100))
   return (
     <div className="wp-allocmode-menu wp-context-menu" ref={ref}
-         style={pos ? { position: 'fixed', top: pos.top, left: pos.left } : undefined}
+         style={pos ? { position: 'fixed', top: pos.top, left: pos.left }
+           : { position: 'fixed', visibility: 'hidden', pointerEvents: 'none' }}
          onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
       <div className="wp-context-head">Context allocation</div>
       <PlainSlider label="CTX" min={1} max={100} value={pct} onChange={setPct}
@@ -3373,7 +3374,10 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
       },
     },
     moe: {
-      // MoE — the EXPERT-SPLIT lever (operator ask 2026-07-26). Tri-state, but
+      // MoE — show the MODEL'S ARCHITECTURE separately from the expert-split
+      // placement lever. The old checkbox alone was misleading: checked meant
+      // experts were currently split, not that the model had a particular MoE
+      // shape.
       // presented as a plain checkbox on purpose: AUTO renders TICKED whenever
       // the derivation actually produced a split, so the operator sees the real
       // behaviour instead of an empty box that secretly means "on"
@@ -3381,7 +3385,7 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
       // checked box under the correct column, that could be switched by the
       // user"). Clicking pins the opposite state; ⟲ returns it to auto.
       label: 'MoE', sortable: false, cls: '',
-      render: ({ key }) => {
+      render: ({ key, m }) => {
         if (!worker.moe_capable?.[key]) {
           return <span className="wp-4bit-na" title={
             'No expert structure — this model is dense, so there is nothing to '
@@ -3391,8 +3395,17 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
         const pinned = ov !== undefined && ov !== null
         const on = key in moeOptimistic ? moeOptimistic[key]
                  : (pinned ? !!ov : !!worker.moe_effective?.[key])
+        const arch = worker.moe_detail?.[key] || m?.moe || {}
+        const expertCount = Number(arch.expert_count ?? arch.n_experts ?? 0)
+        const activeExperts = Number(arch.expert_used_count ?? arch.expert_used ?? arch.active_experts ?? 0)
+        const archLabel = expertCount && activeExperts
+          ? `${expertCount}/${activeExperts}` : 'MoE'
+        const archTitle = expertCount && activeExperts
+          ? `Model architecture: ${expertCount} total experts, ${activeExperts} active per token${arch.sparsity != null ? ` (${(Number(arch.sparsity) * 100).toFixed(2)}% routed density)` : ''}. The allocation is shown in Planned Memory.`
+          : 'Model has expert structure. The checkbox is placement only: expert tensors in RAM vs GPU.'
         return (
           <span className="wp-moe">
+            <span className="wp-moe-arch" title={archTitle}>{archLabel}</span>
             <label title={
               pinned
                 ? `Expert split PINNED ${on ? 'on' : 'off'} by you. Click to flip; ⟲ restores auto.`
@@ -3593,6 +3606,7 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
         // this actually go") and moves with the Alloc mode, the 4-bit lever and
         // the MoE lever, so flipping any switch visibly updates the row.
         const plan = worker.planned_split?.[key]
+        const planLabel = plan?.split ? 'MoE' : (plan?.mode || 'placement')
         if (resident == null && measuredVram == null && plan
             && (plan.gpu_bytes != null || plan.ram_bytes != null)) {
           const g = plan.gpu_bytes, r = plan.ram_bytes
@@ -3602,7 +3616,7 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
           return (
             <span className="wp-model-facts wp-fact-planned" title={
               (plan.split
-                ? `PLANNED expert split: ${fmtBytes(g || 0)} of non-expert tensors on the GPU, `
+                ? `PLANNED MoE allocation (${planLabel}): ${fmtBytes(g || 0)} non-expert/shared tensors in VRAM, `
                   + `${fmtBytes(r || 0)} of experts in RAM. `
                 : `PLANNED placement under '${plan.mode}': `)
               + (plan.split ? '' : `${fmtBytes(g || r || 0)} on ${g ? 'the GPU' : 'the CPU'}`
@@ -3610,7 +3624,7 @@ function WorkerRow({ worker, models, allocation, onAssign, onLoad, onUnassign, o
                  + '. ')
               + 'Not resident yet — this is what the current Alloc mode and the '
               + '4-bit / MoE switches add up to, not a measurement.'}>
-              {parts.join(' + ')}
+              {plan.split ? 'MoE: ' : ''}{parts.join(' + ')}
               <span className="wp-fact-planned-tag"> planned</span>
             </span>
           )
@@ -4526,6 +4540,8 @@ function GroupAssignPanel({ models, workers, onGroupAssign }) {
 
 export default function WorkersPanel({ models = [], embedded = false }) {
   const [workers, setWorkers] = useState([])
+  const [modelDbRows, setModelDbRows] = useState([])
+  const [modelDbStatus, setModelDbStatus] = useState('loading')
   const [error, setError]     = useState(null)
   const [open, setOpen]       = useSessionState('hugpy.sess.wp.open', false)  // session-sticky expansion
   const [form, setForm]       = useState({ name: '', url: '', models: '' })
@@ -4544,6 +4560,42 @@ export default function WorkersPanel({ models = [], embedded = false }) {
   // Same transient for ⬆ Update: the worker pip-installs then restarts itself,
   // so it wears its own flag (a longer fallback — pip is slower than a re-exec).
   const [updating, setUpdating] = useState({})      // worker.id -> true
+
+  // The worker table's model identity and related per-worker controls are
+  // hydrated from the canonical Hugpy model tables. The endpoint is GET-only;
+  // knob writes continue through the existing worker API, whose PostgreSQL
+  // registry transaction also updates models.model_workers.
+  useEffect(() => {
+    let alive = true
+    const refreshModelDb = () => fetchJson('/api/models/database?limit=1000')
+      .then(data => {
+        if (!alive) return
+        if (Array.isArray(data?.rows)) {
+          setModelDbRows(data.rows)
+          setModelDbStatus('connected')
+        } else setModelDbStatus('unavailable')
+      })
+      .catch(() => { if (alive) setModelDbStatus('unavailable') })
+    refreshModelDb()
+    const timer = setInterval(refreshModelDb, 15000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [])
+
+  const displayModels = useMemo(() => {
+    const byName = new Map()
+    for (const row of modelDbRows) {
+      for (const key of [row.name, row.hub_id,
+        row.hub_id?.includes('/') ? row.hub_id.replace('/', '~') : null]) {
+        if (key) byName.set(String(key).toLowerCase(), row)
+      }
+    }
+    return (models || []).map(model => {
+      const names = [model.model_key, model.key, model.hub_id, model.name]
+        .filter(Boolean).map(x => String(x).toLowerCase())
+      const database = names.map(name => byName.get(name)).find(Boolean) || null
+      return database ? { ...model, _modelDatabase: database } : model
+    })
+  }, [models, modelDbRows])
 
   // ── Per-worker TABS (operator, 2026-07-26) ────────────────────────────────
   // The pool used to render every worker's card stacked down the page, which
@@ -5510,6 +5562,10 @@ export default function WorkersPanel({ models = [], embedded = false }) {
            onClick={embedded ? undefined : () => setOpen(o => !o)}>
         <span className="wp-title">🖧 GPU Workers</span>
         <span className="wp-count">{onlineCount} online / {workers.length} total</span>
+        <span className={`wp-db-status wp-db-${modelDbStatus}`}
+              title="Worker model details are read from Hugpy's canonical PostgreSQL models table; allocation and setting changes are persisted by the server.">
+          model DB {modelDbStatus}
+        </span>
         {fleet.hasVram && (
           <span className="wp-fleet" title="VRAM used / total across online workers">
             VRAM {fmtBytes(fleet.used)} / {fmtBytes(fleet.total)} · {fmtBytes(fleet.free)} free
@@ -5570,7 +5626,7 @@ export default function WorkersPanel({ models = [], embedded = false }) {
             <WorkerRow
               key={w.id}
               worker={w}
-              models={models}
+              models={displayModels}
               allocation={allocationMap}
               onAssign={assign}
               onRefresh={load}

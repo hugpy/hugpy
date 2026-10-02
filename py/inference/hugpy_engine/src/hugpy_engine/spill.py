@@ -526,6 +526,41 @@ def moe_split_need(detail: dict, n_cpu_moe: Optional[int] = None) -> "Optional[d
             "layers_on_cpu": n}
 
 
+def moe_split_need_partial(detail: dict, n_cpu_moe: Optional[int], n_gpu_layers) -> "Optional[dict]":
+    """PER-CLASS pricing of a MoE split when attention is only PARTLY on the GPU
+    (operator 2026-10-02, explicit layer counts): ``--n-gpu-layers a`` puts the
+    LAST a layers' attention (+ their KV) on the card; ``--n-cpu-moe c`` keeps
+    the FIRST c layers' experts in RAM. Expert tensors of a layer land on the
+    GPU only when that layer is a GPU layer AND its index >= c. Returns
+    ``{"cpu_bytes", "gpu_bytes", "layers_on_cpu", "gpu_layers", "layers",
+    "layer_fraction"}`` — ``gpu_bytes`` is what the launch really puts on the
+    card (attention share × a/L + GPU-resident experts), ``layer_fraction`` the
+    a/L share of the KV cache that lives there. None for dense/unreadable."""
+    base = moe_split_need(detail, n_cpu_moe)
+    if base is None:
+        return None
+    by_layer = detail.get("expert_bytes_by_layer") or {}
+    layers = sorted(by_layer)
+    L = len(layers)
+    if not L:
+        return dict(base, gpu_layers=None, layers=0, layer_fraction=1.0)
+    try:
+        a = int(n_gpu_layers)
+    except (TypeError, ValueError):
+        a = -1
+    if a < 0 or a >= L:
+        return dict(base, gpu_layers=L, layers=L, layer_fraction=1.0)
+    c = L if n_cpu_moe is None else max(0, min(L, int(n_cpu_moe)))
+    nexpert = int(detail.get("non_expert_bytes") or 0)
+    first_gpu = L - a
+    gpu_exp = sum(int(by_layer[layers[i]]) for i in range(max(c, first_gpu), L))
+    cpu_exp = int(detail.get("expert_bytes") or 0) - gpu_exp
+    frac = a / float(L)
+    return {"cpu_bytes": int(cpu_exp), "gpu_bytes": int(nexpert * frac + gpu_exp),
+            "layers_on_cpu": max(c, first_gpu), "gpu_layers": a, "layers": L,
+            "layer_fraction": frac}
+
+
 def moe_dense_first_plan(detail: dict,
                          gpu_budget_bytes: Optional[int],
                          *, extra_reserve_bytes: int = 0) -> "Optional[dict]":
@@ -1010,7 +1045,8 @@ def served_ctx_for_fit(model_path: str, *, free_vram: Optional[int] = None,
                        parallel: int = 1, kv_dtype_bytes: float = 2.0,
                        extra_reserve_bytes: int = 0,
                        geometry: Optional[dict] = None,
-                       weights_on_gpu_bytes: Optional[int] = None) -> int:
+                       weights_on_gpu_bytes: Optional[int] = None,
+                       gpu_layer_fraction: float = 1.0) -> int:
     """THE context a llama.cpp GGUF should be SERVED at (the single source of
     truth for ``-c``, the fit reserve, and the reported ctx).
 
@@ -1061,6 +1097,15 @@ def served_ctx_for_fit(model_path: str, *, free_vram: Optional[int] = None,
                 fixed_ctx_bytes = int(kb.get("kv_swa_bytes") or 0) + int(kb.get("state_bytes") or 0)
     except Exception:  # noqa: BLE001 — structure gap -> the dense per-token figure
         fixed_ctx_bytes = 0
+    # PARTIAL attention offload (2026-10-02): the KV cache follows each layer's
+    # device, so only the a/L share of it lands on the card. 1.0 = all layers.
+    try:
+        _frac = max(0.0, min(1.0, float(gpu_layer_fraction)))
+    except (TypeError, ValueError):
+        _frac = 1.0
+    if _frac < 1.0:
+        per_tok = per_tok * _frac
+        fixed_ctx_bytes = int(fixed_ctx_bytes * _frac)
     extra_reserve_bytes = int(extra_reserve_bytes or 0) + fixed_ctx_bytes
     if per_tok <= 0:
         return max(floor, _round_down_multiple(upper))

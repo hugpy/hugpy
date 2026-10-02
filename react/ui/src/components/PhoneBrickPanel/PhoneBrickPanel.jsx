@@ -146,7 +146,12 @@ export default function PhoneBrickPanel({ embedded = false }) {
       .catch(e => setError(e.message))
   }, [])
 
+  // PAUSED (operator 2026-10-02): the phone-brick pool is not an active
+  // feature for now — no 10 s poll (central's "phones" feed is paused too).
+  // A manual refresh still works for anyone wiring a handset up.
+  const PHONE_BRICK_PAUSED = true
   useEffect(() => {
+    if (PHONE_BRICK_PAUSED) return undefined
     load()
     const t = setInterval(load, 10_000)
     return () => clearInterval(t)
@@ -219,7 +224,14 @@ export default function PhoneBrickPanel({ embedded = false }) {
       <div className={`pb-bar${embedded ? ' pb-bar-static' : ''}`}
            onClick={embedded ? undefined : () => setOpen(o => !o)}>
         <span className="pb-title">📱 Phone Brick — video analytics pool</span>
-        <span className="pb-count">{onlineCount} online / {phones.length} total</span>
+        {PHONE_BRICK_PAUSED ? (
+          <span className="pb-count" title="Paused as an active feature (operator 2026-10-02): no 10 s registry poll and central's phones feed is off. Handsets can still register; click refresh to read the pool once."
+                onClick={e => { e.stopPropagation(); load() }} style={{ cursor: 'pointer' }}>
+            ⏸ paused · {phones.length ? `${onlineCount} online / ${phones.length} total · ` : ''}↻ refresh
+          </span>
+        ) : (
+          <span className="pb-count">{onlineCount} online / {phones.length} total</span>
+        )}
         {error && <span className="pb-err" title={error}>registry read failed: {error}</span>}
         {!embedded && <span className="pb-toggle">{open ? '▾' : '▸'}</span>}
       </div>

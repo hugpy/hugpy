@@ -734,7 +734,8 @@ def _slot_parallel(ctx=None, model_bytes=None):
 
 def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
                path=None, gpu_mem_gib=None, cpu_mem_gib=None, profile_bin=None,
-               n_cpu_moe=None, tensor_split=None, main_gpu=None):
+               n_cpu_moe=None, tensor_split=None, main_gpu=None,
+               kv_cache_type=None, flash_attn=None):
     """argv for the child llama-server + the resolved (ngl, ctx, threads, cpus).
 
     ``n_cpu_moe`` (MoE expert split, 2026-07-24; DEFAULT since 2026-07-25):
@@ -1062,17 +1063,26 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
     if eff_n_cpu_moe and moe_mode == "explicit" and not _ctx_given:
         try:
             from hugpy_engine.spill import (free_vram_bytes, gguf_moe_detail,
-                                            moe_split_need, served_ctx_for_fit)
-            _split = moe_split_need(gguf_moe_detail(path), int(eff_n_cpu_moe))
+                                            moe_split_need_partial, served_ctx_for_fit)
+            # PER-CLASS aware (2026-10-02, operator: "probably the slot mechanism
+            # is to blame"): with --n-gpu-layers a < L only the last a layers'
+            # attention AND KV sit on the card, and only experts of GPU layers
+            # at/after --n-cpu-moe do. The whole-model pricing this guard used
+            # before (all attention + all KV) trimmed Anko's 20/20 split from
+            # 262144 to 142336 although the verdict priced it at 20.5/24 GiB.
+            _split = moe_split_need_partial(gguf_moe_detail(path), int(eff_n_cpu_moe), ngl)
             if _split and _split.get("gpu_bytes"):
+                _frac = float(_split.get("layer_fraction") or 1.0)
                 _fit = served_ctx_for_fit(path, free_vram=free_vram_bytes(),
                                           weights_on_gpu_bytes=int(_split["gpu_bytes"]),
-                                          extra_reserve_bytes=_mmproj_reserve)
+                                          extra_reserve_bytes=_mmproj_reserve,
+                                          gpu_layer_fraction=_frac)
                 if _fit and int(_fit) < int(ctx):
                     logger.info("slot %s: %s ctx %s -> %s to fit beside %.1f GiB "
-                                "of split weights (--n-cpu-moe %s)", SLOT_ID,
-                                model_key, ctx, _fit,
-                                int(_split["gpu_bytes"]) / 2 ** 30, eff_n_cpu_moe)
+                                "of split weights (--n-gpu-layers %s, --n-cpu-moe %s, "
+                                "KV share %.0f%%)", SLOT_ID, model_key, ctx, _fit,
+                                int(_split["gpu_bytes"]) / 2 ** 30, ngl, eff_n_cpu_moe,
+                                _frac * 100)
                     ctx = int(_fit)
         except Exception:  # noqa: BLE001 — keep the resolved ctx
             pass
@@ -1296,10 +1306,26 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
                 argv += ["--cont-batching"]
             logger.info("slot %s: %s concurrency --parallel %s cont-batching -c %s",
                         SLOT_ID, model_key, n_par, c_val)
-        if (os.environ.get("HUGPY_SLOT_FLASH_ATTN", "").strip().lower()
-                in ("1", "true", "yes", "on")
-                and _server_supports_flag(server_bin, "--flash-attn")):
+        # KV cache knobs (per-pair, DB-owned, 2026-10-02): a quantized cache
+        # (q8_0 / q4_0) shrinks KV by ~2x / ~3.5x vs f16 and REQUIRES flash
+        # attention, so it implies it. flash_attn=None keeps the legacy
+        # HUGPY_SLOT_FLASH_ATTN env behaviour; an explicit bool wins.
+        _kct = str(kv_cache_type or os.environ.get("HUGPY_SLOT_KV_CACHE_TYPE") or "").strip().lower()
+        if _kct in ("f16", "bf16", ""):
+            _kct = ""                       # llama-server default (f16)
+        _fa = flash_attn
+        if isinstance(_fa, str):                 # env wire: "True"/"false"/"1"
+            _fa = _fa.strip().lower() in ("1", "true", "yes", "on")
+        if _fa is None:
+            _fa = (os.environ.get("HUGPY_SLOT_FLASH_ATTN", "").strip().lower()
+                   in ("1", "true", "yes", "on"))
+        if _kct:
+            _fa = True
+        if _fa and _server_supports_flag(server_bin, "--flash-attn"):
             argv += ["--flash-attn", "on"]
+        if _kct and _server_supports_flag(server_bin, "--cache-type-k"):
+            argv += ["--cache-type-k", _kct, "--cache-type-v", _kct]
+            logger.info("slot %s: %s KV cache %s (flash attention on)", SLOT_ID, model_key, _kct)
         if fit_capable:
             argv += ["--fit", "off"]
         if eff_n_cpu_moe is not None:
@@ -1857,7 +1883,8 @@ class Slot:
              cpu_mem_gib=None, profile_bin=None, force=False,
              n_cpu_moe=None, alloc_mode=None, alloc_requested=None,
              alloc_source=None, reload_reason=None,
-             tensor_split=None, main_gpu=None) -> dict:
+             tensor_split=None, main_gpu=None,
+             kv_cache_type=None, flash_attn=None) -> dict:
         with self.lock:
             # k64: the ACTIVE allocation mode, as a per-load opt. The slot is a
             # separate process spawned at boot, so the agent's per-request
@@ -1920,7 +1947,8 @@ class Slot:
                 model_key, n_gpu_layers, ctx, threads, cpus, path=path,
                 gpu_mem_gib=gpu_mem_gib, cpu_mem_gib=cpu_mem_gib,
                 profile_bin=self.profile_bin, n_cpu_moe=n_cpu_moe,
-                tensor_split=self.tensor_split, main_gpu=self.main_gpu)
+                tensor_split=self.tensor_split, main_gpu=self.main_gpu,
+                kv_cache_type=kv_cache_type, flash_attn=flash_attn)
             # per-load GPU pin overrides the slot's MAIN_GPU default; a split
             # leaves the card unset so every visible GPU can hold its shard.
             self.gpu = None if is_split else (gpu if gpu not in (None, "") else MAIN_GPU)
@@ -2324,6 +2352,8 @@ def build_app():
                                      alloc_requested=body.get("alloc_requested"),
                                      alloc_source=body.get("alloc_source"),
                                      reload_reason=body.get("reload_reason"),
+                                     kv_cache_type=body.get("kv_cache_type"),
+                                     flash_attn=body.get("flash_attn"),
                                      tensor_split=body.get("tensor_split"),
                                      main_gpu=body.get("main_gpu")))
         except Exception as exc:  # noqa: BLE001

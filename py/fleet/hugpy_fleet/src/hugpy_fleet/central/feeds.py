@@ -67,7 +67,11 @@ FEEDS = {
     "queue":     ("/llm/queue", 2.0, None),
     "jobs":      ("/llm/jobs?live=0", 3.0, None),
     "downloads": ("/jobs", 3.0, None),
-    "phones":    ("/phone-brick/phones", 10.0, None),
+    # "phones" PAUSED (operator 2026-10-02: "the phone-brick … can be paused as
+    # an active feature for now, at least in the heartbeats, of which it's near
+    # the only beat left"). The /phone-brick routes stay for device M2M calls;
+    # central just stops rebuilding the pool feed every 10 s. Re-enable by
+    # restoring: "phones": ("/phone-brick/phones", 10.0, None),
     "serving":   ("/llm/serving", 15.0, None),
     "peers":     ("/llm/peers", 15.0, None),
 }

@@ -194,6 +194,17 @@
 .wp-servtable-row.wp-servtable-blocked > td:not(.wp-servtable-selcol):not(.wp-servtable-stickycol) { opacity: 0.55; }
 .wp-servtable-row.wp-servtable-blocked > td.wp-servtable-stickycol { color: var(--muted); }
 .wp-servtable-row.wp-servtable-blocked .wp-servtable-name { text-decoration: line-through; text-decoration-color: rgba(248, 81, 73, 0.5); }
+.wp-model-db-pill { display:inline-block; margin-left:5px; padding:0 4px; border:1px solid var(--border,#52606d); border-radius:4px; color:var(--muted,#8b949e); font-size:9px; line-height:14px; vertical-align:1px; }
+.wp-memory-allocation { display:inline-flex; min-width:112px; flex-direction:column; gap:3px; vertical-align:middle; cursor:help; }
+.wp-memory-bar { display:flex; width:100%; height:6px; overflow:hidden; border-radius:999px; background:var(--surface-2,#202833); }
+.wp-memory-bar-gpu { display:block; min-width:0; height:100%; background:var(--accent,#60a5fa); }
+.wp-memory-bar-ram { display:block; min-width:0; height:100%; background:var(--teal,#34d399); }
+.wp-memory-values { display:flex; justify-content:space-between; gap:8px; color:var(--muted,#8b949e); font-size:10px; line-height:1.2; white-space:nowrap; }
+.wp-memory-allocation.is-planned .wp-memory-values { color:var(--text,#d7dee8); }
+.wp-db-status { font-size:11px; opacity:.85; }
+.wp-db-connected { color:var(--success,#3fb950); }
+.wp-db-loading { color:var(--muted,#8b949e); }
+.wp-db-unavailable { color:var(--danger,#f85149); }
 
 .wp-load-toggle {
   margin-top: 6px;
@@ -1590,6 +1601,7 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 /* MoE expert-split lever. The ⟲ appears only when the operator has PINNED a
    state, so an auto row (the default) stays a plain checkbox. */
 .wp-moe { display: inline-flex; align-items: center; gap: 4px; }
+.wp-moe-split { color: var(--muted); font-size: 11px; white-space: nowrap; }
 /* Own class, not a borrowed .wp-4bit-box: two different levers in adjacent
    columns must be distinguishable in the DOM. */
 .wp-moe-box { cursor: pointer; margin: 0; vertical-align: middle; }

@@ -791,6 +791,38 @@ def set_override(model_key: str, fields: dict) -> dict:
             data[model_key] = current
         else:
             data.pop(model_key, None)
+        # In PostgreSQL mode, persist the model and its worker settings first.
+        # The JSON file remains the serving runtime's compatibility projection;
+        # a failed DB write rejects this knob change instead of reporting success
+        # while leaving the canonical database stale.
+        from hugpy_engine import model_index
+        if model_index.enabled():
+            worker_prefs = current.get("worker_prefs") or []
+            by_worker = current.get("gguf_file_by_worker") or {}
+            worker_ids = list(dict.fromkeys(
+                [str(w) for w in worker_prefs]
+                + [str(w) for w in by_worker]
+            ))
+            shared = {k: v for k, v in current.items()
+                      if k not in ("worker_prefs", "gguf_file_by_worker")}
+            worker_settings = {}
+            for worker_id in worker_ids:
+                settings = dict(shared)
+                if worker_id in by_worker:
+                    settings["gguf_file"] = by_worker[worker_id]
+                elif by_worker and current.get("gguf_file"):
+                    # A per-worker pin only overrides the model-wide choice
+                    # for workers named in that map.
+                    settings["gguf_file"] = current["gguf_file"]
+                worker_settings[worker_id] = {
+                    "allocation_rank": (worker_prefs.index(worker_id)
+                                        if worker_id in worker_prefs else None),
+                    "settings": settings,
+                }
+            if not model_index.sync_worker_settings(
+                    model_key, worker_settings, model_settings=current):
+                raise RuntimeError(
+                    "model settings were not saved: the Hugpy database is unavailable")
         _save(data)
     # ``gguf_file`` picks WHICH quant serves, so it changes effective_bytes /
     # effective_gguf / mmproj_bytes / moe — the persisted size half. It is an

@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import struct
 from datetime import datetime, timezone
 from abstract_essentials import safe_dump_to_json
 from hugpy_platform.constants import HUGPY_MARKER, MODELS_HOME
@@ -649,6 +651,416 @@ def manifest_file_status(directory, manifest, *, paths=None, weights_only=False)
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# THE MARKER IS THE MODEL'S INIT RECORD FOR THE DB (operator ruling 2026-10-02:
+# "the hugpy.json is the init for the model so far as the DB is concerned, and
+# the hugpy.json should house enough info and metadata to sufficiently be that
+# … we don't need reasons to API-call Hugging Face ever again after download").
+#
+#   "hub"            the FULL serialized repo-info row the download path cached
+#                    (model_metadata.serialize_model_info): id/sha, tags, license,
+#                    pipeline/library, gated, siblings with sizes, params, dates.
+#                    hub_meta stays as the small subset discovery reads.
+#   "weights_facts"  per weights FILE (each GGUF quant; one "dir" entry for a
+#                    non-GGUF model): size, sha256 (from the manifest), MoE
+#                    structure (expert / non-expert bytes, counts), KV geometry
+#                    (layers, kv heads, head_dim, trained ctx), bnb eligibility.
+#                    Computed ONCE per file signature from local reads; never
+#                    re-derived by a consumer — the DB ingests this block.
+#
+# Both are stamped by write_hugpy_marker (download / re-stamp) and can be
+# backfilled on an existing marker by the two stamp_* functions below. All
+# local reads except stamp_marker_hub(fetch=True), the ONE permitted backfill
+# call for a marker whose Hub row was never cached.
+# ---------------------------------------------------------------------------
+HUB_KEY = "hub"
+WEIGHTS_FACTS_KEY = "weights_facts"
+WEIGHTS_FACTS_VERSION = 2   # v2: per-file kv_cost (ctx -> KV bytes, precalculated)
+INIT_BLOCKS = (MANIFEST_KEY, HUB_KEY, WEIGHTS_FACTS_KEY)
+
+
+def _hub_repo(hub_id):
+    hub_id = (hub_id or "").strip("/")
+    if "/" not in hub_id or hub_id.split("/", 1)[0].lower() in LOCAL_HUB_NAMESPACES:
+        return None
+    return "/".join(hub_id.split("/")[:2])
+
+
+def cached_hub_record(hub_id):
+    """The FULL serialized repo-info row from the LOCAL metadata store (never a
+    network call); None on a miss / local namespace."""
+    repo = _hub_repo(hub_id)
+    if not repo:
+        return None
+    from hugpy_storage.model_metadata import model_metadata_store
+    row = model_metadata_store.get_repo_info(repo)
+    return dict(row) if isinstance(row, dict) else None
+
+
+def stamp_marker_hub(directory, marker=None, write=True, fetch=False):
+    """Set ``hub`` (the full Hub record) on an existing marker when absent.
+    ``fetch=True`` is the ONE-TIME backfill for a dir whose row was never
+    cached: it goes through model_metadata.fetch_repo_info (cache-first, then
+    one Hub call that is itself cached). Returns the marker when it changed and
+    was written, else None."""
+    marker = marker if marker is not None else read_hugpy_marker(directory)
+    if not isinstance(marker, dict) or isinstance(marker.get(HUB_KEY), dict):
+        return None
+    repo = _hub_repo(marker.get("hub_id"))
+    if not repo:
+        return None
+    row = None
+    try:
+        row = cached_hub_record(repo)
+        if row is None and fetch:
+            from hugpy_storage.model_metadata import fetch_repo_info
+            row = fetch_repo_info(repo, files_metadata=True)
+            row = dict(row) if isinstance(row, dict) else None
+    except Exception:  # noqa: BLE001 — a missing Hub row never blocks the stamp
+        row = None
+    if not row:
+        return None
+    row["captured_at"] = _utc_now_iso()
+    marker[HUB_KEY] = row
+    if marker.get(HUB_META_KEY) is None:
+        hm = hub_meta_from_repo_info(row)
+        if hm:
+            marker[HUB_META_KEY] = hm
+    if write:
+        _save_marker(directory, marker)
+    return marker
+
+
+def _file_sig(path):
+    st = os.stat(path)
+    return {"path": path, "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+
+
+def _gguf_shards(path):
+    try:
+        from hugpy_engine.spill import _gguf_shard_paths
+        return list(_gguf_shard_paths(path)) or [path]
+    except Exception:  # noqa: BLE001 — single file when the shard helper is unavailable
+        return [path]
+
+
+def _manifest_sha(marker, rel):
+    for f in ((marker.get(MANIFEST_KEY) or {}).get("files") or []):
+        if isinstance(f, dict) and f.get("path") == rel:
+            return f.get("sha256")
+    return None
+
+
+# ctx -> KV cost table (operator ruling 2026-10-02: "all should be reflected
+# from the db; the ctx to KV ratio precalculated as well"). Priced ONCE per
+# file from its attention structure (hugpy_engine.spill.kv_bytes_for_geo:
+# sliding-window / linear-attention aware when the GGUF carries it, else the
+# dense formula), then any UI prices any context from the record alone:
+#   kv(ctx) ≈ fixed_bytes + bytes_per_token * ctx      (exact at ctx_train)
+# with the exact figures at the listed percentages of the trained context.
+KV_COST_VERSION = 1
+KV_COST_PCTS = (5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 75, 80, 90, 100)
+KV_COMPUTE_BYTES = 512 * 1024 * 1024          # the compute allowance the planner adds
+
+
+def kv_cost_for_gguf(path, geo):
+    """Precalculated ctx -> KV cost for ONE gguf, or None when unpriceable."""
+    from hugpy_engine.spill import kv_bytes_for_geo
+    g = dict(geo or {})
+    train = int(g.get("ctx_train") or 0)
+    if train <= 0:
+        return None
+    g["gguf_path"] = path
+    full = int(kv_bytes_for_geo(g, train, 2.0) or 0)
+    if full <= 0:
+        return None
+    half_ctx = max(1, train // 2)
+    half = int(kv_bytes_for_geo(g, half_ctx, 2.0) or 0)
+    slope = (full - half) / float(train - half_ctx) if train > half_ctx else full / float(train)
+    fixed = max(0, int(round(full - slope * train)))
+    dense = int(kv_bytes_for_geo({k: v for k, v in g.items() if k != "gguf_path"}, train, 2.0) or 0)
+    return {"version": KV_COST_VERSION, "ctx_train": train, "dtype_bytes": 2.0,
+            "bytes_per_token": int(round(slope)), "fixed_bytes": fixed,
+            "compute_bytes": KV_COMPUTE_BYTES,
+            "basis": "dense-formula" if full == dense else "gguf-structure",
+            "at_pct": {str(pct): int(kv_bytes_for_geo(g, max(1, train * pct // 100), 2.0) or 0)
+                       for pct in KV_COST_PCTS}}
+
+
+_ST_DTYPE_BYTES = {"F64": 8, "I64": 8, "F32": 4, "I32": 4, "F16": 2, "BF16": 2, "I16": 2,
+                   "F8_E4M3": 1, "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1}
+_EXPERT_LAYER_RE = re.compile(r"\.layers\.(\d+)\.(?:mlp\.|block_sparse_moe\.|feed_forward\.)?experts\.")
+
+
+def _safetensors_tensors(directory):
+    """(name, bytes) for every tensor in the dir's safetensors shards — HEADER
+    reads only (8-byte length + JSON), never the weights. The index's weight_map
+    names the shards when present; else every *.safetensors in the dir."""
+    files = []
+    idx = os.path.join(directory, "model.safetensors.index.json")
+    try:
+        with open(idx, "r", encoding="utf-8") as f:
+            wm = (json.load(f) or {}).get("weight_map") or {}
+        files = sorted(set(wm.values()))
+    except (OSError, ValueError):
+        files = []
+    if not files:
+        files = sorted(fn for fn in os.listdir(directory) if fn.lower().endswith(".safetensors"))
+    out = []
+    for fn in files:
+        path = os.path.join(directory, fn)
+        try:
+            with open(path, "rb") as f:
+                n = struct.unpack("<Q", f.read(8))[0]
+                hdr = json.loads(f.read(n))
+        except (OSError, ValueError, struct.error):
+            continue
+        for name, meta in hdr.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            offs = meta.get("data_offsets")
+            if isinstance(offs, (list, tuple)) and len(offs) == 2:
+                nbytes = int(offs[1]) - int(offs[0])
+            else:
+                count = 1
+                for d in (meta.get("shape") or []):
+                    count *= int(d)
+                nbytes = count * _ST_DTYPE_BYTES.get(str(meta.get("dtype")), 2)
+            out.append((name, nbytes))
+    return out
+
+
+def _text_config(cfg):
+    """The language-model block of a transformers config (nested for VL /
+    conditional-generation wrappers), else the config itself."""
+    if not isinstance(cfg, dict):
+        return {}
+    for k in ("text_config", "llm_config", "language_config"):
+        sub = cfg.get(k)
+        if isinstance(sub, dict) and (sub.get("num_hidden_layers") or sub.get("num_attention_heads")):
+            return sub
+    return cfg
+
+
+def transformers_kv_geometry(cfg):
+    """KV geometry from a transformers config: layer count, the KV-BEARING layer
+    count (hybrid models: only ``full_attention`` entries of ``layer_types`` hold
+    a KV cache; linear-attention layers hold a FIXED recurrent state instead),
+    kv heads, head dim, trained ctx, and that fixed state in bytes."""
+    c = _text_config(cfg)
+    n_layers = int(c.get("num_hidden_layers") or 0)
+    n_heads = int(c.get("num_attention_heads") or 0)
+    n_kv = int(c.get("num_key_value_heads") or n_heads or 0)
+    head_dim = int(c.get("head_dim") or 0)
+    if not head_dim and c.get("hidden_size") and n_heads:
+        head_dim = int(c["hidden_size"]) // n_heads
+    if not (n_layers and n_kv and head_dim):
+        return None
+    types = c.get("layer_types") if isinstance(c.get("layer_types"), list) else None
+    n_kv_layers = sum(1 for t in types if str(t) in ("full_attention", "attention", "sliding_attention")) if types else n_layers
+    n_linear = sum(1 for t in types if "linear" in str(t) or "mamba" in str(t)) if types else 0
+    state = 0
+    if n_linear:
+        vh = int(c.get("linear_num_value_heads") or 0); kh = int(c.get("linear_num_key_heads") or 0)
+        kd = int(c.get("linear_key_head_dim") or 0); vd = int(c.get("linear_value_head_dim") or 0)
+        conv = int(c.get("linear_conv_kernel_dim") or 0)
+        recurrent = vh * kd * vd * 2                              # S = (v_heads, k_dim, v_dim) at bf16
+        conv_state = max(0, conv - 1) * (2 * kh * kd + vh * vd) * 2   # last k-1 inputs of the qkv conv
+        state = n_linear * (recurrent + conv_state)
+    geo = {"n_layers": n_layers, "n_kv_layers": n_kv_layers, "n_kv_heads": n_kv, "head_dim": head_dim,
+           "ctx_train": int(c.get("max_position_embeddings") or 0) or None,
+           "dtype": c.get("dtype") or c.get("torch_dtype")}
+    if types:
+        geo["hybrid"] = {"full_attention": n_kv_layers, "linear": n_linear, "state_bytes": state}
+        geo["state_bytes"] = state
+    return geo
+
+
+def kv_cost_for_geo(geo):
+    """The ctx -> KV cost table from a geometry alone (no GGUF): linear in ctx
+    over the KV-bearing layers at f16, plus the hybrid fixed state."""
+    g = dict(geo or {})
+    train = int(g.get("ctx_train") or 0)
+    bpt = 2 * int(g.get("n_kv_layers") or g.get("n_layers") or 0) * int(g.get("n_kv_heads") or 0) * int(g.get("head_dim") or 0) * 2
+    if train <= 0 or bpt <= 0:
+        return None
+    fixed = int(g.get("state_bytes") or 0)
+    return {"version": KV_COST_VERSION, "ctx_train": train, "dtype_bytes": 2.0, "bytes_per_token": int(bpt),
+            "fixed_bytes": fixed, "compute_bytes": KV_COMPUTE_BYTES, "basis": "config-formula",
+            "at_pct": {str(pct): fixed + bpt * max(1, train * pct // 100) for pct in KV_COST_PCTS}}
+
+
+def transformers_dir_facts(directory):
+    """Local-read facts for a transformers model DIR (operator 2026-10-02: the
+    safetensors Qwen3.6-35B-A3B must be assessed like a GGUF — MoE, ctx, 4-bit):
+    KV geometry + kv_cost from config.json, expert structure from the
+    safetensors headers (tensor names + sizes). Returns {} without config.json."""
+    cfg_path = os.path.join(directory or "", "config.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {"facts_source": "config.json+safetensors-headers"}
+    geo = transformers_kv_geometry(cfg)
+    if geo:
+        out["kv_geo"] = geo
+        out["kv_cost"] = kv_cost_for_geo(geo)
+    c = _text_config(cfg)
+    n_exp = int(c.get("num_experts") or c.get("num_local_experts") or c.get("n_routed_experts") or 0)
+    tensors = _safetensors_tensors(directory)
+    if tensors:
+        by_layer = {}
+        non_expert = 0
+        for name, nbytes in tensors:
+            m = _EXPERT_LAYER_RE.search(name)
+            if m and n_exp:
+                key = ("mtp" if name.startswith("mtp") else "") + m.group(1)
+                by_layer[key] = by_layer.get(key, 0) + int(nbytes)
+            else:
+                non_expert += int(nbytes)
+        out["tensor_bytes"] = sum(b for _n, b in tensors)
+        if by_layer:
+            ordered = {k: by_layer[k] for k in sorted(by_layer, key=lambda k: (k.startswith("mtp"), int(k.lstrip("mtp"))))}
+            out.update(is_moe=True, expert_bytes=sum(ordered.values()), non_expert_bytes=non_expert,
+                       expert_count=n_exp, expert_used_count=int(c.get("num_experts_per_tok") or c.get("num_experts_per_token") or 0) or None,
+                       expert_bytes_by_layer=ordered)
+            if out["expert_count"] and out["expert_used_count"]:
+                out["sparsity"] = out["expert_used_count"] / out["expert_count"]
+    return out
+
+
+def _weights_file_facts(path, *, quant=None, sha256=None, framework=None):
+    """Local-read facts of ONE weights file. GGUF: header-derived MoE structure
+    and KV geometry; anything else: size only."""
+    shards = _gguf_shards(path) if path.lower().endswith(".gguf") else [path]
+    out = {"path": path, "quant": quant, "sha256": sha256, "sig": _file_sig(path),
+           "size_bytes": sum(os.path.getsize(p) for p in shards), "shards": len(shards),
+           "is_moe": False, "kv_geo": None}
+    if path.lower().endswith(".gguf"):
+        try:
+            from hugpy_engine.spill import gguf_moe_detail, _gguf_kv_geometry
+            det = dict(gguf_moe_detail(path) or {})
+            det.pop("expert_bytes_by_layer", None)       # per-layer table stays in the engine cache
+            out["is_moe"] = bool(det.get("is_moe"))
+            for k in ("expert_bytes", "non_expert_bytes", "expert_count", "expert_used_count", "sparsity"):
+                if det.get(k) is not None:
+                    out[k] = det[k]
+            geo = dict(_gguf_kv_geometry(path) or {})
+            geo.pop("gguf_path", None)
+            out["kv_geo"] = geo or None
+            out["kv_cost"] = kv_cost_for_gguf(path, geo) if geo else None
+        except Exception as exc:  # noqa: BLE001 — recorded, never raised: the file is still a fact
+            out["error"] = f"header read failed: {exc}"
+    return out
+
+
+def stamp_marker_weights_facts(directory, marker=None, write=True, force=False):
+    """Compute/refresh ``weights_facts`` on an existing marker: one entry per
+    weights file (GGUF quants from ``quants``/``filename``; a non-GGUF model
+    gets a single "dir" entry sized from the install manifest, else a walk).
+    Only entries whose file signature changed (or are missing) are recomputed.
+    Returns the marker when something changed (and was written), else None."""
+    marker = marker if marker is not None else read_hugpy_marker(directory)
+    if not isinstance(marker, dict):
+        return None
+    prior = marker.get(WEIGHTS_FACTS_KEY) if isinstance(marker.get(WEIGHTS_FACTS_KEY), dict) else {}
+    prior_files = prior.get("files") if isinstance(prior.get("files"), dict) else {}
+    framework = marker.get("framework")
+    files = {}
+    changed = force or prior.get("version") != WEIGHTS_FACTS_VERSION
+    if (framework or "") in ("gguf", "llama_cpp"):
+        rels = []
+        for q in (marker.get("quants") or []):
+            if isinstance(q, dict) and q.get("file"):
+                rels.append((q["file"], q.get("quant")))
+        if marker.get("filename") and marker["filename"] not in [r for r, _ in rels]:
+            rels.append((marker["filename"], None))
+        if not rels:
+            # a marker stamped without its quants: the dir is the truth — list it
+            # (sync_marker_quants is the same listing discovery keeps true) and
+            # carry the list on the marker so the record is sufficient next time
+            try:
+                synced = sync_marker_quants(directory, marker=marker, write=False)
+                for q in ((synced or marker).get("quants") or []):
+                    if isinstance(q, dict) and q.get("file"):
+                        rels.append((q["file"], q.get("quant")))
+                if synced is not None:
+                    changed = True
+            except Exception:  # noqa: BLE001 — listing failure leaves facts empty, said so below
+                pass
+        for rel, quant in rels:
+            path = rel if os.path.isabs(rel) else os.path.join(directory, rel)
+            if not os.path.isfile(path):
+                base = os.path.basename(rel)
+                hit = next((os.path.join(r, base) for r, _d, fs in os.walk(directory) if base in fs), None)
+                if not hit:
+                    continue
+                path = hit
+            key = os.path.basename(path)
+            old = prior_files.get(key)
+            sig = _file_sig(path)
+            if (not force and old and old.get("sig") == sig and not old.get("error")
+                    and "kv_cost" in old):               # v2 field: a v1 entry is recomputed once
+                files[key] = old
+                continue
+            files[key] = _weights_file_facts(path, quant=quant, sha256=_manifest_sha(marker, rel), framework=framework)
+            changed = True
+    else:
+        man = marker.get(MANIFEST_KEY) if isinstance(marker.get(MANIFEST_KEY), dict) else None
+        if man and man.get("files"):
+            size = sum(int(f.get("bytes") or 0) for f in man["files"] if isinstance(f, dict))
+            sig = {"path": directory, "manifest_captured_at": man.get("captured_at"), "size": size}
+        else:
+            size = 0
+            for root, _dirs, fs in os.walk(directory):
+                for f in fs:
+                    try:
+                        size += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            sig = {"path": directory, "size": size, "mtime_ns": int(os.stat(directory).st_mtime_ns)}
+        old = prior_files.get("dir")
+        has_cfg = os.path.isfile(os.path.join(directory, "config.json"))
+        # a dir entry stamped before config/safetensors facts existed is
+        # recomputed once (the "facts_source" key marks the new shape)
+        if not force and old and old.get("sig") == sig and (old.get("facts_source") or not has_cfg):
+            files["dir"] = old
+        else:
+            entry = {"path": None, "dir": directory, "quant": None, "sig": sig, "size_bytes": size,
+                     "is_moe": False, "kv_geo": None}
+            if has_cfg:
+                try:
+                    entry.update(transformers_dir_facts(directory))
+                except Exception as exc:  # noqa: BLE001 — recorded, never raised
+                    entry["error"] = f"config/safetensors facts failed: {exc}"
+            files["dir"] = entry
+            changed = True
+    if set(prior_files) != set(files):
+        changed = True
+    if not changed:
+        return None
+    # bnb eligibility is a model-level fact (framework + name); stamp it per entry too
+    eligible = bool(marker.get("bnb_capable"))
+    for v in files.values():
+        v["bnb_eligible"] = eligible
+    marker[WEIGHTS_FACTS_KEY] = {"version": WEIGHTS_FACTS_VERSION, "computed_at": _utc_now_iso(), "files": files}
+    if write:
+        _save_marker(directory, marker)
+    return marker
+
+
+def marker_init_gaps(marker):
+    """Which init blocks the DB needs that this marker still lacks."""
+    if not isinstance(marker, dict):
+        return list(INIT_BLOCKS)
+    gaps = [k for k in (MANIFEST_KEY, WEIGHTS_FACTS_KEY) if not isinstance(marker.get(k), dict)]
+    if _hub_repo(marker.get("hub_id")) and not isinstance(marker.get(HUB_KEY), dict):
+        gaps.append(HUB_KEY)
+    return gaps
+
+
 def write_hugpy_marker(directory, *, hub_id, name=None, framework=None,
                        tasks=None, primary_task=None, filename=None,
                        include=None, source="download", manifest=None, **extra):
@@ -791,7 +1203,26 @@ def write_hugpy_marker(directory, *, hub_id, name=None, framework=None,
                 hub_meta = None
         if hub_meta:
             payload[HUB_META_KEY] = hub_meta
+    # INIT RECORD (2026-10-02): the full Hub row and the per-file weights facts
+    # ride every identity write — local reads only (cache + headers).
+    if payload.get(HUB_KEY) is None:
+        hub = prior.get(HUB_KEY) if isinstance(prior.get(HUB_KEY), dict) else None
+        if hub is None:
+            try:
+                hub = cached_hub_record(hub_id)
+                if hub:
+                    hub["captured_at"] = _utc_now_iso()
+            except Exception:  # noqa: BLE001 — a cache read must never block the stamp
+                hub = None
+        if hub:
+            payload[HUB_KEY] = hub
+    if payload.get(WEIGHTS_FACTS_KEY) is None and isinstance(prior.get(WEIGHTS_FACTS_KEY), dict):
+        payload[WEIGHTS_FACTS_KEY] = prior[WEIGHTS_FACTS_KEY]
     os.makedirs(directory, exist_ok=True)
+    try:
+        stamp_marker_weights_facts(directory, marker=payload, write=False)
+    except Exception:  # noqa: BLE001 — facts are best-effort at stamp time; the backfill retries
+        pass
     return _save_marker(directory, payload)
 
 

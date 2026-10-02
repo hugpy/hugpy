@@ -1,0 +1,21 @@
+{
+  "name": "@hugpy/testshell",
+  "private": true,
+  "version": "0.1.0",
+  "description": "hugpy testshell: a read-only React view that mirrors the hugpy Postgres DB — one table per model with its worker allocations and per-worker knobs",
+  "type": "module",
+  "scripts": {
+    "api": "/srv/hugpy/venv/bin/python api.py",
+    "dev": "vite --host 0.0.0.0 --port 7014",
+    "build": "vite build",
+    "start": "./dev.sh"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.4"
+  }
+}

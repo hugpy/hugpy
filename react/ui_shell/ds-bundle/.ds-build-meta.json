@@ -1,0 +1,9 @@
+{
+  "namespace": "HugpyUI",
+  "source": "@hugpy/ui@0.2.0",
+  "shape": "package",
+  "provider": "DemoProvider",
+  "componentCount": 19,
+  "skippedStoryIds": [],
+  "runtimeFontPrefixes": []
+}

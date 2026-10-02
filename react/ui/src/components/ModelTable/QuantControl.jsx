@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
 import { hugpyFetch } from '../../runtime/config'
-import { getServing, invalidateServing, primeServing } from './servingCache'
+import { getServing, invalidateServing } from './servingCache'
 import { fetchJson } from '../../api'
 import { sizeView } from './modelSize'
-import { responseReason } from '../responseReason'
+import QuantListbox, { useDbModelRow, quantFitReason } from './QuantListbox'
 
 // Per-model GGUF QUANTIZATION picker — a first-class model setting, not a serving
 // sub-option. A GGUF repo may hold many quants (Q4_K_M, Q5_K_M, Q8_0, …) but only
@@ -32,6 +32,45 @@ export default function QuantControl({ modelKey, framework, onChanged }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [ready, setReady] = useState(false)
+  // DB truth for the listbox (operator 2026-10-02): the assigned pair rows carry
+  // user_settings.quants / gguf_file and their per-quant verdicts.
+  const [dbTick, setDbTick] = useState(0)
+  const [dbRow] = useDbModelRow(modelKey, dbTick)
+  const pairs = (dbRow?.workers || []).filter(w => w && w.assigned !== false)
+  const lists = pairs.map(w => (w.user_settings?.quants || []))
+  const orderCommon = lists[0] || []
+  const varies = lists.some(l => JSON.stringify(l) !== JSON.stringify(orderCommon))
+  const allocs = [...new Set(pairs.map(w => w.user_settings?.gguf_file || w.plan?.default_variant).filter(Boolean))]
+  const factTrained = Object.fromEntries((dbRow?.quants || []).map(q => [q.file, q.kv_cost?.ctx_train ?? null]))
+  const fitFor = (f) => {
+    if (!pairs.length) return { ok: null, text: '' }
+    let k = 0
+    for (const w of pairs) {
+      const v = (w.verdicts || []).find(x => x.file === f)
+      const ks = w.user_settings || {}
+      if (quantFitReason(v?.memory, { ctxPct: ks.ctx_pct ?? null, trained: factTrained[f], kvType: ks.kv_cache_type || 'f16', bnbOn: ks.bnb_4bit === true }) === null) k++
+    }
+    return { ok: k === pairs.length ? true : (k ? null : false), text: `fits on ${k}/${pairs.length} worker${pairs.length === 1 ? '' : 's'}` }
+  }
+  const saveList = async (order) => {
+    setBusy(true); setMsg('saving…')
+    try {
+      const r = await hugpyFetch(`/api/models/database/${encodeURIComponent(modelKey)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(order.length ? { set: { quants: order } } : { unset: ['quants'] }),
+      })
+      const d = await r.json()
+      if (!r.ok && r.status !== 207) throw new Error(d.error || `HTTP ${r.status}`)
+      const refused = Object.entries(d.workers || {}).filter(([, v]) => v.status !== 'ok')
+      setMsg(refused.length ? `saved on ${d.ok}/${d.total} — refused on ${refused.map(([w, v]) => `${w.slice(0, 8)} (${v.status}: ${JSON.stringify(v.detail).slice(0, 80)})`).join(', ')}`
+                            : `✓ list saved on ${d.total} worker${d.total === 1 ? '' : 's'} — applies on the next load`)
+      setDbTick(t => t + 1); invalidateServing(modelKey); onChanged?.()
+    } catch (e) {
+      setMsg(`✗ ${e.message || e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const apply = useCallback((d) => {
     setVariants(Array.isArray(d.available_gguf_detail) ? d.available_gguf_detail : [])
@@ -58,21 +97,27 @@ export default function QuantControl({ modelKey, framework, onChanged }) {
   if (framework !== 'gguf' && framework !== 'llama_cpp') return null
 
   const save = async (value, doApply) => {
-    setBusy(true); setMsg(doApply ? 'reloading…' : 'saving…')
+    setBusy(true); setMsg('saving…')
     try {
-      const r = await hugpyFetch(`/api/llm/serving/${encodeURIComponent(modelKey)}`, {
+      // DB relay (operator 2026-10-02, "retire the json write"): the model-wide
+      // quant pick is the gguf_file knob on EVERY assigned pair row of the model
+      // (POST /models/database/<key>/knobs), never the JSON override. '' = unset
+      // (each worker falls back to its verdict default). Applies on the next load.
+      const r = await hugpyFetch(`/api/models/database/${encodeURIComponent(modelKey)}/knobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gguf_file: value, apply: doApply }),
+        body: JSON.stringify(value ? { set: { gguf_file: value } } : { unset: ['gguf_file'] }),
       })
       const d = await r.json()
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
-      apply(d)
-      if (doApply) {
-        const a = d.apply || {}
-        setMsg(a.applied ? '✓ reloaded with this quant' : `saved — not applied: ${responseReason(a)}`)
-      } else {
-        setMsg('✓ saved')
+      if (!r.ok && r.status !== 207) throw new Error(d.error || `HTTP ${r.status}`)
+      invalidateServing(modelKey)
+      const fresh = await getServing(modelKey)
+      apply(fresh)
+      {
+        const refused = Object.entries(d.workers || {}).filter(([, v]) => v.status !== 'ok')
+        setMsg(refused.length
+          ? `saved on ${d.ok}/${d.total} workers — refused on ${refused.map(([w, v]) => `${w.slice(0, 8)} (${v.status})`).join(', ')}`
+          : `✓ saved on ${d.total} worker${d.total === 1 ? '' : 's'} — applies on the next load`)
       }
       onChanged?.()
     } catch (e) {
@@ -92,6 +137,17 @@ export default function QuantControl({ modelKey, framework, onChanged }) {
       ) : variants.length === 0 ? (
         <div className="mt-quant-none">No .gguf variants downloaded for this model yet.</div>
       ) : (
+        pairs.length ? (
+        <div className="mt-quant-row" style={{ alignItems: 'flex-start' }}>
+          <QuantListbox variants={variants} order={orderCommon} allocated={allocs[0] || null} fitFor={fitFor}
+                        busy={busy} onChange={saveList}
+                        title={`Preference list written to every assigned pair row (${pairs.length}); the server derives gguf_file per worker = the first listed quant that fits there.${varies ? ' Lists currently VARY by worker — this shows the first worker\'s; saving overwrites all.' : ''}`} />
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+            {varies ? '⚠ lists vary by worker · ' : ''}{allocs.length > 1 ? `allocated varies: ${allocs.join(', ')}` : (allocs[0] ? `allocated: ${allocs[0]}` : '')}
+          </span>
+          {msg && <span className="mt-serve-msg">{msg}</span>}
+        </div>
+        ) : (
         <div className="mt-quant-row">
           <select value={sel} disabled={busy}
                   title="Which downloaded quantization this model serves — global for the model. 'auto' lets the resolver pick (q4_k_m first)."
@@ -118,6 +174,7 @@ export default function QuantControl({ modelKey, framework, onChanged }) {
           )}
           {msg && <span className="mt-serve-msg">{msg}</span>}
         </div>
+        )
       )}
     </div>
   )
@@ -155,6 +212,9 @@ export function WorkerQuantSelect({ modelKey, worker, model, disabled = false, d
     return () => { alive = false }
   }, [modelKey, gg])
 
+  const [dbTick, setDbTick] = useState(0)
+  const [dbRow] = useDbModelRow(modelKey, dbTick)
+  const pair = (dbRow?.workers || []).find(w => w && w.worker_id === wid) || null
   const forms = [wid, wname].filter(Boolean).map(x => String(x).toLowerCase())
   const pins = (row && row.gguf_file_by_worker) || {}
   const pinKey = Object.keys(pins).find(k => forms.includes(String(k).toLowerCase()))
@@ -188,27 +248,61 @@ export function WorkerQuantSelect({ modelKey, worker, model, disabled = false, d
   }
 
   const save = async (filename) => {
-    const next = {}
-    for (const [k, v] of Object.entries(pins)) {
-      if (!forms.includes(String(k).toLowerCase())) next[k] = v
-    }
-    if (filename) next[wid || wname] = filename
     setBusy(true); setErr('')
     try {
-      const r = await hugpyFetch(`/api/llm/serving/${encodeURIComponent(modelKey)}`, {
+      // DB relay (operator 2026-10-02, "retire the json write"): THIS worker's
+      // quant pin is the gguf_file knob on the pair row — POST /knobs, never the
+      // JSON override's gguf_file_by_worker map (which the serving GET now
+      // projects FROM the DB). '' (model-wide) = unset.
+      const r = await hugpyFetch(`/api/models/database/${encodeURIComponent(modelKey)}/workers/${encodeURIComponent(wid)}/knobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gguf_file_by_worker: next }),
+        body: JSON.stringify(filename ? { set: { gguf_file: filename } } : { unset: ['gguf_file'] }),
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
-      primeServing(modelKey, d)
-      setRow(d)
+      invalidateServing(modelKey)
+      const fresh = await getServing(modelKey)
+      setRow(fresh)
     } catch (e) {
       setErr(`✗ ${e.message || e}`)
     } finally {
       setBusy(false)
     }
+  }
+
+  const saveList = async (order) => {
+    setBusy(true); setErr('')
+    try {
+      const r = await hugpyFetch(`/api/models/database/${encodeURIComponent(modelKey)}/workers/${encodeURIComponent(wid)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(order.length ? { set: { quants: order } } : { unset: ['quants'] }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`)
+      setDbTick(t => t + 1); invalidateServing(modelKey)
+    } catch (e) {
+      setErr(`✗ ${e.message || e}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (pair) {
+    const ks = pair.user_settings || {}
+    const factTrained = Object.fromEntries((dbRow?.quants || []).map(q => [q.file, q.kv_cost?.ctx_train ?? null]))
+    const fitForPair = (f) => {
+      const v = (pair.verdicts || []).find(x => x.file === f)
+      const reason = quantFitReason(v?.memory, { ctxPct: ks.ctx_pct ?? null, trained: factTrained[f], kvType: ks.kv_cache_type || 'f16', bnbOn: ks.bnb_4bit === true })
+      return { ok: reason === null, text: reason || '✓ fits' }
+    }
+    return (
+      <span className="mt-wq" style={{ display: 'inline-flex', flexDirection: 'column' }}>
+        <QuantListbox variants={variants} order={ks.quants || []} allocated={ks.gguf_file || pair.plan?.default_variant || null}
+                      fitFor={fitForPair} disabled={disabled} busy={busy} onChange={saveList}
+                      title={disabled ? disabledTitle : `Quant preference list for ${wname || wid} (pair knob quants); the allocated quant is the first that fits at this pair's context + KV cache.`} />
+        {err && <span className="mt-serve-msg">{err}</span>}
+      </span>
+    )
   }
 
   const rec = fit && fit.recommended

@@ -1,0 +1,260 @@
+.api-access {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.aa-strip-hint {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aa-locked { color: var(--yellow); border-color: rgba(251, 191, 36, 0.4); }
+.aa-open   { color: var(--green);  border-color: rgba(74, 222, 128, 0.3); }
+
+.aa-body {
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+}
+
+.aa-error { color: var(--red); font-size: 12px; }
+
+.aa-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* The media-intelligence gate — a distinct control below the key-create row. */
+.aa-media-gate {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+/* Hugging Face credentials — a distinct block like the media gate. */
+.aa-hf-gate {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  align-items: flex-start;
+}
+.aa-hf-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.aa-hf-status { font-size: 12px; }
+.aa-hf-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.aa-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  width: 64px;
+  flex-shrink: 0;
+}
+
+.aa-url {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.aa-note { font-size: 11px; color: var(--muted); }
+.aa-note code { color: var(--text); }
+
+.aa-copy {
+  font-size: 10px;
+  padding: 3px 8px;
+  color: var(--muted);
+}
+.aa-copy:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+
+.aa-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.aa-toggle input { accent-color: var(--accent); cursor: pointer; }
+
+.aa-name { flex: 0 1 320px; min-width: 200px; }
+
+/* one-time key reveal */
+.aa-fresh {
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  background: rgba(74, 222, 128, 0.06);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.aa-fresh-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--green);
+}
+.aa-fresh-dismiss {
+  background: none; border: none; color: var(--muted);
+  font-size: 13px; padding: 0 4px;
+}
+.aa-fresh-dismiss:hover:not(:disabled) { color: var(--bright); background: none; }
+.aa-fresh-key {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.aa-fresh-key code {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--bright);
+  word-break: break-all;
+  user-select: all;
+}
+/* shareable live-demo link, shown alongside the freshly-minted key */
+.aa-fresh-demo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+/* key list */
+.aa-keys {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.aa-keys th {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.aa-keys td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.aa-keys tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+.aa-key-name { color: var(--bright); font-weight: 600; }
+.aa-dim { color: var(--muted); font-size: 11px; }
+.aa-key-actions { text-align: right; }
+.aa-revoke {
+  font-size: 10px;
+  padding: 2px 8px;
+  color: var(--muted);
+  background: transparent;
+}
+.aa-revoke:hover:not(:disabled) { color: var(--red); border-color: var(--red); background: transparent; }
+
+/* curl example */
+.aa-example summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+}
+.aa-example summary:hover { color: var(--text); }
+.aa-example pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+/* ── secure one-time install links (2026-07-23) ─────────────────────────── */
+.aa-install-head {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.aa-install-links {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.aa-select {
+  font-size: 12px;
+  padding: 4px 8px;
+  background: var(--surface-1);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.aa-scope-picks {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.aa-key-expiry { max-width: 190px; }
+
+/* small chips: scopes, status, created_by badges */
+.aa-chip {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 7px;
+  margin: 0 3px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-1);
+}
+.aa-chip-install {
+  margin-left: 6px;
+  color: var(--yellow);
+  border-color: rgba(251, 191, 36, 0.4);
+}
+.aa-status-active    { color: var(--green);  border-color: rgba(74, 222, 128, 0.3); }
+.aa-status-exhausted { color: var(--muted); }
+.aa-status-expired   { color: var(--yellow); border-color: rgba(251, 191, 36, 0.4); }
+.aa-status-revoked   { color: var(--red);    border-color: rgba(248, 113, 113, 0.4); }
+
+/* Dated-key pruning (2026-08-05) */
+.aa-keys-toolbar { display: flex; justify-content: flex-end; margin: 0.4rem 0; }
+.aa-prune {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem 0.7rem; font-size: 0.85rem; cursor: pointer;
+  background: transparent; border: 1px solid var(--aa-border, #444);
+  border-radius: 6px; color: inherit;
+}
+.aa-prune:hover { border-color: #b4553a; color: #e07a55; }
+.aa-chip-expired { background: #7a2d1a; color: #ffd9cc; }

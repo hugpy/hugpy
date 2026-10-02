@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="hugpy">
+<title>hugpy</title>
+<defs>
+<radialGradient id="hb" cx="50%" cy="42%" r="62%">
+<stop offset="0" stop-color="#3a3e46"></stop>
+<stop offset="1" stop-color="#23262b"></stop>
+</radialGradient>
+<linearGradient id="hs" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#f4f6f8"></stop>
+<stop offset=".52" stop-color="#c6cbd1"></stop>
+<stop offset="1" stop-color="#878d95"></stop>
+</linearGradient>
+<linearGradient id="ht" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#9fd9e4"></stop>
+<stop offset="1" stop-color="#4d93ac"></stop>
+</linearGradient>
+<clipPath id="hclip">
+<polygon points="120,28 200,74 200,166 120,212 40,166 40,74"></polygon>
+</clipPath>
+</defs>
+<g transform="translate(120,120) scale(1.25) translate(-120,-120)">
+
+<polygon points="120,40 184,80 184,160 120,200 56,160 56,80" fill="url(#hb)"></polygon>
+
+<g clip-path="url(#hclip)">
+<g fill="none" stroke="#c6cbd1" stroke-opacity="0.4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+<line x1="120" y1="40" x2="104" y2="152"></line>
+<line x1="184" y1="80" x2="96" y2="96"></line>
+<line x1="184" y1="160" x2="86" y2="124"></line>
+<line x1="56" y1="160" x2="150" y2="92"></line>
+<line x1="56" y1="80" x2="160" y2="140"></line>
+<line x1="120" y1="200" x2="150" y2="92"></line>
+<line x1="96" y1="96" x2="160" y2="140"></line>
+<line x1="150" y1="92" x2="104" y2="152"></line>
+</g>
+<g fill="none" stroke="#dbe0e5" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<line x1="96" y1="96" x2="150" y2="92"></line>
+<line x1="150" y1="92" x2="140" y2="118"></line>
+<line x1="140" y1="118" x2="160" y2="140"></line>
+<line x1="160" y1="140" x2="104" y2="152"></line>
+<line x1="104" y1="152" x2="86" y2="124"></line>
+<line x1="86" y1="124" x2="96" y2="96"></line>
+</g>
+<g fill="#dbe0e5" fill-opacity="0.85">
+<circle cx="96" cy="96" r="3"></circle>
+<circle cx="150" cy="92" r="3"></circle>
+<circle cx="160" cy="140" r="3"></circle>
+<circle cx="104" cy="152" r="3"></circle>
+<circle cx="86" cy="124" r="3"></circle>
+<circle cx="140" cy="118" r="3"></circle>
+</g>
+</g>
+
+<polygon points="120,40 184,80 184,160 120,200 56,160 56,80" fill="none" stroke="url(#hs)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"></polygon>
+
+<circle cx="120" cy="120" r="14" fill="url(#ht)" fill-opacity="0.18"></circle>
+<circle cx="120" cy="120" r="7" fill="url(#ht)"></circle>
+<circle cx="120" cy="120" r="7" fill="none" stroke="#dfeef2" stroke-opacity="0.5" stroke-width="1.4"></circle>
+</g>
+</svg>

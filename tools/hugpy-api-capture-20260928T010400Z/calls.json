@@ -1,0 +1,71 @@
+{
+  "base_url": "http://127.0.0.1:7002",
+  "created_utc": "20260928T010400Z",
+  "captures": [
+    {
+      "name": "models",
+      "url": "http://127.0.0.1:7002/api/models",
+      "accept": "application/json",
+      "timeout_s": 180.0,
+      "http_status": 200,
+      "elapsed_s": 1.809,
+      "content_type": "application/json",
+      "body_bytes": 437103,
+      "raw_body_file": "models.body",
+      "json": true,
+      "pretty_json_file": "models.json",
+      "ok": true
+    },
+    {
+      "name": "workers",
+      "url": "http://127.0.0.1:7002/api/llm/workers",
+      "accept": "application/json",
+      "timeout_s": 180.0,
+      "http_status": 200,
+      "elapsed_s": 2.248,
+      "content_type": "application/json",
+      "body_bytes": 591538,
+      "raw_body_file": "workers.body",
+      "json": true,
+      "pretty_json_file": "workers.json",
+      "ok": true
+    },
+    {
+      "name": "serving",
+      "url": "http://127.0.0.1:7002/api/llm/serving",
+      "accept": "application/json",
+      "timeout_s": 180.0,
+      "ok": false,
+      "elapsed_s": 180.1,
+      "error": "TimeoutError: timed out",
+      "error_file": "serving.error.txt"
+    },
+    {
+      "name": "snapshot",
+      "url": "http://127.0.0.1:7002/api/llm/snapshot",
+      "accept": "application/json",
+      "timeout_s": 180.0,
+      "http_status": 200,
+      "elapsed_s": 0.036,
+      "content_type": "application/json",
+      "body_bytes": 992212,
+      "raw_body_file": "snapshot.body",
+      "json": true,
+      "pretty_json_file": "snapshot.json",
+      "ok": true
+    },
+    {
+      "name": "events_initial_snapshot",
+      "url": "http://127.0.0.1:7002/api/llm/events",
+      "accept": "text/event-stream",
+      "timeout_s": 180.0,
+      "ok": true,
+      "http_status": 200,
+      "elapsed_s": 0.046,
+      "content_type": "text/event-stream; charset=utf-8",
+      "raw_sse_file": "events_initial_snapshot.sse",
+      "pretty_json_file": "events_initial_snapshot.json",
+      "body_bytes": 1052669
+    }
+  ]
+}

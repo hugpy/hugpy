@@ -1,0 +1,118 @@
+/* Comms sessions panel — mirrors DiscordPanel.css conventions/tokens. */
+.sessions-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sc-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.sc-bar-static { cursor: default; }
+.sc-bar:not(.sc-bar-static):hover { background: var(--surface-2); }
+.sc-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sc-bar:not(.sc-bar-static):hover .sc-title { color: var(--text); }
+.sc-count { color: var(--muted); font-size: 11px; }
+.sc-err { color: var(--red); margin-left: auto; }
+.sc-toggle { margin-left: auto; color: var(--muted); font-size: 10px; }
+.sc-err + .sc-toggle { margin-left: 8px; }
+
+.sc-body { padding: 10px 14px 14px; }
+.sc-howto { color: var(--muted); font-size: 12px; margin-bottom: 10px; line-height: 1.5; }
+.sc-empty { color: var(--muted); padding: 8px 0; }
+
+/* mint form */
+.sc-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.sc-sel, .sc-in {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.sc-in { width: 150px; }
+.sc-in-ttl { width: 160px; }
+.sc-in-instr { width: 100%; margin-bottom: 12px; }
+.sc-sel { max-width: 260px; }
+.sc-add-btn {
+  background: var(--green);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sc-add-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* one-time token reveal */
+.sc-minted {
+  border: 1px solid var(--amber, #d29922);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.sc-minted-head { color: var(--text); font-size: 12px; margin-bottom: 8px; }
+.sc-block {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+.sc-minted-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* session table */
+.sc-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.sc-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.sc-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border); color: var(--text); }
+.sc-row.sc-revoked td, .sc-row.sc-expired td { color: var(--muted); }
+.sc-pill {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.sc-pill-live { color: var(--green); border-color: var(--green); }
+.sc-remove {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--red);
+  padding: 4px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sc-remove:hover { background: var(--border); }

@@ -20,6 +20,8 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
   // checkbox all read the SAME live mode from one server-side source.
   const dist = useFleetDistribution()
   const [workers, setWorkers] = useState([])
+  const [modelDbRows, setModelDbRows] = useState([])
+  const [modelDbStatus, setModelDbStatus] = useState('loading')
   const [error, setError]     = useState(null)
   const [open, setOpen]       = useSessionState('hugpy.sess.wp.open', false)  // session-sticky expansion
   const [form, setForm]       = useState({ name: '', url: '', models: '' })
@@ -38,6 +40,41 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
   // Same transient for ⬆ Update: the worker pip-installs then restarts itself,
   // so it wears its own flag (a longer fallback — pip is slower than a re-exec).
   const [updating, setUpdating] = useState({})      // worker.id -> true
+
+  // Hydrate the rows actually rendered in this panel from Hugpy's canonical
+  // model table. The DB record supplies each worker's persisted knob values;
+  // writes still go through the worker API, which mirrors them to model_workers.
+  useEffect(() => {
+    let alive = true
+    const refresh = () => fetchJson('/api/models/database?limit=1000')
+      .then(data => {
+        if (!alive) return
+        if (Array.isArray(data?.rows)) {
+          setModelDbRows(data.rows)
+          setModelDbStatus('connected')
+        } else setModelDbStatus('unavailable')
+      })
+      .catch(() => { if (alive) setModelDbStatus('unavailable') })
+    refresh()
+    const timer = setInterval(refresh, 15000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [])
+
+  const displayModels = useMemo(() => {
+    const byName = new Map()
+    for (const row of modelDbRows) {
+      for (const key of [row.name, row.hub_id,
+        row.hub_id?.includes('/') ? row.hub_id.replace('/', '~') : null]) {
+        if (key) byName.set(String(key).toLowerCase(), row)
+      }
+    }
+    return (models || []).map(model => {
+      const names = [model.model_key, model.key, model.hub_id, model.name]
+        .filter(Boolean).map(value => String(value).toLowerCase())
+      const database = names.map(name => byName.get(name)).find(Boolean) || null
+      return database ? { ...model, _modelDatabase: database } : model
+    })
+  }, [models, modelDbRows])
 
   // ── Per-worker TABS (operator, 2026-07-26) ────────────────────────────────
   // The pool used to render every worker's card stacked down the page, which
@@ -277,13 +314,33 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
 
   const assign = useCallback(async (worker, modelKey, spill) => {
     try {
-      const body = { model_key: modelKey }
-      if (spill) body.spill = spill
-      await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/assign`, {
+      // DB-owned designation (operator ruling 2026-10-02): the pair row is the
+      // record; central converges through the designation relay. A spill, when
+      // given, is written as pair knobs on the same row (DB-owned too).
+      const base = `/api/models/database/${encodeURIComponent(modelKey)}/workers/${encodeURIComponent(worker.id)}`
+      await fetchJson(`${base}/assigned`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ assigned: true }),
       })
+      if (spill && typeof spill === 'object') {
+        // only DB pair knobs ride (PAIR_KNOB_KEYS server-side); the old explicit
+        // vocabulary (leniency_pct / priority_device) is dropped — replaced by
+        // the per-class layer counts attention_gpu_layers / experts_cpu_layers +
+        // explicit_spill (review 2026-10-02)
+        const KNOBS = ['alloc_mode', 'n_gpu_layers', 'n_cpu_moe', 'gguf_file', 'moe', 'bnb_4bit', 'threads', 'llama_ctx',
+                       'serve_mode', 'gpu_mem_gib', 'cpu_mem_gib', 'ctx_pct', 'kv_cache_type', 'flash_attn',
+                       'attention_gpu_layers', 'experts_cpu_layers', 'explicit_spill']
+        const set = {}
+        for (const [k, v] of Object.entries(spill)) if (KNOBS.includes(k) && v !== undefined && v !== null && v !== '') set[k] = v
+        if (Object.keys(set).length) {
+          await fetchJson(`${base}/knobs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ set }),
+          })
+        }
+      }
       await load()
     } catch (err) { alert(`Assign failed: ${err.message}`) }
   }, [load])
@@ -364,10 +421,15 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
 
   const unassign = useCallback(async (worker, modelKey) => {
     try {
-      await fetchJson(`/api/llm/workers/${encodeURIComponent(worker.id)}/unassign`, {
+      // DB-owned designation (operator ruling 2026-10-02: "these should all be
+      // database relays"): write model_workers.assigned=false through
+      // hugpy-server; central converges in the background (designation relay),
+      // so the click never waits on the WorkerStore lock that hung the old
+      // /unassign for 40 s+.
+      await fetchJson(`/api/models/database/${encodeURIComponent(modelKey)}/workers/${encodeURIComponent(worker.id)}/assigned`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_key: modelKey }),
+        body: JSON.stringify({ assigned: false }),
       })
       load()
     } catch (err) { alert(`Unassign failed: ${err.message}`) }
@@ -1042,6 +1104,12 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
            onClick={embedded ? undefined : () => setOpen(o => !o)}>
         <span className="wp-title">🖧 GPU Workers</span>
         <span className="wp-count">{onlineCount} online / {workers.length} total</span>
+        <span className={`wp-model-db-pill wp-model-db-status-${modelDbStatus}`}
+              title={modelDbStatus === 'connected'
+                ? 'Worker model rows are hydrated from Hugpy’s canonical model database.'
+                : 'Hugpy model database is not available; worker rows are using live registry values.'}>
+          {modelDbStatus === 'connected' ? 'model DB' : modelDbStatus === 'unavailable' ? 'DB unavailable' : 'DB …'}
+        </span>
         {fleet.hasVram && (
           <span className="wp-fleet" title="VRAM used / total across online workers">
             VRAM {fmtBytes(fleet.used)} / {fmtBytes(fleet.total)} · {fmtBytes(fleet.free)} free
@@ -1117,7 +1185,7 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
             <WorkerRow
               key={w.id}
               worker={w}
-              models={models}
+              models={displayModels}
               onChat={onChat}
               allocation={allocationMap}
               onAssign={assign}

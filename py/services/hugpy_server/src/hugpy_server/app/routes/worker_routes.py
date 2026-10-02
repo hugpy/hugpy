@@ -1250,18 +1250,18 @@ def set_worker_moe_route(worker_id):
     would place tensors that do not exist."""
     body = request.get_json(silent=True) or {}
     from hugpy_fleet.central.workers import list_workers, moe_capable, set_moe
-    worker = next((w for w in (list_workers() or [])
-                   if w.get("id") == worker_id), None)
-    if worker is None:
-        return jsonify({"ok": False, "error": {
-            "code": "NotFound", "message": f"no worker {worker_id!r}"}}), 404
     raw = body.get("value", body.get("enabled"))
     value = None if raw is None else bool(raw)
     if body.get("all"):
+        worker = next((w for w in (list_workers() or [])
+                       if w.get("id") == worker_id), None)
+        if worker is None:
+            return jsonify({"ok": False, "error": {
+                "code": "NotFound", "message": f"no worker {worker_id!r}"}}), 404
         keys = [mk for mk in (worker.get("models") or []) if moe_capable(mk)]
         updated = None
         for mk in keys:
-            updated = set_moe(worker_id, mk, value) or updated
+            updated = set_moe(worker_id, mk, value, public_view=False) or updated
         return jsonify({"ok": True, "worker": updated, "count": len(keys),
                         "value": value})
     model_key = body.get("model_key")
@@ -1273,7 +1273,7 @@ def set_worker_moe_route(worker_id):
             "code": "NotEligible",
             "message": (f"{model_key!r} has no expert structure — there is "
                         "nothing to split")}}), 409
-    updated = set_moe(worker_id, model_key, value)
+    updated = set_moe(worker_id, model_key, value, public_view=False)
     if updated is None:
         return jsonify({"ok": False, "error": {
             "code": "NotFound", "message": f"no worker {worker_id!r}"}}), 404
@@ -2451,8 +2451,24 @@ def workers_activity(worker_id):
     worker = get_worker(worker_id)
     if worker is None:
         abort(404, description=f"no worker {worker_id!r} in the central worker registry")
+    # Activity is a console refresh path, not a recovery probe.  Do not dial a
+    # worker that central already knows is offline: a black-holed worker used to
+    # hold this request until nginx produced a 504, making one dead box look
+    # like the whole fleet was down.  The explicit health route remains the
+    # force-dial recovery check.
+    if worker.get("status") != "online":
+        return jsonify({
+            "ok": False,
+            "error": {
+                "code": "WorkerUnreachable",
+                "message": "worker is offline according to its last heartbeat",
+                "url": worker.get("url"),
+            },
+            "activity": [],
+        }), 503
     try:
-        response = worker_http.get(worker, "/ops/activity", read_timeout=10.0)
+        response = worker_http.get(worker, "/ops/activity", call="probe",
+                                   read_timeout=4.0)
         payload = response.json()
         if isinstance(payload, dict) and isinstance(payload.get("activity"), list):
             # The allocation/status row is the one model display. A registered
@@ -4439,7 +4455,14 @@ def _model_ctx_geometry(model_key):
                 out["source"] = "config.json"
                 out["dtype_bytes"] = float(spill._kv_dtype_bytes(geo.get("dtype")) or 2.0)
         out["geometry"] = geo
-        mml = cfg.get("model_max_length") or cfg.get("tokenizer_model_max_length")
+        # Registry rows are not guaranteed to carry the context limit. For
+        # transformers models the authoritative limit is often only in the
+        # model config; use it before falling back to geometry. Without this,
+        # the endpoint returns no `requested` price and the slider can remain
+        # stuck on "pricing…" even though the model is fully inspectable.
+        mml = (cfg.get("model_max_length") or
+               cfg.get("tokenizer_model_max_length") or
+               cfg.get("max_position_embeddings"))
         try:
             mml = int(mml) if mml else 0
         except (TypeError, ValueError):
@@ -6285,12 +6308,33 @@ def _attach_alloc_feasibility(row, model_key):
         row.pop("alloc_modes_feasible", None)
 
 
+def _db_gguf_pins(model_key):
+    """{worker_id: gguf_file} from the DB pair rows, or None when the DB is off."""
+    try:
+        from hugpy_engine.model_index import enabled, resolve_model_id, pair_knobs_by_worker
+        if not enabled():
+            return None
+        mid = resolve_model_id(model_key)
+        if mid is None:
+            return {}
+        knobs = pair_knobs_by_worker(mid)
+        if knobs is None:
+            return None
+        return {wid: str(k["gguf_file"]) for wid, k in knobs.items() if k.get("gguf_file")}
+    except Exception:  # noqa: BLE001 — a read miss falls back to the JSON map
+        return None
+
+
 def _with_gguf(row, model_key):
     """Attach the variant choices + sizes to a serving row (shared by GET/POST)."""
     row["available_gguf"], row["gguf_file"] = _gguf_choices(model_key)
-    # Per-worker quant pins ({worker: basename_or_quant_token}); {} when unset.
-    row["gguf_file_by_worker"] = (get_override(model_key) or {}
-                                  ).get("gguf_file_by_worker") or {}
+    # Per-worker quant pins ({worker_id: basename}) — DB pair knob gguf_file
+    # (operator 2026-10-02, "retire the json write"); the JSON override map is
+    # only the fallback when the database is off.
+    row["gguf_file_by_worker"] = _db_gguf_pins(model_key)
+    if row["gguf_file_by_worker"] is None:
+        row["gguf_file_by_worker"] = (get_override(model_key) or {}
+                                      ).get("gguf_file_by_worker") or {}
     d = _gguf_detail(model_key)
     row["available_gguf_detail"] = d.get("variants") or []
     row["effective_gguf"] = d.get("effective_gguf")

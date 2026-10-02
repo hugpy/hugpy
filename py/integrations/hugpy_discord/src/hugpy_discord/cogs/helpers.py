@@ -1,70 +1,40 @@
-"""Shared cog helpers: model autocomplete, attachment forwarding, and
-non-streaming result delivery."""
+"""Discord-side cog helpers: model autocomplete, attachment forwarding, and
+non-streaming result delivery.
+
+The transport-neutral helpers (``cached_models``, ``model_label``,
+``clean_model_key``, ``split_items``, ``model_choice_pairs``) live in
+``hugpy_discord.core.models`` and are re-exported here for the cogs. This module
+keeps only the Discord-specific pieces (``discord.Attachment`` / ``discord.File``
+/ ``app_commands.Choice``).
+"""
 from __future__ import annotations
 
 import io
-import re
-import time
 
 import discord
 from discord import app_commands
 
 from hugpy_discord.config import MAX_ATTACHMENT_BYTES, MESSAGE_CHAR_LIMIT
 from hugpy_discord.hugpy_client import HugpyError
+from hugpy_discord.core.models import (  # re-exported for the cogs
+    cached_models, clean_model_key, model_choice_pairs, model_label, split_items,
+)
+from hugpy_discord.core.results import CommandResult
 
-_model_cache: tuple[float, list[dict]] = (0.0, [])
-_MODEL_CACHE_TTL = 60.0
+__all__ = [
+    "cached_models", "clean_model_key", "model_choice_pairs", "model_label",
+    "split_items", "model_autocomplete", "forward_attachment", "send_long",
+    "render_result",
+]
 
-
-async def cached_models(bot) -> list[dict]:
-    global _model_cache
-    stamp, models = _model_cache
-    if time.monotonic() - stamp > _MODEL_CACHE_TTL:
-        try:
-            models = await bot.hugpy.list_models()
-            _model_cache = (time.monotonic(), models)
-        except HugpyError:
-            pass  # serve stale (or empty) rather than fail autocomplete
-    return models
-
-
-def model_label(model: dict) -> str:
-    key = model.get("key") or model.get("name") or "?"
-    status = (model.get("status") or "").strip()
-    # Surface a status suffix ONLY when it's something other than the ordinary
-    # "installed". An "(installed)" on every model is noise, and — because this
-    # label is what users read in the dropdown / `/models` list — it collides
-    # with the plain model key when the name is typed or copied as input.
-    if status and status.lower() != "installed":
-        return f"{key} ({status})"
-    return key
-
-
-_STATUS_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
-
-
-def clean_model_key(s: str | None) -> str | None:
-    """Strip a trailing ' (status)' a user may have copied from a model label
-    (valid model keys never end in a parenthetical), so 'Foo (installed)' still
-    resolves to 'Foo'."""
-    if not s:
-        return s
-    return _STATUS_SUFFIX.sub("", s).strip() or s
+_COLOR = {"blurple": discord.Colour.blurple, "red": discord.Colour.red}
 
 
 async def model_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    models = await cached_models(interaction.client)
-    current = current.lower()
-    choices = []
-    for model in models:
-        key = model.get("key") or model.get("name") or ""
-        if current in key.lower():
-            choices.append(app_commands.Choice(name=model_label(model)[:100], value=key))
-        if len(choices) == 25:
-            break
-    return choices
+    pairs = await model_choice_pairs(interaction.client, current)
+    return [app_commands.Choice(name=p["name"], value=p["value"]) for p in pairs]
 
 
 async def forward_attachment(bot, attachment: discord.Attachment) -> str:
@@ -80,12 +50,6 @@ async def forward_attachment(bot, attachment: discord.Attachment) -> str:
     data = await attachment.read()
     uploaded = await bot.hugpy.upload(attachment.filename, data)
     return uploaded["path"]
-
-
-def split_items(raw: str) -> list[str]:
-    """Split user input into items: '||' wins, else newlines, else one item."""
-    sep = "||" if "||" in raw else "\n"
-    return [part.strip() for part in raw.split(sep) if part.strip()]
 
 
 async def send_long(send, text: str, *, filename: str = "result.txt") -> None:
@@ -107,3 +71,36 @@ async def send_long(send, text: str, *, filename: str = "result.txt") -> None:
         content=text[: MESSAGE_CHAR_LIMIT - 100] + "\n… *(full result attached)*",
         file=discord.File(buffer, filename=filename),
     )
+
+
+async def render_result(interaction: discord.Interaction,
+                        result: CommandResult) -> None:
+    """Render a core :class:`CommandResult` onto a (already-deferred) Discord
+    interaction, preserving the historical idioms: attachments via
+    ``discord.File``, embed-style replies via ``discord.Embed`` (fields for
+    sections, description otherwise), long text via :func:`send_long`."""
+    eph = result.ephemeral
+    if result.files:
+        files = [discord.File(io.BytesIO(f.data), filename=f.filename)
+                 for f in result.files]
+        await interaction.followup.send(
+            (result.text or "")[:MESSAGE_CHAR_LIMIT], files=files, ephemeral=eph)
+        return
+    if result.sections or result.title:
+        embed = discord.Embed(colour=_COLOR.get(result.color, _COLOR["blurple"])())
+        if result.title:
+            embed.title = result.title
+        if result.text:
+            embed.description = result.text[:4000]
+        for name, value in result.sections:
+            embed.add_field(name=name, value=value, inline=False)
+        if result.footer:
+            embed.set_footer(text=result.footer)
+        await interaction.followup.send(embed=embed, ephemeral=eph)
+        return
+    if result.long:
+        async def _send(**kw):
+            return await interaction.followup.send(ephemeral=eph, **kw)
+        await send_long(_send, result.text, filename=result.filename)
+        return
+    await interaction.followup.send(result.text, ephemeral=eph)

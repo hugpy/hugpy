@@ -228,6 +228,10 @@ class HugpyBot(commands.Bot):
         # (best-effort in-memory idempotency; the message's own disabled state is
         # the durable guard across a restart).
         self._answered_escalations: set[str] = set()
+        # chatshare front end: a second transport for THIS brain, started in
+        # setup_hook when CHATSHARE_BOT_TOKEN is set (dormant otherwise). Never
+        # touches the Discord arm.
+        self._chatshare_task = None
 
     async def setup_hook(self) -> None:
         # Register the escalation click handlers so button/select clicks resolve
@@ -249,6 +253,14 @@ class HugpyBot(commands.Bot):
         # Members too, but only when the privileged intent is enabled.
         if config.MEMBERS_INTENT:
             self._member_reporter.start()
+        # chatshare front end (same brain). Guarded + dormant without a token;
+        # its own reconnect loop means a chat-service outage never reaches here.
+        try:
+            from hugpy_discord import chatshare
+            self._chatshare_task = chatshare.start(self)
+        except Exception:
+            log.warning("chatshare adapter failed to start; Discord unaffected",
+                        exc_info=True)
 
     async def on_ready(self) -> None:
         log.info("logged in as %s (%s); hugpy central: %s",
@@ -259,6 +271,8 @@ class HugpyBot(commands.Bot):
         self._channel_reporter.cancel()
         if config.MEMBERS_INTENT:
             self._member_reporter.cancel()
+        if self._chatshare_task is not None:
+            self._chatshare_task.cancel()
         await self.hugpy.close()
         await super().close()
 

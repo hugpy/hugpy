@@ -1,27 +1,21 @@
 """Conversational interface: mention/DM chat plus /chat, /model, /reset,
-/running, /stop."""
+/running, /stop, /link.
+
+The streaming turn, per-channel history and the in-flight registry live in the
+transport-neutral :class:`~hugpy_discord.core.chat.ChatEngine`; this cog is the
+Discord face of it (interactions, embeds, typing, attachments)."""
 from __future__ import annotations
 
-import asyncio
-import itertools
 import logging
-import time
-import uuid
-from collections import defaultdict, deque
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from hugpy_discord.config import HISTORY_MAX_TURNS
+from hugpy_discord.core.chat import ChatEngine
+from hugpy_discord.config import MESSAGE_CHAR_LIMIT
 from hugpy_discord.hugpy_client import HugpyError
-from hugpy_discord.streamer import MessageStreamer
-from hugpy_discord.cogs.helpers import (
-    forward_attachment,
-    model_autocomplete,
-    model_label,
-    clean_model_key,
-)
+from hugpy_discord.cogs.helpers import forward_attachment, model_autocomplete
 
 log = logging.getLogger(__name__)
 
@@ -29,103 +23,9 @@ log = logging.getLogger(__name__)
 class ChatCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._history: dict[int, deque] = defaultdict(
-            lambda: deque(maxlen=HISTORY_MAX_TURNS * 2)
-        )
-        # In-flight generations: turn id -> info dict (task, channel, prompt…).
-        # Cancelling the task tears down the SSE stream, which makes central
-        # drop the worker-side generation.
-        self._active: dict[str, dict] = {}
-        self._turn_ids = itertools.count(1)
-
-    # ── core streaming turn ────────────────────────────────────────────────
-    async def run_turn(
-        self,
-        send,
-        *,
-        channel_id: int,
-        user_id: int,
-        prompt: str,
-        model_key: str | None = None,
-        file: str | None = None,
-        remember: bool = True,
-        temperature: float | None = None,
-        top_p: float | None = None,
-        max_new_tokens: int | None = None,
-        do_sample: bool | None = None,
-    ) -> None:
-        # A console-managed Discord binding for this channel/user wins; otherwise
-        # the user's saved pref / configured default (resolved inside the bot).
-        model_key = clean_model_key(model_key) or await self.bot.resolve_model_for(user_id, channel_id)
-        history = list(self._history[channel_id]) if remember else []
-        messages = history + [{"role": "user", "content": prompt}]
-
-        # DISC-06: a channel personality bundles system prompt + params.
-        # Its system prompt heads the message list every turn; its params are
-        # DEFAULTS only — explicit per-turn values keep winning. (Its model
-        # was already applied in resolve_model_for; explicit model wins.)
-        persona = await self.bot.channel_personality(channel_id)
-        if persona:
-            if persona.get("system"):
-                messages = ([{"role": "system", "content": persona["system"]}]
-                            + messages)
-            params = persona.get("params") or {}
-            if temperature is None:
-                temperature = params.get("temperature")
-            if top_p is None:
-                top_p = params.get("top_p")
-            if do_sample is None:
-                do_sample = params.get("do_sample")
-            if max_new_tokens is None:
-                max_new_tokens = params.get("max_new_tokens")
-
-        streamer = MessageStreamer(send)
-        turn_id = f"t{next(self._turn_ids)}"
-        # The request_id central's job store tracks this turn under — /stop
-        # cancels through it, so the generation actually stops server-side
-        # instead of us just dropping our end of the SSE pipe.
-        request_id = uuid.uuid4().hex
-        self._active[turn_id] = {
-            "task": asyncio.current_task(),
-            "request_id": request_id,
-            "channel_id": channel_id,
-            "user_id": user_id,
-            "model": model_key,
-            "prompt": prompt,
-            "started": time.monotonic(),
-        }
-        try:
-            async for chunk in self.bot.hugpy.chat_stream(
-                messages=messages, model_key=model_key, file=file,
-                temperature=temperature, top_p=top_p,
-                max_new_tokens=max_new_tokens, do_sample=do_sample,
-                request_id=request_id,
-                transport="discord", channel=str(channel_id),
-            ):
-                await streamer.feed(chunk)
-            await streamer.finish()
-        except asyncio.CancelledError:
-            log.info("chat turn %s stopped via /stop", turn_id)
-            try:
-                await streamer.fail("stopped via /stop")
-            except Exception:
-                pass
-            return
-        except HugpyError as exc:
-            log.warning("chat turn failed: %s", exc)
-            await streamer.fail(str(exc))
-            return
-        except discord.HTTPException:
-            log.exception("discord edit failed mid-stream")
-            return
-        finally:
-            self._active.pop(turn_id, None)
-
-        if remember and streamer.full_text:
-            self._history[channel_id].append({"role": "user", "content": prompt})
-            self._history[channel_id].append(
-                {"role": "assistant", "content": streamer.full_text}
-            )
+        self.engine = ChatEngine(
+            bot, transport="discord", char_limit=MESSAGE_CHAR_LIMIT,
+            transport_errors=(discord.HTTPException,))
 
     # ── mention / DM chat ─────────────────────────────────────────────────
     @commands.Cog.listener()
@@ -167,9 +67,9 @@ class ChatCog(commands.Cog):
             return
 
         async with message.channel.typing():
-            await self.run_turn(
+            await self.engine.run_turn(
                 message.reply,
-                channel_id=message.channel.id,
+                conv_key=message.channel.id,
                 user_id=message.author.id,
                 prompt=prompt,
                 file=file_path,
@@ -208,9 +108,9 @@ class ChatCog(commands.Cog):
             except HugpyError as exc:
                 await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
                 return
-        await self.run_turn(
+        await self.engine.run_turn(
             lambda content: interaction.followup.send(content, ephemeral=private, wait=True),
-            channel_id=interaction.channel_id or interaction.user.id,
+            conv_key=interaction.channel_id or interaction.user.id,
             user_id=interaction.user.id,
             prompt=prompt,
             model_key=model,
@@ -224,21 +124,21 @@ class ChatCog(commands.Cog):
 
     @app_commands.command(name="reset", description="Forget this channel's conversation history")
     async def reset(self, interaction: discord.Interaction) -> None:
-        self._history.pop(interaction.channel_id or interaction.user.id, None)
+        self.engine.reset(interaction.channel_id or interaction.user.id)
         await interaction.response.send_message("🧹 history cleared", ephemeral=True)
 
     @app_commands.command(name="running", description="List in-progress generations")
     async def running(self, interaction: discord.Interaction) -> None:
-        if not self._active:
+        snapshot = self.engine.active_snapshot()
+        if not snapshot:
             await interaction.response.send_message(
                 "nothing is generating right now", ephemeral=True
             )
             return
-        now = time.monotonic()
         lines = [
-            f"`{turn_id}` — <#{info['channel_id']}> — `{info['model'] or 'default'}`"
-            f" — {int(now - info['started'])}s — “{info['prompt'][:60]}”"
-            for turn_id, info in self._active.items()
+            f"`{s['turn_id']}` — <#{s['channel_id']}> — `{s['model'] or 'default'}`"
+            f" — {s['elapsed']}s — “{s['prompt'][:60]}”"
+            for s in snapshot
         ]
         await interaction.response.send_message(
             embed=discord.Embed(
@@ -254,39 +154,20 @@ class ChatCog(commands.Cog):
         turn_id="A specific generation from /running (default: everything in this channel)"
     )
     async def stop(self, interaction: discord.Interaction, turn_id: str | None = None) -> None:
-        if turn_id:
-            info = self._active.get(turn_id)
-            if not info:
-                await interaction.response.send_message(
-                    f"no running generation `{turn_id}` — see /running", ephemeral=True
-                )
-                return
-            targets = {turn_id: info}
-        else:
-            channel_id = interaction.channel_id or interaction.user.id
-            targets = {
-                tid: info for tid, info in self._active.items()
-                if info["channel_id"] == channel_id
-            }
-            if not targets:
-                await interaction.response.send_message(
-                    "nothing is generating in this channel — see /running", ephemeral=True
-                )
-                return
-        for info in targets.values():
-            # Server-side first: central's control plane stops the generation
-            # and frees the slot (locally-served or worker-relayed). Then the
-            # task cancel tears down our SSE read. Best-effort — an old
-            # central without the route still gets the task cancel.
-            rid = info.get("request_id")
-            if rid:
-                try:
-                    await self.bot.hugpy.cancel_chat(rid)
-                except Exception as exc:
-                    log.debug("central-side cancel of %s failed: %s", rid, exc)
-            info["task"].cancel()
-        stopped = ", ".join(f"`{tid}`" for tid in targets)
-        await interaction.response.send_message(f"⏹️ stopped {stopped}", ephemeral=True)
+        conv = interaction.channel_id or interaction.user.id
+        stopped, unknown = await self.engine.stop(conv_key=conv, turn_id=turn_id)
+        if unknown:
+            await interaction.response.send_message(
+                f"no running generation `{turn_id}` — see /running", ephemeral=True
+            )
+            return
+        if not stopped:
+            await interaction.response.send_message(
+                "nothing is generating in this channel — see /running", ephemeral=True
+            )
+            return
+        stopped_str = ", ".join(f"`{tid}`" for tid in stopped)
+        await interaction.response.send_message(f"⏹️ stopped {stopped_str}", ephemeral=True)
 
     @app_commands.command(
         name="link",

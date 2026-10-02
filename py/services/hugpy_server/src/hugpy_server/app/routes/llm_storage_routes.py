@@ -81,6 +81,128 @@ def build():
     return jsonify(doc)
 
 
+@llm_bp.route("/models/database", methods=["GET"])
+def model_database_display():
+    """Read-only model-centered view from Hugpy's canonical PostgreSQL tables."""
+    from hugpy_engine.model_index import enabled, fetch_models_for_display
+
+    if not enabled():
+        return jsonify({"error": "model database is not enabled"}), 503
+    rows = fetch_models_for_display(
+        request.args.get("q", ""), request.args.get("limit", 500, type=int))
+    if rows is None:
+        return jsonify({"error": "model database is unavailable"}), 503
+    return jsonify({"source": "models", "rows": rows})
+
+
+@llm_bp.route("/models/database/<model_key>/workers/<worker_id>/knobs", methods=["POST"])
+def model_database_pair_knobs(model_key, worker_id):
+    """Console knob write for ONE (model, worker) pair — straight to the DB.
+
+    Body: {"set": {knob: value, ...}, "unset": [knob, ...]}. <model_key> is a
+    models.id or a console model key. Replaces POST /llm/workers/<id>/{moe,bnb}
+    for the knobs the DB owns (operator ruling 2026-10-01): never touches the
+    WorkerStore, so it cannot queue behind its lock. Operator-gated (see
+    operator_auth._SENSITIVE). Central reads the knobs back from the DB.
+    """
+    from hugpy_engine.model_index import (enabled, last_db_error, resolve_model_id,
+                                          write_pair_knobs, PAIR_KNOB_KEYS)
+
+    if not enabled():
+        return jsonify({"error": "model database is not enabled"}), 503
+    body = request.get_json(silent=True) or {}
+    to_set, to_unset = body.get("set") or {}, body.get("unset") or []
+    if not isinstance(to_set, dict) or not isinstance(to_unset, list) or not (to_set or to_unset):
+        return jsonify({"error": "body must be {\"set\": {...}, \"unset\": [...]} with at least one knob"}), 400
+    model_id = resolve_model_id(model_key)
+    if model_id is None:
+        return jsonify({"error": f"unknown model {model_key!r}", "db": last_db_error()}), 404
+    status, detail = write_pair_knobs(model_id, worker_id, to_set, to_unset)
+    if status == "ok":
+        return jsonify({"model_id": model_id, "worker_id": worker_id, "user_settings": detail})
+    if status == "bad_knob":
+        return jsonify({"error": f"bad knob(s) {detail}", "allowed": list(PAIR_KNOB_KEYS)}), 400
+    if status == "explicit_infeasible":
+        d = detail or {}
+        return jsonify({"error": (d.get("why") or
+                                  f"per-class split does not fit: attention on GPU {d.get('attention_gpu_layers')}/{d.get('layers')} layers, "
+                                  f"experts in RAM {d.get('experts_cpu_layers')}/{d.get('layers')} ({'given' if d.get('experts_cpu_layers_given') else d.get('explicit_spill')}) "
+                                  f"needs {d.get('gpu_need')} B of {d.get('gpu_budget')} B GPU and {d.get('ram_need')} B of {d.get('ram_budget')} B RAM at ctx {d.get('ctx')} "
+                                  f"({d.get('kv_cache_type')}); with {d.get('attention_gpu_layers')} attention layers on the GPU the experts-in-RAM floor is "
+                                  f"{d.get('experts_cpu_layers_min') if d.get('experts_cpu_layers_min') is not None else 'unreachable (attention alone overruns the card)'}, "
+                                  f"attention-on-GPU floor {d.get('attention_gpu_layers_min')}"),
+                        "model_id": model_id, "worker_id": worker_id, **d}), 409
+    if status == "ctx_exceeds":
+        d = detail or {}
+        return jsonify({"error": (f"context target exceeds the verdict's ceiling for {d.get('mode')} at KV cache "
+                                  f"{d.get('kv_cache_type')}: {d.get('requested_ctx')} > {d.get('ctx_max')} tokens "
+                                  f"(max {d.get('max_pct')}% of {d.get('trained')})"),
+                        "model_id": model_id, "worker_id": worker_id, **d}), 409
+    if status == "unassigned":
+        return jsonify({"error": "model is not assigned to this worker — assign it first; "
+                                 "knobs on an unassigned pair would be residue",
+                        "model_id": model_id, "worker_id": worker_id}), 409
+    if status == "moe_not_offered":
+        return jsonify({"error": f"MoE is not offered for this quant on this worker — {detail}",
+                        "model_id": model_id, "worker_id": worker_id}), 409
+    return jsonify({"error": "model database is unavailable", "detail": detail}), 503
+
+
+@llm_bp.route("/models/database/<model_key>/knobs", methods=["POST"])
+def model_database_knobs_all_workers(model_key):
+    """Model-WIDE knob write = the same {"set","unset"} applied to EVERY assigned
+    pair row of the model (operator 2026-10-02, "retire the json write": the
+    Model table's quant picker used to persist a model-wide gguf_file in the
+    JSON override; now it is N pair knobs). Per-worker results are returned;
+    a per-pair refusal (409) does not stop the others."""
+    from hugpy_engine.model_index import (enabled, last_db_error, resolve_model_id,
+                                          write_pair_knobs, pair_knobs_by_worker, PAIR_KNOB_KEYS)
+    if not enabled():
+        return jsonify({"error": "model database is not enabled"}), 503
+    body = request.get_json(silent=True) or {}
+    to_set, to_unset = body.get("set") or {}, body.get("unset") or []
+    if not isinstance(to_set, dict) or not isinstance(to_unset, list) or not (to_set or to_unset):
+        return jsonify({"error": "body must be {\"set\": {...}, \"unset\": [...]} with at least one knob"}), 400
+    bad = [k for k in list(to_set) + list(to_unset) if k not in PAIR_KNOB_KEYS]
+    if bad:
+        return jsonify({"error": f"bad knob(s) {bad}", "allowed": list(PAIR_KNOB_KEYS)}), 400
+    model_id = resolve_model_id(model_key)
+    if model_id is None:
+        return jsonify({"error": f"unknown model {model_key!r}", "db": last_db_error()}), 404
+    pairs = pair_knobs_by_worker(model_id, assigned_only=True) or {}
+    results = {}
+    for wid in pairs:
+        status, detail = write_pair_knobs(model_id, wid, dict(to_set), list(to_unset))
+        results[wid] = {"status": status, **({"user_settings": detail} if status == "ok" else {"detail": detail})}
+    ok = sum(1 for r in results.values() if r["status"] == "ok")
+    return jsonify({"model_id": model_id, "workers": results, "ok": ok, "total": len(results)}), (200 if ok == len(results) else 207)
+
+
+@llm_bp.route("/models/database/<model_key>/workers/<worker_id>/assigned", methods=["POST"])
+def model_database_pair_assigned(model_key, worker_id):
+    """Console designation write for ONE (model, worker) pair — straight to the
+    DB (operator ruling 2026-10-02: "these should all be database relays").
+    Body: {"assigned": true|false}. Replaces POST /llm/workers/<id>/{assign,
+    unassign} for the console's ▶/×: never touches the WorkerStore (whose lock
+    made the × hang 40 s+); the designation relay converges central to the DB
+    within its interval. Operator-gated (operator_auth._SENSITIVE)."""
+    from hugpy_engine.model_index import enabled, last_db_error, resolve_model_id, set_pair_assigned
+
+    if not enabled():
+        return jsonify({"error": "model database is not enabled"}), 503
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get("assigned"), bool):
+        return jsonify({"error": "body must be {\"assigned\": true|false}"}), 400
+    model_id = resolve_model_id(model_key)
+    if model_id is None:
+        return jsonify({"error": f"unknown model {model_key!r}", "db": last_db_error()}), 404
+    status, detail = set_pair_assigned(model_id, worker_id, body["assigned"])
+    if status == "ok":
+        return jsonify({"model_id": model_id, "worker_id": worker_id, **detail,
+                        "note": "central converges to the DB designation within the relay interval"})
+    return jsonify({"error": "model database is unavailable", "detail": detail}), 503
+
+
 @llm_bp.route("/llm/peers", methods=["GET"])
 def peers():
     return jsonify(list_peers())

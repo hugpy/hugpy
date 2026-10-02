@@ -1,0 +1,17 @@
+body::before {
+  content: 'LOCAL CONSOLE DEV · AE-WORKER ONLY · LIVE PYTHON API';
+  position: fixed;
+  z-index: 10000;
+  inset: 0 0 auto;
+  height: 27px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  background: #1d2730;
+  border-bottom: 1px solid #394957;
+  color: #a9c8e9;
+  font: 700 10px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .12em;
+}
+
+#root { padding-top: 27px; }

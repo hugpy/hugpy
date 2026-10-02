@@ -1,0 +1,32 @@
+/* Task templates — visual family of PriorityGroupsPanel. */
+.templates-panel { border: 1px solid var(--border); border-radius: 8px; margin: 10px 0; }
+.tp-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; user-select: none; }
+.tp-title { font-weight: 600; }
+.tp-count { color: var(--muted); font-size: 12px; }
+.tp-err { color: var(--red); font-size: 12px; margin-left: auto; }
+.tp-toggle { margin-left: auto; color: var(--muted); }
+.tp-err + .tp-toggle { margin-left: 8px; }
+.tp-body { padding: 0 12px 12px; }
+.tp-intro { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 4px 0 10px; }
+.tp-template { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.tp-template.tp-active { border-color: var(--green, #3fa650); }
+.tp-template-head { display: flex; align-items: center; gap: 8px; }
+.tp-template-name { font-weight: 600; }
+.tp-badge { color: var(--green, #3fa650); font-size: 11.5px; }
+.tp-note { color: var(--muted); font-size: 11.5px; }
+.tp-spacer { flex: 1 1 auto; }
+.tp-template-detail { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.tp-workers-line { font-family: var(--mono, monospace); }
+.tp-editor { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; }
+.tp-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.tp-name { flex: 1 1 240px; padding: 4px 8px; min-width: 0; }
+.tp-pick-head { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 8px 0 3px; }
+.tp-groups { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.tp-group-pick { display: flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; }
+.tp-workers { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.tp-worker-chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; font-size: 12px; font-family: var(--mono, monospace); }
+.tp-worker-chip button { background: none; border: none; cursor: pointer; color: var(--muted); padding: 0; }
+.tp-worker-pick { padding: 4px 8px; min-width: 160px; }
+.tp-new { margin-top: 4px; }
+.tp-del:disabled { opacity: 0.5; cursor: not-allowed; }
+.tp-save:disabled, .tp-cancel:disabled { opacity: 0.5; cursor: not-allowed; }

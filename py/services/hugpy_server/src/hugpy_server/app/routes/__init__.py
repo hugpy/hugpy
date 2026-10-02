@@ -18,6 +18,7 @@ from hugpy_server.app.routes.agent_routes import agent_bp
 from hugpy_server.app.routes.review_routes import review_bp
 from hugpy_server.app.routes.pypi_routes import pypi_bp
 from hugpy_server.app.routes.eviction_routes import eviction_bp
+from hugpy_server.app.routes.console_trace_routes import trace_bp
 from hugpy_server.app.routes.group_routes import group_bp
 from hugpy_server.app.routes.model_group_routes import model_group_bp
 from hugpy_server.app.routes.metrics_routes import metrics_bp

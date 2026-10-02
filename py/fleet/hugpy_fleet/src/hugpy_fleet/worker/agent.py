@@ -1241,6 +1241,10 @@ _SPILL_ENV = {
     # the channel that already exists. Cleared-when-absent (below) so a lever
     # switched off cannot leak onto the next model loaded in this process.
     "bnb_4bit": "HUGPY_BNB_4BIT",
+    # KV cache knobs (DB pair knobs, 2026-10-02): llama-server --cache-type-k/-v
+    # and --flash-attn, read by the slot child's _build_cmd via the load opts.
+    "kv_cache_type": "HUGPY_SLOT_KV_CACHE_TYPE",
+    "flash_attn": "HUGPY_SLOT_FLASH_ATTN",
     "gpu_mem_gib": "HUGPY_GPU_MEM_GIB",
     "cpu_mem_gib": "HUGPY_CPU_MEM_GIB",
     # Explicit per-model core budget (slot loads pass it to the child;
@@ -5623,6 +5627,31 @@ def build_app(state: "WorkerState") -> Flask:
             return jsonify({"ok": False, "model_key": model_key,
                             "reached": False,
                             "reason": f"{type(exc).__name__}: {exc}"})
+
+    @app.route("/ops/evict-eval", methods=["GET"])
+    def ops_evict_eval():
+        """READ-ONLY eviction evaluation for a hypothetical admission of
+        ``?model_key=`` (operator 2026-10-02: "ComfyUI and agent CUDA context
+        should be part of the eviction eval"): the SAME partition the planner
+        uses — candidates in the order they would be considered, protected rows
+        with their reasons — including the ComfyUI process unit and hugpy's
+        hollow slot children. Never evicts, never loads, always 200."""
+        mk = (request.args.get("model_key") or "").strip() or "__eval__"
+        out = {"ok": True, "subject": mk, "candidates": [], "protected": [],
+               "free_vram": None, "total_vram": None}
+        try:
+            out["free_vram"] = _free_vram_bytes()
+            out["total_vram"] = _total_vram_bytes()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cands, prot = _partition_residents(state, mk)
+            out["candidates"] = [dict(r) for r in cands]
+            out["protected"] = [dict(r) for r in prot]
+        except Exception as exc:  # noqa: BLE001
+            out["ok"] = False
+            out["error"] = f"{type(exc).__name__}: {exc}"
+        return jsonify(out)
 
     @app.route("/ops/residents", methods=["GET"])
     def ops_residents():
@@ -10384,6 +10413,35 @@ def _evict_model(state: "WorkerState", model_key: str,
         out.update(extra)
         return out
 
+    if model_key == COMFY_PROCESS_KEY:
+        # ComfyUI as a whole (operator ruling 2026-10-02): stop the worker-managed
+        # unit so its checkpoints AND its CUDA context go together. Re-proves idle
+        # at stop time; a running render is never stopped (force included — a
+        # render is the operator's work, not residue).
+        try:
+            mgr = _comfy_manager(state)
+        except Exception as exc:  # noqa: BLE001
+            return _result("comfy_process", False, f"comfy manager unavailable: {exc}")
+        if not mgr.managed:
+            return _result("comfy_process", False,
+                           "ComfyUI launcher is external — the worker does not stop it")
+        busy = _comfy_busy_reason(state)
+        if busy:
+            return _result("comfy_process", False, f"comfy busy: {busy}")
+        freed_before = _comfy_process_vram()
+        res = mgr.stop()
+        if res.get("ok"):
+            try:
+                _comfy_ledger().note_freed()        # every checkpoint went with the process
+            except Exception:  # noqa: BLE001
+                pass
+            deadline = time.time() + 20.0
+            while time.time() < deadline and (_comfy_process_vram() or 0) > 0:
+                time.sleep(1.0)
+                _GPU_PROC_CACHE["at"] = 0.0
+            return _result("comfy_process", True, res.get("note") or "comfy stopped",
+                           footprint={"vram_bytes": freed_before, "basis": "nvidia-smi process lump before stop"})
+        return _result("comfy_process", False, res.get("note") or "comfy stop failed")
     from hugpy_fleet.worker import ollama_adapter
     ollama_name = ollama_adapter.model_name(model_key)
     if ollama_name:
@@ -11552,7 +11610,83 @@ def _partition_residents(state: "WorkerState", model_key: str) -> "tuple[list, l
             protected.append({**r, "why": "queued ahead of the subject"})
             continue
         candidates.append(r)
+    # ── ComfyUI as ONE eviction unit (operator ruling 2026-10-02): "ComfyUI and
+    # agent CUDA context should be part of the eviction eval. If no comfy model
+    # is targeted in the run, evicting ComfyUI is sane. They go together, not
+    # detach." The whole process (its checkpoints AND its bare CUDA context) is
+    # a candidate when the worker MANAGES comfy's lifecycle, comfy is provably
+    # idle and the subject is not a comfy model; its per-checkpoint rows fold
+    # into it (one stop releases everything). Otherwise the process is listed
+    # PROTECTED with the honest reason, so the eval always shows it.
+    try:
+        _lump = _comfy_process_vram()
+    except Exception:  # noqa: BLE001
+        _lump = None
+    if _lump:
+        _mgr = None
+        try:
+            _mgr = _comfy_manager(state)
+        except Exception:  # noqa: BLE001
+            _mgr = None
+        # attribute the MANAGED unit's own process when known (another ComfyUI
+        # install on the same card is not this worker's to stop)
+        try:
+            _mpid = _mgr.pid() if (_mgr is not None and _mgr.managed) else None
+            _mine = (_gpu_process_vram() or {}).get(int(_mpid)) if _mpid else None
+            if _mine and int(_mine.get("mib") or 0) > 0:
+                _lump = int(_mine["mib"]) * _MIB
+        except Exception:  # noqa: BLE001
+            pass
+        _proc_row = {"model_key": COMFY_PROCESS_KEY, "host_mode": "comfy_process",
+                     "vram_bytes": int(_lump), "alive": True, "pinned": False}
+        if _comfy_dev_index() is not None:
+            _proc_row["gpu_index"] = _comfy_dev_index()
+        if _mgr is None or not _mgr.managed:
+            protected.append({**_proc_row, "why": ("ComfyUI launcher is external (HUGPY_COMFY_LAUNCH unset) — "
+                                                   "not worker-managed, cannot be stopped from here")})
+        elif _model_framework(model_key) == "comfy" or str(model_key or "").lower().startswith("comfy"):
+            # framework from the local registry, else the key convention (a comfy
+            # checkpoint central dispatches may not be in this worker's registry yet)
+            protected.append({**_proc_row, "why": "ComfyUI hosts the target (a comfy model is the subject)"})
+        else:
+            if comfy_busy is False:
+                comfy_busy = _comfy_busy_reason(state)
+            if comfy_busy:
+                protected.append({**_proc_row, "why": f"comfy busy: {comfy_busy}"})
+            else:
+                # the checkpoint rows go WITH the process — fold them in
+                candidates = [c for c in candidates if str(c.get("host_mode")) != "comfy"]
+                candidates.append(_proc_row)
+    # ── hugpy's own hollow slot children (a CUDA context, no model): surfaced
+    # as protected infra with the reason, so the eval names them instead of
+    # hiding them. They become evictable once the child stops initialising CUDA
+    # while hollow (killing one today only respawns a fresh context).
+    try:
+        for _st in (_slot_statuses() or []):
+            if not isinstance(_st, dict) or _st.get("model_key") or not _st.get("child_pid"):
+                continue
+            _pid = int(_st.get("child_pid"))
+            _info = (_gpu_process_vram() or {}).get(_pid) or {}
+            _vb = int(_info.get("mib") or 0) * _MIB
+            if _vb <= 0:
+                continue
+            protected.append({"model_key": f"slot:{_st.get('slot_id')}", "host_mode": "cuda_context",
+                              "vram_bytes": _vb, "alive": True, "pinned": False, "pid": _pid,
+                              "why": "hugpy slot child with no model — bare CUDA context (torch init), not evictable yet"})
+    except Exception:  # noqa: BLE001 — telemetry only
+        pass
     return candidates, protected
+
+
+COMFY_PROCESS_KEY = "comfy:process"
+
+
+def _comfy_dev_index() -> "int | None":
+    v = (os.environ.get("HUGPY_COMFY_CUDA_DEVICE") or "").strip()
+    try:
+        return int(v) if v else None
+    except ValueError:
+        return None
 
 
 def _subject_resident_vram_bytes(state: "WorkerState", model_key: str) -> int:

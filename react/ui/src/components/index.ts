@@ -25,3 +25,4 @@ export { default as EvictionsPanel } from './EvictionsPanel';
 export { default as MetricsPanel } from './MetricsPanel';
 export { default as CallsPanel } from './CallsPanel';
 export { default as ReviewPanel } from './ReviewPanel';
+export { default as ConsoleTracePanel } from './ConsoleTracePanel/ConsoleTracePanel';

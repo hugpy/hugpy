@@ -13,6 +13,9 @@ import {
   workerCapacity,
 } from './allocation'
 
+// mirrors hugpy_engine.model_index.query_registry.EXPLICIT_SPILL_CHOICES (and WorkerRow)
+const EXPLICIT_SPILL_CHOICES = ['prefer-ram', 'prefer-gpu'] // [0] = default (operator 2026-10-02)
+
 // t39 (operator: "the up and down arrows are useless and a hindrance" — every
 // tolerance band AND the value it loosens becomes a slider, no number-spinner
 // inputs anywhere in this editor). One editable numeric readout shared by every
@@ -604,8 +607,126 @@ export function ExplicitPanel({ spill, worker, need, onApply, onCancel }) {
 // they're known (feasibleCtx). MISSING feasibility (feasible==null) disables
 // NOTHING — fail-open, exactly like the backend. engineGguf=false remains a
 // belt-and-suspenders disable for max-ram/explicit even if feasibility is absent.
-export function AllocModeMenu({ mode, spill, worker, need, engineGguf, feasible, feasibleCtx,
-                        derivedMode, anchorRef, onPick, onApplyExplicit, onRevertDerived, onClose }) {
+// PER-CLASS explicit panel (operator 2026-10-02, layer counts — "more explicit
+// and true over percentage"). Nomenclature = llama.cpp:
+//   attention on GPU (layers)  = --n-gpu-layers: the LAST a layers' attention
+//     tensors AND KV cache on the card. KV follows the layer's device, so this
+//     boundary is what dictates where the KV spills.
+//   experts in RAM (layers)    = --n-cpu-moe: the FIRST c layers' expert
+//     tensors in RAM, c >= L-a (a layer's experts can sit on the GPU only when
+//     its attention does), floored by what the GPU budget holds beside the
+//     attention + its KV. "auto" leaves it to the spill preference:
+//     prefer-gpu fills the leftover GPU budget with experts, prefer-ram keeps
+//     every expert in RAM.
+// Apply writes attention_gpu_layers / explicit_spill (+ experts_cpu_layers when
+// pinned; null unsets it). The per-layer pick-list is a disabled placeholder.
+export function PerClassPanel({ band, knobs, kvLayerBytes, moeCapable = false, moeOn = false, onApply, onCancel }) {
+  const L = Number(band.layers || 0)
+  // expert split (MoE) lives inside explicit as an OPTIONAL setting when the
+  // quant offers it (operator 2026-10-02). Off: experts follow their layer's
+  // attention (no --n-cpu-moe of their own: exactly the layers off the GPU keep
+  // their experts in RAM), so the spill + experts controls fold away.
+  const [moe, setMoe] = useState(typeof knobs?.moe === 'boolean' ? knobs.moe : !!moeOn)
+  const [att, setAtt] = useState(knobs?.attention_gpu_layers != null ? Number(knobs.attention_gpu_layers) : L)
+  // zero attention layers on the GPU = everything runs in RAM, so the expert
+  // split has nothing to place (operator 2026-10-02): the tick is MOOT — shown
+  // greyed, the stored pin untouched (it matters again once attention > 0).
+  const splitMoot = att <= 0
+  const splitOn = (!moeCapable || moe) && !splitMoot
+  const [spill, setSpill] = useState(knobs?.explicit_spill || 'prefer-ram')
+  const [cpuPinned, setCpuPinned] = useState(knobs?.experts_cpu_layers != null)
+  const [cpu, setCpu] = useState(knobs?.experts_cpu_layers != null ? Number(knobs.experts_cpu_layers) : L)
+  const per = (band.expert_layer_bytes || []).map(Number)
+  const attn = Number(band.attn_layer_bytes || 0)
+  const kvL = Number(kvLayerBytes || band.kv_layer_bytes || 0)
+  // experts-in-RAM floor for a attention layers (-1: attention alone overruns the card)
+  const cpuMinFor = (a) => {
+    const room = Number(band.gpu_budget) - Number(band.compute_bytes) - a * (attn + kvL)
+    if (room < 0) return -1
+    for (let e = a; e >= 0; e--) { if (per.slice(L - e).reduce((s, x) => s + x, 0) <= room) return L - e }
+    return L
+  }
+  const attMin = Number(band.a_min || 0)
+  const cpuMin = cpuMinFor(att)
+  const cpuFloor = Math.max(L - att, Math.max(0, cpuMin))
+  const effCpu = !splitOn ? (L - att)
+    : cpuPinned ? Math.max(cpuFloor, Math.min(L, cpu)) : (spill === 'prefer-ram' ? L : Math.max(0, cpuMin))
+  const a = att, e = L - effCpu
+  const gpuW = a * attn + per.slice(L - e).reduce((s, x) => s + x, 0)
+  const ramW = (L - a) * attn + per.slice(0, L - e).reduce((s, x) => s + x, 0)
+  const gpuKv = a * kvL
+  const gib = (b) => (b / 2 ** 30).toFixed(1)
+  const bad = att < attMin || (splitOn ? cpuMin < 0
+    : (a * (attn + kvL) + per.slice(L - a).reduce((s, x) => s + x, 0) + Number(band.compute_bytes) > Number(band.gpu_budget)))
+  const clampL = (v) => Math.max(0, Math.min(L, Math.round(Number(v) || 0)))
+  return (
+    <div className="wp-allocmode-explicit">
+      <div className="wp-allocmode-explicit-head">🎛 Explicit — per class, {L} layers</div>
+      <PlainSlider label="attention on GPU" min={0} max={L} className="wp-alloc-value"
+                   value={String(att)} onChange={v => setAtt(clampL(v))}
+                   formatValue={v => `${v}/${L} layers · ${L - v} in RAM`}
+                   title={`Layers (the last ${att}) whose attention tensors AND KV cache sit on the GPU = --n-gpu-layers ${att >= L ? 'all' : att}. The KV cache follows the layer's device: layers 0..${Math.max(0, L - att - 1)} keep attention + KV in RAM, ${L - att}..${L - 1} on the card. Floor ${attMin} (RAM budget).`} />
+      {moeCapable && (
+        <div className="wp-allocmode-floor">
+          <label style={splitMoot ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
+                 title={splitMoot ? 'Expert split is moot with 0 attention layers on the GPU: every layer runs in RAM, so all experts are in RAM either way (--n-cpu-moe 999). Your pin is kept and applies again once attention > 0.'
+                      : moe ? 'Expert split ON: expert tensors get their own placement (the spill preference / experts-in-RAM count below). Untick to let experts follow their layer\'s attention.'
+                            : 'Expert split OFF: expert tensors follow their layer\'s attention — the layers off the GPU keep their experts in RAM, nothing else moves. Tick to place experts on their own.'}>
+            <input type="checkbox" checked={moe} disabled={splitMoot} onChange={e => setMoe(e.target.checked)} /> expert split (MoE){splitMoot ? ' — moot at 0 attention' : ''}
+          </label>
+        </div>
+      )}
+      {splitOn && (<>
+      <div className="wp-allocmode-split" title="Where the GPU budget left beside the attention boundary goes. prefer-gpu: fill it with expert layers (fewest in RAM). prefer-ram: every expert in RAM, leftover stays free.">
+        <span>spill</span>
+        {EXPLICIT_SPILL_CHOICES.map(c => (
+          <label key={c} className="wp-allocmode-split-gpu" style={{ marginLeft: 6 }}>
+            <input type="radio" name="explicit-spill" checked={spill === c} onChange={() => setSpill(c)} /> {c}
+          </label>
+        ))}
+      </div>
+      <PlainSlider label={cpuPinned ? 'experts in RAM' : 'experts in RAM (auto)'} min={0} max={L} className="wp-alloc-value"
+                   value={String(effCpu)} onChange={v => { setCpuPinned(true); setCpu(clampL(v)) }}
+                   formatValue={v => `${v}/${L} layers · ${L - v} on GPU`}
+                   title={`Layers (the first ${effCpu}) whose expert tensors stay in RAM = --n-cpu-moe ${effCpu >= L ? '999 (all)' : effCpu}. Floor ${cpuMin < 0 ? 'unreachable — attention alone overruns the card' : cpuFloor} (${L - att} from the attention boundary, ${Math.max(0, cpuMin)} from the GPU budget). Drag to pin; auto follows the spill preference.`} />
+      {cpuPinned && (
+        <div className="wp-allocmode-floor">
+          <button className="wp-alloc-cancel" style={{ fontSize: 10 }} onClick={() => setCpuPinned(false)}
+                  title="Unpin experts_cpu_layers — derive it from the spill preference again">↺ auto experts</button>
+        </div>
+      )}
+      </>)}
+      <div className="wp-allocmode-floor">
+        <label title="Future direction: pick the exact layers whose expert tensors sit on the GPU (an --override-tensor regex per layer) instead of a first-N count. Attention/KV cannot be picked per layer — llama.cpp places the KV cache by the layer boundary — so only experts will get a pick-list. Not wired yet." style={{ opacity: 0.5, cursor: 'not-allowed' }}>
+          <input type="checkbox" disabled /> per-layer expert pick-list (coming)
+        </label>
+      </div>
+      <div className="wp-allocmode-split" title="Priced from the verdict band: attention + expert bytes per layer, KV per layer at the current context target and cache type.">
+        <span className="wp-allocmode-split-gpu">{gib(gpuW)} GiB weights + {gib(gpuKv)} GiB KV GPU</span>
+        <span className="wp-allocmode-split-sep">/</span>
+        <span className="wp-allocmode-split-ram">{gib(ramW)} GiB RAM</span>
+      </div>
+      <div className="wp-allocmode-floor">
+        {bad ? `⚠ out of band — attention floor ${attMin} layers${cpuMin < 0 ? ', attention alone overruns the card' : ''}`
+             : splitOn
+               ? `band: attention ≥ ${attMin} · experts in RAM ≥ ${cpuFloor} at ${att} attention layers → --n-gpu-layers ${a >= L ? 'all' : a} --n-cpu-moe ${e <= 0 ? 999 : L - e}`
+               : splitMoot
+               ? `band: attention ≥ ${attMin} · everything in RAM (CPU inference) → --n-gpu-layers 0 --n-cpu-moe 999`
+               : `band: attention ≥ ${attMin} · expert split off, experts follow the boundary → --n-gpu-layers ${a >= L ? 'all' : a} --n-cpu-moe ${e <= 0 ? 999 : L - e}`}
+      </div>
+      <div className="wp-allocmode-explicit-actions">
+        <button className="wp-alloc-apply" disabled={bad}
+                onClick={() => onApply({ alloc_mode: 'explicit', attention_gpu_layers: att, explicit_spill: spill,
+                                         experts_cpu_layers: (splitOn && cpuPinned) ? effCpu : null,
+                                         ...((moeCapable && !splitMoot) ? { moe } : {}) })}>Apply</button>
+        <button className="wp-alloc-cancel" onClick={onCancel} title="Cancel">×</button>
+      </div>
+    </div>
+  )
+}
+
+export function AllocModeMenu({ mode, spill, worker, need, engineGguf, feasible, feasibleCtx, dbFeasible = null,
+                        derivedMode, anchorRef, onPick, onApplyExplicit, onRevertDerived, onClose, perClass = null }) {
   const ref = useRef(null)
   const [explicitOpen, setExplicitOpen] = useState(false)
   // The serving table lives in an overflow:auto scroll box, which would CLIP an
@@ -653,9 +774,14 @@ export function AllocModeMenu({ mode, spill, worker, need, engineGguf, feasible,
          style={pos ? { position: 'fixed', top: pos.top, left: pos.left } : undefined}
          onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
       {explicitOpen ? (
-        <ExplicitPanel spill={spill} worker={worker} need={need}
-                       onApply={(s) => { onApplyExplicit(s) }}
-                       onCancel={() => setExplicitOpen(false)} />
+        perClass && perClass.band
+          ? <PerClassPanel band={perClass.band} knobs={perClass.knobs} kvLayerBytes={perClass.kvLayerBytes}
+                           moeCapable={!!perClass.moeCapable} moeOn={!!perClass.moeOn}
+                           onApply={(s) => { onApplyExplicit(s) }}
+                           onCancel={() => setExplicitOpen(false)} />
+          : <ExplicitPanel spill={spill} worker={worker} need={need}
+                           onApply={(s) => { onApplyExplicit(s) }}
+                           onCancel={() => setExplicitOpen(false)} />
       ) : (
         <>
           {/* Ruling 2 — the SIXTH, top entry: "Auto — derived: <mode>". Clears
@@ -682,11 +808,19 @@ export function AllocModeMenu({ mode, spill, worker, need, engineGguf, feasible,
             // feasible set is disabled with a numbered reason; MISSING feasibility
             // (feasible==null) disables nothing (fail-open, like the backend). The
             // engine gate remains as a fallback disable when feasibility is absent.
-            const feasDisabled = Array.isArray(feasible)
-              ? !feasible.includes(value)
-              : (engineGguf === false && !NONGGUF_ALLOC_MODES.has(value))
+            // DB verdict first (operator 2026-10-02): a mode the stored verdict
+            // cannot serve is disabled with the verdict's reason — never a popup
+            // after the click. Central's feasible set is the fallback for pairs
+            // without a DB verdict yet.
+            const dbReason = (dbFeasible && Object.prototype.hasOwnProperty.call(dbFeasible, value)) ? dbFeasible[value] : undefined
+            const feasDisabled = dbReason !== undefined
+              ? dbReason != null
+              : Array.isArray(feasible)
+                ? !feasible.includes(value)
+                : (engineGguf === false && !NONGGUF_ALLOC_MODES.has(value))
             const reason = feasDisabled
-              ? (allocDisableReason(value, feasibleCtx, engineGguf) || 'not feasible for this model on this worker')
+              ? ((dbReason != null ? dbReason : (allocDisableReason(value, feasibleCtx, engineGguf) || 'not feasible for this model on this worker'))
+                 + ' (no override yet)')
               : null
             const disabled = feasDisabled
             const isCur = value === mode

@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from typing import Callable
 
 from hugpy_engine.model_index.client import DatabaseClient
-
 from .repositories import WorkerRegistryRepository
 
 

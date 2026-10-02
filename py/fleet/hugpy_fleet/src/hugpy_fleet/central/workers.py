@@ -1113,8 +1113,16 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # EFFECTIVE state the checkbox renders — auto shows as ticked when the
         # derivation produced a split, so the real behaviour is never hidden.
         "moe_capable": model_fields["moe_capable"],
-        "moe_by_model": dict(worker.get("moe_by_model") or {}),
+        "moe_by_model": _effective_moe_overrides(worker),
         "moe_effective": model_fields["moe_effective"],
+        # The architecture facts used by the MoE column must come from the
+        # same persisted physical record used by the allocator, not from an
+        # optional/stale catalog row.  Keep this separate from moe_effective:
+        # the latter is placement state, this is model structure.
+        # Cached model views from before the MoE metadata field was added are
+        # still valid for the other fields. Treat the new field as optional so
+        # an old cache cannot turn worker heartbeats into HTTP 500s.
+        "moe_detail": dict(model_fields.get("moe_detail") or {}),
         # The INTENDED vram/ram division per model — what the Memory column
         # shows for a model that is not resident yet, so it stops echoing the
         # Size column and starts answering "where will this actually go".
@@ -1574,6 +1582,9 @@ def _human_bytes_central(n: Any) -> str:
 # alloc_mode ALWAYS wins). Only a spill with none of these is "blank" and gets
 # the feasibility-derived default in spill_for. Kept in sync with the mode/
 # budget/band key families in managers.alloc_modes + worker_routes.
+# DB pair knobs that ride the load-time spill (see _placement_spill_for)
+_DB_SPILL_OVERLAY_KEYS = ("alloc_mode", "n_gpu_layers", "n_cpu_moe", "llama_ctx", "ctx_pct", "threads",
+                          "gpu_mem_gib", "cpu_mem_gib", "gguf_file", "kv_cache_type", "flash_attn")
 _PLACEMENT_SPILL_KEYS = frozenset({
     "alloc_mode", "n_gpu_layers", "leniency_pct", "priority", "priority_device",
     "gpu_mem_gib", "cpu_mem_gib", "gpu_mem_gib_deviation_pct",
@@ -1875,11 +1886,18 @@ def _canonical_registry_key(model_key: str) -> str:
         md = get_models_dict(dict_return=True) or {}
     except Exception:  # noqa: BLE001 — key resolution must never break a read
         return model_key
-    if model_key in md:
-        return model_key
     try:
         from hugpy_engine.resolvers.assure_model_key import _bare_tail, _slugify
     except Exception:  # noqa: BLE001 — no resolver, keep the raw key (fail-open)
+        return model_key
+    if "~" in str(model_key):
+        want = _slugify(_bare_tail(model_key))
+        # Prefer the unqualified registry key when both spellings are present.
+        # Exact-hit-first left duplicate MoE toggles in separate buckets.
+        for k in md:
+            if "~" not in str(k) and _slugify(_bare_tail(k)) == want:
+                return k
+    if model_key in md:
         return model_key
     if "~" in str(model_key):
         want = _slugify(_bare_tail(model_key))
@@ -2304,7 +2322,8 @@ def planned_split(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
     idle row fell back to the on-disk size — the same number the Size column
     already shows, which is the redundancy.
 
-    Returns ``{"gpu_bytes", "ram_bytes", "size_bytes", "mode", "why"}``. Derived
+    Returns ``{"gpu_bytes", "ram_bytes", "size_bytes", "ctx_bytes",
+    "ctx_tokens", "ctx_pct", "ctx_max", "mode", "why"}``. Derived
     from the SAME allocation the worker will actually receive, so the projection
     cannot drift from the placement it describes:
       * explicit (the MoE split) — the two budgets it already carries;
@@ -2315,28 +2334,75 @@ def planned_split(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
         side with split=False, never a fabricated ratio.
     size_bytes reflects the 4-bit lever, so ticking it visibly shrinks the row."""
     out = {"gpu_bytes": None, "ram_bytes": None, "size_bytes": None,
-           "mode": None, "split": False, "source": "derived"}
+           "ctx_bytes": None, "ctx_tokens": None, "ctx_pct": None,
+           "ctx_max": None, "mode": None, "split": False, "source": "derived"}
     try:
         from hugpy_engine.alloc_modes import bnb_effective_bytes
         size = _model_size_bytes(model_key)
         if size and bnb_enabled(worker, model_key):
             size = bnb_effective_bytes(size) or size
         out["size_bytes"] = size
-        # An explicit MoE allocation is a contract.  Do not re-derive it from
-        # the worker's current capacity: that can turn an explicit split into
-        # max-ram/max-gpu in the forecast while the next load still receives
-        # the persisted n_cpu_moe contract.
-        persisted = (worker.get("spill_by_model") or {}).get(str(model_key))
-        if isinstance(persisted, dict) and persisted:
-            d = {"mode": "explicit", "spill": dict(persisted)}
-            if persisted.get("n_cpu_moe") is not None:
-                out["n_cpu_moe"] = int(persisted["n_cpu_moe"])
-            out["source"] = "contract"
-        else:
-            d = derived_default_allocation(worker, model_key) or {}
+        d = derived_default_allocation(worker, model_key) or {}
         mode = d.get("mode")
         out["mode"] = mode
         spill = d.get("spill") or {}
+        # Context is an independent per-model override. Preserve it even when
+        # placement itself is still derived from the worker's default plan.
+        persisted = (worker.get("spill_by_model") or {}).get(model_key) or {}
+        # The old projection always used `derived_default_allocation`, even
+        # when the operator had a persisted placement. That made the Memory
+        # column show the default dense/max-GPU numbers after a MoE or
+        # alloc-mode change. Mirror the same persisted-contract overlay used
+        # by the emission seam: placement first, then MoE, then gpu-only.
+        if set(persisted) & _PLACEMENT_SPILL_KEYS:
+            spill = dict(persisted)
+            apply_moe_override_to_spill(worker, model_key, spill)
+            suppress_moe_split_for_gpu_only(worker, model_key, spill)
+            try:
+                from hugpy_engine.alloc_modes import derive_alloc_mode
+                mode = derive_alloc_mode(spill)
+            except Exception:  # noqa: BLE001
+                mode = persisted.get("alloc_mode") or mode
+            out["mode"] = mode
+            # An explicit MoE allocation is a contract (549fb16): the forecast
+            # carries the persisted n_cpu_moe instead of re-deriving it from the
+            # worker's current capacity.
+            out["source"] = "contract"
+            if persisted.get("n_cpu_moe") is not None:
+                out["n_cpu_moe"] = int(persisted["n_cpu_moe"])
+        if persisted.get("ctx_pct") is not None:
+            spill = dict(spill)
+            spill["ctx_pct"] = persisted.get("ctx_pct")
+        # Context is part of the planned footprint, not a property of the
+        # largest GPU.  Price the operator's per-model ctx_pct against the
+        # model's own trained context and expose it separately so the UI can
+        # show the plan without confusing KV with model weights.
+        try:
+            from hugpy_engine import spill as _spill
+            from hugpy_engine.config.main import get_model_config
+            from hugpy_engine.serve.serve import _model_file_for
+            cfg = get_model_config(model_key, dict_return=True)
+            path = _model_file_for(model_key, cfg)
+            geo = _spill._gguf_kv_geometry(path) if path else {}
+            ctx_max = int((cfg or {}).get("model_max_length") or
+                          (cfg or {}).get("tokenizer_model_max_length") or
+                          (cfg or {}).get("max_position_embeddings") or
+                          geo.get("ctx_train") or 0) or None
+            if ctx_max:
+                raw_pct = spill.get("ctx_pct")
+                pct = max(1, min(100, int(raw_pct))) if raw_pct is not None else 100
+                ctx_tokens = max(1, int(round(ctx_max * pct / 100)))
+                kv = _spill.kv_bytes(
+                    ctx_tokens=ctx_tokens,
+                    n_layers=geo.get("n_kv_layers") or geo.get("n_layers"),
+                    n_kv_heads=geo.get("n_kv_heads"),
+                    head_dim=geo.get("head_dim"),
+                    dtype_bytes=2.0,
+                )
+                out.update(ctx_bytes=int(kv or 0), ctx_tokens=ctx_tokens,
+                           ctx_pct=pct, ctx_max=ctx_max)
+        except Exception:  # noqa: BLE001 — context is additive to the plan
+            pass
         gib = float(2 ** 30)
         g, c = spill.get("gpu_mem_gib"), spill.get("cpu_mem_gib")
         if g is not None or c is not None:
@@ -2374,6 +2440,31 @@ def planned_split(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
                     "n_cpu_moe", "n_cpu_moe_source", "gpu_bytes", "ram_bytes", "kv_bytes",
                     "state_bytes", "mmap_bytes", "block_count", "gpu_weights_bytes",
                     "ram_weights_bytes", "gpu_margin", "ram_margin", "verdict")}
+                # Memory is a model-level projection, not the capacity planner's
+                # whole-layer choice. For an enabled MoE split, allocate the
+                # model's total effective size by its measured tensor ratio:
+                # shared/non-expert tensors to VRAM, expert tensors to RAM.
+                # ``planned_need`` still supplies the separate KV/context and
+                # capacity diagnostics above; it must not supply this ratio.
+                if moe_effective(worker, model_key):
+                    detail = _model_moe_detail(model_key) or {}
+                    expert = int(detail.get("expert_bytes") or 0)
+                    shared = int(detail.get("non_expert_bytes") or 0)
+                    total = expert + shared
+                    model_size = int(out.get("size_bytes") or 0)
+                    if total > 0 and model_size > 0:
+                        gpu = int(round(model_size * shared / total))
+                        ram = max(0, model_size - gpu)
+                        out.update(
+                            gpu_bytes=gpu, ram_bytes=ram, split=True,
+                            split_basis="model-moe-ratio",
+                            moe_ratio={
+                                "shared_bytes": shared,
+                                "expert_bytes": expert,
+                                "gpu_fraction": shared / total,
+                                "ram_fraction": expert / total,
+                            },
+                        )
             out["verdict"] = pn.get("verdict")
             row = _resident_row(worker, model_key)
             if row:                                   # measured, beside the plan
@@ -2398,6 +2489,57 @@ def moe_capable(model_key: str) -> bool:
     return bool(d.get("is_moe"))
 
 
+_model_worker_settings_cache = {}
+_model_worker_settings_lock = threading.Lock()
+
+
+def _model_worker_settings(worker: Dict[str, Any]) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Read canonical per-model settings for one worker, with a short cache."""
+    worker_id = str(worker.get("id") or "")
+    if not worker_id:
+        return None
+    names = set(map(str, worker.get("models") or []))
+    for field in ("moe_by_model", "bnb_by_model", "spill_by_model"):
+        values = worker.get(field)
+        if isinstance(values, dict):
+            names.update(map(str, values))
+    for row in worker.get("allocations") or []:
+        if isinstance(row, dict) and row.get("model_key"):
+            names.add(str(row["model_key"]))
+    if not names:
+        return {}
+    name_key = tuple(sorted(names))
+    now = time.monotonic()
+    with _model_worker_settings_lock:
+        cached = _model_worker_settings_cache.get(worker_id)
+        if cached and cached[0] > now and cached[1] == name_key:
+            return cached[2]
+    try:
+        from hugpy_engine.model_index import fetch_worker_settings
+        settings = fetch_worker_settings(worker_id, list(name_key))
+    except Exception:  # noqa: BLE001 — database is an optional read source
+        settings = None
+    if settings is not None:
+        with _model_worker_settings_lock:
+            _model_worker_settings_cache[worker_id] = (now + 2.0, name_key, settings)
+    return settings
+
+
+def _effective_moe_overrides(worker: Dict[str, Any]) -> Dict[str, Any]:
+    # The registry historically contains both bare and Owner~Repo spellings
+    # for the same model. Fold them into one identity before exposing overrides
+    # so a stale alias cannot silently mask the checked setting on the model row.
+    result = {}
+    for name, value in (worker.get("moe_by_model") or {}).items():
+        result[_canonical_registry_key(str(name))] = value
+    settings = _model_worker_settings(worker)
+    if settings:
+        for name, values in settings.items():
+            if isinstance(values, dict) and isinstance(values.get("moe"), bool):
+                result[_canonical_registry_key(str(name))] = values["moe"]
+    return result
+
+
 def moe_override(worker: Dict[str, Any], model_key: str) -> Optional[bool]:
     """The operator's MoE-split override for this (worker, model), or None.
 
@@ -2412,7 +2554,23 @@ def moe_override(worker: Dict[str, Any], model_key: str) -> Optional[bool]:
     Absent/garbage reads as None, i.e. auto — a malformed row can never pin a
     placement the operator did not choose."""
     try:
-        v = (worker.get("moe_by_model") or {}).get(str(model_key))
+        settings = _model_worker_settings(worker) or {}
+        # Prefer an exact request key, then the canonical key, then any
+        # equivalent owner-qualified spelling returned by the model DB.
+        canonical = _canonical_registry_key(str(model_key))
+        db_values = settings.get(str(model_key)) or settings.get(canonical)
+        if db_values is None:
+            db_values = next((values for name, values in settings.items()
+                              if _canonical_registry_key(str(name)) == canonical), None)
+        if isinstance(db_values, dict) and isinstance(db_values.get("moe"), bool):
+            return db_values["moe"]
+        overrides = worker.get("moe_by_model") or {}
+        v = overrides.get(str(model_key))
+        if v is None:
+            v = overrides.get(canonical)
+        if v is None:
+            v = next((value for name, value in overrides.items()
+                      if _canonical_registry_key(str(name)) == canonical), None)
         return None if v is None else bool(v)
     except Exception:  # noqa: BLE001
         return None
@@ -4231,7 +4389,7 @@ _MODEL_VIEW_MAX_AGE = 3600.0
 # Bump when the CODE that derives model-view fields (planned_split, moe_*)
 # changes: the cache is persisted in the registry, so without this a landing
 # keeps serving the previous code's figures for up to _MODEL_VIEW_MAX_AGE.
-_MODEL_VIEW_VERSION = "2026-10-01.planned-need"
+_MODEL_VIEW_VERSION = "2026-10-01.db-settings-plan-bar"
 
 
 def _model_view_signature(worker: Dict[str, Any]) -> str:
@@ -4240,6 +4398,10 @@ def _model_view_signature(worker: Dict[str, Any]) -> str:
         "models", "spill_by_model", "bnb_by_model", "moe_by_model",
         "ram_total", _RAM_TOTAL_DURABLE_KEY, _GPU_TOTAL_DURABLE_KEY,
     )}
+    # The canonical model_workers relation is a model-view input too. Without
+    # this, a cached plan can outlive a DB knob edit while the heartbeat copy is
+    # stale (or uses an owner~repo alias).
+    inputs["model_db_worker_settings"] = _model_worker_settings(worker)
     inputs["_code"] = _MODEL_VIEW_VERSION
     inputs["gpu_total"] = _worker_gpu_total_bytes(worker)
     payload = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
@@ -4248,19 +4410,9 @@ def _model_view_signature(worker: Dict[str, Any]) -> str:
 
 def _model_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
     cached = worker.get("_model_view_cache")
-    if (isinstance(cached, dict)
-            and cached.get("signature") == _model_view_signature(worker)
-            and float(cached.get("expires_at") or 0) > _now()
-            and isinstance(cached.get("fields"), dict)):
+    if isinstance(cached, dict) and isinstance(cached.get("fields"), dict):
         return cached["fields"]
-    models = worker.get("models") or []
-    return {
-        "model_alloc_modes": _model_alloc_modes(worker),
-        "bnb_available": {mk: True for mk in models if bnb_available(worker, mk)},
-        "moe_capable": {mk: True for mk in models if moe_capable(mk)},
-        "moe_effective": {mk: True for mk in models if moe_effective(worker, mk)},
-        "planned_split": {mk: planned_split(worker, mk) for mk in models},
-    }
+    return {}
 
 
 def _refresh_model_view(worker: Dict[str, Any], now: Optional[float] = None) -> bool:
@@ -4268,11 +4420,23 @@ def _refresh_model_view(worker: Dict[str, Any], now: Optional[float] = None) -> 
     signature = _model_view_signature(worker)
     cached = worker.get("_model_view_cache")
     if (isinstance(cached, dict) and cached.get("signature") == signature
-            and float(cached.get("expires_at") or 0) > now
             and isinstance(cached.get("fields"), dict)):
         return False
     with _view_fill_window():
-        fields = _model_view_fields(worker)
+        models = worker.get("models") or []
+        moe_detail = {}
+        for mk in models:
+            detail = _model_moe_detail(mk)
+            if detail:
+                moe_detail[mk] = detail
+        fields = {
+            "model_alloc_modes": _model_alloc_modes(worker),
+            "bnb_available": {mk: True for mk in models if bnb_available(worker, mk)},
+            "moe_capable": {mk: True for mk in models if moe_capable(mk)},
+            "moe_effective": {mk: True for mk in models if moe_effective(worker, mk)},
+            "moe_detail": moe_detail,
+            "planned_split": {mk: planned_split(worker, mk) for mk in models},
+        }
     worker["_model_view_cache"] = {
         "signature": signature,
         "expires_at": now + _MODEL_VIEW_MAX_AGE,
@@ -4476,8 +4640,6 @@ class WorkerStore:
             try:
                 data = (self._pg.read(self._read_unlocked) if self._pg is not None
                         else self._read_unlocked())
-                if self._pg is not None:
-                    data = self._materialize_storage(data)
             except (ValueError, KeyError):
                 # Corrupt on-disk file: don't crash polls — serve the last good
                 # snapshot if we have one (the error is already logged).
@@ -5431,7 +5593,7 @@ class WorkerStore:
             return _public_view(worker)
 
     def set_moe(self, worker_id: str, model_key: str,
-                value: Optional[bool]) -> Optional[Dict[str, Any]]:
+                value: Optional[bool], *, public_view: bool = True) -> Optional[Dict[str, Any]]:
         """Set the MoE-split override: True (force on), False (force off), or
         None (AUTO — follow the derivation, the default).
 
@@ -5448,17 +5610,30 @@ class WorkerStore:
         stamp), OFF falls back to the non-MoE mode, ⟲ follows the derivation. A
         real split / custom-budget / feasible pin is left untouched
         (_drop_stale_alloc_stamp)."""
+        canonical_key = _canonical_registry_key(str(model_key))
         with self._transaction() as workers:
             worker = workers.get(worker_id)
             if worker is None:
                 return None
             by_model = worker.setdefault("moe_by_model", {})
+            # There must be one persisted override per model, regardless of
+            # whether the caller came from a bare or Owner~Repo UI row.
+            for key in list(by_model):
+                if _canonical_registry_key(str(key)) == canonical_key:
+                    by_model.pop(key, None)
             if value is None:
-                by_model.pop(str(model_key), None)
+                pass
             else:
-                by_model[str(model_key)] = bool(value)
-            _drop_stale_alloc_stamp(worker, str(model_key))
-            return _public_view(worker)
+                by_model[canonical_key] = bool(value)
+            _drop_stale_alloc_stamp(worker, canonical_key)
+            with _model_worker_settings_lock:
+                _model_worker_settings_cache.pop(str(worker_id), None)
+            worker.pop("_model_view_cache", None)
+            if not public_view:
+                return {"id": worker_id, "moe_by_model": dict(by_model)}
+            # Build the view only after _transaction exits; DB-backed model
+            # settings can be updated by the registry transaction trigger.
+        return _public_view(worker)
 
     def set_bnb(self, worker_id: str, model_key: str,
                 enabled: bool) -> Optional[Dict[str, Any]]:
@@ -5950,6 +6125,23 @@ class WorkerStore:
         if worker is None:
             return {}
         spill = dict(worker.get("spill_by_model", {}).get(model_key, {}))
+        # DB-OWNED PAIR KNOBS OVERLAY (operator ruling 2026-10-02: the DB, not
+        # this JSON, is the truth): model_workers.user_settings for this pair
+        # wins over the persisted spill for every placement key it carries —
+        # alloc_mode / n_gpu_layers / n_cpu_moe (incl. the per-class derivation),
+        # budgets, llama_ctx / ctx_pct, the GGUF pin, KV cache type + flash
+        # attention. moe / bnb_4bit keep their own readers below.
+        try:
+            _db = _model_worker_settings(worker) or {}
+            _canon = _canonical_registry_key(str(model_key))
+            _vals = _db.get(str(model_key)) or _db.get(_canon) or next(
+                (v for n, v in _db.items() if _canonical_registry_key(str(n)) == _canon), None)
+            if isinstance(_vals, dict):
+                for _k in _DB_SPILL_OVERLAY_KEYS:
+                    if _vals.get(_k) is not None:
+                        spill[_k] = _vals[_k]
+        except Exception:  # noqa: BLE001 — the DB is an optional read source
+            pass
         # CAPABILITY-AWARE BLANK DEFAULT (operator ruling 2026-07-24): when
         # NOTHING placement-affecting is persisted for this (worker, model), the
         # blank default is derived by FEASIBILITY instead of the flat max-gpu.
@@ -7348,9 +7540,21 @@ def spill_for(worker_id: str, model_key: str) -> Dict[str, Any]:
         from hugpy_engine.serve.overrides import get_override, resolve_gguf_for_worker
         worker = worker_store._load().get(worker_id) or {}
         forms = _worker_forms(worker) | {str(worker_id).strip().lower()}
-        ov = get_override(model_key) or {}
-        selected = resolve_gguf_for_worker(
-            ov.get("gguf_file_by_worker"), forms) or ov.get("gguf_file")
+        selected = None
+        # DB pair knob FIRST (operator 2026-10-02, "retire the json write")
+        try:
+            from hugpy_engine import model_index as _mi
+            if _mi.enabled():
+                _mid = _mi.resolve_model_id(model_key)
+                _k = _mi.read_pair_knobs(_mid, worker_id) if _mid is not None else None
+                if _k and _k.get("gguf_file"):
+                    selected = str(_k["gguf_file"])
+        except Exception:  # noqa: BLE001 — fall through to the JSON projection
+            selected = None
+        if not selected:
+            ov = get_override(model_key) or {}
+            selected = resolve_gguf_for_worker(
+                ov.get("gguf_file_by_worker"), forms) or ov.get("gguf_file")
         if selected:
             out["gguf_file"] = selected
     except Exception:  # noqa: BLE001 — quant projection is additive

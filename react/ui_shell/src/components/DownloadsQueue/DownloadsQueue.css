@@ -1,0 +1,175 @@
+/* Downloads tile — a StatusBar tile (.sb-seg) that anchors its own popover.
+   Sits inline in .sb-tiles right after the inference Queue tile. Mirrors the
+   ActivityQueue chip/popover pattern and the mt-dl progress-bar vocabulary. */
+.dlq {
+  position: relative;
+}
+
+/* The clickable value line — chromeless so the tile reads like its siblings. */
+.dlq-toggle {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+/* Amber accent on the count when something is downloading. */
+.dlq-count { color: var(--amber, #e0a44a); }
+
+/* ── popover ────────────────────────────────────────────────────────────── */
+.dlq-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 320px;
+  max-width: 480px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: var(--radius-lg, 10px);
+  background: var(--surface-3, #1f2435);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-menu, 0 10px 30px rgba(0, 0, 0, 0.5));
+}
+.dlq-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 2px 4px 6px;
+}
+.dlq-head-muted { opacity: 0.7; margin-top: 4px; }
+
+/* ── pane variant (the "⬇ Queue" tab inside Add models, 2026-08-13) ──────
+   Same rows/bars as the popover, but an always-visible block: the row and
+   button classes below are deliberately unscoped so both shells share them. */
+.dlq-panel {
+  padding: 10px 12px;
+  border-radius: var(--radius-lg, 10px);
+  background: var(--surface-2, #181c2a);
+  border: 1px solid var(--border);
+}
+.dlq-panel .dlq-name { max-width: 320px; }
+.dlq-panel-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 8px 4px;
+}
+
+/* ── rows ───────────────────────────────────────────────────────────────── */
+.dlq-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+.dlq-name {
+  color: var(--text);
+  font-weight: 600;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.dlq-label {
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dlq-row-active .dlq-label { flex-shrink: 0; }
+.dlq-row-done   .dlq-label { flex: 1; }
+
+/* Progress bar — same look as ModelTable's .mt-dl-bar. */
+.dlq-bar {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+  min-width: 70px;
+}
+.dlq-bar-fill {
+  height: 100%;
+  background: var(--blue);
+  transition: width 0.3s ease;
+}
+.dlq-bar-completed .dlq-bar-fill { background: var(--green); }
+.dlq-bar-failed .dlq-bar-fill,
+.dlq-bar-cancelled .dlq-bar-fill { background: var(--red); }
+
+/* Indeterminate: slide the partial fill back and forth. */
+.dlq-bar-indet .dlq-bar-fill { animation: dlq-slide 1.1s ease-in-out infinite; }
+@keyframes dlq-slide {
+  0%   { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
+/* Stalled: amber pulsing fill so a stuck transfer reads at a glance. */
+.dlq-bar-stalled .dlq-bar-fill { background: var(--yellow); animation: dlq-pulse 1s ease-in-out infinite; }
+@keyframes dlq-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* Terminal-row status coloring. */
+.dlq-completed .dlq-label { color: var(--green); }
+.dlq-failed    .dlq-label { color: var(--red); }
+.dlq-cancelled .dlq-label { color: var(--muted); }
+.dlq-row-done { opacity: 0.85; }
+
+/* ── row buttons (cancel / retry / clear) ───────────────────────────────── */
+.dlq-btn {
+  padding: 1px 6px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.dlq-cancel:hover:not(:disabled),
+.dlq-clear:hover:not(:disabled) { color: var(--red); border-color: var(--red); background: transparent; }
+.dlq-retry { color: var(--blue); }
+.dlq-retry:hover:not(:disabled) { border-color: var(--blue); background: transparent; }
+
+/* ── k121: persistent failure records, in place ─────────────────────────── */
+/* A terminal row stacks: the verb line on top, the failure detail + keeper
+   diagnosis pinned beneath it. Active rows keep the flat flex line. */
+.dlq-row-done {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.dlq-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dlq-detail {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--surface-1, #12151f);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dlq-detail-error { color: var(--red, #e06a6a); }
+.dlq-detail-msg { margin-top: 2px; }
+.dlq-diagnosis {
+  border-left: 2px solid var(--amber, #e0a44a);
+  color: var(--text);
+}
+.dlq-expired .dlq-label,
+.dlq-failed .dlq-label { color: var(--red, #e06a6a); }
+.dlq-diagnose {
+  cursor: pointer;
+}

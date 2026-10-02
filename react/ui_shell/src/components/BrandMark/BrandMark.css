@@ -1,0 +1,73 @@
+/* BrandMark — canonical, page-independent styling for the hugpy brand mark.
+   Mirrors the console topbar's original .logo so the mark is identical wherever
+   it appears. */
+.brandmark {
+  color: var(--bright);
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.brandmark:hover { color: var(--accent); }
+.brandmark-img {
+  /* scaled up to stand in proportion to the taller two-row text lockup */
+  height: 34px;
+  width: auto;
+  align-self: center;
+  /* the mark sits on solid black in the source PNG; blend onto our bg.
+     brighten the source so the thin hexagon carries weight next to the
+     wordmark rather than reading as a faint outline. */
+  mix-blend-mode: screen;
+  filter: brightness(1.6) saturate(1.2);
+}
+
+/* wordmark + tagline stack vertically, split by a hairline rule, all three
+   sharing one width (the wordmark is tracked out below to match the tagline):
+     H U G P Y
+     ─────────────
+     inference you own */
+.brandmark-text {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+}
+/* track the wordmark out so it spans the same width as the tagline below it:
+   wordmark, rule, and tagline form one uniform-width block. the negative
+   margin cancels letter-spacing's trailing gap so it stays optically centred. */
+.brandmark-word {
+  font-size: 16px;
+  line-height: 1;
+  letter-spacing: 0.92em;
+  margin-right: -0.92em;
+}
+.brandmark-rule {
+  height: 1px;
+  width: 100%;
+  background: currentColor;
+  opacity: 0.35;
+}
+.brandmark-sub {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+/* On phones the tagline costs too much vertical/horizontal room and overflows
+   the nav — drop the tagline AND its rule there, collapsing back to the compact
+   single-line mark (symbol + "hugpy" wordmark) at the original symbol size. */
+@media (max-width: 640px) {
+  .brandmark-rule,
+  .brandmark-sub { display: none; }
+  .brandmark-img { height: 22px; }
+  /* no tagline to match against here — relax the tracking back to a normal
+     compact wordmark. */
+  .brandmark-word { letter-spacing: 0.12em; margin-right: 0; }
+}

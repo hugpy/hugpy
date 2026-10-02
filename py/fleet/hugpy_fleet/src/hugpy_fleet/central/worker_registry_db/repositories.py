@@ -4,13 +4,28 @@ from __future__ import annotations
 import time
 
 from . import query_registry as sql
+from hugpy_engine.model_index.query_registry import ModelQueries
 
 
 class WorkerRegistryRepository:
     def ensure(self, cur) -> None:
-        cur.execute(sql.CREATE_META)
-        cur.execute(sql.CREATE_WORKERS)
-        cur.execute(sql.ENSURE_META)
+        # bounded lock waits: a contended schema statement fails THIS call (the
+        # service resets _schema_ready and retries later) instead of parking the
+        # shared connection behind another session's lock (2026-10-02 outage).
+        cur.execute(ModelQueries.DDL_LOCK_TIMEOUT_ON)
+        try:
+            cur.execute(sql.CREATE_META)
+            cur.execute(sql.CREATE_WORKERS)
+            cur.execute(sql.ENSURE_META)
+            # Model allocation/activity is a database-level projection of every
+            # worker-registry write, including writes from older central processes.
+            cur.execute(ModelQueries.SYNC_WORKER_REGISTRY_FUNCTION)
+            cur.execute(ModelQueries.INSTALL_WORKER_REGISTRY_TRIGGER)
+        finally:
+            try:
+                cur.execute(ModelQueries.DDL_LOCK_TIMEOUT_OFF)
+            except Exception:  # noqa: BLE001
+                pass
 
     def lock_meta(self, cur) -> bool:
         cur.execute(sql.LOCK_META)

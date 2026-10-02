@@ -1,0 +1,147 @@
+.agentnodes-panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+/* collapsible header bar (same idiom as PhoneBrickPanel) */
+.an-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.an-bar-static { cursor: default; }
+.an-bar:hover { background: var(--surface-2); }
+.an-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.an-bar:hover .an-title { color: var(--text); }
+.an-count { color: var(--muted); font-size: 11px; }
+.an-headnote { margin-left: auto; font-size: 11px; }
+.an-headnote-unavailable { color: var(--muted); }
+.an-headnote-auth { color: var(--amber, #c98a00); }
+.an-headnote-error { color: var(--red); }
+.an-toggle { margin-left: auto; color: var(--muted); font-size: 10px; }
+.an-headnote + .an-toggle { margin-left: 8px; }
+
+.an-body { padding: 10px 14px 14px; }
+.an-howto { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.an-howto code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.an-empty { color: var(--muted); padding: 8px 0; }
+
+/* degrade / status banners */
+.an-banner {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-lg);
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+}
+.an-banner code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.an-banner-unavailable { color: var(--muted); background: var(--surface-2); }
+.an-banner-auth { color: var(--amber, #c98a00); }
+.an-banner-error { color: var(--red); }
+.an-banner-loading { color: var(--muted); }
+
+/* one node row */
+.an-node {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 9px 11px;
+  margin-bottom: 9px;
+  background: var(--surface);
+}
+.an-node-stale { opacity: 0.65; }
+.an-node-revoked { border-color: var(--red); }
+
+.an-node-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.an-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.an-dot-live { background: var(--green); }
+.an-dot-stale { background: var(--muted); }
+.an-name { font-weight: 600; }
+
+.an-status {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 1px 7px; border-radius: 4px; background: var(--surface-2); color: var(--muted);
+}
+.an-st-idle { color: var(--green); }
+.an-st-busy { color: var(--amber, #c98a00); }
+.an-st-enrolled { color: var(--muted); }
+.an-st-offline { color: var(--red); }
+
+.an-ct { font-size: 11px; }
+.an-ct-idle { color: var(--green); }
+.an-ct-busy { color: var(--amber, #c98a00); }
+.an-ct-unknown { color: var(--muted); }
+
+.an-ver { font-size: 11px; color: var(--muted); font-family: var(--mono, monospace); }
+.an-seen { font-size: 11px; color: var(--muted); }
+.an-revoked { font-size: 10px; color: var(--red); text-transform: uppercase; letter-spacing: 0.05em; }
+
+.an-node-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.an-host { font-size: 11px; color: var(--muted); font-family: var(--mono, monospace); }
+.an-cap {
+  font-size: 10px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 6px;
+}
+
+/* dispatch control */
+.an-dispatch {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--border);
+}
+.an-dispatch-input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 5px 8px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-1); color: var(--text);
+}
+.an-dispatch-btn { padding: 5px 12px; font-weight: 600; white-space: nowrap; }
+.an-dispatch-err { color: var(--red); font-size: 12px; margin-top: 6px; }
+
+/* dispatched-task cards */
+.an-task-list { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+.an-task {
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 7px 9px; background: var(--surface-1);
+}
+.an-task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.an-ts-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 1px 7px; border-radius: 4px; background: var(--surface-2);
+}
+.an-ts-queued { color: var(--muted); }
+.an-ts-done { color: var(--green); }
+.an-ts-error { color: var(--red); }
+.an-task-seq { font-size: 11px; color: var(--muted); font-family: var(--mono, monospace); }
+.an-task-prompt {
+  font-size: 12px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+}
+.an-task-fin { font-size: 11px; color: var(--muted); }
+.an-task-wait { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.an-task-result {
+  margin: 7px 0 0; padding: 8px 10px;
+  background: var(--surface-2); border-radius: 6px;
+  font-size: 12px; font-family: var(--mono, monospace);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow: auto;
+}
+.an-task-result-err { color: var(--red); }
+
+/* spinner while a task is queued/in-flight */
+.an-spin {
+  width: 9px; height: 9px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--muted);
+  display: inline-block; animation: an-spin 0.8s linear infinite;
+}
+@keyframes an-spin { to { transform: rotate(360deg); } }

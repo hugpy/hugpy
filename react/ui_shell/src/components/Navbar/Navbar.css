@@ -1,0 +1,13 @@
+/* Main-app nav — the LOOK now comes from the sitewide shared stylesheet
+   (ui_shared/navbar/navbar.css, imported by Navbar.jsx) on the .hugpy-navbar*
+   class contract, identical to the media/video arms. Only this app-specific
+   sticky header-stack wrapper stays local.
+
+   The nav + its optional demo banner are wrapped in .hugpy-navbar-stack, and it is
+   THAT wrapper that sticks — so the whole header (nav on top, banner directly
+   beneath) pins to the viewport top as one unit and neither slides under the
+   other on scroll (operator directive 2026-07-21). */
+.hugpy-navbar-stack {
+  position: sticky; top: 0; z-index: 40;
+  flex-shrink: 0;
+}

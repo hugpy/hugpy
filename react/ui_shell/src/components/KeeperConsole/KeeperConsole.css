@@ -1,0 +1,10 @@
+.keeper-console { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.kc-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; flex-wrap: wrap;
+          border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-1); }
+.kc-title { font-weight: 700; font-size: 12px; }
+.kc-in { font-size: 12px; }
+.kc-err { color: var(--red); font-size: 11px; }
+.kc-howto { font-size: 11px; color: var(--muted); line-height: 1.45; padding: 6px 2px 8px; }
+/* the mount point — mountConsole fills whatever box it's given */
+.kc-mount { flex: 1; min-height: 420px; border: 1px solid var(--border); border-radius: var(--radius);
+            overflow: hidden; background: var(--bg); }

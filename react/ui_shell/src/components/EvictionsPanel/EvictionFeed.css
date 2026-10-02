@@ -1,0 +1,288 @@
+/* EvictionFeed — the compact eviction stream docked under the model list.
+   Denser than EvictionsPanel by design: one line per pass, detail on demand.
+   Shares the ev-dot / ev-tier / ev-out-* vocabulary defined in
+   EvictionsPanel.css, so only the evf-* additions live here. */
+
+.evf {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--surface);
+  font-size: 11px;
+}
+
+/* ---- toolbar ---- */
+.evf-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.evf-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.evf-spacer { flex: 1; }
+
+.evf-sel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  color: var(--bright);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.evf-sel-n {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.evf-btn {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  border-radius: var(--radius);
+  padding: 1px 7px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.evf-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.evf-btn-on {
+  color: var(--bright);
+  border-color: var(--accent);
+  background: var(--surface-3);
+}
+
+.evf-err {
+  padding: 4px 8px;
+  color: var(--red);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---- list ---- */
+.evf-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.evf-empty {
+  padding: 14px 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.evf-empty code {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+/* ---- one pass ---- */
+.evf-run { border-bottom: 1px solid var(--border); }
+
+/* The selected model was involved in this pass. A left rail + a lift off the
+   background: loud enough to find while scanning, quiet enough that a screen
+   full of hits is still readable. */
+.evf-hit {
+  background: var(--surface-1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.evf-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.evf-line:hover { background: var(--surface-2); }
+
+.evf-caret {
+  color: var(--muted);
+  transition: transform 0.12s ease;
+  flex-shrink: 0;
+}
+.evf-caret-open { transform: rotate(90deg); }
+
+.evf-model {
+  font-family: var(--font-mono);
+  color: var(--text);
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.evf-model-sweep { color: var(--muted); font-style: italic; }
+.evf-model-sel { color: var(--bright); font-weight: 600; }
+
+.evf-victims {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.evf-arrow {
+  color: var(--muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.evf-victim {
+  font-family: var(--font-mono);
+  color: var(--yellow);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.evf-victim-sel {
+  color: var(--bright);
+  font-weight: 600;
+  text-decoration: underline dotted var(--accent);
+}
+
+.evf-none { color: var(--muted); font-size: 10px; }
+
+/* The failure line, in the collapsed row, where the victim summary would be.
+   Ellipsised rather than wrapped — this row is one line and stays one line; the
+   full sentence is on the title and in the expanded detail. */
+.evf-fail {
+  color: var(--red);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.evf-freed {
+  color: var(--yellow);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.evf-chip {
+  padding: 0 5px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.evf-time {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.evf-outcome {
+  padding: 0 6px;
+  border-radius: var(--radius);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+/* ---- expanded detail ---- */
+.evf-detail {
+  padding: 3px 8px 6px 22px;
+  background: var(--surface-1);
+  border-top: 1px dashed var(--border);
+}
+
+.evf-dchip {
+  display: inline-block;
+  margin: 0 5px 3px 0;
+  padding: 0 5px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.evf-drow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+  min-width: 0;
+}
+
+.evf-drow-sel {
+  box-shadow: inset 2px 0 0 var(--accent);
+  padding-left: 5px;
+}
+
+.evf-dmark {
+  /* 46px, not 40 — "RESOLVE" is the longest mark since the serve-pipeline rows
+     arrived, and a spilled mark breaks the detail block's left rail. */
+  width: 46px;
+  flex-shrink: 0;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.evf-dkey {
+  font-family: var(--font-mono);
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+/* Provision SOURCE / load ENGINE, inline in a detail row. Same idiom as
+   .evf-dchip but it sits mid-row rather than in the chip strip, so it carries no
+   block margin. */
+.evf-dchip-inline {
+  padding: 0 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.evf-dwhy {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Skips are the quietest row on purpose — they are the most COMMON and the
+   most important, so they must be readable in bulk without shouting. */
+.evf-dskip .evf-dkey { color: var(--muted); }
+.evf-devict .evf-dmark, .evf-devict .evf-dkey { color: var(--yellow); }
+.evf-dfail .evf-dmark, .evf-dfail .evf-dkey { color: var(--red); }
+.evf-dinflight .evf-dmark { color: var(--blue); }
+.evf-dverdict .evf-dkey { color: var(--purple); }
+.evf-dquiet { color: var(--muted); }
+
+/* MODEL GROUPS — member.select in the compact feed (member.skip uses the
+   existing .evf-dquiet muted style). */
+.evf-dgroup .evf-dmark, .evf-dgroup .evf-dkey { color: var(--accent); }

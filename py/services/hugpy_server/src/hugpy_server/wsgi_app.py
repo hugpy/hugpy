@@ -26,6 +26,7 @@ from hugpy_server.app.routes.discord_routes import discord_bp
 from hugpy_server.app.routes.video_routes import video_bp
 from hugpy_server.app.routes.agent_routes import agent_bp
 from hugpy_server.app.routes.messages_routes import messages_bp
+from hugpy_server.app.routes.console_trace_routes import trace_bp, install_console_trace
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,7 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
         allowed_origins=allowed_origins,
         debug=debug
     )
+    install_console_trace(app)
     # Bound request bodies so /uploads (and any POST) can't be an unbounded
     # memory/disk DoS. Generous default (100 MB); override via HUGPY_MAX_UPLOAD_MB.
     try:
@@ -262,6 +264,14 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
     except (ValueError, AssertionError):
         # Idempotent: already mounted on this app instance.
         pass
+
+    # Designation relay (2026-10-02): central converges to the DB's assigned
+    # flags in the background; the console never waits on the WorkerStore lock.
+    try:
+        from hugpy_server.app.designation_relay import start as _start_relay
+        _start_relay()
+    except Exception as _exc:  # noqa: BLE001 — never block app creation
+        logger.warning("designation relay not started: %s", _exc)
 
     # Same /api dual-mount for the phone-brick pool: phones register, heartbeat,
     # and fetch seeded images by reaching gunicorn directly over the VPN.
@@ -324,6 +334,13 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
         import logging as _logging
         _logging.getLogger(__name__).warning(
             "eviction telemetry routes not mounted under /api: %s", _exc)
+
+    try:
+        app.register_blueprint(trace_bp, url_prefix="/api", name="console_trace_bp_api")
+    except (ValueError, AssertionError):
+        pass
+    except Exception as _exc:  # noqa: BLE001 — diagnostics must not break boot
+        logger.warning("console trace routes not mounted under /api: %s", _exc)
 
     # Same /api dual-mount for the per-worker TEST FIRE (test_fire_routes): the
     # console POSTs /api/llm/workers/<id>/test-fire and polls the job under the
