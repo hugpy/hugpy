@@ -42,7 +42,7 @@ function CopyButton({ text, label = 'copy' }) {
 
 const KIND_CHOICES = [
   { id: 'agent', label: 'hugpy-agent', hint: 'the hugpy-agent installer (all platforms)' },
-  { id: 'console', label: 'hugpy Station', hint: 'the desktop Station .deb + its hugpy key (Linux)' },
+  { id: 'console', label: 'hugpy Station', hint: 'the desktop Station .deb + hugpy-agent, keyed for hugpy and the toolserver (Linux)' },
 ]
 const SCOPE_CHOICES = [
   { id: 'v1', hint: 'chat / models (/v1)' },
@@ -218,9 +218,11 @@ export default function InstallLinks() {
         </label>
         <span className="aa-note">
           {kind === 'console'
-            ? 'Installs the hugpy Station .deb and writes a freshly minted key (with these ' +
-              'scopes) to ~/.fleet/console-hugpy.env on the target box — the credential its ' +
-              'hugpy agents use. The raw key is never shown here.'
+            ? 'Installs the hugpy Station .deb (hugpy-agent included) and establishes BOTH ' +
+              'credentials on the target box: a freshly minted HUGPY_API_KEY (with these scopes) ' +
+              'and a TOOLSERVER_AUTH_KEY, written to /etc/hugpy-station/{hugpy-api,toolserver}.env ' +
+              'before the install so the Station, its seats and ~/.config/hugpy-agent/agent.env ' +
+              'come up keyed. The raw keys are never shown here.'
             : 'The download bakes a freshly minted key (with these scopes) into the ' +
               'installer. The raw key is never shown — it exists only inside the ' +
               'one-time download.'}

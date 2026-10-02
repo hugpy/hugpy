@@ -1532,6 +1532,52 @@ def console_dist_download(filename):
 # unexpired) but not uses_left, since the consuming fetch just happened —
 # see install_links.peek_artifact_serveable for the rationale.
 
+# ── toolserver hand-off for station installs (operator 2026-10-02) ──────────
+# A delegated Station install must land with BOTH credentials the Station's
+# seats need: the hugpy API key (minted per link, as before) AND a toolserver
+# key — the toolserver is ONE operator-token service (abstract-toolserver
+# app.py), so the key handed down is the token THIS central holds for it.
+# Operator: "I may have had the toolserver auth disabled previously; keep it
+# that way if so but keep outputting the packages with one" — so when central
+# holds no toolserver token the script still ships a TOOLSERVER_AUTH_KEY
+# (freshly generated, labelled `generated` in the mint response); it is
+# simply not checked by a toolserver whose auth is off, and becomes the value
+# to register if auth is turned on later. The raw key is NEVER in the mint
+# response — only its source.
+_TOOLSERVER_KEY_ENVS = ("TOOLSERVER_AUTH", "HUGPY_TOOLSERVER_TOKEN",
+                        "TOOLSERVER_OPERATOR_TOKEN", "TOOLSERVER_TOKEN")
+_TOOLSERVER_URL_ENVS = ("HUGPY_TOOLSERVER_PUBLIC_URL", "TOOLSERVER_PUBLIC_URL",
+                        "HUGPY_TOOLSERVER_URL")
+
+
+def _toolserver_handoff() -> dict:
+    """{url, key, key_source} for the install payload. url: the public env
+    first, then the endpoint central discovered at boot (wsgi_app →
+    app.config["HUGPY_TOOLSERVER"]); '' when none (the script then writes only
+    the key, and the Station discovers its toolserver by itself)."""
+    import secrets as _secrets
+    url = ""
+    for name in _TOOLSERVER_URL_ENVS:
+        url = (os.getenv(name) or "").strip().rstrip("/")
+        if url:
+            break
+    if not url:
+        try:
+            from flask import current_app
+            url = ((current_app.config.get("HUGPY_TOOLSERVER") or {}).get("url") or "").strip().rstrip("/")
+        except Exception:  # noqa: BLE001 — outside an app context
+            url = ""
+    key, source = "", "generated"
+    for name in _TOOLSERVER_KEY_ENVS:
+        key = (os.getenv(name) or "").strip()
+        if key:
+            source = name
+            break
+    if not key:
+        key = _secrets.token_hex(24)
+    return {"url": url, "key": key, "key_source": source}
+
+
 @agent_bp.route("/agent/console/install-links", methods=["POST"])
 def console_install_link_create():
     """MEMBER or OPERATOR: mint a scoped key + one-time fleet-console install
@@ -1556,6 +1602,10 @@ def console_install_link_create():
     # consumers must not render a command that cannot work (the macos_pkg
     # omission rule).
     link["commands"] = {"linux": f"curl -fsSL {url}.sh | bash"}
+    # 2026-10-02: what the payload establishes on the target (names only, never values)
+    ts = _toolserver_handoff()
+    link["delivers"] = ["HUGPY_API_KEY", "TOOLSERVER_AUTH_KEY"]
+    link["toolserver"] = {"url": ts["url"], "key_source": ts["key_source"]}
     return jsonify(link), 201
 
 
@@ -1593,6 +1643,11 @@ def console_install_link_sh(link_id):
             .replace("@@DEB_URL@@",
                      f"{base}/agent/console/install/{link_id}/latest.deb")
             .replace("@@API_KEY@@", raw_key))
+    ts = _toolserver_handoff()
+    body = (body
+            .replace("@@TOOLSERVER_URL@@", ts["url"])
+            .replace("@@TOOLSERVER_KEY@@", ts["key"])
+            .replace("@@TOOLSERVER_KEY_SOURCE@@", ts["key_source"]))
     logger.info("console install link %s… served installer to %s",
                 link_id[:8], remote or "?")
     resp = Response(body, mimetype="text/x-shellscript")

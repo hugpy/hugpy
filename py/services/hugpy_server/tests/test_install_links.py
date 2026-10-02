@@ -1058,3 +1058,55 @@ def test_install_commands_posix_args_is_additive(client):
     with_args = agent_routes._install_commands(url, posix_args="--no-launch")
     assert with_args["macos"] == f"curl -fsSL {url}.sh | bash -s -- --no-launch"
     assert with_args["windows"] == plain["windows"]      # windows untouched
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7) Station (console) links establish BOTH credentials (operator 2026-10-02)
+# ═══════════════════════════════════════════════════════════════════════════
+@pytest.fixture
+def staged_deb(tmp_path, monkeypatch):
+    d = tmp_path / "console-artifacts"; d.mkdir()
+    (d / "hugpy-station_1.0.153_amd64.deb").write_bytes(b"deb")
+    (d / "hugpy-station_1.0.153_amd64.deb.sha256").write_text("ab" * 32 + "  hugpy-station_1.0.153_amd64.deb\n")
+    monkeypatch.setattr(agent_routes, "_CONSOLE_ARTIFACTS_DIR", str(d))
+    return d
+
+
+def _mint_console(client, **over):
+    body = {"label": "station box"}
+    body.update(over)
+    r = client.post("/agent/console/install-links", json=body, headers=_op())
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()
+
+
+def test_station_link_delivers_hugpy_and_toolserver_keys(client, staged_deb, monkeypatch):
+    monkeypatch.setenv("TOOLSERVER_AUTH", "ts-central-token")
+    monkeypatch.setenv("HUGPY_TOOLSERVER_PUBLIC_URL", "https://toolserver.example/")
+    link = _mint_console(client)
+    assert link["delivers"] == ["HUGPY_API_KEY", "TOOLSERVER_AUTH_KEY"]
+    assert link["toolserver"] == {"url": "https://toolserver.example", "key_source": "TOOLSERVER_AUTH"}
+    assert "ts-central-token" not in json.dumps(link)          # never the raw key
+    r = client.get(f"/agent/console/install/{link['link_id']}.sh")
+    assert r.status_code == 200
+    body = r.get_data(as_text=True)
+    assert 'TOOLSERVER_KEY_VALUE="ts-central-token"' in body
+    assert 'TOOLSERVER_URL_VALUE="https://toolserver.example"' in body
+    assert "/etc/hugpy-station" in body and "hugpy-api.env" in body and "toolserver.env" in body
+    assert "TOOLSERVER_AUTH_KEY=" in body and "STATION_CONSOLE_TOOLSERVER_TOKEN=" in body
+    assert ".config/hugpy-agent/agent.env" in body             # hugpy-agent included
+    # the hugpy key is still the minted one, and it is in the script, not the mint
+    raw = [k for k in ak._load()["keys"].values()]
+    assert raw and 'HUGPY_API_KEY_VALUE="' in body
+
+
+def test_station_link_generates_a_toolserver_key_when_central_has_none(client, staged_deb, monkeypatch):
+    for name in agent_routes._TOOLSERVER_KEY_ENVS + agent_routes._TOOLSERVER_URL_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    link = _mint_console(client)
+    assert link["toolserver"]["key_source"] == "generated"
+    body = client.get(f"/agent/console/install/{link['link_id']}.sh").get_data(as_text=True)
+    import re as _re
+    m = _re.search(r'TOOLSERVER_KEY_VALUE="([0-9a-f]{48})"', body)
+    assert m, "a generated 48-hex toolserver key must still ship"
+    assert 'TOOLSERVER_URL_VALUE=""' in body                   # no url: the Station discovers it
