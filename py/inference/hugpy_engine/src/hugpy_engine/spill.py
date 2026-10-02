@@ -764,9 +764,34 @@ def kv_bytes_for_geo(geo: dict, ctx: Optional[int], dtype_bytes: float = 2.0) ->
 def _transformers_kv_geometry(config: dict) -> dict:
     """Layers / kv-heads / head-dim / dtype from a transformers config.json dict.
     Mirrors HF conventions: num_key_value_heads defaults to num_attention_heads
-    (MHA) when absent; head_dim defaults to hidden_size / num_attention_heads."""
+    (MHA) when absent; head_dim defaults to hidden_size / num_attention_heads.
+
+    ONE RULE WITH THE DB FACTS (2026-10-02, operator: Surogate-3.5-2B refused at
+    "KV 64.0 GB at ctx 262,144" while its DB facts price 3.0 GiB): the storage
+    marker's transformers_kv_geometry reads the nested text_config of VL /
+    conditional-generation wrappers and counts only the KV-BEARING layers of a
+    hybrid (layer_types full_attention), giving ``n_kv_layers`` that kv_bytes
+    prices with. Before this a VL config read as geometry-less (-> the
+    conservative heuristic) and a hybrid priced every layer. The local parse
+    below stays as the fallback."""
     if not isinstance(config, dict):
         return {}
+    try:
+        from hugpy_storage.hugpy_marker import transformers_kv_geometry as _marker_geo
+        g = _marker_geo(config)
+    except Exception:  # noqa: BLE001 — fall back to the local parse
+        g = None
+    if g:
+        out = {"dtype": g.get("dtype") or config.get("torch_dtype")}
+        for k in ("n_layers", "n_kv_layers", "n_kv_heads", "head_dim", "ctx_train"):
+            try:
+                if g.get(k) is not None:
+                    out[k] = int(g[k])
+            except (TypeError, ValueError):
+                pass
+        if g.get("state_bytes"):
+            out["state_bytes"] = int(g["state_bytes"])
+        return out
     n_layers = config.get("num_hidden_layers")
     n_heads = config.get("num_attention_heads")
     n_kv = config.get("num_key_value_heads") or n_heads      # MHA fallback
