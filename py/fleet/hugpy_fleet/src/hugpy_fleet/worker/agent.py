@@ -12457,6 +12457,26 @@ def _fit_residents(state: "WorkerState", model_key: str):
     return tuple(rows), candidates, protected
 
 
+def _bnb_reprice(det: dict) -> "tuple[int | None, dict, float | None]":
+    """4-BIT RE-PRICE, weights only (2026-10-02): bitsandbytes quantizes the
+    WEIGHTS; the KV cache is untouched. Multiplying the whole need by the ratio
+    priced MN-GRAND's 3.2 GiB of KV as 0.96 GiB and left the breakdown printing
+    full-precision weights ("12.1 GB = 50.2 GB weights"). Returns (need, det
+    with 4-bit weights, ratio) through _need_total — the one need arithmetic."""
+    from hugpy_engine.alloc_modes import BNB_4BIT_SIZE_RATIO
+    ratio = float(BNB_4BIT_SIZE_RATIO)
+    w = det.get("weights")
+    if not w:
+        return det.get("total"), det, None
+    w4 = int(int(w) * ratio)
+    kv = int(det.get("kv") or 0)
+    corr = det.get("calibration_correction")
+    corr = None if (corr in (None, 1, 1.0)) else float(corr)
+    out = dict(det, weights=w4, weights_full_precision=int(w), bnb_4bit_ratio=ratio)
+    out["total"] = _need_total(w4, kv, corr)
+    return out["total"], out, ratio
+
+
 def _fit_preview(state: "WorkerState", model_key: str, bnb: "bool | None" = None) -> dict:
     """DRY-RUN of the VRAM admission (operator 2026-10-02: "a test button for
     every allocated model, something that will simply show what it thinks the
@@ -12483,9 +12503,7 @@ def _fit_preview(state: "WorkerState", model_key: str, bnb: "bool | None" = None
     bnb_ratio = None
     if bnb:
         try:
-            from hugpy_engine.alloc_modes import BNB_4BIT_SIZE_RATIO
-            bnb_ratio = float(BNB_4BIT_SIZE_RATIO)
-            need = int(need * bnb_ratio)
+            need, det, bnb_ratio = _bnb_reprice(det)
         except Exception:  # noqa: BLE001
             bnb_ratio = None
     request = _fit_request(state, model_key, need, det, False)
@@ -12604,6 +12622,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
                                   reserve_bytes=int(policy.ceiling_reserve_bytes or 0))
     if _ctx_room_note and _det.get("ctx_source") == "loader-default":
         _det["ctx_reason"] = _ctx_room_note + "; " + str(_det.get("ctx_reason") or "")
+    need_from_detail = need is None
     if need is None:
         need = _det.get("total")
     if not need:
@@ -12612,11 +12631,18 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
     # 4-BIT RE-PRICE (operator lever, 2026-07-26): price what will ACTUALLY be
     # loaded, with the same ratio central derived the projection from. A
     # PRICING lever that reads the request env, so it stays on the gather side.
+    # Weights only — the KV cache is not quantized (_bnb_reprice). An explicit
+    # caller-passed need has no split to re-price: shrink it by the weights'
+    # saving, which keeps its KV share whole.
     try:
         from hugpy_engine.spill import bnb_4bit_env
         if bnb_4bit_env():
-            from hugpy_engine.alloc_modes import BNB_4BIT_SIZE_RATIO
-            need = int(need * BNB_4BIT_SIZE_RATIO)
+            if need_from_detail:
+                need, _det, _ = _bnb_reprice(_det)
+            else:
+                _full = int(_det.get("weights") or 0)
+                _r_need, _det, _ = _bnb_reprice(_det)
+                need = max(0, int(need) - (_full - int(_det.get("weights") or _full)))
     except Exception:  # noqa: BLE001 — never break admission over the lever
         pass
     request = _fit_request(state, model_key, need, _det, polite)

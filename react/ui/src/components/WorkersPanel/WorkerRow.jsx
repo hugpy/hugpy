@@ -1633,13 +1633,18 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
           const nd = fp.need_detail || {}
           const corr = Number(nd.calibration_correction || 1)
           const wFile = nd.weights_file_bytes, wMargin = nd.weights_margin
-          const wPart = (wFile && wMargin && Math.abs(wMargin - 1) > 1e-3)
-            ? `weights ${fmtBytes(fp.weights_bytes)} (file ${fmtBytes(wFile)} ×${wMargin} ${nd.weights_margin_source || ''} margin)`
+          // 4-bit shrinks the weights only (the KV is not quantized), so the
+          // ratio is part of the weights term, never a factor on the whole sum.
+          const factors = [
+            ...((wMargin && Math.abs(wMargin - 1) > 1e-3) ? [`×${wMargin} ${nd.weights_margin_source || ''} margin`] : []),
+            ...(fp.bnb_4bit_ratio ? [`×${fp.bnb_4bit_ratio} 4-bit`] : []),
+          ]
+          const wPart = (wFile && factors.length)
+            ? `weights ${fmtBytes(fp.weights_bytes)} (file ${fmtBytes(wFile)} ${factors.join(' ')})`
             : `weights ${fmtBytes(fp.weights_bytes)}`
           const sum = `${wPart} + KV ${fmtBytes(fp.kv_bytes)}`
           const head = `${verdict} · load gate needs ${fmtBytes(fp.need_bytes)} = `
             + (Math.abs(corr - 1) > 1e-3 ? `(${sum}) ×${corr.toFixed(3)} learned correction` : sum)
-            + `${fp.bnb_4bit_ratio ? ` (×${fp.bnb_4bit_ratio} 4-bit)` : ''}`
           const body = [
             `ctx ${x.resolved != null ? Number(x.resolved).toLocaleString() : '?'}${x.pct != null ? ` (${x.pct}% of ${Number(x.max || 0).toLocaleString()})` : ''} · source ${x.source || '?'}${x.reason ? ` — ${x.reason}` : ''}`,
             `card ${fmtBytes(c.total_bytes)} · free ${fmtBytes(c.free_bytes)} budgetable (device ${fmtBytes(c.device_free_bytes)}) · reserve ${fmtBytes(c.ceiling_reserve_bytes)}${c.subject_held_bytes ? ` · own seat ${fmtBytes(c.subject_held_bytes)}` : ''}`,
