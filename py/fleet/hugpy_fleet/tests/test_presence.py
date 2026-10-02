@@ -85,3 +85,12 @@ def test_record_normalizes_unknown_state(monkeypatch):
 def test_empty_live_passthrough():
     assert presence.merge(None) is None
     assert presence.merge([]) == []
+
+
+def test_dsn_falls_back_to_registry_dsn(monkeypatch):
+    monkeypatch.delenv("HUGPY_REGISTRY_PG_DSN", raising=False)
+    monkeypatch.setenv("HUGPY_REGISTRY_DB", "pg")
+    monkeypatch.setenv("SOLCATCHER_POSTGRESQL_HOST", "dbhost")
+    assert "host=dbhost" in presence._dsn()
+    monkeypatch.setenv("HUGPY_REGISTRY_DB", "json")
+    assert presence._dsn() is None

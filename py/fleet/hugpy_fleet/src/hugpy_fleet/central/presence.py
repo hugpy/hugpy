@@ -46,8 +46,17 @@ def link_stale_s() -> float:
 
 
 def _dsn():
+    """HUGPY_REGISTRY_PG_DSN, else the registry's own DSN when the registry runs
+    on PG (central sets HUGPY_REGISTRY_DB=pg + SOLCATCHER_POSTGRESQL_*, not the
+    explicit DSN)."""
     from hugpy_fleet.central.heartbeat_db import dsn
-    return dsn()
+    if dsn():
+        return dsn()
+    try:
+        from hugpy_engine.model_index.client import enabled, resolve_dsn
+    except ImportError:
+        return None
+    return resolve_dsn() if enabled() else None
 
 
 def _run(fn):
