@@ -19,6 +19,13 @@ from hugpy_fleet.worker.comfy_watchdog import ComfyIdleWatchdog, UNKNOWN
 IDLE_QUEUE = {"running": 0, "pending": 0}
 
 
+@pytest.fixture(autouse=True)
+def _timer_stop_opted_in(monkeypatch):
+    # The TIMER stop is opt-in since 2026-10-02 (stop on NEED is the default
+    # rule); these tests exercise the timer, so they opt in.
+    monkeypatch.setenv("HUGPY_COMFY_IDLE_STOP", "1")
+
+
 class Clock:
     def __init__(self, t=1000.0):
         self.t = t

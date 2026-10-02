@@ -124,11 +124,14 @@ def idle_stop_s() -> float:
 
 
 def stop_enabled() -> bool:
-    """The idle-STOP kill switch (``HUGPY_COMFY_IDLE_STOP=0`` disables it).
-    Default ON; still a no-op unless the launcher is worker-managed and a
-    ``stop_call`` is bound."""
+    """The TIMER idle-stop (``HUGPY_COMFY_IDLE_STOP=1`` turns it on).
+
+    DEFAULT OFF since 2026-10-02 (operator): ComfyUI is stopped only when a load
+    NEEDS the room and no image work is in flight — ``stop_for_need``, the
+    contention path — never because a clock ran out. The timer stays as an
+    explicit opt-in."""
     v = (os.environ.get("HUGPY_COMFY_IDLE_STOP") or "").strip().lower()
-    return v not in ("0", "false", "no", "off")
+    return v in ("1", "true", "yes", "on")
 
 
 def queue_state(url: str, client=None, timeout: float = 3.0) -> "Optional[dict]":
@@ -434,6 +437,62 @@ class ComfyIdleWatchdog:
         self._emit("headroom.done", trigger="comfy-idle-stop", evicted=[],
                    outcome="proceeded-unfit", note=note)
         return {"action": "failed", "reason": note, "idle_for_s": idle_for}
+
+    # -- the NEED stop (operator rule 2026-10-02) -----------------------------
+    def stop_for_need(self, *, managed: bool, running: bool,
+                      incoming_model: "Optional[str]" = None,
+                      need_bytes: "Optional[int]" = None) -> dict:
+        """Stop a MANAGED ComfyUI because a load NEEDS the room it still holds
+        (its bare CUDA context, after the contention /free) — the operator's
+        rule: stop only when (a load needs the room AND no image work is
+        resident/queued). Image work = a registered comfy call or anything in
+        comfy's own /queue; either (or an unreadable probe) leaves it running.
+        No idle window: need, not time, is the trigger. Returns
+        ``{"action", "reason", "freed_bytes"}`` (freed = the process VRAM it held)."""
+        if not managed or self._stop_call is None:
+            return {"action": "skip", "reason": "comfy launcher is not worker-managed (external)",
+                    "freed_bytes": 0}
+        if not running:
+            return {"action": "skip", "reason": "comfy not running", "freed_bytes": 0}
+        call = self._call_probe()
+        if call is UNKNOWN:
+            return {"action": "skip", "reason": "comfy call table unreadable — cannot prove idle",
+                    "freed_bytes": 0}
+        if call:
+            return {"action": "skip", "freed_bytes": 0,
+                    "reason": f"a comfy call is in flight ({(call or {}).get('model_key') or '?'})"}
+        q = self._queue_probe(self._url_probe())
+        if q is None:
+            return {"action": "skip", "reason": "comfy /queue unreadable — cannot prove idle",
+                    "freed_bytes": 0}
+        if int(q.get("running") or 0) or int(q.get("pending") or 0):
+            return {"action": "skip", "freed_bytes": 0,
+                    "reason": f"image work queued (running={q.get('running')}, pending={q.get('pending')})"}
+        try:
+            held = int(self._vram_probe() or 0)
+        except Exception:  # noqa: BLE001
+            held = 0
+        logger.info("comfy stop-for-need: %s needs room; ComfyUI is idle (empty queue, no "
+                    "registered call) and still holds %s — stopping the managed process",
+                    incoming_model or "a pending load", _human(held))
+        self._emit("headroom.start", trigger="comfy-stop-for-need", incoming_model=incoming_model,
+                   need_bytes=need_bytes, note="a load needs the room; no image work in flight")
+        try:
+            res = self._stop_call()
+        except Exception as exc:  # noqa: BLE001
+            self._emit("evict.fail", model_key="comfy", tier="comfy",
+                       trigger="comfy-stop-for-need", error=f"{type(exc).__name__}: {exc}")
+            return {"action": "failed", "reason": f"{type(exc).__name__}: {exc}", "freed_bytes": 0}
+        ok, note = _stop_result(res)
+        self._stop_idle_since = None
+        if ok:
+            self._emit("evict.done", model_key="comfy", tier="comfy", trigger="comfy-stop-for-need")
+            self._emit("headroom.done", trigger="comfy-stop-for-need", evicted=["comfy"],
+                       outcome="fit", note=note)
+            return {"action": "stopped", "reason": note, "freed_bytes": held}
+        self._emit("evict.fail", model_key="comfy", tier="comfy",
+                   trigger="comfy-stop-for-need", error=note)
+        return {"action": "failed", "reason": note, "freed_bytes": 0}
 
     # -- the free itself -----------------------------------------------------
     def _do_free(self, obs: dict, trigger: str, incoming_model: "Optional[str]",

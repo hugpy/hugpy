@@ -10355,6 +10355,27 @@ def _comfy_reclaim_idle_vram(state: "WorkerState", incoming_model: "str | None",
         return 0
 
 
+def _comfy_stop_for_need(state: "WorkerState", incoming_model: "str | None",
+                         need_bytes: "int | None" = None) -> int:
+    """Bytes released by STOPPING an idle managed ComfyUI for a load that still
+    needs room after the contention /free; 0 when comfy is external / not
+    running / has image work in flight. Never raises into admission."""
+    try:
+        mgr = _comfy_manager(state)
+        res = _comfy_watchdog(state).stop_for_need(
+            managed=mgr.managed, running=mgr.is_running(),
+            incoming_model=incoming_model, need_bytes=need_bytes)
+        if res.get("action") == "stopped":
+            try:
+                time.sleep(2.0)            # let the driver hand the context back
+            except Exception:  # noqa: BLE001
+                pass
+        return int(res.get("freed_bytes") or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("comfy stop-for-need failed: %s", exc)
+        return 0
+
+
 # ── comfy resident ledger (2026-09-22) ──────────────────────────────────────
 # ComfyUI is one nvidia-smi lump; hugpy dispatched every checkpoint inside it.
 # The ledger (worker.comfy_ledger) records those dispatches and their file
@@ -13179,6 +13200,15 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         if _comfy_freed:
             freed += _comfy_freed
             final = _fits_after(freed)
+        # Still short after the /free: stop the idle managed ComfyUI so its CUDA
+        # context comes back too (operator 2026-10-02 — stop on NEED, never on a
+        # timer; never with image work in flight).
+        if final is False:
+            _stopped = _comfy_stop_for_need(state, model_key, need_bytes=need)
+            if _stopped:
+                _comfy_freed += _stopped
+                freed += _stopped
+                final = _fits_after(freed)
     # ── POST-EXECUTION VERIFY (F1b): ONE live read, for the journal only ────
     # predicted = the plan's post-eviction free figure; measured = the card
     # now. A mismatch is logged (WARNING) and never re-planned: the second
