@@ -28,9 +28,14 @@ export function GpuChips({ gpus, items = [], loadedSet, loadingSet, worker, size
   return (
     <div className="wp-gpus">
       {gpus.map((g, i) => {
+        // The driver's reserved share (firmware/GSP) is inside memory_total but in
+        // no process and never freeable — an immutable occupant, drawn and listed
+        // apart from `used` so "used" means processes (= nvidia-smi memory.used).
         const total = g.memory_total, free = g.memory_free
-        const used = (total != null && free != null) ? Math.max(total - free, 0) : null
-        const pct = (used != null && total) ? Math.min((used / total) * 100, 100) : 0
+        const driver = Number(g.memory_reserved) || 0
+        const used = (total != null && free != null) ? Math.max(total - free - driver, 0) : null
+        const driverPct = total ? Math.min((driver / total) * 100, 100) : 0
+        const pct = (used != null && total) ? Math.min((used / total) * 100, 100 - driverPct) : 0
         // LOAD-STATE-LATENCY (2026-09-29): models loading onto THIS card right
         // now (a slot mid-/load, a cold request in admission). Their bytes are
         // drawn as a hatched PENDING segment: measured VRAM (already inside
@@ -52,7 +57,7 @@ export function GpuChips({ gpus, items = [], loadedSet, loadingSet, worker, size
             <div className="wp-gpu-head">
               🖥 {g.name || `GPU ${g.index ?? i}`}
               {used != null && (
-                <em> · {fmtBytes(used)} used / {fmtBytes(total)}</em>
+                <em> · {fmtBytes(used)} used{driver ? ` · 🔒 ${fmtBytes(driver)} driver` : ''} · {fmtBytes(free)} free / {fmtBytes(total)}</em>
               )}
               {g.utilization != null && <em> · {g.utilization}% compute</em>}
               {loadingHere.length > 0 && (
@@ -65,19 +70,28 @@ export function GpuChips({ gpus, items = [], loadedSet, loadingSet, worker, size
             </div>
             {used != null && (
               <div className="wp-vram-bar" title={`${fmtBytes(free)} free${loadingHere.length ? ` · loading: ${loadingLabel}` : ''}`}>
+                {driverPct > 0 && (
+                  <div className="wp-vram-driver" style={{ width: `${driverPct}%` }}
+                       title={`🔒 NVIDIA driver reserved ${fmtBytes(driver)} — immutable, held by no process`} />
+                )}
                 <div className="wp-vram-fill" style={{ width: `${pct}%` }} />
                 {pendMeasuredPct > 0 && (
-                  <div className="wp-vram-pending" style={{ left: `${pct - pendMeasuredPct}%`, width: `${pendMeasuredPct}%` }}
+                  <div className="wp-vram-pending" style={{ left: `${driverPct + pct - pendMeasuredPct}%`, width: `${pendMeasuredPct}%` }}
                        title={`${fmtBytes(pendMeasured)} measured so far — still loading`} />
                 )}
                 {pendEstimatedPct > 0 && (
-                  <div className="wp-vram-pending wp-vram-pending-est" style={{ left: `${pct}%`, width: `${pendEstimatedPct}%` }}
+                  <div className="wp-vram-pending wp-vram-pending-est" style={{ left: `${driverPct + pct}%`, width: `${pendEstimatedPct}%` }}
                        title={`~${fmtBytes(pendEstimated)} expected — load starting`} />
                 )}
               </div>
             )}
             <div className="wp-gpu-detail">
               <div className="wp-res-detail-label">Process registry and per-card usage · GPU {g.index ?? i}</div>
+              {driver > 0 && (
+                <div className="wp-pidreg-row wp-pidreg-driver" title="Reserved by the NVIDIA driver (firmware/GSP buffers). Counted in the card total, held by no process, never freeable — no evict.">
+                  🔒 NVIDIA driver (reserved) · {fmtBytes(driver)} · immutable
+                </div>
+              )}
               {items.some(a => !registryModelKeys.has(a.model_key) && onGpu(a, g.index ?? i)) && <>
                 <div className="wp-res-detail-label">GPU residents without a PID registry row</div>
                 <ResidentList items={items.filter(a => !registryModelKeys.has(a.model_key)

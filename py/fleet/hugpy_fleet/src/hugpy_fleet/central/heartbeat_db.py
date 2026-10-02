@@ -188,7 +188,8 @@ def liveness_from_record(rec: dict, ts: float | None, stale_s: float) -> dict:
     """The small per-worker liveness row (shared shape for DB rows and roster rows)."""
     now = time.time()
     allocs = rec.get("allocations") or []
-    gpus = [{"index": g.get("index"), "memory_total": g.get("memory_total"), "memory_free": g.get("memory_free")}
+    gpus = [{"index": g.get("index"), "memory_total": g.get("memory_total"), "memory_free": g.get("memory_free"),
+             "memory_reserved": g.get("memory_reserved")}
             for g in (rec.get("gpus") or []) if isinstance(g, dict)]
     return {
         "id": rec.get("id") or rec.get("worker_id"),

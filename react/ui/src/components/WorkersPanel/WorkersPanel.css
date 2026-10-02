@@ -1796,3 +1796,14 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-tf-filter-passed.wp-tf-filter-on { color: var(--green); border-color: rgba(74, 222, 128, 0.5); }
 .wp-tf-filter-failed.wp-tf-filter-on { color: var(--red); border-color: rgba(248, 113, 113, 0.5); }
 .wp-tf-skip-why { display: inline-block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Driver-reserved segment (2026-10-02): an immutable occupant drawn first, the
+   process fill after it — flex keeps the two side by side. */
+.wp-vram-bar { display: flex; }
+.wp-vram-driver {
+  height: 100%; flex: none;
+  background: repeating-linear-gradient(45deg,
+    rgba(139, 148, 158, 0.85) 0, rgba(139, 148, 158, 0.85) 2px,
+    rgba(139, 148, 158, 0.45) 2px, rgba(139, 148, 158, 0.45) 4px);
+}
+.wp-vram-fill { flex: none; }
+.wp-pidreg-driver { color: var(--muted, #8b949e); font-size: 11px; padding: 2px 0; }

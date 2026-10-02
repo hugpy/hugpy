@@ -67,13 +67,22 @@ def _detect_gpus_nvidia_smi() -> List[dict]:
     smi = resolve_bin("nvidia-smi")
     if not smi:
         return []
-    try:
-        out = subprocess.check_output(
-            [smi, "--query-gpu=index,name,memory.total,memory.free,utilization.gpu",
-             "--format=csv,noheader,nounits"],
-            stderr=subprocess.DEVNULL, timeout=10,
-        ).decode("utf-8", "replace")
-    except (OSError, subprocess.SubprocessError):
+    # memory.reserved = the driver's own share (firmware/GSP buffers): counted in
+    # memory.total, never in memory.free, held by no process and never freeable —
+    # displays show it as an immutable occupant (operator 2026-10-02). Drivers
+    # that predate the field reject the whole query, so fall back without it.
+    out = None
+    for fields in ("index,name,memory.total,memory.free,utilization.gpu,memory.reserved",
+                   "index,name,memory.total,memory.free,utilization.gpu"):
+        try:
+            out = subprocess.check_output(
+                [smi, f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
+                stderr=subprocess.DEVNULL, timeout=10,
+            ).decode("utf-8", "replace")
+            break
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if out is None:
         return []
     gpus: List[dict] = []
     for line in out.strip().splitlines():
@@ -82,11 +91,13 @@ def _detect_gpus_nvidia_smi() -> List[dict]:
             continue
         idx, name, mem_total, mem_free = parts[:4]
         tot, free = _safe_int(mem_total), _safe_int(mem_free)
+        rsv = _safe_int(parts[5]) if len(parts) > 5 else None
         gpus.append({
             "index": _safe_int(idx),
             "name": name,
             "memory_total": tot * 1024 * 1024 if tot else None,   # MiB -> bytes
             "memory_free": free * 1024 * 1024 if free else None,
+            "memory_reserved": rsv * 1024 * 1024 if rsv is not None else None,
             "utilization": _safe_int(parts[4]) if len(parts) > 4 else None,
         })
     return gpus
