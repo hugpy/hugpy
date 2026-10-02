@@ -110,6 +110,10 @@
 .wp-offline .wp-dot { background: var(--red); }
 .wp-name { font-weight: 600; color: var(--bright); }
 .wp-status { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+.wp-link { font-size: 10px; padding: 0 6px; border-radius: 8px; color: var(--muted); border: 1px solid var(--border, #444); white-space: nowrap; }
+.wp-link-up.wp-ws-up { color: var(--ok, #3a3); border-color: currentColor; }
+.wp-link-up.wp-ws-busy, .wp-link-up.wp-ws-restarting, .wp-link-central { color: var(--warn, #c90); border-color: currentColor; }
+.wp-link-down, .wp-link-up.wp-ws-down { color: var(--danger, #d33); border-color: currentColor; }
 .wp-url { color: var(--muted); font-size: 11px; }
 /* Version pill — running package version beside the name. Same chip idiom as
    .wp-adm / .wp-state-pill: green = in sync with central's required version,

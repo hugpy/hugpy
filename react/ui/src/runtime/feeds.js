@@ -55,6 +55,8 @@ function mergeLiveness(live) {
         : w.allocations,
       l.allocations)
     const same = w.status === l.status && w.last_seen === l.last_seen
+      && w.link === l.link && w.link_ts === l.link_ts
+      && w.worker_state === l.worker_state && w.state_stale === l.state_stale
       && JSON.stringify(w.loaded_models) === JSON.stringify(l.loaded_models)
       && JSON.stringify(w.loading) === JSON.stringify(l.loading)
       && JSON.stringify(w.gpus) === JSON.stringify(gpus)
@@ -62,7 +64,10 @@ function mergeLiveness(live) {
     if (same) return w
     changed = true
     return { ...w, status: l.status, last_seen: l.last_seen, loaded_models: l.loaded_models,
-             loading: l.loading, free_ram: l.free_ram ?? w.free_ram, gpus, allocations }
+             loading: l.loading, free_ram: l.free_ram ?? w.free_ram, gpus, allocations,
+             // hugpy-link presence: the connection apart from the state report.
+             link: l.link, link_ts: l.link_ts, worker_state: l.worker_state,
+             state_stale: l.state_stale }
   })
   if (changed) state.feeds = { ...state.feeds, workers: next }
 }

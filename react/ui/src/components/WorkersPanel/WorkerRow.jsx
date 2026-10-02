@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../../api'
 import { hugpyFetch } from '../../runtime/config'
+import { useFeedConn } from '../../runtime/feeds'
 import { modelTask, modelTasks } from '../ModelTable/ModelTable'
 import FixDoc from '../FixDoc/FixDoc'
 import useSessionState from '../../hooks/useSessionState'
@@ -195,6 +196,27 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
         <button type="button" onClick={() => onApply(null)}>Auto</button>
       </div>
     </div>
+  )
+}
+
+// hugpy-link presence (2026-10-02): the CONNECTION apart from the heavy state
+// heartbeat. link = the per-host daemon's ping (null = no daemon on that host:
+// heartbeat-only, nothing shown); worker = the process state it saw; a late
+// heartbeat reads "state Ns old", never "disconnected". While the console's own
+// feed socket is down, central itself is restarting — say that instead.
+function WorkerLink({ worker }) {
+  const { conn } = useFeedConn()
+  if (conn === 'reconnecting' || conn === 'disconnected') {
+    return <span className="wp-link wp-link-central" title="the console lost central's feed — central is restarting or unreachable">central restarting</span>
+  }
+  if (worker.link == null) return null
+  const age = worker.last_seen ? Math.max(0, Math.round(Date.now() / 1000 - worker.last_seen)) : null
+  const ws = worker.worker_state
+  return (
+    <span className={`wp-link wp-link-${worker.link}${ws ? ` wp-ws-${ws}` : ''}`}
+          title={`hugpy-link daemon: link ${worker.link}${worker.link_ts ? ` (last ping ${Math.round(Date.now() / 1000 - worker.link_ts)}s ago)` : ''}; worker process ${ws || 'unknown'}; state heartbeat ${age != null ? `${age}s old` : 'never seen'}`}>
+      link {worker.link}{ws ? ` · worker ${ws}` : ''}{worker.state_stale && age != null ? ` · state ${age}s old` : ''}
+    </span>
   )
 }
 
@@ -1925,6 +1947,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         <span className="wp-dot" />
         <span className="wp-name">{worker.name}</span>
         <span className="wp-status">{worker.status}</span>
+        <WorkerLink worker={worker} />
         {/* Version pill — control-plane/worker skew is silent behavior drift, so
             the running package version rides in the header next to the name.
             GREEN = in sync with central's required_pkg_version, RED = skewed
