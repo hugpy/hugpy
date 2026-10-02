@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -45,12 +46,37 @@ INTERVAL_S = _env_f("HUGPY_LINK_INTERVAL_S", 5.0)
 BUSY_S = _env_f("HUGPY_LINK_BUSY_S", 2.0)
 HEALTH_TIMEOUT_S = _env_f("HUGPY_LINK_HEALTH_TIMEOUT_S", 4.0)
 RESTART_GRACE_S = _env_f("HUGPY_LINK_RESTART_GRACE_S", 60.0)
-CENTRAL = (os.environ.get("HUGPY_LINK_CENTRAL") or os.environ.get("WORKER_CENTRAL_URL")
-           or "http://127.0.0.1:7002").rstrip("/")
-WORKER_URL = (os.environ.get("HUGPY_LINK_WORKER_URL")
-              or f"http://127.0.0.1:{os.environ.get('WORKER_PORT') or 9200}").rstrip("/")
 UNIT = os.environ.get("HUGPY_LINK_UNIT") or "hugpy-worker.service"
-TOKEN = (os.environ.get("WORKER_ENROLL_TOKEN") or "").strip()
+
+
+def unit_env(unit=UNIT):
+    """The worker unit's own Environment= (systemctl --user show), so the link
+    inherits the worker's central URL / port / enrollment token instead of a
+    second copy of the token in its own unit. {} when unavailable."""
+    try:
+        out = subprocess.run(["systemctl", "--user", "show", unit, "-p", "Environment", "--value"],
+                             capture_output=True, text=True, timeout=5).stdout
+        return dict(tok.split("=", 1) for tok in shlex.split(out) if "=" in tok)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def config(env=None, worker_env=None):
+    """(central, worker_url, token): HUGPY_LINK_* / own env first, then the worker unit's."""
+    env = os.environ if env is None else env
+    wenv = unit_env() if worker_env is None else worker_env
+
+    def get(*names):
+        for n in names:
+            for src in (env, wenv):
+                v = (src.get(n) or "").strip()
+                if v:
+                    return v
+        return ""
+    central = (get("HUGPY_LINK_CENTRAL", "WORKER_CENTRAL_URL") or "http://127.0.0.1:7002").rstrip("/")
+    worker = (get("HUGPY_LINK_WORKER_URL")
+              or f"http://127.0.0.1:{get('WORKER_PORT') or 9200}").rstrip("/")
+    return central, worker, get("WORKER_ENROLL_TOKEN")
 
 
 def log(msg):
@@ -82,7 +108,7 @@ def unit_status(unit=UNIT):
     return kv.get("ActiveState") or "unknown", pid, since
 
 
-def probe_health(url=WORKER_URL, timeout=HEALTH_TIMEOUT_S):
+def probe_health(url, timeout=HEALTH_TIMEOUT_S):
     """('ok'|'timeout'|'refused'|'error', elapsed_ms, body-or-None)."""
     t0 = time.monotonic()
     try:
@@ -126,7 +152,7 @@ def worker_version():
         return None
 
 
-def post_presence(worker_id, body, central=CENTRAL, token=TOKEN, timeout=5.0):
+def post_presence(worker_id, body, central, token, timeout=5.0):
     req = urllib.request.Request(
         f"{central}/api/llm/workers/{worker_id}/presence",
         data=json.dumps(body).encode(), method="POST",
@@ -140,11 +166,13 @@ def main():
     worker_id = (os.environ.get("HUGPY_LINK_WORKER_ID") or "").strip() or None
     host = socket.gethostname()
     last_pid, version, last_note = None, None, ""
-    log(f"start: central={CENTRAL} worker={WORKER_URL} unit={UNIT} every {INTERVAL_S:g}s")
+    central, worker_url, token = config()
+    log(f"start: central={central} worker={worker_url} unit={UNIT} token={'yes' if token else 'no'}"
+        f" every {INTERVAL_S:g}s")
     while True:
         t0 = time.monotonic()
         active, pid, since = unit_status()
-        health, ms, body = probe_health()
+        health, ms, body = probe_health(worker_url)
         if body and body.get("worker_id"):
             worker_id = worker_id or str(body["worker_id"])
         if pid != last_pid:
@@ -158,7 +186,7 @@ def main():
                 post_presence(worker_id, {
                     "worker_state": state, "version": version, "link_version": LINK_VERSION,
                     "uptime_s": round(time.time() - _START), "worker_pid": pid or None,
-                    "health_ms": round(ms), "unit_state": active, "host": host})
+                    "health_ms": round(ms), "unit_state": active, "host": host}, central, token)
             except urllib.error.HTTPError as exc:
                 note = f"central answered HTTP {exc.code}"
             except Exception as exc:  # noqa: BLE001

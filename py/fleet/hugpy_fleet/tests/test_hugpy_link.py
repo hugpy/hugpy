@@ -33,3 +33,12 @@ def test_daemon_is_stdlib_only():
     mods = {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     mods |= {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert mods <= set(sys.stdlib_module_names) | {"__future__"}, mods
+
+
+def test_config_inherits_worker_unit_env():
+    from hugpy_fleet.link.hugpy_link import config
+    wenv = {"WORKER_CENTRAL_URL": "http://192.168.1.100:7002/", "WORKER_PORT": "9100",
+            "WORKER_ENROLL_TOKEN": "tok"}
+    assert config({}, wenv) == ("http://192.168.1.100:7002", "http://127.0.0.1:9100", "tok")
+    assert config({"HUGPY_LINK_CENTRAL": "http://c:1"}, wenv)[0] == "http://c:1"
+    assert config({}, {}) == ("http://127.0.0.1:7002", "http://127.0.0.1:9200", "")

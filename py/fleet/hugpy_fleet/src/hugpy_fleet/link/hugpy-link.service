@@ -4,8 +4,8 @@ After=network-online.target
 
 [Service]
 # Copied from hugpy_fleet/link/ by the installer; restarted only when this script changes.
+# Central URL / worker port / enrollment token come from the worker unit's Environment.
 ExecStart=%h/hugpy-worker/venv/bin/python %h/hugpy-link/hugpy_link.py
-Environment=HUGPY_LINK_CENTRAL=http://127.0.0.1:7002
 Environment=HUGPY_LINK_UNIT=hugpy-worker.service
 Restart=always
 RestartSec=5
