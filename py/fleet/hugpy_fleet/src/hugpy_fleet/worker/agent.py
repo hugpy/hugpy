@@ -1446,6 +1446,24 @@ def _adopt_storage_inputs(state: "WorkerState", worker: dict | None) -> None:
     am = worker.get("model_alloc_modes")
     if isinstance(am, dict):
         _RUNTIME_SETTINGS["alloc_mode"] = {k: str(v) for k, v in am.items() if v}
+    # CONTEXT FROM THE DB (2026-10-02, operator: "the weights are not attributing
+    # properly" — Qwythos-9B refused at "KV 64.0 GB at ctx 262,144 (loader
+    # default)" while its pair row says ctx_pct 1 = 2,048 tokens). Since the DB
+    # detach the console writes ctx_pct to model_workers only; central overlays
+    # it into ``spill_by_model`` on this reply, but the fit gate read only the
+    # local settings file the legacy /assign relay used to fill. Adopt the DB
+    # value here; _ctx_pct prefers it. A reply WITH the map is authoritative: a
+    # model absent from it (or without ctx_pct) is "auto", not a stale local %.
+    sbm = worker.get("spill_by_model")
+    if isinstance(sbm, dict):
+        cmap = {}
+        for k, v in sbm.items():
+            if isinstance(v, dict) and v.get("ctx_pct") is not None:
+                try:
+                    cmap[k] = max(1, min(100, int(v["ctx_pct"])))
+                except (TypeError, ValueError):
+                    pass
+        _RUNTIME_SETTINGS["ctx_pct_db"] = cmap
     storage = worker.get("storage")
     if isinstance(storage, dict) and storage.get("allocated_count") is not None:
         state.allocated = {
@@ -8105,7 +8123,12 @@ def _ctx_pct(model_key: str) -> int | None:
             return max(1, min(100, int(floored)))
         except (TypeError, ValueError):
             pass
-    val = (_RUNTIME_SETTINGS.get("ctx_pct") or {}).get(model_key)
+    db = _RUNTIME_SETTINGS.get("ctx_pct_db")
+    if isinstance(db, dict):
+        # central sent the DB map: it is the truth (absent = auto, no local fallback)
+        val = db.get(model_key)
+    else:
+        val = (_RUNTIME_SETTINGS.get("ctx_pct") or {}).get(model_key)
     try:
         v = int(val)
     except (TypeError, ValueError):
