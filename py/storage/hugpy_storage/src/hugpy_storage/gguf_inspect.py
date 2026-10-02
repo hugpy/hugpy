@@ -922,7 +922,16 @@ def gguf_structure(model_path) -> dict:
     for i in range(n_block):
         L = layers.get(i) or {"expert_bytes": 0, "always_bytes": 0, "roles": set()}
         roles = L["roles"]
-        if "kv" in roles:
+        # LINEAR WINS (2026-10-02): a Gated-DeltaNet block of a Qwen3.5/3.6
+        # hybrid (qwen35 / qwen35moe / qwen3next) carries a FUSED attn_qkv input
+        # projection beside its ssm_* recurrent tensors, so testing "kv" first
+        # classified every block as full attention: Anko (40 blocks, 10 full)
+        # priced 81,920 B/token = 20 GiB at 262,144 instead of 20,480 B/token =
+        # 5 GiB, on the console AND the load gate. A block with the linear-
+        # attention role holds a fixed recurrent state, not a KV cache.
+        if "linear" in roles:
+            kind = "linear"
+        elif "kv" in roles:
             kind = "full"
             if swa_window:
                 pv = per_layer(swa_pattern, i, None) if isinstance(swa_pattern, dict) else None
@@ -930,8 +939,6 @@ def gguf_structure(model_path) -> dict:
                     kind = "swa" if pv else "full"
                 elif period:
                     kind = "swa" if (i % period) < (period - 1) else "full"
-        elif "linear" in roles:
-            kind = "linear"
         else:
             kind = "none"
         hk = per_layer(n_head_kv, i, None)

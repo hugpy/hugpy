@@ -951,9 +951,16 @@ def _weights_file_facts(path, *, quant=None, sha256=None, framework=None):
             geo.pop("gguf_path", None)
             out["kv_geo"] = geo or None
             out["kv_cost"] = kv_cost_for_gguf(path, geo) if geo else None
+            out["kv_rule"] = KV_RULE
         except Exception as exc:  # noqa: BLE001 — recorded, never raised: the file is still a fact
             out["error"] = f"header read failed: {exc}"
     return out
+
+
+# KV pricing rule version of a GGUF facts entry. 2 (2026-10-02): hybrid
+# Qwen3.5/3.6 linear-attention blocks hold a recurrent state, not a KV cache
+# (gguf_inspect "linear wins"); entries priced under rule 1 are recomputed once.
+KV_RULE = 2
 
 
 def stamp_marker_weights_facts(directory, marker=None, write=True, force=False):
@@ -1016,7 +1023,8 @@ def stamp_marker_weights_facts(directory, marker=None, write=True, force=False):
             old = prior_files.get(key)
             sig = _file_sig(path)
             if (not force and old and old.get("sig") == sig and not old.get("error")
-                    and "kv_cost" in old):               # v2 field: a v1 entry is recomputed once
+                    and "kv_cost" in old                 # v2 field: a v1 entry is recomputed once
+                    and (old.get("kv_rule") or 1) >= KV_RULE):   # a KV-rule fix recomputes once
                 files[key] = old
                 continue
             files[key] = _weights_file_facts(path, quant=quant, sha256=_manifest_sha(marker, rel), framework=framework)
