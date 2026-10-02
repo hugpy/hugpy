@@ -82,6 +82,32 @@ def set_fit_check(fn) -> None:
 # executes only the plan's named evictions. None -> an over-ceiling seat
 # proceeds with a warning; nothing is evicted.
 _MAKE_ROOM = None
+_SERVED_CTX = None
+
+
+def set_served_ctx(fn) -> None:
+    """Register the worker's served-context resolver ``fn(model_key) -> int |
+    None`` (2026-10-02): the ctx the admission priced KV at (its ticket / the DB
+    ctx_pct). The slot child is a separate process and cannot read the worker's
+    admission ticket, so without this its own _ctx_for guessed — MN-GRAND was
+    priced at 20480 (ctx_pct 2) and launched at -c 29696."""
+    global _SERVED_CTX
+    _SERVED_CTX = fn
+
+
+def _with_served_ctx(body: dict, model_key: str) -> dict:
+    """The /load body with the priced ctx when the caller gave none. Only the
+    load request carries it — never the reuse signature, so a slot that trimmed
+    its ctx to fit is not reloaded over it."""
+    if body.get("ctx") or _SERVED_CTX is None:
+        return body
+    try:
+        c = _SERVED_CTX(model_key)
+        if c and int(c) > 0:
+            body["ctx"] = int(c)
+    except Exception:  # noqa: BLE001 — no ctx -> the child's own resolution
+        logger.debug("served-ctx resolver failed for %s", model_key, exc_info=True)
+    return body
 
 
 def set_make_room(fn) -> None:
@@ -678,8 +704,8 @@ class SlotPool:
             if "error" in s:
                 continue
             if not s.get("model_key"):
-                body = {"model_key": model_key, **eff_opts,
-                        **_alloc_body(requested, source, reload_reason)}
+                body = _with_served_ctx({"model_key": model_key, **eff_opts,
+                                         **_alloc_body(requested, source, reload_reason)}, model_key)
                 resp = _post(s["_control"] + "/load", body, load_timeout)
                 if isinstance(resp, dict) and resp.get("error"):
                     # Typed (2026-09-23): a HARD loader rejection arrives as
@@ -744,8 +770,8 @@ class SlotPool:
                     logger.warning("promotion evict failed on %s: %s",
                                    victim["_control"], exc)
                     continue
-                body = {"model_key": model_key, **eff_opts,
-                        **_alloc_body(requested, source, reload_reason)}
+                body = _with_served_ctx({"model_key": model_key, **eff_opts,
+                                         **_alloc_body(requested, source, reload_reason)}, model_key)
                 resp = _post(victim["_control"] + "/load", body, load_timeout)
                 if isinstance(resp, dict) and resp.get("error"):
                     # Typed (2026-09-23): a HARD loader rejection arrives as

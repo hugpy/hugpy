@@ -15790,8 +15790,12 @@ def main(argv: list[str] | None = None) -> int:
             set_fit_check as set_slot_fit_check,
             set_make_room as set_slot_make_room,
             set_evict_verb as set_slot_evict_verb,
+            set_served_ctx as set_slot_served_ctx,
         )
         set_eviction_policy(lambda mk: _residency(mk) == "on-demand")
+        # The slot child can't read this process's admission ticket: hand it
+        # the ctx the admission priced so -c is the priced context (2026-10-02).
+        set_slot_served_ctx(lambda mk: (_effective_ctx(mk) or {}).get("ctx"))
         set_residency_lookup(_residency)
         # step 2 (F1): a seat promotion evicts through the ONE verb.
         set_slot_evict_verb(lambda victim, subject: _slot_evict_verb(state, victim, subject))
