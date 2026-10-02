@@ -653,6 +653,43 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     }
     setFitPreview(o => ({ ...o, [key]: out }))
   }, [worker.id])
+  // CALIBRATE (operator 2026-10-02): measured ground truth for one pair — load
+  // through the real path, measure, unload, measure what is left; the job
+  // records predicted vs measured (POST /api/llm/workers/<wid>/calibrate).
+  const [calib, setCalib] = useState({})   // key -> job (running / done / error)
+  const runCalibrate = useCallback(async (key, bnbOn) => {
+    const others = (worker.loaded_models || []).filter(k => k !== key)
+    if (!window.confirm(`Calibrate ${key} on ${worker.name}?\n\nThis LOADS the model through the real path (one pinned one-token chat), measures its VRAM, then UNLOADS it and measures what the unload left on the card.`)) return
+    let evictOthers = false
+    if (others.length) {
+      evictOthers = window.confirm(`The card also holds: ${others.join(', ')}.\n\nOK = evict those on-demand residents first for a clean baseline (static models are never evicted).\nCancel = run only if the card is already idle.`)
+    }
+    setCalib(o => ({ ...o, [key]: { status: 'running', steps: [{ text: 'starting…' }] } }))
+    let job
+    try {
+      const r = await hugpyFetchJsonLoose(`/api/llm/workers/${encodeURIComponent(worker.id)}/calibrate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_key: key, bnb: !!bnbOn, evict_others: evictOthers }),
+      })
+      job = r.body || {}
+      if (!r.ok || job.error) throw new Error(job.error || `HTTP ${r.status}`)
+    } catch (e) {
+      setCalib(o => ({ ...o, [key]: { status: 'error', error: String(e.message || e) } }))
+      return
+    }
+    const poll = async () => {
+      try {
+        const r = await hugpyFetchJsonLoose(`/api/llm/workers/${encodeURIComponent(worker.id)}/calibrate/${job.job_id}`)
+        const j = r.body || {}
+        setCalib(o => ({ ...o, [key]: j }))
+        if (j.status === 'running') setTimeout(poll, 3000)
+        else if (typeof onDbRefresh === 'function') onDbRefresh()
+      } catch (e) {
+        setCalib(o => ({ ...o, [key]: { status: 'error', error: String(e.message || e) } }))
+      }
+    }
+    setTimeout(poll, 2000)
+  }, [worker.id, worker.name, worker.loaded_models, onDbRefresh])
   const writeKvKnobs = useCallback(async (key, body) => {
     const nextSet = body.set || {}
     setKvOptimistic(o => ({ ...o, [key]: { ...(o[key] || {}), ...nextSet,
@@ -1598,6 +1635,11 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         })() : null
         return (
           <>
+            <button className="wp-activate wp-calibrate" disabled={calib[key]?.status === 'running'}
+                    title="Calibrate: load this model through the real path, measure its VRAM, unload it and measure what is left — predicted vs measured, recorded for this model and GPU. Asks before it loads or evicts anything."
+                    onClick={e => { e.stopPropagation(); runCalibrate(key, pairDb(key, models.find(mm => (mm.model_key ?? mm.key) === key)).bnbOn) }}>
+              {calib[key]?.status === 'running' ? '⚗ …' : '⚗ calibrate'}
+            </button>
             <button className="wp-activate wp-fit-preview" disabled={fp === 'running'}
                     title="Fit preview: ask this worker's load gate what it would decide right now — weights + KV at the context it would use, free room, reserve, what it would evict and what is protected. Dry run: nothing loads. Compare with the Memory column."
                     onClick={e => { e.stopPropagation(); runFitPreview(key, pairDb(key, models.find(mm => (mm.model_key ?? mm.key) === key)).bnbOn) }}>
@@ -1613,6 +1655,25 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
               <span className="wp-lt-muted" style={{ fontSize: 11, color: disc.ok ? undefined : 'var(--danger, #d33)' }}
                     title={disc.text}>{disc.ok ? '✓' : '✗'} {disc.text.length > 70 ? disc.text.slice(0, 70) + '…' : disc.text}</span>
             )}
+            {calib[key] && (() => {
+              const j = calib[key]
+              const last = (j.steps || []).slice(-1)[0]?.text || ''
+              if (j.status === 'running') return <div className="wp-lt-muted" style={{ fontSize: 11 }}>⚗ {last}</div>
+              if (j.status === 'error') return <div style={{ fontSize: 11, color: 'var(--danger, #d33)' }}>⚗ calibration stopped: {j.error}
+                <button className="wp-moe-auto" style={{ fontSize: 10, marginLeft: 6 }} onClick={e => { e.stopPropagation(); setCalib(o => { const n = { ...o }; delete n[key]; return n }) }}>dismiss</button></div>
+              const r = j.result || {}, p = r.predicted || {}, m = r.measured || {}, d = r.detail || {}
+              const meas = m.resident_vram_bytes ?? m.device_used_delta_bytes
+              const tone = r.verdict === 'agree' ? undefined : 'var(--danger, #d33)'
+              return (
+                <div className="wp-calibrate-out" style={{ fontSize: 11, marginTop: 2, whiteSpace: 'normal', minWidth: 360 }}>
+                  <div style={{ color: tone }}>⚗ {r.verdict === 'agree' ? '✓ prediction agrees' : r.verdict === 'leak' ? '✗ unload LEFT memory on the card' : r.verdict === 'disagree' ? '✗ prediction DISAGREES with measurement' : r.verdict}
+                    {d.gate_error_pct != null ? ` (gate ${d.gate_error_pct > 0 ? '+' : ''}${d.gate_error_pct}% vs measured)` : ''}</div>
+                  <div className="wp-lt-muted">measured {fmtBytes(meas)} {m.host_mode ? `(${m.host_mode})` : ''} · gate predicted {fmtBytes(p.gate_need_bytes)} = weights {fmtBytes(p.gate_weights_bytes)} + KV {fmtBytes(p.gate_kv_bytes)} at ctx {r.ctx != null ? Number(r.ctx).toLocaleString() : '?'} ({r.ctx_source || '?'})</div>
+                  <div className="wp-lt-muted">margin ×{p.weights_margin ?? '?'} ({p.weights_margin_source || '?'}){p.calibration_correction ? ` · correction ×${p.calibration_correction}` : ''} · file {fmtBytes(p.weights_file_bytes)} · left after unload {fmtBytes(m.leftover_after_unload_bytes)} · load {m.load_took_s ?? '?'} s</div>
+                  <button className="wp-moe-auto" style={{ fontSize: 10 }} onClick={e => { e.stopPropagation(); setCalib(o => { const n = { ...o }; delete n[key]; return n }) }}>dismiss</button>
+                </div>
+              )
+            })()}
             {fpLines && (
               <div className="wp-fit-preview-out" style={{ fontSize: 11, marginTop: 2, whiteSpace: 'normal', minWidth: 360,
                                                            color: fpLines.ok === false ? 'var(--danger, #d33)' : undefined }}>

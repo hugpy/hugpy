@@ -4587,6 +4587,48 @@ def _context_preview(model_key, worker, pct):
     return out
 
 
+@worker_bp.route("/llm/workers/<worker_id>/calibrate", methods=["POST"])
+def workers_calibrate_start(worker_id):
+    """CALIBRATE RUN (operator): body {model_key, bnb?, evict_others?} -> 202 job.
+    Loads the model through the real path, measures it, unloads, measures what
+    is left; records predicted vs measured (hugpy_server.app.calibration_run)."""
+    from hugpy_server.app import calibration_run
+    body = request.get_json(silent=True) or {}
+    model_key = str(body.get("model_key") or "").strip()
+    if not model_key:
+        return jsonify({"error": "model_key is required"}), 400
+    worker = get_worker(worker_id)
+    if worker is None:
+        return jsonify({"error": f"no worker {worker_id!r} in the central worker registry"}), 404
+    job = calibration_run.start(worker, model_key, bnb=bool(body.get("bnb")),
+                                evict_others=bool(body.get("evict_others")))
+    return jsonify(job), (409 if job.get("error") else 202)
+
+
+@worker_bp.route("/llm/workers/<worker_id>/calibrate/<job_id>", methods=["GET"])
+def workers_calibrate_job(worker_id, job_id):
+    from hugpy_server.app import calibration_run
+    job = calibration_run.get_job(job_id)
+    if not job or job.get("worker_id") != str(worker_id):
+        return jsonify({"error": f"no calibration job {job_id!r} for worker {worker_id!r}"}), 404
+    return jsonify(job)
+
+
+@worker_bp.route("/llm/calibrations", methods=["GET"])
+def calibrations_history():
+    """GET ?model_key=&worker_id=&limit= -> recorded calibration rows, newest first."""
+    from hugpy_server.app import calibration_run
+    model_key = (request.args.get("model_key") or "").strip()
+    if not model_key:
+        return jsonify({"error": "model_key is required"}), 400
+    try:
+        rows = calibration_run.history(model_key, (request.args.get("worker_id") or "").strip() or None,
+                                       int(request.args.get("limit") or 20))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 503
+    return jsonify({"rows": rows, "count": len(rows)})
+
+
 @worker_bp.route("/llm/workers/<worker_id>/fit-preview", methods=["GET"])
 def workers_fit_preview(worker_id):
     """GET ?model_key=&bnb=1 -> the WORKER's own dry-run admission for that model
