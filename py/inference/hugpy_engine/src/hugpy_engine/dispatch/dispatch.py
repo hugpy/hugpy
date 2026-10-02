@@ -1147,7 +1147,26 @@ def evict(model_key: str, task: Optional[str] = None) -> bool:
         heavy = evict_llama_runner(model_key)
     except Exception:
         heavy = False
-    return dropped or heavy
+    # TRANSFORMERS weights live in generate.coder.REGISTRY, not in the runner
+    # wrapper: drop them too, then reclaim so the freed VRAM is visible to the
+    # very next fit check (2026-10-02: an in-process eviction "freed 16 MB" of
+    # a 17 GB model and stranded the rest on the card).
+    tf = 0
+    try:
+        from hugpy_engine.generate.coder import REGISTRY as _TF_REGISTRY
+        tf = _TF_REGISTRY.evict_model(model_key)
+    except Exception:
+        tf = 0
+    if tf:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+    return dropped or heavy or bool(tf)
 
 
 def clear() -> None:
@@ -1157,6 +1176,14 @@ def clear() -> None:
     try:
         from hugpy_engine.llama.runners.get import clear_llama_runners
         clear_llama_runners()
+    except Exception:
+        pass
+    try:
+        from hugpy_engine.generate.coder import REGISTRY as _TF_REGISTRY
+        for _k in {getattr(getattr(i, "cfg", None), "model_key", None) for i in list(_TF_REGISTRY._instances.values())}:
+            if _k:
+                _TF_REGISTRY.evict_model(_k)
+        _TF_REGISTRY.clear()
     except Exception:
         pass
 

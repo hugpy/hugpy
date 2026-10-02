@@ -618,6 +618,33 @@ class _Registry:
         with self._lock:
             return self._instances.pop(key, None) is not None
 
+    def evict_model(self, model_key: str) -> int:
+        """Drop EVERY instance loaded for ``model_key`` and release its weights.
+        Returns the count dropped.
+
+        (2026-10-02, operator: "this has been a problem for some time") The
+        dispatch eviction popped the runner wrapper but never this registry, so
+        an evicted transformers model's weights stayed referenced here and the
+        post-evict gc + cuda.empty_cache freed nothing: ae logged "evicted
+        Qwythos-9B ... freed 16.0 MB" while 17.4 GB stayed on the card, owned by
+        no registered model — nothing left to evict, every later load refused.
+        The tensors are dropped explicitly as well, so a stray reference to the
+        instance (a finished stream's closure) cannot keep the weights alive."""
+        if not model_key:
+            return 0
+        with self._lock:
+            keys = [k for k, inst in self._instances.items()
+                    if getattr(getattr(inst, "cfg", None), "model_key", None) == model_key]
+            dropped = [self._instances.pop(k) for k in keys]
+        for inst in dropped:
+            for attr in ("model", "tokenizer", "generation_config"):
+                try:
+                    if getattr(inst, attr, None) is not None:
+                        setattr(inst, attr, None)
+                except Exception:  # noqa: BLE001 — best-effort release
+                    pass
+        return len(dropped)
+
     def keys(self) -> List[tuple]:
         with self._lock:
             return list(self._instances.keys())
