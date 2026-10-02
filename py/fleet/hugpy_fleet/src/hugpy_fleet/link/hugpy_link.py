@@ -139,7 +139,7 @@ def post_presence(worker_id, body, central=CENTRAL, token=TOKEN, timeout=5.0):
 def main():
     worker_id = (os.environ.get("HUGPY_LINK_WORKER_ID") or "").strip() or None
     host = socket.gethostname()
-    last_pid, version, last_note = None, None, None
+    last_pid, version, last_note = None, None, ""
     log(f"start: central={CENTRAL} worker={WORKER_URL} unit={UNIT} every {INTERVAL_S:g}s")
     while True:
         t0 = time.monotonic()
