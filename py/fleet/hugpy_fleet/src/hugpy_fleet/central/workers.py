@@ -3968,11 +3968,25 @@ def _resident_materialized(worker: Dict[str, Any], model_key: str) -> Optional[b
     return verdict
 
 
+_BNB_MARGIN_SUFFIX = "#bnb-4bit"
+
+
+def _split_bnb_key(mk: str):
+    """``("<key>", True)`` for a worker's 4-bit margin record key
+    (``<key>#bnb-4bit``), else ``(mk, False)``. 4-bit and full-precision
+    records never price each other."""
+    mk = str(mk)
+    if mk.endswith(_BNB_MARGIN_SUFFIX):
+        return mk[:-len(_BNB_MARGIN_SUFFIX)], True
+    return mk, False
+
+
 def _margin_records_for(model_key: str, exclude_worker: Optional[str] = None) -> List[Dict[str, Any]]:
     """Every MEASURED weights-margin record any live worker reported for
     ``model_key`` (heartbeat ``weights_margins`` map, else the allocation row's
     fields), each stamped with the worker it came from. Plausible ratios only
     (the worker's own guard band, 0.9..2.0)."""
+    model_key, want_bnb = _split_bnb_key(model_key)
     wanted = _match_keys(model_key)
     out: List[Dict[str, Any]] = []
     # RAW records, never worker_store.all(): all() builds every worker's public
@@ -3988,7 +4002,10 @@ def _margin_records_for(model_key: str, exclude_worker: Optional[str] = None) ->
         wname = w.get("name") or wid
         seen = set()
         for mk, rec in (w.get("weights_margins") or {}).items():
-            if not isinstance(rec, dict) or not (mk == model_key or (_match_keys(str(mk)) & wanted)):
+            base, is_bnb = _split_bnb_key(mk)
+            if is_bnb != want_bnb:
+                continue
+            if not isinstance(rec, dict) or not (base == model_key or (_match_keys(base) & wanted)):
                 continue
             try:
                 ratio = float(rec.get("margin"))
@@ -4001,7 +4018,7 @@ def _margin_records_for(model_key: str, exclude_worker: Optional[str] = None) ->
             out.append(r)
             seen.add(str(mk))
         for row in (w.get("allocations") or []):
-            if not isinstance(row, dict) or row.get("weights_margin") is None:
+            if want_bnb or not isinstance(row, dict) or row.get("weights_margin") is None:
                 continue
             mk = row.get("model_key")
             if not mk or str(mk) in seen or not (mk == model_key or (_match_keys(str(mk)) & wanted)):
@@ -4054,7 +4071,9 @@ def peer_weights_margins(worker_id: str, model_keys: Optional[Iterable[str]] = N
         for mk, rec in (w.get("weights_margins") or {}).items():
             if not isinstance(rec, dict):
                 continue
-            if keys is not None and not (mk in keys or any(_match_keys(str(mk)) & _match_keys(k) for k in keys)):
+            base, _bnb = _split_bnb_key(mk)
+            if keys is not None and not (mk in keys or base in keys
+                                         or any(_match_keys(base) & _match_keys(k) for k in keys)):
                 continue
             try:
                 ratio = float(rec.get("margin"))

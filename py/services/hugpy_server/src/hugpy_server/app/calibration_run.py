@@ -247,16 +247,17 @@ def _run(jid: str, worker: dict, model_key: str, bnb: bool, evict_others: bool) 
         # 4b. RECORD THE MARGIN (2026-10-02) — a full load measured alone on an
         # idle card IS the weights measurement the gate prices from; the worker
         # nets out KV x sequences with the heartbeat learner's own arithmetic.
-        # Not for 4-bit (the file is the full-precision checkpoint) or a planned
-        # partial (only part of the weights are on the card).
+        # A 4-bit load records its OWN margin (bnb_4bit: the worker prices it
+        # against the 4-bit file figure, under <key>#bnb-4bit); never for a
+        # planned partial (only part of the weights are on the card).
         margin_rec = None
         d_used = (loaded.get("used") - base.get("used")) \
             if (loaded.get("used") is not None and base.get("used") is not None) else None
-        if not bnb and pred.get("action") == "proceed" and d_used and d_used > 0:
+        if pred.get("action") == "proceed" and d_used and d_used > 0:
             _step(jid, "recording the measured weights margin on the worker")
             st_m, margin_rec = _worker_post(worker, "/ops/weights-margin",
                                             {"model_key": model_key, "delta_bytes": int(d_used),
-                                             "ctx": x.get("resolved")})
+                                             "ctx": x.get("resolved"), "bnb_4bit": bool(bnb)})
             if st_m >= 400 or not (isinstance(margin_rec, dict) and margin_rec.get("ok")):
                 _step(jid, f"margin not recorded: {(margin_rec or {}).get('error') if isinstance(margin_rec, dict) else margin_rec}")
         # 5. UNLOAD — the worker's own eviction, then what it left behind

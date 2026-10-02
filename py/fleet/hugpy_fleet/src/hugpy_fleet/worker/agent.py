@@ -5275,10 +5275,14 @@ def build_app(state: "WorkerState") -> Flask:
         wfile, served = _incoming_weights_file(model_key)
         if not wfile:
             return jsonify({"ok": False, "error": f"no weights file size for {model_key}"}), 404
-        rec = _margin_record(model_key, delta, wfile, served,
+        bnb = bool(body.get("bnb_4bit"))
+        if bnb:  # a 4-bit load: its own record, against the 4-bit file figure
+            wfile, served = _bnb_file(wfile, served)
+        rec = _margin_record(_bnb_margin_key(model_key) if bnb else model_key, delta, wfile, served,
                              ctx=row.get("ctx") or body.get("ctx"),
                              parallel=row.get("parallel") or 1,
-                             dev_index=row.get("gpu_index"), origin="calibrate")
+                             dev_index=row.get("gpu_index"), origin="calibrate",
+                             framework=_model_framework(model_key))
         if rec is None:
             return jsonify({"ok": False, "error": "implausible ratio — not recorded (see worker log)"}), 422
         return jsonify({"ok": True, "record": rec})
@@ -7643,6 +7647,11 @@ def _margin_note_admission(model_key: str, free_before: "int | None",
     be counted into ours). A refused load arms nothing."""
     if free_before is None:
         return
+    try:  # the per-load 4-bit lever as THIS admission saw it
+        from hugpy_engine.spill import bnb_4bit_env
+        bnb = bool(bnb_4bit_env())
+    except Exception:  # noqa: BLE001
+        bnb = False
     try:
         others = [k for k in (_loading_model_keys() or []) if k != model_key]
     except Exception:  # noqa: BLE001
@@ -7655,7 +7664,8 @@ def _margin_note_admission(model_key: str, free_before: "int | None",
         _MARGIN_BASELINES[model_key] = {
             "free_before": int(free_before), "epoch": _ACTIVITY_EPOCH[0],
             "ts": time.time(), "device_index": device_index,
-            "tainted": bool(others), "tainted_by": others}
+            "tainted": bool(others), "tainted_by": others,
+            "bnb_4bit": bnb}
 
 
 def _incoming_weights_file(model_key: str) -> "tuple[int | None, str | None]":
@@ -7724,6 +7734,25 @@ def _incoming_need_bytes(model_key: str) -> "int | None":
     stays the uncalibrated figure a calibration sample records."""
     wfile, _served = _incoming_weights_file(model_key)
     return int(wfile * _WEIGHTS_HEADROOM) if wfile else None
+
+
+# 4-bit margins (2026-10-02): a bitsandbytes 4-bit load maps the SAME
+# full-precision checkpoint, so its measured delta over the file reads ~0.27
+# and was discarded as implausible — 4-bit never learned. A 4-bit measurement
+# is its own record, under ``<model_key>#bnb-4bit``, against the 4-bit file
+# figure (file x BNB_4BIT_SIZE_RATIO); the full-precision record is untouched.
+_BNB_MARGIN_SUFFIX = "#bnb-4bit"
+
+
+def _bnb_margin_key(model_key: str) -> str:
+    return f"{model_key}{_BNB_MARGIN_SUFFIX}"
+
+
+def _bnb_file(wfile: "int | None", served: "str | None") -> "tuple[int | None, str]":
+    """(4-bit file figure, served tag) for a 4-bit residency of this file."""
+    from hugpy_engine.alloc_modes import BNB_4BIT_SIZE_RATIO
+    w4 = int(int(wfile) * float(BNB_4BIT_SIZE_RATIO)) if wfile else None
+    return w4, (f"{served}+bnb-4bit" if served else "bnb-4bit")
 
 
 def _margin_record_matches(rec: dict, served_file: "str | None") -> bool:
@@ -7837,6 +7866,12 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
     if not wfile:
         return None
     delta = int(base["free_before"]) - int(free_after)
+    if base.get("bnb_4bit"):
+        wfile, served = _bnb_file(wfile, served)
+        return _margin_record(_bnb_margin_key(model_key), delta, wfile, served,
+                              ctx=row.get("ctx"), parallel=row.get("parallel"),
+                              dev_index=row.get("gpu_index", base.get("device_index")),
+                              framework=_model_framework(model_key))
     if moe_n is not None:
         return _margin_measure_moe(model_key, row, int(moe_n), delta, wfile, served)
     return _margin_record(model_key, delta, wfile, served, ctx=row.get("ctx"),
@@ -7845,12 +7880,13 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
 
 
 def _margin_record(model_key: str, delta: int, wfile: int, served: "str | None", *,
-                   ctx=None, parallel=None, dev_index=None, origin: str = "heartbeat") -> "dict | None":
+                   ctx=None, parallel=None, dev_index=None, origin: str = "heartbeat",
+                   framework: "str | None" = None) -> "dict | None":
     """delta (VRAM the residency took) -> weights margin record, the ONE copy of
     the arithmetic: GGUF nets out KV x sequences at the served ctx, the rest is
     weights / file. Shared by the heartbeat learner and the calibrate run
     (2026-10-02: a calibrate measurement becomes the gate's measured margin)."""
-    framework = _model_framework(model_key)
+    framework = framework or _model_framework(model_key)
     kv = 0
     if str(framework or "").lower() in ("gguf", "llama_cpp"):
         if not ctx:
@@ -12457,7 +12493,7 @@ def _fit_residents(state: "WorkerState", model_key: str):
     return tuple(rows), candidates, protected
 
 
-def _bnb_reprice(det: dict) -> "tuple[int | None, dict, float | None]":
+def _bnb_reprice(det: dict, model_key: "str | None" = None) -> "tuple[int | None, dict, float | None]":
     """4-BIT RE-PRICE, weights only (2026-10-02): bitsandbytes quantizes the
     WEIGHTS; the KV cache is untouched. Multiplying the whole need by the ratio
     priced MN-GRAND's 3.2 GiB of KV as 0.96 GiB and left the breakdown printing
@@ -12469,10 +12505,22 @@ def _bnb_reprice(det: dict) -> "tuple[int | None, dict, float | None]":
     if not w:
         return det.get("total"), det, None
     w4 = int(int(w) * ratio)
+    mg4 = None
+    if model_key and det.get("weights_file_bytes"):
+        # A MEASURED 4-bit margin prices the 4-bit file directly (2026-10-02);
+        # without one, the full-precision weights term x ratio stands.
+        f4, served4 = _bnb_file(det.get("weights_file_bytes"), det.get("weights_file"))
+        m = _weights_margin_for(_bnb_margin_key(model_key), served4)
+        if m.get("source") == "measured" and f4:
+            mg4 = m
+            w4 = int(f4 * float(m["margin"]))
     kv = int(det.get("kv") or 0)
     corr = det.get("calibration_correction")
     corr = None if (corr in (None, 1, 1.0)) else float(corr)
     out = dict(det, weights=w4, weights_full_precision=int(w), bnb_4bit_ratio=ratio)
+    if mg4:
+        out.update(bnb_4bit_margin=mg4["margin"], bnb_4bit_margin_samples=mg4.get("samples"),
+                   bnb_4bit_margin_origin=mg4.get("origin"))
     out["total"] = _need_total(w4, kv, corr)
     return out["total"], out, ratio
 
@@ -12503,7 +12551,7 @@ def _fit_preview(state: "WorkerState", model_key: str, bnb: "bool | None" = None
     bnb_ratio = None
     if bnb:
         try:
-            need, det, bnb_ratio = _bnb_reprice(det)
+            need, det, bnb_ratio = _bnb_reprice(det, model_key)
         except Exception:  # noqa: BLE001
             bnb_ratio = None
     request = _fit_request(state, model_key, need, det, False)
@@ -12638,10 +12686,10 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         from hugpy_engine.spill import bnb_4bit_env
         if bnb_4bit_env():
             if need_from_detail:
-                need, _det, _ = _bnb_reprice(_det)
+                need, _det, _ = _bnb_reprice(_det, model_key)
             else:
                 _full = int(_det.get("weights") or 0)
-                _r_need, _det, _ = _bnb_reprice(_det)
+                _r_need, _det, _ = _bnb_reprice(_det, model_key)
                 need = max(0, int(need) - (_full - int(_det.get("weights") or _full)))
     except Exception:  # noqa: BLE001 — never break admission over the lever
         pass

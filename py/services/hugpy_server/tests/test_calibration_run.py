@@ -103,7 +103,7 @@ def test_full_load_records_the_measured_margin_before_unloading(monkeypatch):
     never records (only part of the weights were on the card)."""
     fake = _Fake([], 1 * G, 20 * G, 1 * G, 19 * G, 21 * G)
     j = _run(monkeypatch, fake)
-    assert fake.margins == [{"model_key": "M", "delta_bytes": 19 * G, "ctx": 2048}]
+    assert fake.margins == [{"model_key": "M", "delta_bytes": 19 * G, "ctx": 2048, "bnb_4bit": False}]
     assert j["result"]["measured"]["margin"]["ok"] is True
     part = _Fake([], 1 * G, 15 * G, 1 * G, 14 * G, 25 * G)
     part.action = "partial"
