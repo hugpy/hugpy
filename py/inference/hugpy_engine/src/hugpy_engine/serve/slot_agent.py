@@ -1837,6 +1837,8 @@ class Slot:
             # None = no split. getattr for the same pre-field-instance reason.
             "n_cpu_moe": getattr(self, "n_cpu_moe", None),
             "ctx": self.ctx,
+            # Sequences (llama-server --parallel): KV on the card = ctx x parallel.
+            "parallel": getattr(self, "parallel", 1) if self.model_key else None,
             # Allocation provenance (additive; see __init__). alloc_effective is
             # what the child actually launched with.
             "alloc_requested": getattr(self, "alloc_requested", None),
@@ -1974,6 +1976,16 @@ class Slot:
                 profile_bin=self.profile_bin, n_cpu_moe=n_cpu_moe,
                 tensor_split=self.tensor_split, main_gpu=self.main_gpu,
                 kv_cache_type=kv_cache_type, flash_attn=flash_attn)
+            # Sequences the child serves (--parallel; 1 when absent). llama-server
+            # allocates KV for ctx x parallel at load, so a measurement of this
+            # residency must subtract that many sequences, not one.
+            self.parallel = 1
+            for _i, _a in enumerate(argv):
+                if _a == "--parallel" and _i + 1 < len(argv):
+                    try:
+                        self.parallel = max(1, int(argv[_i + 1]))
+                    except (TypeError, ValueError):
+                        pass
             # per-load GPU pin overrides the slot's MAIN_GPU default; a split
             # leaves the card unset so every visible GPU can hold its shard.
             self.gpu = None if is_split else (gpu if gpu not in (None, "") else MAIN_GPU)

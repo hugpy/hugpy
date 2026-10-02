@@ -244,6 +244,21 @@ def _run(jid: str, worker: dict, model_key: str, bnb: bool, evict_others: bool) 
         if not answered:
             err = chat.get("error") if isinstance(chat, dict) else chat
             raise RuntimeError(f"the load did not answer: {json.dumps(err, default=str)[:600]}")
+        # 4b. RECORD THE MARGIN (2026-10-02) — a full load measured alone on an
+        # idle card IS the weights measurement the gate prices from; the worker
+        # nets out KV x sequences with the heartbeat learner's own arithmetic.
+        # Not for 4-bit (the file is the full-precision checkpoint) or a planned
+        # partial (only part of the weights are on the card).
+        margin_rec = None
+        d_used = (loaded.get("used") - base.get("used")) \
+            if (loaded.get("used") is not None and base.get("used") is not None) else None
+        if not bnb and pred.get("action") == "proceed" and d_used and d_used > 0:
+            _step(jid, "recording the measured weights margin on the worker")
+            st_m, margin_rec = _worker_post(worker, "/ops/weights-margin",
+                                            {"model_key": model_key, "delta_bytes": int(d_used),
+                                             "ctx": x.get("resolved")})
+            if st_m >= 400 or not (isinstance(margin_rec, dict) and margin_rec.get("ok")):
+                _step(jid, f"margin not recorded: {(margin_rec or {}).get('error') if isinstance(margin_rec, dict) else margin_rec}")
         # 5. UNLOAD — the worker's own eviction, then what it left behind
         _step(jid, "unloading through the worker's eviction path")
         st, ev = _worker_post(worker, "/ops/evict", {"model_key": model_key})
@@ -256,6 +271,7 @@ def _run(jid: str, worker: dict, model_key: str, bnb: bool, evict_others: bool) 
             "device_used_delta_bytes": (used1 - used0) if (used0 is not None and used1 is not None) else None,
             "leftover_after_unload_bytes": (used2 - used0) if (used0 is not None and used2 is not None) else None,
             "evict_status": st, "evict": ev, "load_took_s": chat.get("_took_s"),
+            "margin": margin_rec,
         }
         load_bytes = measured["resident_vram_bytes"] or measured["device_used_delta_bytes"]
         predicted = {"gate_need_bytes": pred.get("need_bytes"), "gate_weights_bytes": pred.get("weights_bytes"),

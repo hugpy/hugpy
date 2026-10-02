@@ -2316,6 +2316,7 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
             "busy": s.get("busy"), "endpoint": s.get("endpoint"),
             "rss_bytes": s.get("rss_bytes"),
             "n_gpu_layers": s.get("n_gpu_layers"), "ctx": s.get("ctx"),
+            "parallel": s.get("parallel"),
             "vram_bytes": vram_bytes, "device": device,
             # Allocation provenance (2026-09-23), None from an older slot:
             # what the seat was loaded FOR and by whom, what it actually got,
@@ -5250,6 +5251,38 @@ def build_app(state: "WorkerState") -> Flask:
             "loaded_models": loaded_model_keys(),
         })
 
+    @app.route("/ops/weights-margin", methods=["POST"])
+    def ops_weights_margin():
+        # CALIBRATE -> MEASURED MARGIN (2026-10-02): central's calibrate run
+        # measured the card's used-delta for a load it made alone on an idle
+        # card; record it through the SAME arithmetic as the heartbeat learner
+        # (_margin_record) so the gate prices the next load from it. The served
+        # ctx / --parallel / card come from this worker's own live row; central
+        # sends only {model_key, delta_bytes}. Partial residencies are refused.
+        body = request.get_json(silent=True) or {}
+        model_key = str(body.get("model_key") or "").strip()
+        try:
+            delta = int(body.get("delta_bytes"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "delta_bytes (int) is required"}), 400
+        if not model_key or delta <= 0:
+            return jsonify({"ok": False, "error": "model_key and a positive delta_bytes are required"}), 400
+        row = next((a for a in (_allocations() or []) if (a or {}).get("model_key") == model_key), None) or {}
+        if row and row.get("n_gpu_layers") is not None and _calib_verdict(
+                row.get("device") or "cuda", row.get("n_gpu_layers"), row.get("total_layers")) not in ("full", "unknown"):
+            return jsonify({"ok": False, "error": "partial residency is not a weights measurement",
+                            "row": {k: row.get(k) for k in ("n_gpu_layers", "total_layers", "device")}}), 409
+        wfile, served = _incoming_weights_file(model_key)
+        if not wfile:
+            return jsonify({"ok": False, "error": f"no weights file size for {model_key}"}), 404
+        rec = _margin_record(model_key, delta, wfile, served,
+                             ctx=row.get("ctx") or body.get("ctx"),
+                             parallel=row.get("parallel") or 1,
+                             dev_index=row.get("gpu_index"), origin="calibrate")
+        if rec is None:
+            return jsonify({"ok": False, "error": "implausible ratio — not recorded (see worker log)"}), 422
+        return jsonify({"ok": True, "record": rec})
+
     @app.route("/ops/evict", methods=["POST"])
     def ops_evict():
         # Targeted eviction: free ONE model's RAM+VRAM, picking the mechanism by
@@ -7806,27 +7839,41 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
     delta = int(base["free_before"]) - int(free_after)
     if moe_n is not None:
         return _margin_measure_moe(model_key, row, int(moe_n), delta, wfile, served)
+    return _margin_record(model_key, delta, wfile, served, ctx=row.get("ctx"),
+                          parallel=row.get("parallel"),
+                          dev_index=row.get("gpu_index", base.get("device_index")))
+
+
+def _margin_record(model_key: str, delta: int, wfile: int, served: "str | None", *,
+                   ctx=None, parallel=None, dev_index=None, origin: str = "heartbeat") -> "dict | None":
+    """delta (VRAM the residency took) -> weights margin record, the ONE copy of
+    the arithmetic: GGUF nets out KV x sequences at the served ctx, the rest is
+    weights / file. Shared by the heartbeat learner and the calibrate run
+    (2026-10-02: a calibrate measurement becomes the gate's measured margin)."""
     framework = _model_framework(model_key)
     kv = 0
-    ctx = None
     if str(framework or "").lower() in ("gguf", "llama_cpp"):
-        ctx = row.get("ctx")
         if not ctx:
             try:
                 ctx = _effective_ctx(model_key).get("ctx")
             except Exception:  # noqa: BLE001
                 ctx = None
         kv = _kv_bytes_at_ctx(model_key, ctx)
-    weights_measured = delta - kv
+        # llama-server holds ctx x --parallel of KV; subtracting one sequence
+        # booked the extras as weights (margins of ~1.12 on multi-sequence seats).
+        try:
+            kv *= max(1, int(parallel or 1))
+        except (TypeError, ValueError):
+            pass
+    weights_measured = int(delta) - kv
     ratio = (weights_measured / float(wfile)) if wfile else None
     if ratio is None or not _plausible_margin(ratio):
-        logger.warning("weights margin for %s DISCARDED as implausible: delta=%s "
+        logger.warning("weights margin for %s DISCARDED as implausible (%s): delta=%s "
                        "kv=%s weights_measured=%s file=%s ratio=%s (plausible %s..%s)",
-                       model_key, delta, kv, weights_measured, wfile,
+                       model_key, origin, delta, kv, weights_measured, wfile,
                        (None if ratio is None else round(ratio, 3)),
                        _MARGIN_PLAUSIBLE[0], _MARGIN_PLAUSIBLE[1])
         return None
-    dev_index = row.get("gpu_index", base.get("device_index"))
     dev_class = _device_class(dev_index)
     now = time.time()
     with _MARGIN_LOCK:
@@ -7842,11 +7889,12 @@ def _margin_measure(model_key: str, row: dict, loading: "list | None" = None,
                "margin": round(mean, 4), "last_ratio": round(ratio, 4),
                "weights_measured_bytes": int(weights_measured),
                "kv_measured_bytes": int(kv), "measured_ctx": (int(ctx) if ctx else None),
+               "parallel": (int(parallel) if parallel else 1), "origin_kind": origin,
                "delta_bytes": int(delta), "measured_at": now, "samples": samples}
         _WEIGHTS_MARGINS[model_key] = rec
-    logger.info("weights margin measured: model=%s file=%s backend=%s device=%r "
+    logger.info("weights margin measured (%s): model=%s file=%s backend=%s device=%r "
                 "delta_bytes=%s kv_bytes=%s weights_measured_bytes=%s file_bytes=%s "
-                "ratio=%.3f margin=%.3f samples=%d (prior %.2f)", model_key, served,
+                "ratio=%.3f margin=%.3f samples=%d (prior %.2f)", origin, model_key, served,
                 framework, dev_class, delta, kv, weights_measured, wfile, ratio,
                 mean, samples, _WEIGHTS_HEADROOM)
     _persist_weights_margins()

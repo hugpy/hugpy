@@ -230,6 +230,9 @@ def test_device_source_is_the_only_new_key(monkeypatch):
         # step 2 F4 (2026-09-29): the slot's MEASURED residency (its own probe)
         # — the same key ram rows carry, so central consults ONE field.
         "materialized",
+        # 2026-10-02: llama-server --parallel (KV on the card = ctx x parallel);
+        # central types allocations as a plain list, so the key is wire-safe.
+        "parallel",
     }
 
 

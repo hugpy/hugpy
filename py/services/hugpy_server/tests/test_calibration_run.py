@@ -16,6 +16,8 @@ class _Fake:
         self.mine = mine_bytes
         self.gate = gate_need
         self.evicted = []
+        self.margins = []
+        self.action = "proceed"
 
     def get(self, worker, path, params=None, timeout=20):
         if path == "/ops/residents":
@@ -29,11 +31,14 @@ class _Fake:
                 u = self.used[2]
             return {"vram_used_bytes": u, "vram_free_bytes": 24 * G - u, "vram_total_bytes": 24 * G, "cards": [], "holders": []}
         if path.startswith("/fit-preview/"):
-            return {"need_bytes": self.gate, "weights_bytes": self.gate, "kv_bytes": 0, "action": "proceed",
+            return {"need_bytes": self.gate, "weights_bytes": self.gate, "kv_bytes": 0, "action": self.action,
                     "ctx": {"resolved": 2048, "source": "ctx_pct"}, "need_detail": {"weights_file": "m.gguf"}}
         raise AssertionError(path)
 
     def post(self, worker, path, body, timeout=120):
+        if path == "/ops/weights-margin":
+            self.margins.append(body)
+            return 200, {"ok": True, "record": {"margin": 0.96}}
         assert path == "/ops/evict"
         self.evicted.append(body["model_key"])
         self.res = [r for r in self.res if r["model_key"] != body["model_key"]]
@@ -90,3 +95,17 @@ def test_gate_far_from_measured_is_a_disagreement(monkeypatch):
     f = _Fake([], G, 10 * G, G, 9 * G, 30 * G)
     j = _run(monkeypatch, f)
     assert j["result"]["verdict"] == "disagree" and j["result"]["detail"]["gate_error_pct"] > 100
+
+
+def test_full_load_records_the_measured_margin_before_unloading(monkeypatch):
+    """2026-10-02: a planned-full load measured alone becomes the gate's measured
+    margin — the delta goes to the worker BEFORE the eviction; a planned partial
+    never records (only part of the weights were on the card)."""
+    fake = _Fake([], 1 * G, 20 * G, 1 * G, 19 * G, 21 * G)
+    j = _run(monkeypatch, fake)
+    assert fake.margins == [{"model_key": "M", "delta_bytes": 19 * G, "ctx": 2048}]
+    assert j["result"]["measured"]["margin"]["ok"] is True
+    part = _Fake([], 1 * G, 15 * G, 1 * G, 14 * G, 25 * G)
+    part.action = "partial"
+    _run(monkeypatch, part)
+    assert part.margins == []
