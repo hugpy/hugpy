@@ -154,6 +154,10 @@ check("ungrant_model is idempotent (second call no-op, no error)",
 
 
 # --- 5. _remember_assignments does NOT persist grants -----------------------
+# The sidecar is FROZEN by default since the DB detach (2026-10-02: designation
+# lives in model_workers); HUGPY_ASSIGN_SIDECAR_WRITE=1 re-enables it, and the
+# "never persists grants" contract must hold whenever it is written.
+os.environ["HUGPY_ASSIGN_SIDECAR_WRITE"] = "1"
 store.grant_model("wid-1", "GrantOnlyModel")
 # assign/unassign both call _remember_assignments internally; force a fresh
 # snapshot write via assign_model (already exercises the real code path).

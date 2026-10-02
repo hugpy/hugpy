@@ -1064,6 +1064,10 @@ def _public_view(worker: Dict[str, Any]) -> Dict[str, Any]:
 
 def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
     """The body of :func:`_public_view`, inside its cold-fill window."""
+    # COLD CACHE (85b9ab8 made _model_view_fields return {} until the model
+    # view is filled): read every key with an empty default — a fresh worker's
+    # register/_public_view raised KeyError 'model_alloc_modes' (release gate,
+    # 2026-10-02: 7 test modules failed at import).
     model_fields = _model_view_fields(worker)
     cached_storage = worker.get("_storage_view_cache")
     if (isinstance(cached_storage, dict)
@@ -1114,7 +1118,7 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # with nothing persisted is deliberately ABSENT rather than stamped
         # max-gpu: absent degrades to the blank max-gpu default at the reader,
         # which is the same answer without asserting a preference nobody chose.
-        "model_alloc_modes": model_fields["model_alloc_modes"],
+        "model_alloc_modes": dict(model_fields.get("model_alloc_modes") or {}),
         # BITSANDBYTES SPECIALIZATION (operator, 2026-07-26) — two separate
         # maps because "can this take it" and "is it switched on" are different
         # questions and the console needs both: availability decides whether the
@@ -1122,13 +1126,13 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # A model absent from bnb_available simply has no lever (gguf, a
         # CPU-only worker, an already-quantized repo).
         "bnb_by_model": dict(worker.get("bnb_by_model") or {}),
-        "bnb_available": model_fields["bnb_available"],
+        "bnb_available": dict(model_fields.get("bnb_available") or {}),
         # MoE: capability (can it split at all), the operator override, and the
         # EFFECTIVE state the checkbox renders — auto shows as ticked when the
         # derivation produced a split, so the real behaviour is never hidden.
-        "moe_capable": model_fields["moe_capable"],
+        "moe_capable": dict(model_fields.get("moe_capable") or {}),
         "moe_by_model": _effective_moe_overrides(worker),
-        "moe_effective": model_fields["moe_effective"],
+        "moe_effective": dict(model_fields.get("moe_effective") or {}),
         # The architecture facts used by the MoE column must come from the
         # same persisted physical record used by the allocator, not from an
         # optional/stale catalog row.  Keep this separate from moe_effective:
@@ -1140,7 +1144,7 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # The INTENDED vram/ram division per model — what the Memory column
         # shows for a model that is not resident yet, so it stops echoing the
         # Size column and starts answering "where will this actually go".
-        "planned_split": model_fields["planned_split"],
+        "planned_split": dict(model_fields.get("planned_split") or {}),
         # k67 item G — INERT SPILL ROWS. A persisted spill for a BLOCKED model is
         # a dead contract (the model can't route while blocked, and block never
         # authored it). Rather than let it linger indistinguishable from a live
