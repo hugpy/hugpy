@@ -47,6 +47,12 @@ def _liveness_builder(app):
         if isinstance(w, dict) and w.get("id") not in have:
             (live := live if live is not None else []).append(
                 heartbeat_db.liveness_from_record(w, w.get("last_seen"), 45.0))
+    # hugpy-link presence: the connection apart from the state report.
+    try:
+        from hugpy_fleet.central import presence
+        live = presence.merge(live)
+    except Exception:  # noqa: BLE001 — presence is additive; heartbeat-only status stands
+        pass
     return sorted(live or [], key=lambda x: str(x.get("name")))
 
 

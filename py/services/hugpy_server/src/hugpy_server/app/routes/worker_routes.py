@@ -1424,6 +1424,22 @@ def workers_health(worker_id):
         return jsonify({"reachable": False, "url": url, "error": f"{type(exc).__name__}: {exc}"})
 
 
+@worker_bp.route("/llm/workers/<worker_id>/presence", methods=["POST"])
+def workers_presence(worker_id):
+    """hugpy-link ping (2026-10-02): the CONNECTION apart from the heavy state
+    heartbeat. Body {version, worker_state: up|busy|restarting|down, uptime_s?,
+    worker_pid?, health_ms?, link_version?, unit_state?}. One short write on its
+    own connection (central.presence); never touches the worker registry, so it
+    cannot queue behind a heartbeat transaction. Same enrollment gate as the
+    heartbeat."""
+    if not _enrollment_ok():
+        abort(401, description="Worker enrollment token invalid or required.")
+    from hugpy_fleet.central import presence
+    body = request.get_json(silent=True) or {}
+    ok = presence.record(worker_id, body)
+    return jsonify({"ok": bool(ok), "stored": bool(ok), "link_stale_s": presence.link_stale_s()}), (200 if ok else 503)
+
+
 @worker_bp.route("/llm/workers/<worker_id>/heartbeat", methods=["POST"])
 def workers_heartbeat(worker_id):
     if not _enrollment_ok():
