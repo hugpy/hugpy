@@ -636,6 +636,23 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
     if (typeof onDbRefresh === 'function') onDbRefresh()
     if (typeof onRefresh === 'function') onRefresh()
   }, [worker.id, models, onDbRefresh, onRefresh])
+  // FIT PREVIEW (operator 2026-10-02: "a test button for every allocated
+  // model, something that will simply show what it thinks the total is"):
+  // the WORKER's own dry-run admission — what the load gate would decide right
+  // now, in bytes — next to the console's Memory figure. Nothing loads.
+  const [fitPreview, setFitPreview] = useState({})   // key -> 'running' | result
+  const runFitPreview = useCallback(async (key, bnbOn) => {
+    setFitPreview(o => ({ ...o, [key]: 'running' }))
+    let out
+    try {
+      const q = `model_key=${encodeURIComponent(key)}${bnbOn ? '&bnb=1' : ''}`
+      const r = await hugpyFetchJsonLoose(`/api/llm/workers/${encodeURIComponent(worker.id)}/fit-preview?${q}`)
+      out = r.body || { error: `HTTP ${r.status}` }
+    } catch (e) {
+      out = { error: String(e.message || e) }
+    }
+    setFitPreview(o => ({ ...o, [key]: out }))
+  }, [worker.id])
   const writeKvKnobs = useCallback(async (key, body) => {
     const nextSet = body.set || {}
     setKvOptimistic(o => ({ ...o, [key]: { ...(o[key] || {}), ...nextSet,
@@ -1560,8 +1577,32 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
         const canChat = chatModel && modelTasks(chatModel).some(t =>
           t === 'text-generation' || t === 'image-text-to-text')
         const disc = discovering[key]
+        const fp = fitPreview[key]
+        const fpLines = (fp && fp !== 'running') ? (() => {
+          if (fp.error) return { ok: false, head: `fit preview failed: ${fp.error}`, body: [] }
+          if (fp.gpu === false || !fp.need_bytes) return { ok: null, head: fp.note || 'no VRAM gate on this worker', body: [] }
+          const c = fp.card || {}, x = fp.ctx || {}
+          const verdict = fp.action === 'refuse' ? `✗ would REFUSE (${fp.failure?.kind || 'refuse'})`
+            : fp.action === 'evict' ? `↻ would EVICT ${fp.would_evict.length} to fit`
+            : fp.action === 'partial' ? '◐ would load PARTIAL (offload)' : '✓ would fit now'
+          const head = `${verdict} · load gate needs ${fmtBytes(fp.need_bytes)} = weights ${fmtBytes(fp.weights_bytes)} + KV ${fmtBytes(fp.kv_bytes)}`
+            + `${fp.bnb_4bit_ratio ? ` (×${fp.bnb_4bit_ratio} 4-bit)` : ''}`
+          const body = [
+            `ctx ${x.resolved != null ? Number(x.resolved).toLocaleString() : '?'}${x.pct != null ? ` (${x.pct}% of ${Number(x.max || 0).toLocaleString()})` : ''} · source ${x.source || '?'}${x.reason ? ` — ${x.reason}` : ''}`,
+            `card ${fmtBytes(c.total_bytes)} · free ${fmtBytes(c.free_bytes)} budgetable (device ${fmtBytes(c.device_free_bytes)}) · reserve ${fmtBytes(c.ceiling_reserve_bytes)}${c.subject_held_bytes ? ` · own seat ${fmtBytes(c.subject_held_bytes)}` : ''}`,
+            ...(fp.would_evict?.length ? [`would evict: ${fp.would_evict.map(e => `${e.model_key} (${fmtBytes(e.vram_bytes)})`).join(', ')}`] : []),
+            ...((fp.residents || []).filter(r => r.protected).length ? [`protected: ${(fp.residents || []).filter(r => r.protected).map(r => `${r.model_key} (${fmtBytes(r.vram_bytes)}${r.why ? `, ${r.why}` : ''})`).join(', ')}`] : []),
+            ...(fp.failure?.reason ? [`gate: ${fp.failure.reason}`] : []),
+          ]
+          return { ok: fp.action !== 'refuse', head, body }
+        })() : null
         return (
           <>
+            <button className="wp-activate wp-fit-preview" disabled={fp === 'running'}
+                    title="Fit preview: ask this worker's load gate what it would decide right now — weights + KV at the context it would use, free room, reserve, what it would evict and what is protected. Dry run: nothing loads. Compare with the Memory column."
+                    onClick={e => { e.stopPropagation(); runFitPreview(key, pairDb(key, models.find(mm => (mm.model_key ?? mm.key) === key)).bnbOn) }}>
+              {fp === 'running' ? '⚖ …' : '⚖ fit'}
+            </button>
             <button className="wp-activate wp-discover-model" disabled={disc === 'running'}
                     title={'Targeted discovery: re-read this model\'s files on disk — resync its quant list, re-stamp its weights facts (size, MoE structure, layer bytes, KV cost) and recompute its fit verdicts on every worker.'
                       + (disc && disc !== 'running' ? `\nLast run: ${disc.text}` : '')}
@@ -1571,6 +1612,14 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
             {disc && disc !== 'running' && (
               <span className="wp-lt-muted" style={{ fontSize: 11, color: disc.ok ? undefined : 'var(--danger, #d33)' }}
                     title={disc.text}>{disc.ok ? '✓' : '✗'} {disc.text.length > 70 ? disc.text.slice(0, 70) + '…' : disc.text}</span>
+            )}
+            {fpLines && (
+              <div className="wp-fit-preview-out" style={{ fontSize: 11, marginTop: 2, whiteSpace: 'normal', minWidth: 360,
+                                                           color: fpLines.ok === false ? 'var(--danger, #d33)' : undefined }}>
+                <div>{fpLines.head}</div>
+                {fpLines.body.map((l, i) => <div key={i} className="wp-lt-muted">{l}</div>)}
+                <button className="wp-moe-auto" style={{ fontSize: 10 }} onClick={e => { e.stopPropagation(); setFitPreview(o => { const n = { ...o }; delete n[key]; return n }) }}>dismiss</button>
+              </div>
             )}
             {onChat && canChat && (
               <button className="wp-activate wp-chat-model" title={`Chat with ${key} in Compute`}

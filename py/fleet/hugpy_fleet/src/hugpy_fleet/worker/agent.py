@@ -5174,6 +5174,15 @@ def build_app(state: "WorkerState") -> Flask:
         _schedule_restart(state, "ops/config apply")
         return jsonify({"ok": True, "settings": settings, "restarting": True})
 
+    @app.route("/fit-preview/<path:model_key>", methods=["GET"])
+    def fit_preview(model_key):
+        # Read-only dry run of the VRAM admission (no load, no eviction).
+        bnb = request.args.get("bnb") in ("1", "true", "yes")
+        try:
+            return jsonify(_fit_preview(state, model_key, bnb=bnb))
+        except Exception as exc:  # noqa: BLE001 — a preview must answer, not 500
+            return jsonify({"model_key": model_key, "error": f"{type(exc).__name__}: {exc}"}), 200
+
     @app.route("/probe/<path:model_key>", methods=["POST", "GET"])
     def probe(model_key):
         # THE LOAD HALF (operator ruling 2026-09-24): a live VRAM-fit check that
@@ -12398,6 +12407,70 @@ def _fit_residents(state: "WorkerState", model_key: str):
                              why=p.get("why"), materialized=_fit_materialized(p),
                              pinned=bool(p.get("pinned")), gpu_index=p.get("gpu_index")))
     return tuple(rows), candidates, protected
+
+
+def _fit_preview(state: "WorkerState", model_key: str, bnb: "bool | None" = None) -> dict:
+    """DRY-RUN of the VRAM admission (operator 2026-10-02: "a test button for
+    every allocated model, something that will simply show what it thinks the
+    total is"). The SAME gather -> plan_fit as ``_vram_evict_to_fit`` — the
+    priced need (weights + KV at the effective ctx), the budgetable free room,
+    the ceiling reserve, the residents it would evict and the protected ones —
+    with NOTHING executed: no eviction, no ticket, no flex/partial commit is
+    cleared or written. What a load would decide right now, in bytes."""
+    from hugpy_engine.fit import plan_fit
+    total = _total_vram_bytes()
+    if not total:
+        return {"model_key": model_key, "gpu": False,
+                "note": "no GPU / unmeasurable — a real load proceeds without a VRAM gate"}
+    snap = _fit_snapshot(total)
+    policy = _fit_policy(total)
+    residents, _cand_rows, _prot_rows = _fit_residents(state, model_key)
+    free_hint, room_note = _admission_room_hint(state, model_key, snap, policy, residents, False)
+    det = _need_detail_with_hint(model_key, free_hint=free_hint,
+                                 reserve_bytes=int(policy.ceiling_reserve_bytes or 0))
+    need = det.get("total")
+    if not need:
+        return {"model_key": model_key, "gpu": True, "need_detail": det,
+                "note": "unknown weight size — a real load fails open (proceeds)"}
+    bnb_ratio = None
+    if bnb:
+        try:
+            from hugpy_engine.alloc_modes import BNB_4BIT_SIZE_RATIO
+            bnb_ratio = float(BNB_4BIT_SIZE_RATIO)
+            need = int(need * bnb_ratio)
+        except Exception:  # noqa: BLE001
+            bnb_ratio = None
+    request = _fit_request(state, model_key, need, det, False)
+    plan = plan_fit(request, snap, residents, policy)
+    fl = plan.failure
+    split = dict((plan.need_detail or {}).get("need_split") or {})
+    return {
+        "model_key": model_key, "gpu": True,
+        "action": plan.action, "fits_now": plan.fits_now,
+        "failure": (fl.as_dict() if fl is not None else None),
+        "need_bytes": plan.need_bytes,
+        "weights_bytes": split.get("weights_bytes", det.get("weights")),
+        "kv_bytes": split.get("kv_bytes", det.get("kv")),
+        "bnb_4bit_ratio": bnb_ratio,
+        "ctx": {"resolved": det.get("ctx_resolved") or split.get("ctx_resolved"),
+                "pct": det.get("ctx_pct"), "max": det.get("ctx_max"),
+                "source": det.get("ctx_source"), "reason": det.get("ctx_reason"),
+                "room_note": room_note},
+        "card": {"total_bytes": snap.total_bytes, "free_bytes": snap.free_bytes,
+                 "device_free_bytes": (None if snap.free_bytes is None
+                                       else int(snap.free_bytes) + int(snap.external_floor_bytes or 0)),
+                 "external_floor_bytes": int(snap.external_floor_bytes or 0),
+                 "ceiling_reserve_bytes": plan.ceiling_reserve_bytes,
+                 "free_effective_bytes": plan.free_effective_bytes,
+                 "subject_held_bytes": plan.subject_held_bytes},
+        "would_evict": [{"model_key": e.model_key, "vram_bytes": e.vram_bytes, "host_mode": e.host_mode}
+                        for e in plan.evictions],
+        "predicted_freed_bytes": plan.predicted_freed_bytes,
+        "residents": [{"model_key": r.model_key, "vram_bytes": r.vram_bytes, "host_mode": r.host_mode,
+                       "protected": bool(r.protected), "why": r.why} for r in residents],
+        "reasons": list(plan.reasons or ()), "note": plan.note,
+        "need_detail": {k: v for k, v in det.items() if k not in ("need_split",)},
+    }
 
 
 def _vram_evict_to_fit(state: "WorkerState", model_key: str,

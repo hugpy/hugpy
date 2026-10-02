@@ -4587,6 +4587,36 @@ def _context_preview(model_key, worker, pct):
     return out
 
 
+@worker_bp.route("/llm/workers/<worker_id>/fit-preview", methods=["GET"])
+def workers_fit_preview(worker_id):
+    """GET ?model_key=&bnb=1 -> the WORKER's own dry-run admission for that model
+    (operator 2026-10-02: a per-row test that shows what the load gate thinks the
+    total is): weights + KV at the effective ctx, free / reserve / floor, the
+    residents it would evict and the protected ones. Read-only: nothing loads."""
+    from urllib.parse import quote
+    from hugpy_fleet.central import worker_http
+    model_key = (request.args.get("model_key") or "").strip()
+    if not model_key:
+        return jsonify({"error": "model_key is required"}), 400
+    worker = get_worker(worker_id)
+    if worker is None:
+        return jsonify({"error": f"no worker {worker_id!r} in the central worker registry"}), 404
+    params = {"bnb": "1"} if request.args.get("bnb") in ("1", "true", "yes") else None
+    try:
+        r = worker_http.get(worker, f"/fit-preview/{quote(model_key, safe='')}", params=params, read_timeout=20)
+    except worker_http.WorkerUnreachable as exc:
+        cause = getattr(exc, "__cause__", None) or exc
+        return jsonify({"error": f"worker unreachable: {type(cause).__name__}: {cause}"}), 502
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 502
+    if r.status_code == 404:
+        return jsonify({"error": "this worker's agent predates /fit-preview (update the worker)"}), 501
+    try:
+        return jsonify(r.json()), r.status_code
+    except ValueError:
+        return jsonify({"error": f"worker answered HTTP {r.status_code} with no JSON"}), 502
+
+
 @worker_bp.route("/llm/workers/<worker_id>/context-preview", methods=["GET"])
 def workers_context_preview(worker_id):
     """GET ?model_key=&pct= -> the priced need (weights, kv_bytes, total) at
