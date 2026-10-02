@@ -239,6 +239,9 @@ class GpuInfo(BaseModel):
     name: str | None = None
     memory_total: int | None = None
     memory_free: int | None = None
+    # The driver's reserved share (nvidia-smi memory.reserved): inside
+    # memory_total, never free, held by no process — shown as immutable.
+    memory_reserved: int | None = None
 
 
 class RegisterRequest(BaseModel):
