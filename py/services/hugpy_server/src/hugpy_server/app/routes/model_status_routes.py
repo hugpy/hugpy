@@ -1101,7 +1101,7 @@ def _unservable_reason(row, verification, servable, unserveable_reason) -> Optio
 
 def build_status_rows(catalog: Iterable[dict], *, workers: List[dict], metrics_rows: List[dict],
                       audit_doc: Optional[dict], failures: List[dict], detail: bool = False,
-                      override_of: Optional[Callable[[str], Any]] = None, events=(), calls=(),
+                      override_of: Optional[Callable[[str], Any]] = None, events=(), calls=(), successes=(),
                       inflight_of: Optional[Callable[[str, str], int]] = None,
                       now: Optional[float] = None, throughput_stats=(), transfers=(),
                       throughput_error: Optional[str] = None) -> List[dict]:
@@ -1132,6 +1132,17 @@ def build_status_rows(catalog: Iterable[dict], *, workers: List[dict], metrics_r
             fails.setdefault(mk, []).append(f)
     acts: Dict[str, list] = {mk: list(v) for mk, v in fails.items()}
     for a in calls or []:
+        mk = form_to_key.get((a or {}).get("model") or "")
+        if mk:
+            acts.setdefault(mk, []).append(a)
+    # SUCCESSFUL LOADS (2026-10-02, operator: "Coder-Next answered plenty and
+    # never stopped saying failed"): the per-worker overlay clears a failure
+    # only when it sees a newer success, but it was handed failures + the last
+    # 10 s of calls — and calls carry no worker_card. A load that failed during
+    # a worker restart then stayed "failed" after many good loads. Successes go
+    # into the per-worker list only; `fails` (the history / last_failure) is
+    # untouched.
+    for a in successes or []:
         mk = form_to_key.get((a or {}).get("model") or "")
         if mk:
             acts.setdefault(mk, []).append(a)
@@ -1397,6 +1408,20 @@ def load_events() -> tuple:
         return [], {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def load_successes() -> tuple:
+    """Recent SUCCESSFUL load rows (any outcome but fail/failed/error), so a
+    newer good load clears an older load failure in the per-worker state."""
+    try:
+        from hugpy_fleet.central import model_metrics as _mm
+        rows = _mm.recent_actions(_mm.model_metrics_store, limit=3000, action="load",
+                                  since_ts=time.time() - 7 * 86400)
+        ok = [r for r in rows or [] if isinstance(r, dict)
+              and str(r.get("outcome") or "").lower() not in ("fail", "failed", "error")]
+        return ok, {"rows": len(ok), "error": None}
+    except Exception as exc:  # noqa: BLE001
+        return [], {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def load_calls() -> tuple:
     """Call rows of the last few seconds (the ``answering`` signal)."""
     try:
@@ -1528,6 +1553,7 @@ def models_status():
     audit_doc, sources["audit"] = _cached("audit", load_audit)
     grade_rows, sources["metrics"] = _cached("metrics", load_grade_rows)
     failures, sources["failures"] = _cached("failures", load_failures)
+    successes, sources["successes"] = _cached("successes", load_successes)
     workers, sources["workers"] = _cached("workers", load_workers, WORKERS_TTL_S)
     events, sources["events"] = _cached("events", load_events, WORKERS_TTL_S)
     calls, sources["calls"] = _cached("calls", load_calls, 1.0)
@@ -1535,7 +1561,7 @@ def models_status():
     transfers, sources["transfers"] = load_transfers()
     rows = build_status_rows(catalog, workers=workers, metrics_rows=grade_rows, audit_doc=audit_doc,
                              failures=failures, detail=detail, override_of=_override_of if detail else None,
-                             events=events, calls=calls, inflight_of=_inflight_of,
+                             events=events, calls=calls, successes=successes, inflight_of=_inflight_of,
                              throughput_stats=tstats, transfers=transfers,
                              throughput_error=(sources.get("throughput") or {}).get("error"))
     summary = summarize(rows)

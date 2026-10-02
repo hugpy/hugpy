@@ -411,3 +411,23 @@ def test_comfy_checkpoint_on_central_is_not_missing():
     gone = {**row, "central_file": {"exists": False, "path": "/c/x.safetensors"}}
     assert ms.model_worker_state(gone, W(comfy={"available": False}), now=NOW)["base"] == "not allocated"
     assert ms.model_worker_state(gone, W(models=["M"], comfy={"available": False}), now=NOW)["base"] == "missing"
+
+
+def test_a_newer_successful_load_clears_an_older_load_failure():
+    """GUARD (2026-10-02, operator: "Coder-Next answered plenty and never
+    stopped saying failed"): a load that failed while the worker restarted
+    must not stay the worker's state after a later good load. Successful load
+    rows ('unloaded' / ok outcomes) are handed to the per-worker state, and the
+    newest attempt decides; an OLDER success never hides a newer failure."""
+    from hugpy_server.app.routes import model_status_routes as ms
+    model = {"model_key": "Qwen3-Coder-Next-GGUF", "name": "Qwen3-Coder-Next-GGUF"}
+    worker = {"id": "w-ae", "name": "ae-worker", "status": "online", "models": ["Qwen3-Coder-Next-GGUF"],
+              "models_local": ["Qwen3-Coder-Next-GGUF"], "slots": [], "loaded_models": []}
+    fail = {"id": 1, "ts": 1000.0, "action": "load", "outcome": "fail", "model": "Qwen3-Coder-Next-GGUF",
+            "worker_card": "ae-worker:0", "detail": {"message": "WorkerUnreachable: ConnectError: [Errno 111] Connection refused"}}
+    ok_after = {"id": 2, "ts": 1070.0, "action": "load", "outcome": "unloaded", "model": "Qwen3-Coder-Next-GGUF",
+                "worker_card": "ae-worker:0", "detail": {}}
+    ok_before = dict(ok_after, id=0, ts=900.0)
+    assert ms.model_worker_state(model, worker, None, [fail], now=2000)["state"] == "failed"
+    assert ms.model_worker_state(model, worker, None, [fail, ok_after], now=2000)["state"] == "cold"
+    assert ms.model_worker_state(model, worker, None, [fail, ok_before], now=2000)["state"] == "failed"
