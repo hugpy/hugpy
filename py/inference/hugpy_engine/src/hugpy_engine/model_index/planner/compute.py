@@ -209,10 +209,13 @@ def compute_weights(model: dict) -> dict:
 # ── per (model, worker): plan ────────────────────────────────────────────────
 def worker_totals(payload: dict | None) -> dict:
     payload = payload or {}
+    # A card's total is what processes can hold: nvidia-smi memory.total minus the
+    # driver's reserved share (firmware/GSP — immutable, in no process; 450 MiB on
+    # a 3090). Pricing against the raw total over-promised that much on every card.
     gpu = 0
     for g in payload.get("gpus") or []:
         try:
-            gpu += int((g or {}).get("memory_total") or 0)
+            gpu += max(0, int((g or {}).get("memory_total") or 0) - int((g or {}).get("memory_reserved") or 0))
         except (TypeError, ValueError):
             pass
     try:
