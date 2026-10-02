@@ -3,7 +3,9 @@
 **A self-hosted LLM console and OpenAI-compatible API in a single process.**
 Model registry & downloads, streaming chat, an OpenAI-compatible `/v1` surface
 with on-site API keys, and a GPU worker fleet with cross-machine RPC sharding —
-all served by one command, with no nginx and no Node required.
+all served by one command, with no nginx and no Node required. From 0.2.6 every
+operator setting lives in the hugpy database, and a planner prices every quant
+on every worker before anything loads.
 
 ```bash
 pip install hugpy
@@ -20,12 +22,15 @@ runner, and service dependencies for a particular machine profile.
 ## Table of contents
 
 - [Why hugpy](#why-hugpy)
+- [Screenshots](#screenshots)
+- [What's new in 0.2.6](#whats-new-in-026)
 - [The distributions](#the-distributions)
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [OpenAI-compatible API](#openai-compatible-api)
 - [Command-line interface](#command-line-interface)
 - [GPU worker fleet & sharding](#gpu-worker-fleet--sharding)
+- [Allocation, the planner and discovery](#allocation-the-planner-and-discovery)
 - [Discord bot](#discord-bot)
 - [Configuration](#configuration)
 - [Storage & paths](#storage--paths)
@@ -48,9 +53,95 @@ around self-hosting:
 - **Bring your own GPUs.** Join any machine to a central as a worker
   (`hugpy worker`), or lend its GPU to a **cross-machine shard pool** so models
   larger than one card can run across several boxes over RPC.
+- **Placement you can read.** Every quant gets a stored verdict per worker:
+  which modes fit, the GPU/RAM split and the context ceiling per KV cache
+  type. Explicit placement uses llama.cpp's own layer counts.
 - **One install, configurable runtime.** The base install carries the complete
 Hugpy module family; native engines, GPU runners, and optional media stacks are
 opt-in extras that the code lazy-imports only when used.
+
+---
+
+## Screenshots
+
+![The landing page](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-home.png)
+
+*The landing page: `pip install hugpy`, with central at the hub of GPU boxes, phones, the OpenAI-compatible API and Discord.*
+
+![The Compute tab](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-console.png)
+
+*The Compute tab, one worker's allocation rows: allocation mode, targeted discover, size, context, the GPU and RAM memory bar, 4-bit, MoE, state, residency, pin, and each pair's ranked quant list.*
+
+![Media Intelligence](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-media.png)
+
+*Media Intelligence: chat with any served model, plus embeddings, keywords, summaries, image analysis, transcription, and document and webpage briefs.*
+
+![The video studio](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-video.png)
+
+*The video studio: image-to-video clips with a VRAM budget, prompt assist from a served model, and the render desk.*
+
+![Metrics](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-metrics.png)
+
+*Metrics: the most-active models and measured throughput per worker, from every recorded call.*
+
+![The built-in docs](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-docs.png)
+
+*The built-in docs: start here, using the console, running it yourself, agents and troubleshooting.*
+
+![The Fleet page](https://raw.githubusercontent.com/hugpy/hugpy/main/docs/screenshots/hugpy-fleet.png)
+
+*The Fleet page for `hugpy-agent`, the portable agent runtime that uses the fleet's inference from any box.*
+
+---
+
+## What's new in 0.2.6
+
+0.2.6 is a ground-up change in where hugpy keeps its state. Every operator
+setting now lives in the hugpy database, the console reads and writes that
+database directly, and central converges to it. Highlights:
+
+- **The database is the source of truth.** Model designation, per-worker
+  allocation knobs, pins, drive inventory and model-wide serving settings are
+  rows in PostgreSQL (`HUGPY_REGISTRY_DB=pg`). The old JSON stores for
+  assignments, the worker catalog and serve overrides are frozen. Central
+  converges to the database in the background, so a restart no longer drops
+  unpinned state and the console never waits on central's lock.
+- **One row per model and worker.** Each (model, worker) pair carries its own
+  context target, KV cache type, flash attention, quant choice, MoE split,
+  4-bit load and placement. A pair is either **assigned** (routing may use it)
+  or also **pinned** (an operator lock that automation may neither unassign
+  nor retune). Every designation records where it came from: operator,
+  wildcard, inventory, relay, benchmark or agent.
+- **A planner that prices every quant on every worker.** For each weights file
+  hugpy stamps the facts once into the model's `hugpy.json`: size, MoE
+  structure, per-layer attention and expert bytes, and KV cost per token. The
+  planner turns those facts and each worker's budget into a stored verdict per
+  quant: which allocation modes fit, the auto mode, the largest context each
+  mode can hold for each KV cache type, and the explicit layer band. The
+  console shows these verdicts; it no longer guesses.
+- **Explicit placement in llama.cpp terms.** The explicit mode sets layer
+  counts, not percentages: attention layers on the GPU (`--n-gpu-layers`),
+  expert layers kept in RAM (`--n-cpu-moe`), an expert-split toggle for MoE
+  models, and a prefer-RAM or prefer-GPU choice for where the leftover band
+  goes. Modes that cannot fit are disabled with the verdict's reason.
+- **A ranked quant list per pair.** Tick the quants a worker may serve and rank
+  them. Rank 1 serves when it fits at the pair's context and KV type; the
+  server picks the first listed quant that fits. The lower ranks are the ladder
+  for evict-to-fit, so a polite eviction can step down to a smaller quant
+  (server-side step-down is the next release).
+- **Targeted discovery.** One click on a model's row re-reads that model's
+  files: it makes sure the folder has a `hugpy.json`, resyncs the quant list,
+  re-stamps the weights facts and recomputes the verdicts on every worker. The
+  full **Discover models** pass now ends with the same planner pass over the
+  whole store.
+- **Split GGUF quants are first-class.** A quant shipped as
+  `-00001-of-0000N.gguf` shards is priced from its shard set like any single
+  file, so large sharded MoE models get verdicts and explicit placement.
+- **Smaller fixes.** Exact MoE pricing with structural KV, worker budgets in
+  0.01 GiB steps, a VRAM limit that never exceeds the worker's reported cap, a
+  context ceiling that follows the chosen mode and KV type, test-fire filters,
+  and Station install links that hand down both the hugpy API key and the
+  toolserver key.
 
 ---
 
@@ -63,9 +154,10 @@ does not create a dependency.
 | Distribution | Import name | Owns |
 |---|---|---|
 | `hugpy-platform` | `hugpy_platform` | stdlib-first foundation: central URL, env values, app dirs, hardware probes, pydantic shim |
+| `hugpy-tools` | `hugpy_tools` | stdlib-only capability suite for agents: safe file/path ops, text chunking and diffing, hashing, structured-data read/write, webpage assessment |
 | `hugpy-control` | `hugpy_control` | control-plane records: bus, jobs, principals, settings |
 | `hugpy-storage` | `hugpy_storage` | download queue/daemon, HF transport and token, model sync, physical inventory, on-disk layout |
-| `hugpy-engine` | `hugpy_engine` | prompt-to-reply path, model registry/classification, allocation, eviction, spill, native llama.cpp engines, task and placement seams |
+| `hugpy-engine` | `hugpy_engine` | prompt-to-reply path, model registry/classification and the model database, the planner (weights facts, per-quant verdicts), allocation, eviction, spill, native llama.cpp engines, task and placement seams |
 | `hugpy-media` | `hugpy_media` | embeddings, summaries, keywords, speech, TTS, vision, image generation, document/URL extraction |
 | `hugpy-video` | `hugpy_video` | media library and bus, job lifecycle, ffmpeg/synthetic/studio runners |
 | `hugpy-oracle` | `hugpy_oracle` | creative planning, model selection, DAG runtime, repair/evaluation, ledgers |
@@ -187,6 +279,20 @@ the same origin and are governed by the site's auth mode, not `/v1` keys.
 Every path is reachable both bare (`/health`) and `/api`-prefixed
 (`/api/health`).
 
+**Model database routes.** The console's own allocation writes go straight to
+the database and are operator-gated:
+
+```
+GET  /api/models/database?q=&limit=                        models with pairs, verdicts and quant facts
+POST /api/models/database/<model>/workers/<worker>/knobs   {"set": {...}, "unset": [...]}
+POST /api/models/database/<model>/knobs                    the same, on every assigned pair
+POST /api/models/database/<model>/workers/<worker>/assigned  {"assigned": true|false, "source"?: "..."}
+POST /api/models/database/<model>/workers/<worker>/pinned    {"pinned": true|false}
+POST /api/models/database/<model>/discover                 targeted discovery for one model
+```
+
+`<model>` is the database id or the model name.
+
 ---
 
 ## Command-line interface
@@ -302,6 +408,47 @@ for the full flow and revocation.
 
 ---
 
+## Allocation, the planner and discovery
+
+hugpy decides where and how a model runs from three stored layers, all in the
+database:
+
+1. **Weights facts**, once per file. Stamped into the model folder's
+   `hugpy.json` and mirrored into the database: size, quant, shard count, MoE
+   structure (expert count, expert and non-expert bytes, bytes per layer) and
+   the KV cost per token.
+2. **Verdicts**, once per quant, per worker, per budget. For every allocation
+   mode the planner records whether it fits, the GPU and RAM split, and the
+   largest context it can hold for each KV cache type (`f16`, `q8_0`, `q4_0`).
+   It also records the auto mode and, for MoE GGUF models, the explicit layer
+   band. A verdict is recomputed only when the file or the worker's budget
+   changes.
+3. **Pair knobs**, set by the operator on the (model, worker) row: context
+   target, KV cache type, flash attention, the ranked quant list, MoE split,
+   4-bit load, allocation mode and explicit layer counts.
+
+The five allocation modes:
+
+| Mode | Meaning |
+|---|---|
+| `gpu-only` | The whole model on the GPU |
+| `max-gpu` | As many layers on the GPU as fit, the rest in RAM |
+| `max-ram` | RAM first, keeping only what helps on the GPU |
+| `ram-only` | CPU inference, nothing on the GPU |
+| `explicit` | Exact layer counts: attention on the GPU, experts in RAM, and a spill preference |
+
+Auto picks the first mode whose verdict fits and holds the context target.
+Clearing an allocation drops only the placement knobs; context, KV cache and
+the quant choice stay.
+
+**Discovery** is how hugpy re-reads the disk. **Discover models** walks the
+whole store and ends with a change-driven planner pass. **Targeted discovery**
+(the per-model button, or `POST /api/models/database/<model>/discover`) does
+the same for one model, forced: it guarantees a `hugpy.json`, resyncs the quant
+list, re-stamps the facts and recomputes every worker's verdicts.
+
+---
+
 ## Discord bot
 
 The bot arm drives a hugpy central over HTTP — it can point at this machine or a
@@ -325,6 +472,8 @@ hugpy is configured by environment variables. The most useful:
 |----------|---------|
 | `DEFAULT_ROOT` | Root directory for model weights, manifests, and data |
 | `HUGPY_AUTH_MODE` | `open` (default, no login wall) or `external` (front a real auth service) |
+| `HUGPY_REGISTRY_DB` / `HUGPY_REGISTRY_PG_DSN` | `pg` turns on the model database (the source of truth for designation, pair knobs, pins and verdicts); the DSN in URI form |
+| `HUGPY_PLANNER_DSN` | Database the planner writes to when run outside central (defaults to the local `hugpy` database) |
 | `HUGPY_AUTO_DOWNLOAD` | Auto-fetch missing models on demand |
 | `HUGPY_BASE_URL` | Central base URL used by `hugpy bot` / `hugpy chat` / clients |
 | `HUGPY_DATA_DIR` / `HUGPY_CONFIG_DIR` / `HUGPY_CACHE_DIR` | Per-OS data/config/cache overrides |
