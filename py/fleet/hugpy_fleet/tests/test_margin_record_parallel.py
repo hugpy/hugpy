@@ -31,3 +31,13 @@ def test_implausible_ratio_not_recorded(monkeypatch):
     _patch(monkeypatch)
     assert A._margin_record("M", 4 * G, 10 * G, "m.gguf", ctx=4096) is None
     assert "M" not in A._WEIGHTS_MARGINS
+
+
+def test_pre_parallel_record_is_replaced_not_averaged(monkeypatch):
+    _patch(monkeypatch)
+    A._WEIGHTS_MARGINS["M"] = {"model_key": "M", "file": "m.gguf", "file_bytes": 10 * G,
+                              "backend": "gguf", "margin": 1.1162, "samples": 3}
+    rec = A._margin_record("M", 12 * G, 10 * G, "m.gguf", ctx=4096, parallel=1)
+    assert rec["samples"] == 1 and rec["margin"] == 1.0
+    rec2 = A._margin_record("M", 12 * G, 10 * G, "m.gguf", ctx=4096, parallel=1)
+    assert rec2["samples"] == 2

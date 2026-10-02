@@ -7980,7 +7980,12 @@ def _margin_record(model_key: str, delta: int, wfile: int, served: "str | None",
     now = time.time()
     with _MARGIN_LOCK:
         prev = _WEIGHTS_MARGINS.get(model_key)
-        if prev and _margin_record_matches(prev, served) and prev.get("backend") == framework:
+        # A record without ``parallel`` predates the KV x --parallel netting
+        # (2026-10-02): its mean booked extra sequences as weights (Coder-Next
+        # 1.116, Qwen2.5-3B 1.120). It prices until now; the first measurement
+        # under the fixed arithmetic REPLACES it rather than averaging in.
+        if prev and _margin_record_matches(prev, served) and prev.get("backend") == framework \
+                and "parallel" in prev:
             n = int(prev.get("samples") or 0)
             mean = (float(prev.get("margin")) * n + ratio) / (n + 1)
             samples = n + 1
