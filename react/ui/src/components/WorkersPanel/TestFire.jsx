@@ -40,6 +40,23 @@ async function startTestFire(worker, opts) {
   throw err
 }
 
+// The job lives on CENTRAL, not in this component: switching workers or leaving
+// the screen unmounts the strip, so on mount we re-adopt the worker's latest
+// job (GET .../test-fire/current). A finished job the operator dismissed stays
+// dismissed (its id is remembered per worker).
+const dismissKey = workerId => `hugpy.testFire.dismissed.${workerId}`
+
+function loadDismissed(workerId) {
+  try { return globalThis.localStorage?.getItem(dismissKey(workerId)) || null } catch { return null }
+}
+
+function saveDismissed(workerId, jobId) {
+  try {
+    if (jobId) globalThis.localStorage?.setItem(dismissKey(workerId), jobId)
+    else globalThis.localStorage?.removeItem(dismissKey(workerId))
+  } catch { /* storage unavailable: dismiss is per-mount only */ }
+}
+
 export function useTestFire(worker) {
   const [job, setJob] = useState(null)        // last status snapshot
   const [busy, setBusy] = useState(false)     // start/stop request in flight
@@ -64,6 +81,26 @@ export function useTestFire(worker) {
     }
   }, [worker?.id])   // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Re-adopt the worker's job from central after a remount.
+  useEffect(() => {
+    const wid = worker?.id
+    if (!wid) return undefined
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await hugpyFetch(`${base(worker)}/current`)
+        if (!r.ok) return
+        const s = await r.json()
+        if (cancelled || !alive.current || !s?.job_id || activeId.current) return
+        if (!s.running && loadDismissed(wid) === s.job_id) return
+        activeId.current = s.job_id
+        setJob(s)
+        poll(s.job_id)              // full snapshot with the result ring
+      } catch { /* no job / central unreachable: nothing to adopt */ }
+    })()
+    return () => { cancelled = true }
+  }, [worker?.id])   // eslint-disable-line react-hooks/exhaustive-deps
+
   // Poll loop: one timer per active job while it reports running.
   useEffect(() => {
     if (!job || !job.running || job.job_id !== activeId.current) return undefined
@@ -77,6 +114,7 @@ export function useTestFire(worker) {
     try {
       const { jobId } = await startTestFire(worker, opts || { rounds: 1, concurrency: 1, max_tokens: 32 })
       activeId.current = jobId
+      saveDismissed(worker.id, null)
       setOpen(true)
       await poll(jobId)
     } catch (e) {
@@ -102,7 +140,10 @@ export function useTestFire(worker) {
     }
   }, [worker, poll])
 
-  const dismiss = useCallback(() => { activeId.current = null; setJob(null); setError(null) }, [])
+  const dismiss = useCallback(() => {
+    saveDismissed(worker?.id, activeId.current)
+    activeId.current = null; setJob(null); setError(null)
+  }, [worker?.id])
 
   return { job, busy, error, open, setOpen, start, stop, dismiss, filter, setFilter }
 }
