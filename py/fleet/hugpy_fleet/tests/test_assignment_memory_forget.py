@@ -18,7 +18,9 @@ from hugpy_fleet.central import workers as W
 from worker_store_isolation import swap_worker_store
 
 
-def test_forget_ghost_refuses_live_and_reports_unknown():
+def test_forget_ghost_refuses_live_and_reports_unknown(monkeypatch):
+    # The sidecar is frozen since the DB detach (2026-10-02); seed it explicitly.
+    monkeypatch.setenv("HUGPY_ASSIGN_SIDECAR_WRITE", "1")
     with swap_worker_store(prefix="hugpy-memory-forget-test-"):
         W.worker_store.register(name="live-one", url="http://192.0.2.70:9100", worker_id="live-one")
         W.worker_store.assign_model("live-one", "Some~Model")

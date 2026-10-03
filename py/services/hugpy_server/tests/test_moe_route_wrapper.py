@@ -34,7 +34,9 @@ def test_single_model_toggle_ok(client):
     r = c.post(f"/llm/workers/{wid}/moe", json={"model_key": MK, "value": True})
     assert r.status_code == 200, r.get_data(as_text=True)
     assert r.get_json()["ok"] is True
-    assert r.get_json()["worker"]["moe_by_model"][MK] is True
+    # stored under the model's CANONICAL registry key (bare or Owner~Repo,
+    # whichever the catalog holds at the time)
+    assert r.get_json()["worker"]["moe_by_model"][W._canonical_registry_key(MK)] is True
     r = c.post(f"/llm/workers/{wid}/moe", json={"model_key": MK, "value": None})
     assert r.status_code == 200, r.get_data(as_text=True)
 
@@ -42,4 +44,4 @@ def test_single_model_toggle_ok(client):
 def test_wrapper_accepts_route_keywords(client):
     _, _, wid = client
     out = W.set_moe(wid, MK, False, public_view=False)
-    assert out and out["moe_by_model"][MK] is False
+    assert out and out["moe_by_model"][W._canonical_registry_key(MK)] is False

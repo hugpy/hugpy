@@ -157,7 +157,8 @@ check("ungrant_model is idempotent (second call no-op, no error)",
 # The sidecar is FROZEN by default since the DB detach (2026-10-02: designation
 # lives in model_workers); HUGPY_ASSIGN_SIDECAR_WRITE=1 re-enables it, and the
 # "never persists grants" contract must hold whenever it is written.
-os.environ["HUGPY_ASSIGN_SIDECAR_WRITE"] = "1"
+_prev_sidecar = os.environ.get("HUGPY_ASSIGN_SIDECAR_WRITE")
+os.environ["HUGPY_ASSIGN_SIDECAR_WRITE"] = "1"   # restored below: never leak into later modules
 store.grant_model("wid-1", "GrantOnlyModel")
 # assign/unassign both call _remember_assignments internally; force a fresh
 # snapshot write via assign_model (already exercises the real code path).
@@ -173,6 +174,10 @@ check("assign-memory models list does not include the grant-only model",
 with open(W._assign_memory_path(), "r", encoding="utf-8") as fh:
     raw = fh.read()
 check("raw assign-memory JSON text never mentions 'grants'", '"grants"' not in raw)
+if _prev_sidecar is None:
+    os.environ.pop("HUGPY_ASSIGN_SIDECAR_WRITE", None)
+else:
+    os.environ["HUGPY_ASSIGN_SIDECAR_WRITE"] = _prev_sidecar
 check("raw assign-memory JSON text never mentions the grant-only model key",
       "GrantOnlyModel" not in raw)
 

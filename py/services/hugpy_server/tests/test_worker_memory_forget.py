@@ -30,10 +30,13 @@ oa = importlib.import_module("hugpy_server.app.operator_auth")
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """Bare worker blueprint over an isolated registry seeded with a LIVE
     worker (``live-two``) and a GHOST (``ghost-two``: memory entry survives
     the row removal, by design)."""
+    # The sidecar is frozen since the DB detach (2026-10-02); the ghost-cleanup
+    # route still serves its frozen entries, so seed them with the write on.
+    monkeypatch.setenv("HUGPY_ASSIGN_SIDECAR_WRITE", "1")
     app = Flask(__name__)
     app.register_blueprint(wr.worker_bp)
     app.config["TESTING"] = True
@@ -83,6 +86,7 @@ def test_memory_route_refuses_anonymous_through_the_gate(monkeypatch):
     anonymous DELETE is refused (401) before it reaches the sidecar."""
     monkeypatch.setenv("HUGPY_AUTH_MODE", "open")
     monkeypatch.setenv("HUGPY_OPERATOR_TOKEN", "s3cret")
+    monkeypatch.setenv("HUGPY_ASSIGN_SIDECAR_WRITE", "1")   # frozen sidecar: seed it explicitly
     app = Flask(__name__)
     app.register_blueprint(wr.worker_bp)
     oa.install_operator_gate(app)
