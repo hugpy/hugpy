@@ -23,6 +23,7 @@ import { ExternalLeases } from './ExternalLeases'
 import { TestFireButton, TestFireStrip, useTestFire } from './TestFire'
 import TestFireHistory from './TestFireHistory'
 import { ModelFlagChips, ModelNotesButton } from './ModelNotes'
+import { ModelEnvControl } from './EnvProfilesPanel'
 import { ResidencyMenu } from './ResidencyMenu'
 import { ResourceStrip } from './ResourceStrip'
 import { SpillBadge } from './SpillBadge'
@@ -1119,6 +1120,10 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
           <ModelFlagChips modelKey={key} />
           <ModelNotesButton modelKey={key}
                             dbRef={findCatalogRow(models, key)?._modelDatabase?.id != null ? String(findCatalogRow(models, key)._modelDatabase.id) : key} />
+          <ModelEnvControl modelKey={key} workerId={worker.id}
+                           dbRef={findCatalogRow(models, key)?._modelDatabase?.id != null ? String(findCatalogRow(models, key)._modelDatabase.id) : key}
+                           current={(findCatalogRow(models, key)?._modelDatabase?.workers || []).find(r => r.worker_id === worker.id)?.user_settings?.env_profile}
+                           onChanged={() => { if (typeof onRefresh === 'function') onRefresh() }} />
         </>
       ),
     },

@@ -1893,3 +1893,5 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-env-test input { width: 140px; }
 .wp-env-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; margin-top: 8px; }
 .wp-env-form textarea { min-width: 240px; font: inherit; }
+.wp-env-select { font-size: 10px; margin-left: 3px; max-width: 110px; background: transparent; color: var(--muted); border: 1px solid transparent; }
+.wp-env-select:hover, .wp-env-select-on { border-color: var(--border, #444); color: inherit; }

@@ -109,3 +109,62 @@ export default function EnvProfilesPanel({ workers = [] }) {
     </details>
   )
 }
+
+// ── per-model attribution (the model row's 🧪 control) ─────────────────────
+const envStore = { profiles: [], loaded: false, loading: false }
+const envListeners = new Set()
+
+async function refreshEnvs() {
+  if (envStore.loading) return
+  envStore.loading = true
+  try {
+    const d = await fetchJson(BASE)
+    envStore.profiles = d.profiles || []
+    envStore.loaded = true
+  } catch { /* environments are additive */ }
+  envStore.loading = false
+  envListeners.forEach(fn => fn())
+}
+
+function useEnvProfiles() {
+  const [, force] = useState(0)
+  useEffect(() => {
+    const fn = () => force(n => n + 1)
+    envListeners.add(fn)
+    if (!envStore.loaded) refreshEnvs()
+    return () => envListeners.delete(fn)
+  }, [])
+  return envStore.profiles
+}
+
+export function ModelEnvControl({ modelKey, dbRef, workerId, current, onChanged }) {
+  const profiles = useEnvProfiles()
+  const [busy, setBusy] = useState(false)
+  const approved = profiles.filter(p => p.status === 'approved')
+  if (!approved.length && !current) return null
+  const prof = profiles.find(p => p.name === current)
+  const w = prof && (prof.workers || []).find(x => x.worker_id === workerId)
+  const set = async (name) => {
+    setBusy(true)
+    try {
+      await fetchJson(`/api/models/database/${encodeURIComponent(dbRef)}/workers/${encodeURIComponent(workerId)}/knobs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(name ? { set: { env_profile: name } } : { unset: ['env_profile'] }),
+      })
+      onChanged && onChanged()
+    } catch (e) {
+      alert(`environment not set: ${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <select className={`wp-env-select${current ? ' wp-env-select-on' : ''}`} value={current || ''} disabled={busy}
+            title={current ? `environment ${current}: ${w ? (w.state || 'not built') : 'not built on this worker yet'}${prof ? ` — ${(prof.packages || []).join(', ')}` : ''}`
+              : 'run this model in a per-model environment'}
+            onClick={e => e.stopPropagation()} onChange={e => set(e.target.value)}>
+      <option value="">🧪</option>
+      {approved.map(p => <option key={p.name} value={p.name}>🧪 {p.name}</option>)}
+    </select>
+  )
+}
