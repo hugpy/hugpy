@@ -98,3 +98,14 @@ def test_prompt_over_context_is_a_400(base):
     st, raw = _post(url + "/v1/chat/completions",
                     {"model": "M", "messages": [{"role": "user", "content": "a b c d e"}]})
     assert st == 400 and "exceed" in raw
+
+
+def test_token_clock_drives_timings():
+    import time as _t
+    srv = tf.ChatServer(FakeEngine(), "M", "/m", ctx=None)
+    t0 = _t.time()
+    srv.engine.last_t_first_token, srv.engine.last_t_last_token = t0 + 1.0, t0 + 3.0
+    usage, timings = srv.usage_timings({"n_prompt": 10}, {"t0": t0, "t_first": t0 + 3.0,
+                                                          "t_end": t0 + 3.0, "n": 21})
+    assert abs(timings["prompt_ms"] - 1000) < 5 and abs(timings["predicted_ms"] - 2000) < 5
+    assert timings["measurement_source"] == "transformers_child_tokens"

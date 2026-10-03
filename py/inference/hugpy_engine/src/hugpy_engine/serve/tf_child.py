@@ -106,8 +106,18 @@ class HFEngine:
         import torch
         from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
 
+        engine = self
+
         class _Cancel(StoppingCriteria):
+            # Called once per NEW token: the first call is the end of prefill,
+            # the last the final token — the real prefill/decode clock (the
+            # text streamer releases pieces at word boundaries, so its timing
+            # read 3 tokens in 0.2 ms = 14,000 tok/s on the first live load).
             def __call__(self, input_ids, scores, **kwargs):
+                now = time.time()
+                if engine.last_t_first_token is None:
+                    engine.last_t_first_token = now
+                engine.last_t_last_token = now
                 return torch.full((input_ids.shape[0],), cancel.is_set(),
                                   dtype=torch.bool, device=input_ids.device)
 
@@ -162,6 +172,8 @@ class HFEngine:
                 streamer.end()
 
         self.last_completion_n = 0
+        self.last_t_first_token = None
+        self.last_t_last_token = None
         th = threading.Thread(target=_run, name="tf-generate", daemon=True)
         th.start()
         try:
@@ -362,10 +374,14 @@ class ChatServer:
         clock["n"] = int(getattr(self.engine, "last_completion_n", 0) or 0)
         clock["finish"] = ("stop" if stopped or clock["n"] < job["max_new"] else "length")
 
-    @staticmethod
-    def usage_timings(job: dict, clock: dict):
+    def usage_timings(self, job: dict, clock: dict):
         t0, t_end = clock["t0"], clock.get("t_end", time.time())
         t_first = clock.get("t_first", t_end)
+        # the engine's per-token clock when it has one (first/last new token)
+        tf_tok = getattr(self.engine, "last_t_first_token", None)
+        tl_tok = getattr(self.engine, "last_t_last_token", None)
+        if tf_tok and tl_tok and tl_tok >= tf_tok >= t0:
+            t_first, t_end = tf_tok, tl_tok
         n = clock.get("n", 0)
         # prompt_ms: request start -> first decoded text (prefill + the first
         # token's decode); predicted_ms: first text -> end of generation.
@@ -375,7 +391,7 @@ class ChatServer:
                  "total_tokens": job["n_prompt"] + n}
         timings = {"prompt_n": job["n_prompt"], "prompt_ms": prompt_ms,
                    "predicted_n": n, "predicted_ms": predicted_ms,
-                   "measurement_source": "transformers_child_wall"}
+                   "measurement_source": ("transformers_child_tokens" if tf_tok else "transformers_child_wall")}
         if prompt_ms > 0:
             timings["prompt_per_second"] = job["n_prompt"] / (prompt_ms / 1000.0)
         if predicted_ms > 0 and n:
