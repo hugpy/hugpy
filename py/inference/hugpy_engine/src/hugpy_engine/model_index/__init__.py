@@ -57,6 +57,7 @@ save_discovery = _service.save_discovery
 load_discovery = _service.load_discovery
 record_metric = _service.record_metric
 record_call = _service.record_call
+record_call_if_absent = _service.record_call_if_absent
 fetch_call_stats = _service.fetch_call_stats
 record_grade = _service.record_grade
 record_cold_load = _service.record_cold_load
@@ -93,7 +94,7 @@ __all__ = [
     "DiscoveryQueries", "QuantQueries", "MetricsQueries", "CallQueries",
     "DiscoveryRepository", "QuantsRepository", "MetricsRepository",
     "CallsRepository",
-    "save_discovery", "load_discovery", "record_metric", "record_call",
+    "save_discovery", "load_discovery", "record_metric", "record_call", "record_call_if_absent",
     "record_grade", "record_cold_load",
     "fetch_model_metrics", "fetch_model_calls", "fetch_worker_averages", "fetch_call_stats",
     "sync_worker_settings",

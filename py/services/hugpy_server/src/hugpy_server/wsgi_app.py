@@ -617,6 +617,13 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
             start_benchmark_resume()
         except Exception as _exc:  # noqa: BLE001 — must never break app creation
             logger.error("benchmark resume hook failed: %s", _exc)
+    # FAILED CALLS -> model_calls (2026-10-02): the call log's end row of every
+    # call that did not complete is attributed to its model in the DB.
+    try:
+        from hugpy_server.app.failed_calls import start as _start_failed_calls
+        _start_failed_calls()
+    except Exception as _exc:  # noqa: BLE001 — must never break app creation
+        logger.error("failed-call recorder not installed: %s", _exc)
     # GRADING TRIGGER (operator 2026-10-02): a model's first successful load
     # with no grading attempt on record queues it for a benchmark run.
     if _daemons_enabled(start_daemons):

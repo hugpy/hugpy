@@ -128,6 +128,17 @@ def _session_hook(phase: str, row: dict) -> None:
         log.debug("session hook failed", exc_info=True)
 
 
+# Called with the "end" row after it is written (2026-10-02: central records
+# FAILED / cancelled calls into model_calls through this; the call log itself
+# stays the complete record). A hook never breaks logging.
+_END_HOOKS: list = []
+
+
+def add_end_hook(fn) -> None:
+    if fn not in _END_HOOKS:
+        _END_HOOKS.append(fn)
+
+
 def record(phase: str, job, **extra) -> None:
     """Append one event for `job`. Never raises — logging must not break serving."""
     try:
@@ -171,6 +182,12 @@ def record(phase: str, job, **extra) -> None:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with _LOCK, open(p, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+        if phase == "end":
+            for hook in list(_END_HOOKS):
+                try:
+                    hook(row)
+                except Exception:  # noqa: BLE001
+                    log.debug("call log end hook failed", exc_info=True)
     except Exception:  # noqa: BLE001
         log.debug("call log write failed", exc_info=True)
 

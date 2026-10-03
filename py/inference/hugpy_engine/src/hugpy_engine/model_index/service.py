@@ -925,6 +925,30 @@ class ModelIndexService:
             self.db.mark_unavailable(exc, "recording a call")
             return False
 
+    def record_call_if_absent(self, request_id: str, model_name: str, worker: str, **kw) -> bool:
+        """record_call, unless a row for ``request_id`` already exists (the
+        relay records a call it completed; the job-end path records only what
+        the relay never saw — failures before/at the worker, cancellations)."""
+        if not enabled() or not model_name or not worker or not request_id:
+            return False
+        try:
+            with self.db.lock:
+                with self.db.transaction(), self.db.cursor() as cur:
+                    self.start(cur)
+                    cur.execute("SELECT 1 FROM model_calls WHERE request_id = %s LIMIT 1", (str(request_id),))
+                    if cur.fetchone() is not None:
+                        return False
+                    row = {"quant": "", "alloc_mode": "", "tok_per_s": None, "prompt_tokens": None,
+                           "completion_tokens": None, "elapsed_s": None, "task": None,
+                           "state": None}
+                    row.update(kw)
+                    self.calls.insert_call(cur, model_name=model_name, worker=worker,
+                                           request_id=str(request_id), **row)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_unavailable(exc, "recording a failed call")
+            return False
+
     def fetch_model_metrics(self, model_name: str) -> list:
         if not enabled() or not model_name:
             return []
