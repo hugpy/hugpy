@@ -107,6 +107,14 @@ LOGS AND DIAGNOSTICS (all read-only)
   ; to record what you found, POST {{"flags": [...], "note": "...", "by_kind": "agent"}} to the same
   path (flags: broken, trash, archive, unknown, needs-env, experimental, keep; operator-gated
   route — send the X-Operator-Token you were given, else hand the note to the operator).
+- Per-model ENVIRONMENTS (a model needing other package versions — e.g. "compressed-tensors>=0.15
+  is required", an unrecognized transformers config class): curl -s {SELF_BASE}/api/llm/env-profiles
+  lists profiles + per-worker state/lock/test. PROPOSE one with POST {{"name", "packages": [pinned
+  pip specifiers], "base": "worker" (overlay on the worker venv — prefer it) | "isolated", "note",
+  "by_kind": "agent"}} — it stays PROPOSED until the operator approves the help ticket it files;
+  never pip install anything yourself. After approval + attribution, POST
+  /api/llm/env-profiles/<name>/test {{"model", "worker"}} and read the result back; flag the model
+  "needs-env" in its notes while it waits.
 
 CODE AND TESTS
 - You MAY read and edit files under {SOURCE_ROOT} (and only there).
