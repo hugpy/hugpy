@@ -7,6 +7,7 @@ and fail-open degradation. Callers use the module-level functions in
 from __future__ import annotations
 
 import logging
+import re
 
 from hugpy_engine.model_index.client import DatabaseClient, enabled
 from hugpy_engine.model_index.repositories import (
@@ -324,6 +325,8 @@ class ModelIndexService:
             if not 1 <= cp <= 100:
                 return "bad_knob", ["ctx_pct must be an integer 1..100"]
             to_set["ctx_pct"] = cp
+        if "env_profile" in to_set and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", str(to_set["env_profile"] or "")):
+            return "bad_knob", ["env_profile must be an environment name (letters, digits, . _ -)"]
         if "ctx_yield" in to_set and not isinstance(to_set["ctx_yield"], bool):
             return "bad_knob", ["ctx_yield must be true/false"]
         if "ctx_min_pct" in to_set:

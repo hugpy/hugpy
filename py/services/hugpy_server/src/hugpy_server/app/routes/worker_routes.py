@@ -1645,6 +1645,26 @@ def workers_heartbeat(worker_id):
                 mk: archive_text(archive_block(mk)) or "" for mk in sorted(_arch)}
     except Exception:  # noqa: BLE001 — never 5xx a beat
         logger.debug("archive heartbeat hook failed", exc_info=True)
+    # PER-MODEL ENVIRONMENTS (2026-10-02): the worker's profile report (state +
+    # lock per profile, from its config) lands in env_profile_workers, and the
+    # reply DECLARES the approved profiles its models are attributed to (pair
+    # knob env_profile, carried in spill_by_model) so the worker builds them.
+    # Omit-when-empty; never fails a beat.
+    try:
+        from hugpy_server.app import env_profiles as _envp
+        _cfg = body.config if isinstance(body.config, dict) else {}
+        if isinstance(_cfg.get("profiles"), dict) and _cfg["profiles"]:
+            _envp.record_worker_report(worker_id, _cfg["profiles"])
+        _mp = {str(mk): str(sp.get("env_profile")) for mk, sp in (worker.get("spill_by_model") or {}).items()
+               if isinstance(sp, dict) and sp.get("env_profile")}
+        if _mp:
+            _specs = _envp.approved_specs(sorted(set(_mp.values())))
+            reply_extra["env_profiles"] = _specs
+            reply_extra["model_profiles"] = {mk: n for mk, n in _mp.items() if n in _specs}
+        else:
+            reply_extra["env_profiles"], reply_extra["model_profiles"] = {}, {}
+    except Exception:  # noqa: BLE001 — environments never fail a beat
+        logger.debug("env profile heartbeat hook failed", exc_info=True)
     # FLEET-WIDE eviction policy (2026-07-25): publish the drop-pass switch so
     # every worker's auto-evict runs the SAME pass central's storage_proposal
     # preview runs — Parity (spec assets/evictionflow.html) is the whole reason

@@ -7667,6 +7667,44 @@ def _pinned(model_key: str) -> bool:
     return bool((_RUNTIME_SETTINGS.get("pinned") or {}).get(model_key))
 
 
+def _declared_profiles() -> dict:
+    """{name: {packages, base}}: the worker's settings-file profiles overlaid by
+    the DB-declared ones central relays (2026-10-02; the DB wins on a name)."""
+    out = dict(_RUNTIME_SETTINGS.get("profiles") or {})
+    out.update(_RUNTIME_SETTINGS.get("profiles_db") or {})
+    return out
+
+
+def _model_profile_map() -> dict:
+    """{model_key: profile name}: settings-file attribution overlaid by the DB
+    pair knob env_profile (relayed with the approved specs)."""
+    out = dict(_RUNTIME_SETTINGS.get("model_profiles") or {})
+    out.update(_RUNTIME_SETTINGS.get("model_profiles_db") or {})
+    return out
+
+
+def _adopt_env_profiles(worker: "dict | None") -> None:
+    """Adopt central's per-model environments from the heartbeat reply and kick
+    a background build when the declared set changed. A reply without the keys
+    (older central) changes nothing."""
+    if not isinstance(worker, dict) or "env_profiles" not in worker:
+        return
+    specs = {str(k): {"packages": list((v or {}).get("packages") or []),
+                      "base": (v or {}).get("base") or "worker"}
+             for k, v in (worker.get("env_profiles") or {}).items()}
+    mp = {str(k): str(v) for k, v in (worker.get("model_profiles") or {}).items() if v}
+    changed = specs != (_RUNTIME_SETTINGS.get("profiles_db") or {})
+    _RUNTIME_SETTINGS["profiles_db"] = specs
+    _RUNTIME_SETTINGS["model_profiles_db"] = mp
+    if changed and specs:
+        try:
+            from hugpy_engine.serve import profiles as _profiles
+            _profiles.materialize_all(specs, register=register_executor)
+            logger.info("env profiles: building %d DB-declared profile(s): %s", len(specs), sorted(specs))
+        except Exception as exc:  # noqa: BLE001 — a build never breaks a beat
+            logger.warning("env profiles: build kick failed: %s", exc)
+
+
 def _resolve_model_profile(model_key: str) -> "dict | None":
     """Env-profiles (stage 1) resolver, registered onto managers.serve.profiles
     so the runner spawn seam can decide without reading operator settings itself.
@@ -7677,13 +7715,13 @@ def _resolve_model_profile(model_key: str) -> "dict | None":
     error and ``bin`` is the profile venv's bin dir ONLY when ready (the value
     the slot child's PATH/interpreter is built from). None when the model has no
     profile — the base serving path is untouched."""
-    name = (_RUNTIME_SETTINGS.get("model_profiles") or {}).get(model_key)
+    name = _model_profile_map().get(model_key)
     if not name:
         return None
-    spec = (_RUNTIME_SETTINGS.get("profiles") or {}).get(name) or {}
+    spec = _declared_profiles().get(name) or {}
     packages = spec.get("packages") or []
     from hugpy_engine.serve import profiles as _profiles
-    state = _profiles.state_for(name, packages)
+    state = _profiles.state_for(name, packages, spec.get("base") or "isolated")
     out = {"name": name, "state": state,
            "bin": _profiles.profile_bin_dir(name) if state == "ready" else None}
     if state == "error":
@@ -14632,14 +14670,14 @@ def _effective_config() -> dict:
     # /llm/workers row carries the truth — central routes a profiled model only
     # once its profile reads ready. Present only when profiles are in play
     # (mirrors residency/pinned). Defensive import: never break a beat.
-    if _RUNTIME_SETTINGS.get("profiles"):
+    if _declared_profiles():
         try:
             from hugpy_engine.serve import profiles as _profiles
-            out["profiles"] = _profiles.report(_RUNTIME_SETTINGS["profiles"])
+            out["profiles"] = _profiles.report(_declared_profiles())
         except Exception:  # noqa: BLE001 — heartbeat truth is best-effort
             out["profiles"] = {}
-    if _RUNTIME_SETTINGS.get("model_profiles"):
-        out["model_profiles"] = dict(_RUNTIME_SETTINGS["model_profiles"])
+    if _model_profile_map():
+        out["model_profiles"] = _model_profile_map()
     # ── EVICTION POLICY: report what is ACTUALLY IN FORCE, not what was typed.
     # Read back through the same reader the eviction path uses, so the console
     # can never show a value the planner disagrees with — including the case
@@ -16104,6 +16142,8 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
             # disk allocation and the LRU clock the FIFO orders by. Both are
             # facts only central holds; the pull path reads them off state.
             _adopt_storage_inputs(state, worker)
+            # Per-model environments declared in the DB (2026-10-02).
+            _adopt_env_profiles(worker)
             # Converge to central's required package version (restarts on update).
             _self_update_if_needed((worker or {}).get("required_pkg_version"), args, state,
                                    constraints_url=(worker or {}).get("constraints_url"),

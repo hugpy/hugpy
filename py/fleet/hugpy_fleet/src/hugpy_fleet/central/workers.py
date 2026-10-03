@@ -1611,7 +1611,7 @@ def _human_bytes_central(n: Any) -> str:
 # the feasibility-derived default in spill_for. Kept in sync with the mode/
 # budget/band key families in managers.alloc_modes + worker_routes.
 # DB pair knobs that ride the load-time spill (see _placement_spill_for)
-_DB_SPILL_OVERLAY_KEYS = ("alloc_mode", "n_gpu_layers", "n_cpu_moe", "llama_ctx", "ctx_pct", "ctx_min_pct", "ctx_yield", "threads",
+_DB_SPILL_OVERLAY_KEYS = ("alloc_mode", "n_gpu_layers", "n_cpu_moe", "llama_ctx", "ctx_pct", "ctx_min_pct", "ctx_yield", "env_profile", "threads",
                           "gpu_mem_gib", "cpu_mem_gib", "gguf_file", "kv_cache_type", "flash_attn")
 
 

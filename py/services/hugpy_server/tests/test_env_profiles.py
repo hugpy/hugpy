@@ -65,3 +65,8 @@ def test_test_requires_approval_and_args(client, monkeypatch):
 def test_writes_are_operator_gated():
     gated = lambda p: any("POST" in m and rx.match(p) for m, rx in oa._SENSITIVE)
     assert gated("/llm/env-profiles") and gated("/llm/env-profiles/x/approve") and gated("/llm/env-profiles/x/test")
+
+
+def test_knob_validation():
+    import hugpy_engine.model_index.query_registry as q
+    assert "env_profile" in q.PAIR_KNOB_KEYS
