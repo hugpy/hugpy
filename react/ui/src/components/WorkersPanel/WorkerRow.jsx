@@ -135,6 +135,12 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
   // quant-to-worker assessment); a larger stored value is clamped on open.
   const maxPct = db && db.maxPct != null ? Math.max(1, Math.min(100, db.maxPct)) : 100
   const [pct, setPctState] = useState(Math.max(1, Math.min(maxPct, initial)))
+  // CONTEXT RANGE (operator 2026-10-02): a second point starting at 0 makes the
+  // target a [min, max] window — the admission may shrink the context into it
+  // (as far as needed, never below min) before evicting anyone.
+  const [rangeOn, setRangeOn] = useState(spill?.ctx_min_pct != null)
+  const [minPct, setMinPct] = useState(spill?.ctx_min_pct != null ? Number(spill.ctx_min_pct) : 0)
+  const minTokens = Math.max(0, Math.round(Number(maxContext || 0) * minPct / 100))
   useEffect(() => { if (pct > maxPct) { setPctState(maxPct); if (onChange) onChange(maxPct) } }, [maxPct])  // eslint-disable-line react-hooks/exhaustive-deps
   // Every slider move is reported upward so the row's Memory column re-prices
   // weights + KV(ctx) from the DB kv_cost while dragging (operator ask 2026-10-02).
@@ -174,8 +180,19 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
            : { position: 'fixed', visibility: 'hidden', pointerEvents: 'none' }}>
       <div className="wp-context-title">Context target</div>
       <input type="range" min="1" max={maxPct} step="1" value={pct}
-             onChange={e => setPct(Number(e.target.value))} />
+             onChange={e => { const v = Number(e.target.value); setPct(v); if (minPct > v) setMinPct(v) }} />
       <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens{maxPct < 100 ? ` (max ${maxPct}%)` : ''}</span>
+      <label className="wp-context-range"
+             title="Add a 0 point: the context becomes a range. Under memory pressure the load gate shrinks this model's context only as far as it needs to (never below the minimum) before evicting another model.">
+        <input type="checkbox" checked={rangeOn} onChange={e => setRangeOn(e.target.checked)} /> range — minimum context for polite eviction
+      </label>
+      {rangeOn && (
+        <>
+          <input type="range" min="0" max={pct} step="1" value={Math.min(minPct, pct)}
+                 onChange={e => setMinPct(Number(e.target.value))} />
+          <span className="wp-context-value">minimum {minPct}% · {minTokens.toLocaleString()} tokens — window {minPct}%–{pct}%</span>
+        </>
+      )}
       <DbContextPreview db={db} pct={pct} tokens={tokens} />
       {kv && (
         <div className="wp-context-kv" style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '6px 0' }}
@@ -193,8 +210,8 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
         </div>
       )}
       <div className="wp-context-actions">
-        <button type="button" onClick={() => onApply(pct)}>Apply</button>
-        <button type="button" onClick={() => onApply(null)}>Auto</button>
+        <button type="button" onClick={() => onApply(pct, rangeOn ? Math.min(minPct, pct) : null)}>Apply</button>
+        <button type="button" onClick={() => onApply(null, rangeOn ? minPct : null)}>Auto</button>
       </div>
     </div>
   )
@@ -734,7 +751,7 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
   // and until the DB refetch lands (null = Auto = trained ctx). The Ctx and
   // Memory cells both read it so they move together.
   const [ctxOptimistic, setCtxOptimistic] = useState({})
-  const applyContext = useCallback(async (key, currentSpill, pct) => {
+  const applyContext = useCallback(async (key, currentSpill, pct, minPct = null) => {
     setCtxMenu(null)
     setCtxOptimistic(o => ({ ...o, [key]: pct == null ? null : Number(pct) }))
     try {
@@ -746,7 +763,12 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
       await fetchJson(`/api/models/database/${ref}/workers/${encodeURIComponent(worker.id)}/knobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(pct == null ? { unset: ['ctx_pct'] } : { set: { ctx_pct: Number(pct) } }),
+        // the range minimum rides the same write (null = no range: unset it)
+        body: JSON.stringify({
+          set: { ...(pct == null ? {} : { ctx_pct: Number(pct) }),
+                 ...(minPct == null ? {} : { ctx_min_pct: Number(minPct) }) },
+          unset: [...(pct == null ? ['ctx_pct'] : []), ...(minPct == null ? ['ctx_min_pct'] : [])],
+        }),
       })
     } catch (e) {
       setCtxOptimistic(o => { const n = { ...o }; delete n[key]; return n })
@@ -1175,6 +1197,9 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
           ? ` KV ${fmtBytes(kvAt)} at this context (${(Number(kvCost.bytes_per_token || 0) * kvMul / 1048576).toFixed(2)} MiB/token at ${kvType}${kvKnobs.flash_attn ? ', flash attention' : ''}, ${kvCost.basis}, from the DB).`
           : ''
         const open = ctxMenu === key
+        const ctxMin = dbCtxView.knobs?.ctx_min_pct != null ? Number(dbCtxView.knobs.ctx_min_pct) : null
+        const maxAllowedPct = (() => { const d = pairDb(key, m); return d && d.maxPct != null ? Math.max(1, Math.min(100, d.maxPct)) : 100 })()
+        const maxAllowedTokens = (() => { const d = pairDb(key, m); return d && d.ctxMax > 0 ? Number(d.ctxMax) : null })()
         return (
           <span className="wp-ctx-anchor">
             <button type="button" className="wp-ctx-button" ref={open ? ctxAnchorRef : undefined}
@@ -1183,12 +1208,22 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
                     onClick={() => setCtxMenu(open ? null : key)}>
               {value.toLocaleString()}
             </button>
-            {open && ctxMax > 0 && <ContextMenu workerId={worker.id} maxContext={ctxMax} spill={{ ctx_pct: pct }} anchorRef={ctxAnchorRef} modelKey={key}
+            {ctxMin != null && ctxMax > 0 && (
+              <em className="wp-ctx-min" title={`context range: the load gate may shrink this model to ${ctxMin}% (${Math.round(ctxMax * ctxMin / 100).toLocaleString()} tokens) before evicting another model`}>
+                ≥{Math.round(ctxMax * ctxMin / 100).toLocaleString()}
+              </em>
+            )}
+            {ctxMax > 0 && (
+              <button type="button" className="wp-ctx-max" disabled={applying}
+                      title={`maximum context: drop any range and set the target to the largest this worker allows (${maxAllowedPct}%${maxAllowedTokens ? ` · ${maxAllowedTokens.toLocaleString()} tokens` : ''})`}
+                      onClick={() => applyContext(key, spill, maxAllowedPct, null)}>⤒</button>
+            )}
+            {open && ctxMax > 0 && <ContextMenu workerId={worker.id} maxContext={ctxMax} spill={{ ctx_pct: pct, ctx_min_pct: ctxMin }} anchorRef={ctxAnchorRef} modelKey={key}
                                   onChange={next => setCtxOptimistic(o => ({ ...o, [key]: next }))}
                                   db={pairDb(key, m)}
                                   kv={kvCost ? { kv_cache_type: kvType, flash_attn: !!kvKnobs.flash_attn } : null}
                                   onKv={body => writeKvKnobs(key, body)}
-                                  onApply={next => applyContext(key, spill, next)}
+                                  onApply={(next, nextMin) => applyContext(key, spill, next, nextMin)}
                                   onClose={() => setCtxMenu(null)} />}
           </span>
         )

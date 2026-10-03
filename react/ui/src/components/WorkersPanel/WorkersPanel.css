@@ -1841,3 +1841,10 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-tfh-v-flaky, .wp-tfh-v-regressed { color: var(--warn, #c90); }
 .wp-tfh-v-failing { color: var(--danger, #d33); }
 .wp-tfh-v-untested { color: var(--muted); }
+
+/* context range + max (2026-10-02) */
+.wp-ctx-min { font-size: 10px; color: var(--muted); margin-left: 3px; font-style: normal; }
+.wp-ctx-max { font-size: 10px; padding: 0 4px; margin-left: 3px; border: 1px solid var(--border, #444);
+  border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.wp-ctx-max:hover { color: var(--accent, #6aa0ff); border-color: currentColor; }
+.wp-context-range { display: flex; gap: 6px; align-items: center; font-size: 11px; margin: 6px 0 2px; }
