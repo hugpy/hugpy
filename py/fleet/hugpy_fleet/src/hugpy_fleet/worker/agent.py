@@ -10181,8 +10181,30 @@ def _cuda_holders(limit: int = 12) -> dict:
             child_ids.add(id(c))
     roots = sorted([(m, b) for m, b in modules if id(m) not in child_ids], key=lambda x: -x[1])[:limit]
     loose = sorted(loose, key=lambda x: -x[1])[:limit]
+    # The allocator's SEGMENTS, grouped by (memory pool, stream): reserved memory
+    # empty_cache() cannot release lives in a private pool (CUDA-graph capture)
+    # or behind a pending stream event — this says which.
+    segs: dict = {}
+    try:
+        for seg in torch.cuda.memory_snapshot():
+            k = (str(seg.get("segment_pool_id")), str(seg.get("stream")), seg.get("segment_type"))
+            g = segs.setdefault(k, {"pool": k[0], "stream": k[1], "type": k[2], "segments": 0,
+                                    "total_bytes": 0, "allocated_bytes": 0, "active_bytes": 0})
+            g["segments"] += 1
+            g["total_bytes"] += int(seg.get("total_size") or 0)
+            g["allocated_bytes"] += int(seg.get("allocated_size") or 0)
+            g["active_bytes"] += int(seg.get("active_size") or 0)
+    except Exception as exc:  # noqa: BLE001
+        segs = {("error",): {"error": f"{type(exc).__name__}: {exc}"}}
+    try:
+        dyn = sys.modules.get("torch._dynamo")
+        dynamo = {"imported": dyn is not None}
+    except Exception:  # noqa: BLE001
+        dynamo = {}
     return {
         "torch_cuda": True,
+        "segments": sorted(segs.values(), key=lambda g: -int(g.get("total_bytes") or 0))[:limit],
+        "dynamo": dynamo,
         "allocated_bytes": int(torch.cuda.memory_allocated()),
         "reserved_bytes": int(torch.cuda.memory_reserved()),
         "loaded_models": loaded_model_keys(),
