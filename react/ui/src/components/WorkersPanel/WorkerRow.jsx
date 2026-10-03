@@ -179,20 +179,30 @@ function ContextMenu({ workerId, maxContext, spill, anchorRef, onApply, onClose,
          style={pos ? { position: 'fixed', top: pos.top, left: pos.left }
            : { position: 'fixed', visibility: 'hidden', pointerEvents: 'none' }}>
       <div className="wp-context-title">Context target</div>
-      <input type="range" min="1" max={maxPct} step="1" value={pct}
-             onChange={e => { const v = Number(e.target.value); setPct(v); if (minPct > v) setMinPct(v) }} />
-      <span className="wp-context-value">{pct}% · {tokens.toLocaleString()} tokens{maxPct < 100 ? ` (max ${maxPct}%)` : ''}</span>
+      {/* ONE slider; the range adds a second handle on the same track (operator
+          2026-10-02): lower = ctx_min_pct (0 = the smallest context), upper =
+          ctx_pct. The handles never cross. */}
+      <div className="wp-dual-range">
+        {rangeOn && (
+          <div className="wp-dual-fill" style={{ left: `${(minPct / maxPct) * 100}%`, width: `${Math.max(0, (pct - minPct) / maxPct) * 100}%` }} />
+        )}
+        {rangeOn && (
+          <input type="range" className="wp-dual-lo" aria-label="minimum context" min="0" max={maxPct} step="1"
+                 value={Math.min(minPct, pct)} style={{ zIndex: minPct >= pct ? 3 : 1 }}
+                 onChange={e => setMinPct(Math.min(Number(e.target.value), pct))} />
+        )}
+        <input type="range" className="wp-dual-hi" aria-label="context target" min={rangeOn ? 0 : 1} max={maxPct} step="1"
+               value={pct} style={{ zIndex: 2 }}
+               onChange={e => setPct(Math.max(1, rangeOn ? Math.max(minPct, Number(e.target.value)) : Number(e.target.value)))} />
+      </div>
+      <span className="wp-context-value">
+        {rangeOn ? `${minPct}%–${pct}% · ${minTokens.toLocaleString()}–${tokens.toLocaleString()} tokens`
+          : `${pct}% · ${tokens.toLocaleString()} tokens`}{maxPct < 100 ? ` (max ${maxPct}%)` : ''}
+      </span>
       <label className="wp-context-range"
-             title="Add a 0 point: the context becomes a range. Under memory pressure the load gate shrinks this model's context only as far as it needs to (never below the minimum) before evicting another model.">
+             title="Add a 0 point: a second handle on the slider makes the context a range. Under memory pressure the load gate shrinks this model's context only as far as it needs to (never below the minimum) before evicting another model.">
         <input type="checkbox" checked={rangeOn} onChange={e => setRangeOn(e.target.checked)} /> range — minimum context for polite eviction
       </label>
-      {rangeOn && (
-        <>
-          <input type="range" min="0" max={pct} step="1" value={Math.min(minPct, pct)}
-                 onChange={e => setMinPct(Number(e.target.value))} />
-          <span className="wp-context-value">minimum {minPct}% · {minTokens.toLocaleString()} tokens — window {minPct}%–{pct}%</span>
-        </>
-      )}
       <DbContextPreview db={db} pct={pct} tokens={tokens} />
       {kv && (
         <div className="wp-context-kv" style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '6px 0' }}

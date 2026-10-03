@@ -1848,3 +1848,19 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
   border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .wp-ctx-max:hover { color: var(--accent, #6aa0ff); border-color: currentColor; }
 .wp-context-range { display: flex; gap: 6px; align-items: center; font-size: 11px; margin: 6px 0 2px; }
+
+/* one slider, two handles (context range, 2026-10-02) */
+.wp-dual-range { position: relative; width: 200px; height: 20px; margin: 4px 0; }
+.wp-dual-range::before { content: ''; position: absolute; left: 0; right: 0; top: 9px; height: 3px;
+  border-radius: 2px; background: var(--border, #444); }
+.wp-dual-fill { position: absolute; top: 9px; height: 3px; border-radius: 2px; background: var(--accent, #6aa0ff); opacity: 0.6; }
+.wp-context-menu .wp-dual-range input[type="range"] { position: absolute; left: 0; top: 0; width: 100%; height: 20px; margin: 0;
+  background: transparent; pointer-events: none; -webkit-appearance: none; appearance: none; }
+.wp-dual-range input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
+.wp-dual-range input[type="range"]::-moz-range-track { background: transparent; }
+.wp-dual-range input[type="range"]::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%; background: var(--accent, #6aa0ff); cursor: pointer; margin-top: 3px; }
+.wp-dual-range input[type="range"]::-moz-range-thumb { pointer-events: auto; width: 14px; height: 14px; border: 0;
+  border-radius: 50%; background: var(--accent, #6aa0ff); cursor: pointer; }
+.wp-dual-range input.wp-dual-lo::-webkit-slider-thumb { background: var(--warn, #c90); }
+.wp-dual-range input.wp-dual-lo::-moz-range-thumb { background: var(--warn, #c90); }
