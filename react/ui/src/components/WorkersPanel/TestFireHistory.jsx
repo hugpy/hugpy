@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { fetchJson } from '../../api'
+import { hugpyFetch } from '../../runtime/config'
 
 const SHOWN = 8
 
@@ -45,9 +46,27 @@ function Popup({ title, onClose, children }) {
     document.body)
 }
 
-function RunPopup({ worker, run, onClose }) {
+// Resumable = cut off (central restart) or stopped by the operator.
+const resumable = run => !run.live && run.state !== 'complete' && run.state !== 'running'
+
+function RunPopup({ worker, run, onClose, onResumed }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
+  const [resuming, setResuming] = useState(false)
+  const resume = async () => {
+    setResuming(true); setError(null)
+    try {
+      const r = await hugpyFetch(`${base(worker)}/history/${encodeURIComponent(run.job_id)}/resume`, { method: 'POST' })
+      const b = await r.json().catch(() => ({}))
+      if (!r.ok || !b.job_id) throw new Error(b.error || `HTTP ${r.status}`)
+      onResumed && onResumed(b.job_id)
+      onClose()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setResuming(false)
+    }
+  }
   useEffect(() => {
     let off = false
     fetchJson(`${base(worker)}/history/${encodeURIComponent(run.job_id)}`)
@@ -75,6 +94,13 @@ function RunPopup({ worker, run, onClose }) {
             <span>{data.rounds ? `${data.rounds} round(s)` : 'until stopped'} · concurrency {data.concurrency} · max {data.max_tokens} tok</span>
             {dur(data.started, data.finished) && <span>took {dur(data.started, data.finished)}</span>}
             {skipped.length > 0 && <span title={skipped.map(s => `${s.model_key}: ${s.reason}`).join('\n')}>skipped {skipped.length}</span>}
+            {data.resumed_from && <span>resumed from {data.resumed_from}</span>}
+            {resumable(run) && (
+              <button className="wp-test-fire" disabled={resuming} onClick={resume}
+                      title={`start a new run that restarts ${data.current_model || 'the interrupted model'} and proceeds through the rest of the round${data.rounds > 1 ? ' and the remaining rounds' : ''}`}>
+                {resuming ? '▶ …' : `▶ resume${data.current_model ? ` from ${data.current_model}` : ''}`}
+              </button>
+            )}
           </div>
           <table className="wp-tfh-table">
             <thead><tr><th>model</th><th>ok</th><th>failed</th><th>median latency</th><th>median tok/s</th></tr></thead>
@@ -208,7 +234,7 @@ export default function TestFireHistory({ worker, tf }) {
               <span>{when(r.created)}</span>
               <span className="wp-tf-ok">✓{r.ok}</span>
               <span className="wp-tf-fail">✗{r.failed}</span>
-              {r.state !== 'complete' && <em>{r.state}</em>}
+              {r.state !== 'complete' && <em>{r.state}{resumable(r) ? ' ▶' : ''}</em>}
             </button>
           ))}
           {list.length > SHOWN && (
@@ -218,7 +244,8 @@ export default function TestFireHistory({ worker, tf }) {
           )}
         </div>
       )}
-      {openRun && <RunPopup worker={worker} run={openRun} onClose={() => setOpenRun(null)} />}
+      {openRun && <RunPopup worker={worker} run={openRun} onClose={() => setOpenRun(null)}
+                            onResumed={jobId => { tf?.adopt && tf.adopt(jobId); load() }} />}
       {analysis && <AnalysisPopup worker={worker} onClose={() => setAnalysis(false)} />}
     </div>
   )

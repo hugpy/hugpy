@@ -145,7 +145,16 @@ export function useTestFire(worker) {
     activeId.current = null; setJob(null); setError(null)
   }, [worker?.id])
 
-  return { job, busy, error, open, setOpen, start, stop, dismiss, filter, setFilter }
+  // Attach the strip to a job started elsewhere (a history RESUME).
+  const adopt = useCallback(async (jobId) => {
+    if (!jobId) return
+    activeId.current = jobId
+    saveDismissed(worker?.id, null)
+    setOpen(true)
+    await poll(jobId)
+  }, [worker?.id, poll])
+
+  return { job, busy, error, open, setOpen, start, stop, dismiss, adopt, filter, setFilter }
 }
 
 export function TestFireButton({ tf, disabled = false }) {

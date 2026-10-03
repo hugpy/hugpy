@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS test_fire_results (
 );
 CREATE INDEX IF NOT EXISTS test_fire_results_job ON test_fire_results (job_id, id);
 CREATE INDEX IF NOT EXISTS test_fire_results_pair ON test_fire_results (worker_id, model_key, started DESC);
+ALTER TABLE test_fire_runs ADD COLUMN IF NOT EXISTS round INTEGER;
+ALTER TABLE test_fire_runs ADD COLUMN IF NOT EXISTS current_model TEXT;
+ALTER TABLE test_fire_runs ADD COLUMN IF NOT EXISTS resumed_from TEXT;
 """
 
 # verdict thresholds (analyze)
@@ -133,14 +136,17 @@ def save_run(job) -> bool:
     def op(cur):
         cur.execute(
             "INSERT INTO test_fire_runs (job_id, worker_id, worker_name, created, started, finished,"
-            " rounds, concurrency, max_tokens, models, skipped, ok, failed, stop_reason)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)"
+            " rounds, concurrency, max_tokens, models, skipped, ok, failed, stop_reason,"
+            " round, current_model, resumed_from)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT (job_id) DO UPDATE SET started=EXCLUDED.started, finished=EXCLUDED.finished,"
             " ok=EXCLUDED.ok, failed=EXCLUDED.failed, stop_reason=EXCLUDED.stop_reason,"
-            " skipped=EXCLUDED.skipped",
+            " skipped=EXCLUDED.skipped, round=EXCLUDED.round, current_model=EXCLUDED.current_model",
             (job.job_id, job.worker_id, job.worker_name, job.created, job.started, job.finished,
              job.rounds, job.concurrency, job.max_tokens, json.dumps(list(job.models)),
-             json.dumps(list(job.skipped), default=str), job.ok, job.failed, job.stop_reason))
+             json.dumps(list(job.skipped), default=str), job.ok, job.failed, job.stop_reason,
+             getattr(job, "round", None), getattr(job, "current_model", None),
+             getattr(job, "resumed_from", None)))
         return True
     return bool(_run(op))
 
@@ -163,7 +169,8 @@ def save_result(job, result: dict) -> bool:
 def list_runs(worker_id: str, limit: int = 50) -> list:
     def op(cur):
         cur.execute("SELECT job_id, worker_id, worker_name, created, started, finished, rounds, concurrency,"
-                    " max_tokens, models, skipped, ok, failed, stop_reason FROM test_fire_runs"
+                    " max_tokens, models, skipped, ok, failed, stop_reason, round, current_model, resumed_from"
+                    " FROM test_fire_runs"
                     " WHERE worker_id = %s ORDER BY created DESC LIMIT %s", (worker_id, int(limit)))
         return _rows(cur)
     return _run(op) or []
@@ -180,6 +187,33 @@ def get_run(job_id: str) -> Optional[dict]:
                     (job_id,))
         return dict(runs[0], results=_rows(cur))
     return _run(op)
+
+
+def resume_plan(run: dict, results: list) -> Optional[dict]:
+    """PURE: how to pick an unfinished run back up (operator 2026-10-02: "a
+    resume option that starts with the last model that was run if incomplete —
+    start that model's run over and proceed"). Returns ``{first_order,
+    rounds}`` — the rest of the interrupted round, the in-flight model first,
+    then the rounds still owed (0 = until stopped) — or None when nothing is
+    left. Assumes the round-robin order run_job uses (every model once per round)."""
+    models = list(run.get("models") or [])
+    if not models:
+        return None
+    n = len(models)
+    done = len(results or [])
+    rounds = int(run.get("rounds") or 0)
+    full = done // n
+    if rounds and full >= rounds:
+        return None
+    in_round = [r.get("model_key") for r in (results or [])[full * n:]]
+    remaining = [m for m in models if m not in in_round]
+    cur = run.get("current_model")
+    if cur in remaining:
+        remaining = [cur] + [m for m in remaining if m != cur]
+    if not remaining:
+        return None
+    return {"first_order": remaining, "rounds": (0 if not rounds else rounds - full),
+            "interrupted_model": cur, "completed_rounds": full}
 
 
 def _pair_results(worker_id: str, limit_runs: int) -> "tuple[list, list]":

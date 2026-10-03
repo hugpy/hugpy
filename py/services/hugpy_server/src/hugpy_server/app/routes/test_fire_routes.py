@@ -273,7 +273,8 @@ class TestFireJob:
     def __init__(self, worker_id: str, worker_name: str, models: list, *,
                  rounds: int = 1, concurrency: int = 1,
                  max_tokens: int = DEFAULT_MAX_TOKENS, seed: Optional[int] = None,
-                 skipped: Optional[list] = None):
+                 skipped: Optional[list] = None, first_order: Optional[list] = None,
+                 resumed_from: Optional[str] = None):
         self.job_id = uuid.uuid4().hex[:12]
         self.worker_id = worker_id
         self.worker_name = worker_name
@@ -283,6 +284,11 @@ class TestFireJob:
         self.max_tokens = int(max_tokens)
         self.seed = seed
         self.skipped = list(skipped or [])
+        # RESUME (2026-10-02): round 1 runs exactly this order (the rest of an
+        # interrupted round, its in-flight model first); later rounds shuffle.
+        self.first_order = [str(m) for m in (first_order or [])] or None
+        self.resumed_from = resumed_from
+        self.current_model: Optional[str] = None
         self.created = time.time()
         self.started: Optional[float] = None
         self.finished: Optional[float] = None
@@ -305,7 +311,11 @@ class TestFireJob:
     # ----- control
     @property
     def total_planned(self) -> Optional[int]:
-        return None if self.rounds == 0 else self.rounds * len(self.models)
+        if self.rounds == 0:
+            return None
+        if self.first_order:
+            return len(self.first_order) + (self.rounds - 1) * len(self.models)
+        return self.rounds * len(self.models)
 
     def stop_requested(self) -> bool:
         return self._stop.is_set()
@@ -321,6 +331,8 @@ class TestFireJob:
         if request_id:
             with self._lock:
                 self.in_flight[request_id] = model_key
+        self.current_model = model_key
+        _persist("save_run", self)
 
     def record(self, result: dict) -> None:
         """Append one call result and fold it into the counters/per-model view."""
@@ -329,6 +341,8 @@ class TestFireJob:
         with self._lock:
             if rid:
                 self.in_flight.pop(rid, None)
+            if self.current_model == key:
+                self.current_model = None
             self.results.append(result)
             self.done_calls += 1
             pm = self.per_model.setdefault(key, {"ok": 0, "failed": 0, "last_status": None,
@@ -366,6 +380,7 @@ class TestFireJob:
             "seed": self.seed,
             "models": list(self.models),
             "skipped": list(self.skipped),
+            "resumed_from": self.resumed_from,
             "done_calls": self.done_calls,
             "total_planned": self.total_planned,
             "in_flight": [{"request_id": r, "model_key": k} for r, k in in_flight.items()],
@@ -400,8 +415,11 @@ def run_job(job: TestFireJob, call_fn: Callable[..., dict],
                 if job.rounds and job.round >= job.rounds:
                     break
                 job.round += 1
-                order = list(job.models)
-                rng.shuffle(order)
+                if job.round == 1 and job.first_order:
+                    order = list(job.first_order)
+                else:
+                    order = list(job.models)
+                    rng.shuffle(order)
                 pending = []
                 for key in order:
                     if job.stop_requested():
@@ -587,12 +605,12 @@ def _register(job: TestFireJob) -> None:
 def start_job(worker_id: str, worker_name: str, models: list, *, rounds=1,
               concurrency=1, max_tokens=DEFAULT_MAX_TOKENS, seed=None,
               skipped=None, call_fn: Callable[..., dict] = fire_one,
-              spawn: bool = True) -> TestFireJob:
+              spawn: bool = True, first_order=None, resumed_from=None) -> TestFireJob:
     """Create + register + (by default) spawn the run thread. ``spawn=False``
     leaves the job registered but not started (tests drive ``run_job``)."""
     job = TestFireJob(worker_id, worker_name, models, rounds=rounds,
                       concurrency=concurrency, max_tokens=max_tokens, seed=seed,
-                      skipped=skipped)
+                      skipped=skipped, first_order=first_order, resumed_from=resumed_from)
     _register(job)
     if spawn:
         job.running = True   # visible as running before the thread's first tick
@@ -750,6 +768,35 @@ def test_fire_analysis(worker_id):
         return jsonify({"error": "test-fire history disabled"}), 503
     runs = _arg_int("runs", 20, 1, 200)
     return jsonify(h.analyze(worker_id, runs))
+
+
+@test_fire_bp.route("/llm/workers/<worker_id>/test-fire/history/<job_id>/resume", methods=["POST"])
+def test_fire_resume(worker_id, job_id):
+    """Pick an unfinished stored run back up as a NEW job (resumed_from = the
+    old one): the interrupted model first, then the rest of its round, then
+    the rounds still owed. Never automatic — the operator asks."""
+    h = _history()
+    run = h.get_run(job_id) if h else None
+    if not run or run.get("worker_id") != worker_id:
+        return jsonify({"ok": False, "error": f"no stored test-fire run {job_id!r} for this worker"}), 404
+    live = _running_job_for(worker_id)
+    if live is not None:
+        return jsonify({"ok": False, "error": "test-fire already running on this worker",
+                        "job_id": live.job_id}), 409
+    if live is None and run.get("finished") and (run.get("stop_reason") or "complete") == "complete":
+        return jsonify({"ok": False, "error": "that run completed — nothing to resume"}), 409
+    plan = h.resume_plan(run, run.get("results") or [])
+    if not plan:
+        return jsonify({"ok": False, "error": "nothing left to run in that test fire"}), 409
+    job = start_job(worker_id, run.get("worker_name") or worker_id, list(run.get("models") or []),
+                    rounds=plan["rounds"], concurrency=int(run.get("concurrency") or 1),
+                    max_tokens=int(run.get("max_tokens") or DEFAULT_MAX_TOKENS),
+                    skipped=run.get("skipped") or [], first_order=plan["first_order"],
+                    resumed_from=job_id, call_fn=fire_one)
+    logger.info("test-fire %s: RESUMES %s on %s — first %s, %d model(s) left in the round, rounds=%s",
+                job.job_id, job_id, job.worker_name, plan["first_order"][0],
+                len(plan["first_order"]), plan["rounds"] or "∞")
+    return jsonify({"ok": True, "job_id": job.job_id, "resumed_from": job_id, **plan}), 202
 
 
 @test_fire_bp.route("/llm/workers/<worker_id>/test-fire/history/<job_id>", methods=["GET"])

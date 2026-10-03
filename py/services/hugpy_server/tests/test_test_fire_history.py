@@ -102,3 +102,37 @@ def test_store_fails_open_without_dsn(monkeypatch):
     monkeypatch.setattr(store, "_dsn", lambda: None)
     assert store.list_runs("w1") == [] and store.get_run("x") is None
     assert store.analyze("w1")["models"] == {}
+
+
+def _res(*keys):
+    return [{"model_key": k} for k in keys]
+
+
+def test_resume_plan_restarts_the_interrupted_model_then_the_rest_of_its_round():
+    run = {"models": ["A", "B", "C", "D"], "rounds": 2, "current_model": "C"}
+    plan = store.resume_plan(run, _res("A", "B", "C", "D", "B"))   # round 2: B done, C in flight
+    assert plan["first_order"] == ["C", "A", "D"] and plan["rounds"] == 1
+    assert store.resume_plan(dict(run, current_model=None), _res("A", "B"))["first_order"] == ["C", "D"]
+    assert store.resume_plan(run, _res("A", "B", "C", "D") * 2) is None          # all rounds done
+    assert store.resume_plan({"models": ["A", "B"], "rounds": 0}, _res("A"))["rounds"] == 0
+
+
+def test_resume_route_starts_a_linked_job_in_the_planned_order(monkeypatch):
+    fake = FakeStore()
+    fake.resume_plan = store.resume_plan
+    fake.runs["old"] = {"job_id": "old", "worker_id": "w1", "worker_name": "box", "finished": None,
+                        "stop_reason": None, "created": 1, "models": ["A", "B", "C"], "rounds": 1,
+                        "concurrency": 1, "max_tokens": 8, "current_model": "B"}
+    fake.results.append({"job_id": "old", "model_key": "A"})
+    client = _client(monkeypatch, fake)
+    seen = []
+    monkeypatch.setattr(tf, "fire_one", lambda k, p, m, j: (seen.append(k), {"model_key": k, "ok": True})[1])
+    r = client.post("/llm/workers/w1/test-fire/history/old/resume")
+    assert r.status_code == 202, r.get_json()
+    body = r.get_json()
+    assert body["first_order"] == ["B", "C"] and body["resumed_from"] == "old"
+    job = tf._JOBS[body["job_id"]]
+    job.thread.join(5)
+    assert seen == ["B", "C"] and job.total_planned == 2
+    fake.runs["done"] = dict(fake.runs["old"], job_id="done", finished=5, stop_reason="complete")
+    assert client.post("/llm/workers/w1/test-fire/history/done/resume").status_code == 409
