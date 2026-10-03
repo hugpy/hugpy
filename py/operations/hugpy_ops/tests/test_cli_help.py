@@ -111,17 +111,18 @@ def test_import_hugpy_ops_is_light():
         "assert set(hugpy_ops.__all__) >= {'sentinel', 'chaos', 'keeper', "
         "'provisioner', 'todo_keeper', 'todo_keeper_daemon', 'versions'}\n"
         "print(hugpy_ops.__version__)\n"
+        "from importlib.metadata import PackageNotFoundError, version\n"
+        "try:\n    print(version('hugpy-ops'))\n"
+        "except PackageNotFoundError:\n    print('0.0.0+unknown')\n"
     )
     proc = _run(code)
     assert proc.returncode == 0, proc.stderr[-2000:]
     # The version is the installed distribution's (git-derived, lockstep),
-    # never a literal; the source-tree fallback is 0.0.0+unknown.
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        expected = version("hugpy-ops")
-    except PackageNotFoundError:
-        expected = "0.0.0+unknown"
-    assert proc.stdout.strip() == expected
+    # never a literal; the source-tree fallback is 0.0.0+unknown. Resolved in
+    # the SAME interpreter/path as the import — a parent process can see a
+    # different (e.g. stale in-tree egg-info) distribution.
+    got, expected = proc.stdout.strip().splitlines()[-2:]
+    assert got == expected
 
 
 def test_lazy_submodule_access_and_versions_helper():
