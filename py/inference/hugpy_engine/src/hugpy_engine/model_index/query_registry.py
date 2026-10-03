@@ -833,6 +833,9 @@ PAIR_KNOB_KEYS = ("alloc_mode", "n_gpu_layers", "n_cpu_moe", "gguf_file", "moe",
                   # ctx_pct] polite window the admission may shrink into before
                   # evicting; absent = no range.
                   "ctx_min_pct",
+                  # opt-in (operator 2026-10-02): a LOADED model with a range may be
+                  # reloaded at a smaller ctx inside it instead of being evicted.
+                  "ctx_yield",
                   # KV cache knobs (operator 2026-10-02: "the actual area of
                   # adjustment that truly can make a tight load work"). The cache
                   # type is a LAUNCH choice (llama-server --cache-type-k/-v), not a

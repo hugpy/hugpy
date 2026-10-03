@@ -1500,6 +1500,8 @@ def _adopt_storage_inputs(state: "WorkerState", worker: dict | None) -> None:
                 except (TypeError, ValueError):
                     pass
         _RUNTIME_SETTINGS["ctx_min_pct_db"] = mmap
+        _RUNTIME_SETTINGS["ctx_yield_db"] = {
+            k for k, v in sbm.items() if isinstance(v, dict) and v.get("ctx_yield") is True}
         # The whole per-model spill, for the fit preview (it must price what a
         # real load of the model would carry — n_cpu_moe, bnb_4bit, ...).
         _RUNTIME_SETTINGS["spill_by_model_db"] = {
@@ -8386,6 +8388,91 @@ def _ctx_min_pct(model_key: str) -> "int | None":
         return None
 
 
+def _ctx_yield(model_key: str) -> bool:
+    """Opt-in (DB pair knob ``ctx_yield``, operator 2026-10-02): this model,
+    when LOADED and in the way of another load, may be reloaded at a smaller
+    ctx inside its range instead of being evicted. Off unless set."""
+    return model_key in (_RUNTIME_SETTINGS.get("ctx_yield_db") or set())
+
+
+def _yield_pct(weights: int, kv: int, cur_pct: int, min_pct: "int | None",
+               room: int) -> "int | None":
+    """PURE: the largest ctx% in [max(1, min_pct), cur_pct] at which a model of
+    ``weights`` + ``kv`` (KV priced at ``cur_pct``, linear in ctx) fits ``room``
+    bytes; None when even the minimum does not fit."""
+    if min_pct is None or not cur_pct or kv <= 0 or weights is None:
+        return None
+    lo = max(1, int(min_pct))
+    spare = int(room) - int(weights)
+    if spare <= 0:
+        return None
+    fit = int(int(cur_pct) * spare // int(kv))
+    pct = min(int(cur_pct), fit)
+    return pct if pct >= lo else None
+
+
+def _plan_ctx_yields(subject: str, evicted: list, room: int) -> list:
+    """For each evicted GGUF resident that opted into ``ctx_yield`` with a range:
+    the ctx% it comes back at in the room left after the subject lands. Spends
+    the room in eviction order. ``[(model_key, pct), ...]``."""
+    out = []
+    for mk in evicted or []:
+        if not _ctx_yield(mk) or _ctx_min_pct(mk) is None:
+            continue
+        if str(_model_framework(mk) or "").lower() not in ("gguf", "llama_cpp"):
+            continue
+        try:
+            det = _incoming_need_detail(mk) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        weights, kv = det.get("weights"), int(det.get("kv") or 0)
+        cur = det.get("ctx_pct") or _ctx_pct(mk) or 100
+        pct = _yield_pct(weights, kv, int(cur), _ctx_min_pct(mk), room)
+        if pct is None:
+            continue
+        from hugpy_engine.fit.flex import kv_at_ctx_pct
+        room -= int(weights) + int(kv_at_ctx_pct(kv, int(cur), pct))
+        out.append((mk, pct))
+    return out
+
+
+def _yield_reload(subject: str, model_key: str, pct: int, wait_s: float = 900.0) -> None:
+    """Background: once ``subject`` is serving, reload the yielding resident at
+    ``pct`` through the NORMAL load path (its own spill, the same admission).
+    A refusal leaves it evicted — honest, never forced."""
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        try:
+            if subject in (loaded_model_keys() or []) or any(
+                    (s or {}).get("model_key") == subject and (s or {}).get("healthy", True)
+                    for s in (_slot_statuses() or [])):
+                break
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(2.0)
+    _FLEX_CTX_FLOOR[model_key] = int(pct)       # the served -c follows the yield
+    token = None
+    try:
+        from hugpy_engine.spill import _REQUEST_ENV, set_request_env
+        token = set_request_env(_spill_overlay(_preview_spill(model_key)))
+        from hugpy_engine.llama.runners.get import get_llama_runner
+        get_llama_runner(model_key)
+        logger.info("ctx yield: %s reloaded at ctx %s%% (made room for %s)", model_key, pct, subject)
+        _evt_emit("yield.done", model_key=model_key, incoming_model=subject,
+                  note=f"reloaded at ctx {pct}% instead of staying evicted")
+    except Exception as exc:  # noqa: BLE001 — the yield is best-effort
+        _FLEX_CTX_FLOOR.pop(model_key, None)
+        logger.warning("ctx yield: %s could not reload at ctx %s%% (%s) — stays evicted",
+                       model_key, pct, exc)
+    finally:
+        if token is not None:
+            try:
+                from hugpy_engine.spill import _REQUEST_ENV
+                _REQUEST_ENV.reset(token)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _flex_priority(model_key: str) -> int:
     """Per-model flex priority (0 == normal) from settings, via the ONE seam
     (flex.flex_priority_key). Higher compresses/evicts lower-priority neighbours
@@ -13445,6 +13532,19 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         return out
 
     if final:
+        # OPT-IN CONTEXT YIELD (operator 2026-10-02): an evicted resident that
+        # accepted it comes back at a smaller ctx inside its range, in the room
+        # left after the subject lands — reloaded once the subject is serving.
+        if evicted and snap_free is not None and need is not None:
+            try:
+                _room = snap_free + freed + subject_held - int(need) - reserve
+                for _ymk, _ypct in _plan_ctx_yields(model_key, evicted, _room):
+                    logger.info("ctx yield: %s will reload at ctx %s%% after %s lands",
+                                _ymk, _ypct, model_key)
+                    threading.Thread(target=_yield_reload, args=(model_key, _ymk, _ypct),
+                                     daemon=True, name=f"ctx-yield-{_ymk}").start()
+            except Exception:  # noqa: BLE001 — a yield never breaks the admission
+                logger.debug("ctx yield planning failed", exc_info=True)
         if moe_commit is not None:
             return _with_measured(_moe_admit_verdict(evicted, freed))
         out = {"action": "evicted", "evicted": evicted,

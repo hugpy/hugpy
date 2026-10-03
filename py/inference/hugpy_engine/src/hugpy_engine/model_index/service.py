@@ -324,6 +324,8 @@ class ModelIndexService:
             if not 1 <= cp <= 100:
                 return "bad_knob", ["ctx_pct must be an integer 1..100"]
             to_set["ctx_pct"] = cp
+        if "ctx_yield" in to_set and not isinstance(to_set["ctx_yield"], bool):
+            return "bad_knob", ["ctx_yield must be true/false"]
         if "ctx_min_pct" in to_set:
             try:
                 mp = int(to_set["ctx_min_pct"])
