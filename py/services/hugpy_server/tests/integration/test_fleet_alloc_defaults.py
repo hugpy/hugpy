@@ -376,20 +376,24 @@ store.heartbeat(did, gpus=GPUS_24, ram_total=124 * GIB)
 check("durable: a heartbeat re-confirms the totals (advance-only update)",
       store._load()[did].get("gpu_total_bytes_known") == 24 * GIB)
 
-# survive a FULL registry loss: the durable totals ride the assignment-memory
-# sidecar, so a returning worker id inherits them on a brand-new row.
-_remembered = W._load_assign_memory().get(did) or {}
-check("durable: the totals were snapshotted into the assignment-memory sidecar",
-      _remembered.get("gpu_total_bytes_known") == 24 * GIB
-      and _remembered.get("ram_total_bytes_known") == 124 * GIB)
-store.remove(did)                            # registry row gone (row swept)
-d3 = store.register(name="durable-box", url="http://d2:9100",
-                    pkg_version="0.1.203", gpus=[], ram_total=None,
-                    worker_id=did)           # returning id, no live totals yet
-check("durable: a returning id with a LOST row inherits totals from memory",
-      store._load()[did].get("gpu_total_bytes_known") == 24 * GIB)
-check("durable: feasibility works immediately on the restored row (pre-first-beat)",
-      W.feasible_modes_for(did, "tf-big") == ("ram-only", "max-gpu", "max-ram"))
+# FULL registry loss. The assignment-memory sidecar that used to carry the
+# totals across a lost row is RETIRED (2026-10-02, operator: detach from the
+# non-DB stores — designations re-converge from model_workers, hardware totals
+# live in worker_budgets); it is no longer written. A returning id with a lost
+# row therefore has no totals until its first beat and FAILS OPEN meanwhile.
+if os.environ.get("HUGPY_ASSIGN_SIDECAR_WRITE", "0") != "1":
+    _remembered = W._load_assign_memory().get(did) or {}
+    check("retired: the assignment-memory sidecar is not written",
+          not _remembered.get("gpu_total_bytes_known"))
+    store.remove(did)                        # registry row gone (row swept)
+    d3 = store.register(name="durable-box", url="http://d2:9100",
+                        pkg_version="0.1.203", gpus=[], ram_total=None,
+                        worker_id=did)       # returning id, no live totals yet
+    check("retired: a returning id with a LOST row fails open until its first beat",
+          set(W.feasible_modes_for(did, "tf-big")) >= {"ram-only", "max-gpu", "max-ram"})
+    store.heartbeat(did, gpus=GPUS_24, ram_total=124 * GIB)
+    check("retired: the first beat restores the totals",
+          store._load()[did].get("gpu_total_bytes_known") == 24 * GIB)
 
 # a GENUINELY-NEW worker id (never seen, no memory) still fails open + self-logs.
 import logging as _logging
