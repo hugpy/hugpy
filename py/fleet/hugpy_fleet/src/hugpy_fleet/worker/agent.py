@@ -1275,6 +1275,11 @@ _SPILL_ENV = {
     "flash_attn": "HUGPY_SLOT_FLASH_ATTN",
     "gpu_mem_gib": "HUGPY_GPU_MEM_GIB",
     "cpu_mem_gib": "HUGPY_CPU_MEM_GIB",
+    # WHO stated cpu_mem_gib (2026-10-02): "pair" when the DB pair row carries
+    # it explicitly (a HARD RAM budget at admission); absent = derived (central's
+    # own contract, or a cpu_mem_gib left on the env by an earlier request —
+    # that key is sticky), which is gated on free host RAM instead.
+    "cpu_mem_gib_source": "HUGPY_CPU_MEM_GIB_SOURCE",
     # Explicit per-model core budget (slot loads pass it to the child;
     # in-process loads read DEFAULT_LLAMA_THREADS at build).
     "threads": "DEFAULT_LLAMA_THREADS",
@@ -1343,7 +1348,10 @@ _SPILL_ENV_CLEAR_WHEN_ABSENT = ("alloc_mode", "leniency_pct", "priority_device",
                                 "main_gpu",
                                 "tensor_split",
                                 # provenance is per-request by definition
-                                "alloc_source")
+                                "alloc_source",
+                                # a leaked "pair" would make the NEXT model's
+                                # derived/sticky RAM budget a hard refusal
+                                "cpu_mem_gib_source")
 
 
 # ── operator resource limits (two-tier) ─────────────────────────────────────
@@ -2536,10 +2544,13 @@ def _allocations(slot_statuses: "list | None" = None) -> list:
                 _rb = _resident_bytes_under_dir(_smaps_rss_by_path(), _mdir)
                 if _rb is not None:
                     _rsrc = "smaps"
-            if _rb is None:
-                _cpu = ip.get("cpu_bytes")
-                if _cpu:
-                    _rb, _rsrc = int(_cpu), "torch"
+            # THE LARGER of the two measurements (2026-10-02): a transformers
+            # model COPIES its safetensors into torch CPU tensors, so a few
+            # still-mapped pages under its dir read as a tiny smaps figure that
+            # used to hide the torch bytes (a 65 GB model in RAM shown as MBs).
+            _cpu = ip.get("cpu_bytes")
+            if _cpu and (_rb is None or int(_cpu) > int(_rb)):
+                _rb, _rsrc = int(_cpu), "torch"
             if _rb is not None:
                 ram_row["ram_resident_bytes"] = int(_rb)
                 ram_row["ram_resident_source"] = _rsrc
@@ -11944,12 +11955,31 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
     # ordinal (_inprocess_gpu_bytes); comfy -> its provisioned pin; slot -> its own
     # CUDA_VISIBLE_DEVICES pin (joined below). gpu_index omitted when unknown.
     try:
-        _ip_dev = {mk: v.get("gpu_index")
-                   for mk, v in (_inprocess_gpu_bytes() or {}).items()}
+        _ip = _inprocess_gpu_bytes() or {}
+        _ip_dev = {mk: v.get("gpu_index") for mk, v in _ip.items()}
         _ip_known = True
     except Exception:  # noqa: BLE001 — no torch -> no per-device attribution
+        _ip = {}
         _ip_dev = {}
         _ip_known = False
+    # HOST RAM each resident pins (2026-10-02), MEASURED: an in-process torch
+    # model's parameter+buffer bytes on device 'cpu'; a slot child's anonymous
+    # RSS (its mmap'd file pages are page cache — MemAvailable already counts
+    # them free — so only VmRSS when the anon split is unreadable). Absent ->
+    # no ram_bytes key: the RAM-deficit stage never walks an unmeasured row.
+    _ip_ram = {mk: int(v["cpu_bytes"]) for mk, v in _ip.items() if v.get("cpu_bytes")}
+    try:
+        _slots_now = list(_slot_statuses() or [])
+    except Exception:  # noqa: BLE001 — slot pool unreadable -> registry rows stand
+        _slots_now = []
+    _slot_ram: dict = {}
+    for _s in _slots_now:
+        _smk = (_s or {}).get("model_key")
+        _sram = _s.get("rss_anon_bytes") if _smk else None
+        if _smk and _sram is None:
+            _sram = _s.get("rss_bytes")
+        if _smk and _sram:
+            _slot_ram[_smk] = int(_sram)
     _comfy_dev = None
     _cd_env = (os.environ.get("HUGPY_COMFY_CUDA_DEVICE") or "").strip()
     if _cd_env:
@@ -11975,6 +12005,10 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             }
             if _ip_dev.get(mk) is not None:
                 _row["gpu_index"] = _ip_dev.get(mk)
+            _rram = (_ip_ram.get(mk) if _row["host_mode"] == "in_process"
+                     else _slot_ram.get(mk) if _row["host_mode"] == "subprocess" else None)
+            if _rram:
+                _row["ram_bytes"] = _rram
             if _row["host_mode"] == "external":
                 try:
                     from hugpy_fleet.worker import external_residents as _extres
@@ -12016,7 +12050,7 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
     # re-measured from the device after each eviction anyway).
     try:
         gpu_procs = None
-        for s in (_slot_statuses() or []):
+        for s in _slots_now:
             mk = (s or {}).get("model_key")
             if not mk or mk in seen:
                 continue
@@ -12032,6 +12066,8 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
                 "host_mode": "subprocess",
                 "alive": bool(s.get("healthy", True)),
             }
+            if _slot_ram.get(mk):
+                _srow["ram_bytes"] = _slot_ram[mk]
             _sgi = s.get("gpu")
             if _sgi in (None, ""):
                 _sgi = s.get("main_gpu")
@@ -12793,6 +12829,8 @@ def _fit_policy(total: "int | None", model_key: "str | None" = None):
         alloc_mode=_amode(), leniency_pct=_lenpct(), priority_device=_pdev(),
         gpu_target_bytes=_gib_bytes(_spill_env_get("HUGPY_GPU_MEM_GIB")),
         ram_target_bytes=_gib_bytes(_spill_env_get("HUGPY_CPU_MEM_GIB")),
+        ram_target_source=("pair" if (_spill_env_get("HUGPY_CPU_MEM_GIB_SOURCE") or "")
+                           .strip().lower() == "pair" else "derived"),
         ctx_cap_on_evict_pct=_ctx_cap_on_evict_pct())
 
 
@@ -12904,7 +12942,8 @@ def _fit_residents(state: "WorkerState", model_key: str):
         except (TypeError, ValueError):
             vb = None
         rows.append(Resident(
-            model_key=mk, vram_bytes=vb, host_mode=r.get("host_mode"),
+            model_key=mk, vram_bytes=vb, ram_bytes=r.get("ram_bytes"),
+            host_mode=r.get("host_mode"),
             protected=False, materialized=_fit_materialized(r),
             pinned=bool(r.get("pinned")), gpu_index=r.get("gpu_index"),
             priority=_fpk(_flex_alloc(mk)), kv_bytes=int(rkv or 0),
@@ -12922,6 +12961,7 @@ def _fit_residents(state: "WorkerState", model_key: str):
         except (TypeError, ValueError):
             vb = None
         rows.append(Resident(model_key=p["model_key"], vram_bytes=vb,
+                             ram_bytes=p.get("ram_bytes"),
                              host_mode=p.get("host_mode"), protected=True,
                              why=p.get("why"), materialized=_fit_materialized(p),
                              pinned=bool(p.get("pinned")), gpu_index=p.get("gpu_index")))
@@ -13159,7 +13199,7 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         "free_bytes=%s device_free_bytes=%s free_effective_bytes=%s "
         "subject_held_bytes=%s ceiling_reserve_bytes=%s external_floor_bytes=%s "
         "total_bytes=%s evictions=%d protected=%d evicted_keys=%s protected_keys=%s "
-        "note=%r",
+        "ram_need_bytes=%s ram_free_bytes=%s ram_freed_planned_bytes=%s note=%r",
         model_key, plan.action, plan.fits_now,
         (_fl.kind if _fl is not None else None), (_fl.code if _fl is not None else None),
         plan.need_bytes, _split.get("weights_bytes"), _split.get("kv_bytes"),
@@ -13171,7 +13211,8 @@ def _vram_evict_to_fit(state: "WorkerState", model_key: str,
         plan.free_effective_bytes, plan.subject_held_bytes, plan.ceiling_reserve_bytes,
         int(snap.external_floor_bytes or 0), snap.total_bytes,
         len(plan.evictions), sum(1 for r in residents if r.protected),
-        plan.evicted_keys, [r.model_key for r in residents if r.protected], plan.note)
+        plan.evicted_keys, [r.model_key for r in residents if r.protected],
+        plan.ram_need_bytes, plan.ram_free_bytes, plan.predicted_ram_freed_bytes, plan.note)
     # ── EXECUTE (the only impure part) ──────────────────────────────────────
     verdict = _execute_fit_plan(state, model_key, plan, request, snap, policy,
                                 cand_rows, prot_rows)
@@ -13347,9 +13388,25 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
     snap_free = None if snap.free_bytes is None else int(snap.free_bytes)
 
     def _fits_after(freed_bytes: int) -> "bool | None":
+        if need is not None and int(need) <= 0:
+            return True                      # a RAM-only plan puts 0 B on the card
         if snap_free is None or need is None:
             return None
         return (snap_free + int(freed_bytes) + subject_held - int(need)) >= reserve
+
+    # The RAM side of the same static test (2026-10-02 RAM-deficit stage): the
+    # snapshot's free host RAM plus the RAM the executed evictions pinned (the
+    # plan's measured Resident.ram_bytes) against the plan's host-RAM need.
+    # Unmeasurable either side -> True (the plan did not gate on RAM either).
+    ram_need = plan.ram_need_bytes
+    # the capacity the PLAN judged by (file-backed experts count the box, not
+    # momentary free RAM) — never a second, stricter basis
+    ram_free0 = plan.ram_free_bytes if plan.ram_free_bytes is not None else snap.ram_free_bytes
+
+    def _ram_ok(ram_freed_bytes: int) -> bool:
+        if ram_need is None or ram_free0 is None:
+            return True
+        return int(ram_free0) + int(ram_freed_bytes) >= int(ram_need)
 
     def _moe_admit_verdict(evicted_list, freed_bytes) -> dict:
         """Commit + emit the MoE-split admit: n_gpu_layers=-1 + --n-cpu-moe
@@ -13452,9 +13509,30 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                       incoming_model=model_key,
                       reason="polite load (no_evict) — never evicts",
                       vram_bytes=_c.get("vram_bytes"))
+    # A RAM-ONLY refusal (the whole need lands in host RAM and free RAM + every
+    # evictable resident is short): nothing about the card is relevant, so the
+    # plan's own RAM sentence IS the refusal.
+    if (plan.action == "refuse" and plan.failure is not None
+            and plan.failure.kind == "ram_fit" and (need is None or int(need) <= 0)):
+        _record_calibration_refuse(model_key, _det)
+        _FLEX_CTX_FLOOR.pop(model_key, None)
+        _clear_partial_ngl(model_key)
+        return {"action": "refuse", "evicted": [], "freed_bytes": 0,
+                "reason": {"state": "refused", "model_key": model_key,
+                           "reason": plan.failure.reason,
+                           "fit_failure": plan.failure.as_dict(),
+                           "ram_need_bytes": plan.ram_need_bytes,
+                           "ram_free_bytes": plan.ram_free_bytes,
+                           "evictions_considered": [e.model_key for e in plan.evictions],
+                           "evictions_would_free_ram_bytes": int(plan.predicted_ram_freed_bytes or 0),
+                           "protected": [{"model_key": p["model_key"],
+                                          "ram_bytes": p.get("ram_bytes"),
+                                          "host_mode": p.get("host_mode"),
+                                          "why": p.get("why")} for p in prot_rows]}}
     evicted: list[str] = []
     evict_failed: list[dict] = []            # attempted but not freed — carried
     freed = 0                                # in the refusal so counts are TRUE
+    ram_freed = 0                            # host RAM the executed evictions pinned
     # Which plans EXECUTE their evictions: an `evict` / `partial` plan was
     # priced on the room they free. A `refuse` plan evicts NOTHING — nothing
     # would fit afterwards, so emptying the card is a wasted eviction (the
@@ -13465,8 +13543,8 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
     _unmeasured = any(e.vram_bytes is None for e in plan.evictions)
     _walk = plan.action in ("evict", "partial") or (plan.action == "refuse" and _unmeasured)
     for e in (plan.evictions if _walk else ()):
-        if _fits_after(freed):
-            break                            # the freed room already covers the deficit
+        if _fits_after(freed) and _ram_ok(ram_freed):
+            break                            # the freed room already covers the deficit(s)
         mk = e.model_key
         _ev_tier = _telemetry_tier(e.host_mode)
         _evt_emit("evict.start", model_key=mk, tier=_ev_tier,
@@ -13478,6 +13556,7 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
             # The eviction's OWN measurement; the plan's figure is the fallback
             # when the verb could not attribute the freed bytes.
             freed += int(fb) if fb else int(e.vram_bytes or 0)
+            ram_freed += int(e.ram_bytes or 0)
             evicted.append(mk)
             _note_vram_eviction(mk, model_key, fb, res.get("host_mode") or "")
             _evt_emit("evict.done", model_key=mk, tier=_ev_tier,
@@ -13517,6 +13596,11 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
                 _comfy_freed += _stopped
                 freed += _stopped
                 final = _fits_after(freed)
+    # The RAM side must hold too: a planned RAM victim that did not go leaves
+    # the host short, and that load is refused, never admitted-then-OOM.
+    _ram_short = not _ram_ok(ram_freed)
+    if final and _ram_short:
+        final = False
     # ── POST-EXECUTION VERIFY (F1b): ONE live read, for the journal only ────
     # predicted = the plan's post-eviction free figure; measured = the card
     # now. A mismatch is logged (WARNING) and never re-planned: the second
@@ -13569,7 +13653,7 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
     # the honest refusal below with the failed evictions named.
     partial = plan.partial
     _pd = dict(partial or {})
-    if plan.action == "partial" and not evict_failed:
+    if plan.action == "partial" and not evict_failed and not _ram_short:
         ppath = request.gguf_path
         if plan.partial_kind == "moe-first":
             _mplan = dict(plan.moe_plan or {})
@@ -13846,6 +13930,19 @@ def _execute_fit_plan(state: "WorkerState", model_key: str, plan, request, snap,
         reason["fit_failure"] = _failure.as_dict()
         if _failure.kind != "vram_fit":
             reason["reason"] = _failure.reason + "; " + reason["reason"]
+    if _ram_short:
+        # The plan admitted on RAM its evictions would free, and they did not
+        # all free it: say the RAM numbers first (a RAM-only plan has no card
+        # side at all — its GPU need is 0 B).
+        _rs = (f"host RAM still short after evictions: needs {int(ram_need)} B "
+               f"({int(ram_need) / 2 ** 30:.1f} GiB), {int(ram_free0)} B free + "
+               f"{ram_freed} B pinned by the {len(evicted)} resident(s) evicted")
+        reason["ram_need_bytes"] = int(ram_need)
+        reason["ram_free_bytes"] = int(ram_free0)
+        reason["ram_freed_bytes"] = int(ram_freed)
+        reason["reason"] = (_rs + ("; " + "; ".join(holders) if holders else "")
+                            if need is not None and int(need) <= 0
+                            else _rs + "; " + reason["reason"])
     # The load is refused — void any ctx compression / partial-offload commitment
     # we made for it so a future admission of this model re-decides from target.
     _FLEX_CTX_FLOOR.pop(model_key, None)

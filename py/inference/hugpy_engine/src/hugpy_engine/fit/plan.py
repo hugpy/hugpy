@@ -34,10 +34,12 @@ from hugpy_engine.spill import moe_dense_first_plan as _moe_dense_first_plan
 def evict_order(rows: Iterable[_ev.EvictUnit], need: Optional[int],
                 priority: Optional[Mapping[str, int]] = None, *,
                 now: float, least_reaping: bool = _ev.DEFAULT_LEAST_REAPING,
-                ) -> "list[str]":
+                device: str = _ev.VRAM) -> "list[str]":
     """Model keys to evict, in order — via THE shared function
     (``eviction.evict_plan``), with the operator's flex priority as the OUTER
-    key. PURE: ``now`` and ``least_reaping`` are passed in.
+    key. PURE: ``now`` and ``least_reaping`` are passed in. ``device`` is the
+    pool the need is on (``eviction.VRAM`` | ``eviction.RAM``); the rows'
+    ``bytes`` must be that pool's footprint (see ``_unit``).
 
     ``need`` None (unmeasurable free VRAM) -> DEGRADE-NOT-GUESS: the full pool
     in shared-key order; the caller's incremental fit loop stops it.
@@ -50,7 +52,7 @@ def evict_order(rows: Iterable[_ev.EvictUnit], need: Optional[int],
     pri = dict(priority or {})
     if need is None:
         ordered = sorted(rows, key=lambda r: (pri.get(r.model_key, 0),
-                                              _ev.sort_key(r, _ev.VRAM, now)))
+                                              _ev.sort_key(r, device, now)))
         return [r.model_key for r in ordered]
     out: list[str] = []
     remaining = int(need)
@@ -58,18 +60,20 @@ def evict_order(rows: Iterable[_ev.EvictUnit], need: Optional[int],
         if remaining <= 0:
             break
         members = [r for r in rows if pri.get(r.model_key, 0) == band]
-        plan = _ev.evict_plan(_ev.VRAM, remaining, members, now=now,
+        plan = _ev.evict_plan(device, remaining, members, now=now,
                               least_reaping=least_reaping)
         out.extend(plan.victims)
         remaining -= plan.freed
     return out
 
 
-def _unit(r: Resident) -> _ev.EvictUnit:
-    """A Resident as the shared eviction function describes it."""
+def _unit(r: Resident, device: str = _ev.VRAM) -> _ev.EvictUnit:
+    """A Resident as the shared eviction function describes it, on ``device``'s
+    pool: its measured VRAM, or (``eviction.RAM``) its measured host RAM."""
+    b = r.ram_bytes if device == _ev.RAM else r.vram_bytes
     return _ev.EvictUnit(
         model_key=r.model_key,
-        bytes=(int(r.vram_bytes or 0) or None),
+        bytes=(int(b or 0) or None),
         pref=r.pref or _ev.VRAM,
         last_call=r.last_call, calls=int(r.calls or 0),
         mid_generation=bool(r.mid_generation),
@@ -78,7 +82,75 @@ def _unit(r: Resident) -> _ev.EvictUnit:
 
 def _eviction(r: Resident, rank: int) -> Eviction:
     return Eviction(model_key=r.model_key, vram_bytes=r.vram_bytes,
-                    host_mode=r.host_mode, rank=rank)
+                    host_mode=r.host_mode, rank=rank, ram_bytes=r.ram_bytes)
+
+
+def _ram_capacity(snapshot: ResourceSnapshot, residents, file_backed: bool) -> Optional[int]:
+    """Host RAM a load can count on. Anonymous need (a RAM-only transformers
+    load): the snapshot's free RAM. File-backed need (a MoE split's mmap'd
+    experts — page cache the kernel reclaims on demand, the 2026-08-28
+    doctrine): max(free, total - reserve - the anon RAM residents pin)."""
+    free = _int_or_none(snapshot.ram_free_bytes)
+    if free is None or not file_backed or not snapshot.ram_total_bytes:
+        return free
+    pinned = sum(int(r.ram_bytes or 0) for r in residents)
+    return max(free, int(snapshot.ram_total_bytes) - int(snapshot.ram_reserve_bytes or 0) - pinned)
+
+
+def _ram_deficit_evictions(ram_need: Any, planned: tuple, candidates: list,
+                           protected: list, snapshot: ResourceSnapshot,
+                           policy: FitPolicy, file_backed: bool = False
+                           ) -> "tuple[tuple, int, Optional[FitFailure]]":
+    """The RAM-DEFICIT stage (2026-10-02): host RAM is a pool like the card.
+    When the load's host-RAM need (a MoE split's CPU share, or the whole need
+    of a RAM-only placement) exceeds the snapshot's free RAM, the idle
+    UNPROTECTED residents that pin host RAM are evicted through THE shared
+    function on the RAM pool, after crediting what the already-planned
+    (VRAM) evictions free. Returns ``(extra_evictions, ram_freed, failure)``:
+    ``failure`` (kind ``ram_fit``) only when free RAM + every eviction is
+    still short. Unmeasurable RAM (need or free None) -> no gate.
+
+    ``file_backed`` (a MoE split's experts): they are mmap'd page cache the
+    kernel reclaims on demand, so momentary free RAM understates the room —
+    the 2026-08-28 doctrine sizes them against the BOX: capacity = max(free,
+    total - reserve - the anon RAM residents pin). Evicting a resident still
+    adds its RAM either way."""
+    need = _int_or_none(ram_need)
+    free = _ram_capacity(snapshot, list(candidates) + list(protected), file_backed)
+    if not need or free is None:
+        return (), 0, None
+    planned_keys = {e.model_key for e in planned}
+    freed = sum(int(e.ram_bytes or 0) for e in planned)
+    extra: tuple = ()
+    deficit = need - free - freed
+    if deficit > 0:
+        pool = [r for r in candidates if r.model_key not in planned_keys]
+        order = evict_order([_unit(r, _ev.RAM) for r in pool], deficit,
+                            {r.model_key: int(r.priority or 0) for r in pool},
+                            now=snapshot.now, least_reaping=policy.least_reaping,
+                            device=_ev.RAM)
+        by_mk = {r.model_key: r for r in pool}
+        extra = tuple(_eviction(by_mk[k], len(planned) + i)
+                      for i, k in enumerate(order) if k in by_mk)
+        freed += sum(int(e.ram_bytes or 0) for e in extra)
+    if free + freed >= need:
+        return extra, freed, None
+    short = need - free - freed
+    held = sum(int(r.ram_bytes or 0) for r in protected)
+    unmeasured = sum(1 for r in candidates if r.model_key not in planned_keys
+                     and not r.ram_bytes)
+    reason = (f"host RAM: needs {need} B ({need / 2 ** 30:.1f} GiB), "
+              f"{free} B ({free / 2 ** 30:.1f} GiB) free; evicting "
+              f"{len(planned) + len(extra)} resident(s) frees ~{freed} B of RAM; "
+              f"still {short} B ({short / 2 ** 30:.1f} GiB) short"
+              + (f"; {len(protected)} protected resident(s) pin {held} B of RAM"
+                 if protected else "")
+              + (f"; {unmeasured} resident(s) with unmeasured RAM not planned"
+                 if unmeasured else ""))
+    return extra, freed, FitFailure(
+        kind="ram_fit", code="wont_fit_ram", reason=reason,
+        need_bytes=need, budget_bytes=free + freed,
+        permanent=False, state_dependent=True)
 
 
 def _int_or_none(v: Any) -> Optional[int]:
@@ -125,7 +197,13 @@ def _split_failure(split: MoeSplit, request: FitRequest,
     checked against the contract's RAM budget (the slot preflight's
     ``cpu_mem_gib`` check, moved to plan time so need and budget are never
     priced at different N), and a split that no available engine can express
-    is refused here rather than falling through to an in-process runner."""
+    is refused here rather than falling through to an in-process runner.
+
+    The budget is HARD only when the DB pair row states it
+    (``policy.ram_target_source == "pair"``, 2026-10-02). A derived budget —
+    central's own contract, or a value left on the process env by an earlier
+    request — never refuses on its own: the split's RAM need is gated on free
+    host RAM after the RAM-deficit evictions (``_ram_deficit_evictions``)."""
     if request.split_expressible is False:
         return FitFailure(
             kind="split_not_expressible", code="no_native_engine",
@@ -135,7 +213,7 @@ def _split_failure(split: MoeSplit, request: FitRequest,
             plan_n_cpu_moe=split.n_cpu_moe,
             contract_n_cpu_moe=split.contract_n_cpu_moe,
             permanent=False, state_dependent=True)
-    budget = policy.ram_target_bytes
+    budget = policy.ram_target_bytes if policy.ram_target_source == "pair" else None
     cpu = split.cpu_bytes
     if budget is not None and cpu is not None and split.n_cpu_moe and int(cpu) > int(budget):
         return FitFailure(
@@ -143,7 +221,7 @@ def _split_failure(split: MoeSplit, request: FitRequest,
             reason=(f"MoE split --n-cpu-moe {split.n_cpu_moe} puts {int(cpu)} B "
                     f"({int(cpu) / 2 ** 30:.1f} GiB) of expert tensors in host RAM, "
                     f"over this model's RAM budget of {int(budget)} B "
-                    f"({int(budget) / 2 ** 30:.1f} GiB)"
+                    f"({int(budget) / 2 ** 30:.1f} GiB, the pair's cpu_mem_gib)"
                     + (f" (budget derived at --n-cpu-moe {split.contract_n_cpu_moe})"
                        if split.contract_n_cpu_moe is not None
                        and split.contract_n_cpu_moe != split.n_cpu_moe else "")),
@@ -187,9 +265,34 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
     planned = _int_or_none(request.planned_gpu_bytes)
     if planned is not None and planned < need:
         if planned <= 0:
+            # RAM-ONLY (2026-10-02): nothing lands on the card, but the WHOLE
+            # need lands in host RAM — gate it there (the subject and the
+            # protected rows are never victims; a polite load spends none).
+            ro_pool = [r for r in residents if not key_equivalent(r.model_key, mk)]
+            ro_cand = [] if request.polite else [r for r in ro_pool if not r.protected]
+            ro_prot = [r for r in ro_pool if r.protected]
+            ro_ev, ro_freed, ro_bad = _ram_deficit_evictions(
+                need, (), ro_cand, ro_prot, snapshot, policy)
+            ro_kw = dict(total_bytes=total, need_detail=det, ram_need_bytes=int(need),
+                         ram_free_bytes=snapshot.ram_free_bytes,
+                         predicted_ram_freed_bytes=ro_freed)
+            if ro_bad is not None:
+                reasons.append(ro_bad.reason)
+                return FitPlan(action="refuse", model_key=mk, failure=ro_bad,
+                               refuse_reason=ro_bad.reason, fits_now=False,
+                               evictions=ro_ev, reasons=tuple(reasons),
+                               note="refuse", **ro_kw)
+            if ro_ev:
+                reasons.append(f"RAM-only placement: evicting {len(ro_ev)} resident(s) "
+                               f"frees ~{ro_freed} B of host RAM for a {need} B need")
+                return FitPlan(action="evict", model_key=mk, need_bytes=0,
+                               evictions=ro_ev, predicted_fits=True,
+                               comfy_reclaim_eligible=False, reasons=tuple(reasons),
+                               note=f"evict {len(ro_ev)} resident(s) for host RAM",
+                               **ro_kw)
             return _proceed("placement intent puts 0 B on the GPU "
                             "(CPU/RAM-only) — VRAM admission is a no-op",
-                            total_bytes=total, need_detail=det)
+                            **ro_kw)
         need = int(planned)
         det["intent_gpu_remainder"] = need
         reasons.append(f"placement intent re-priced the GPU need to {need} B")
@@ -259,7 +362,48 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                   free_bytes=free, free_effective_bytes=free_eff,
                   subject_held_bytes=subject_held, ceiling_reserve_bytes=reserve,
                   weights_bytes=_int_or_none(det.get("weights")),
-                  kv_bytes=_int_or_none(det.get("kv")), ram_budget_bytes=ram_budget)
+                  kv_bytes=_int_or_none(det.get("kv")), ram_budget_bytes=ram_budget,
+                  # the capacity a split's file-backed experts are judged by —
+                  # the executor's RAM check reads THIS, so the two agree
+                  ram_free_bytes=_ram_capacity(
+                      snapshot, [r for r in residents if not key_equivalent(r.model_key, mk)], True))
+
+    def _ram_gate(split: Optional[MoeSplit], planned: tuple = ()
+                  ) -> "tuple[tuple, int, Optional[FitFailure]]":
+        """The RAM-deficit stage for a committed split: its CPU share at the
+        plan's N against free host RAM, after ``planned`` (the stage's VRAM
+        victims). The subject and protected rows are never victims; a polite
+        load spends none."""
+        if split is None or not split.n_cpu_moe:
+            return (), 0, None
+        pool = [r for r in residents if not key_equivalent(r.model_key, mk)]
+        cand = [] if request.polite else [r for r in pool if not r.protected]
+        return _ram_deficit_evictions(split.cpu_bytes, tuple(planned), cand,
+                                      [r for r in pool if r.protected], snapshot, policy,
+                                      file_backed=True)
+
+    def _with_ram(kw: dict, extra: tuple, ram_freed: int) -> dict:
+        """``kw`` (an eviction stage's FitPlan fields) with the RAM-deficit
+        victims appended after the VRAM ones, in plan order."""
+        out = dict(kw, predicted_ram_freed_bytes=ram_freed)
+        if extra:
+            out["evictions"] = tuple(kw.get("evictions") or ()) + tuple(extra)
+            out["predicted_freed_bytes"] = (int(kw.get("predicted_freed_bytes") or 0)
+                                            + sum(int(e.vram_bytes or 0) for e in extra))
+        return out
+
+    def _ram_evict_plan(split: MoeSplit, extra: tuple, ram_freed: int, **kw) -> FitPlan:
+        """A plan whose VRAM side already fits (now / after flex) but whose
+        split's CPU share needs RAM victims: an ``evict`` of those alone."""
+        reasons.append(f"RAM deficit: evicting {len(extra)} resident(s) frees ~"
+                       f"{ram_freed} B of host RAM for the split's {split.cpu_bytes} B")
+        return FitPlan(action="evict", moe_commit=moe_commit, split=split,
+                       n_cpu_moe=split.n_cpu_moe, ram_need_bytes=split.cpu_bytes,
+                       evictions=tuple(extra), eviction_need_bytes=0,
+                       predicted_freed_bytes=sum(int(e.vram_bytes or 0) for e in extra),
+                       predicted_ram_freed_bytes=ram_freed, predicted_fits=True,
+                       reasons=tuple(reasons),
+                       note=f"evict {len(extra)} resident(s) for host RAM", **kw)
 
     if _fits(need):
         split = _commit_split()
@@ -268,6 +412,14 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
             if bad is not None:
                 return _refuse_split(split, bad, need_bytes=need, fits_now=True,
                                      moe_commit=moe_commit, **common)
+            ram_ev, ram_freed, bad = _ram_gate(split)
+            if bad is not None:
+                return _refuse_split(split, bad, need_bytes=need, fits_now=True,
+                                     moe_commit=moe_commit, evictions=ram_ev,
+                                     predicted_ram_freed_bytes=ram_freed, **common)
+            if ram_ev:
+                return _ram_evict_plan(split, ram_ev, ram_freed, need_bytes=need,
+                                       fits_now=True, **common)
         # Fits under the ceiling: nothing MUST be evicted. The eviction-aware
         # autofit size-up (a bonus that buys a better layer count BY evicting)
         # stays the executor's — it is skipped for a MoE commit and for a
@@ -344,6 +496,16 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
             return _refuse_split(split, bad, need_bytes=need, self_ctx_pct=self_ctx_pct,
                                  flex=fplan.as_dict(), flex_note=fplan.note,
                                  moe_commit=moe_commit, **common)
+        ram_ev, ram_freed, bad = _ram_gate(split)
+        if bad is not None:
+            return _refuse_split(split, bad, need_bytes=need, self_ctx_pct=self_ctx_pct,
+                                 flex=fplan.as_dict(), flex_note=fplan.note,
+                                 moe_commit=moe_commit, evictions=ram_ev,
+                                 predicted_ram_freed_bytes=ram_freed, **common)
+        if ram_ev:
+            return _ram_evict_plan(split, ram_ev, ram_freed, need_bytes=need,
+                                   self_ctx_pct=self_ctx_pct, flex=fplan.as_dict(),
+                                   flex_note=fplan.note, **common)
         return FitPlan(action="flex", need_bytes=need, self_ctx_pct=self_ctx_pct,
                        flex=fplan.as_dict(), flex_note=fplan.note,
                        moe_commit=moe_commit, split=split,
@@ -420,11 +582,18 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
         bad = _split_failure(split, request, policy) if split is not None else None
         if bad is not None:
             return _refuse_split(split, bad, **evict_common, **common)
-        reasons.append(f"eviction of {len(evictions)} resident(s) frees ~{predicted_freed} B")
+        ram_ev, ram_freed, bad = _ram_gate(split, evictions)
+        ram_common = _with_ram(evict_common, ram_ev, ram_freed)
+        if bad is not None:
+            return _refuse_split(split, bad, **ram_common, **common)
+        reasons.append(f"eviction of {len(evictions)} resident(s) frees ~{predicted_freed} B"
+                       + (f"; {len(ram_ev)} more for host RAM (~{ram_freed} B of RAM freed)"
+                          if ram_ev else ""))
         return FitPlan(action="evict", reasons=tuple(reasons), split=split,
                        n_cpu_moe=(split.n_cpu_moe if split else None),
                        ram_need_bytes=(split.cpu_bytes if split else None),
-                       note=f"evict {len(evictions)} resident(s)", **evict_common, **common)
+                       note=f"evict {len(ram_common['evictions'])} resident(s)",
+                       **ram_common, **common)
 
     # ── stage 2.5: honest GGUF PARTIAL offload — autofit's hybrid contract ──
     # Full offload still short after flex + (all) evictions. Priced from the
@@ -468,6 +637,11 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                     msplit = _split_of(mplan["n_cpu_moe"], mplan.get("gpu_bytes"),
                                        mplan.get("cpu_bytes"), "moe-first", contract_n)
                     bad = _split_failure(msplit, request, policy)
+                    if bad is not None:
+                        return _refuse_split(msplit, bad, moe_plan=dict(mplan),
+                                             budget_bytes=mbudget, **evict_common, **common)
+                    ram_ev, ram_freed, bad = _ram_gate(msplit, evictions)
+                    evict_common = _with_ram(evict_common, ram_ev, ram_freed)
                     if bad is not None:
                         return _refuse_split(msplit, bad, moe_plan=dict(mplan),
                                              budget_bytes=mbudget, **evict_common, **common)
@@ -519,6 +693,12 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
                 msplit = _split_of(mplan["n_cpu_moe"], mplan.get("gpu_bytes"),
                                    mplan.get("cpu_bytes"), "mode-moe", contract_n)
                 bad = _split_failure(msplit, request, policy)
+                if bad is not None:
+                    return _refuse_split(msplit, bad, moe_plan=dict(mplan),
+                                         partial=partial.as_dict(), budget_bytes=mbudget,
+                                         **evict_common, **common)
+                ram_ev, ram_freed, bad = _ram_gate(msplit, evictions)
+                evict_common = _with_ram(evict_common, ram_ev, ram_freed)
                 if bad is not None:
                     return _refuse_split(msplit, bad, moe_plan=dict(mplan),
                                          partial=partial.as_dict(), budget_bytes=mbudget,

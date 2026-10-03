@@ -1623,18 +1623,24 @@ def _db_spill_overlay(worker: Dict[str, Any], model_key: str, spill: Dict[str, A
     it. Reads go through _model_worker_settings (2 s cache per worker). Never
     raises — the DB is an optional read source."""
     out = dict(spill or {})
+    _vals = _db_pair_vals(worker, model_key)
+    for _k in _DB_SPILL_OVERLAY_KEYS:
+        if _vals.get(_k) is not None:
+            out[_k] = _vals[_k]
+    return out
+
+
+def _db_pair_vals(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
+    """The DB pair row's user_settings for (worker, model) — exact key, else
+    the canonical one. {} when the DB holds none (or is unreadable)."""
     try:
         _db = _model_worker_settings(worker) or {}
         _canon = _canonical_registry_key(str(model_key))
         _vals = _db.get(str(model_key)) or _db.get(_canon) or next(
             (v for n, v in _db.items() if _canonical_registry_key(str(n)) == _canon), None)
-        if isinstance(_vals, dict):
-            for _k in _DB_SPILL_OVERLAY_KEYS:
-                if _vals.get(_k) is not None:
-                    out[_k] = _vals[_k]
+        return dict(_vals) if isinstance(_vals, dict) else {}
     except Exception:  # noqa: BLE001
-        pass
-    return out
+        return {}
 
 
 def _spill_for_model(worker: Dict[str, Any], model_key: str) -> Dict[str, Any]:
@@ -2277,6 +2283,52 @@ def _resident_row(worker: Dict[str, Any], model_key: str) -> Optional[Dict[str, 
     return None
 
 
+def _need_margins(worker: Dict[str, Any], model_key: str,
+                  is_moe: bool) -> "tuple[float, float, Optional[Dict[str, Any]]]":
+    """``(gpu_margin, ram_margin, record)`` the need function prices with — a
+    measured record for this model on this worker's card class (per side for
+    a MoE), else the x1.15 prior. The ONE choice ``planned_need`` and the
+    derived MoE RAM budget share, mirroring the worker's ``_moe_margins``."""
+    rec = None
+    try:
+        dc = next((g.get("name") for g in (worker.get("gpus") or [])
+                   if isinstance(g, dict) and g.get("name")), None)
+        rec = weights_margin_for(model_key, device_class=dc)
+    except Exception:  # noqa: BLE001
+        rec = None
+    prior = float(os.environ.get("HUGPY_VRAM_HEADROOM", "1.15"))
+    if is_moe:
+        gm = float(rec["gpu_margin"]) if (rec and rec.get("moe") and rec.get("gpu_margin")) else prior
+        rm = float(rec["ram_margin"]) if (rec and rec.get("moe") and rec.get("ram_margin")) else prior
+    else:
+        gm = rm = float(rec["margin"]) if (rec and rec.get("margin") and not rec.get("moe")) else prior
+    return gm, rm, rec
+
+
+def _moe_ram_need_bytes(worker: Dict[str, Any], model_key: str,
+                        n_cpu_moe: int) -> Optional[int]:
+    """Host RAM a MoE GGUF's split puts in RAM at ``--n-cpu-moe n_cpu_moe``,
+    priced by THE need function the worker's admission uses
+    (``gguf_need(...)["ram_bytes"]``: the experts moved to CPU + token_embd,
+    x the RAM margin) — so a derived ``cpu_mem_gib`` and the worker's split
+    need are one figure. None for a dense / unreadable file."""
+    try:
+        from hugpy_engine.fit.gguf_need import gguf_need, structure_for
+        from hugpy_engine.serve.serve import _model_file_for
+        from hugpy_engine.config.main import get_model_config
+        path = _model_file_for(model_key, get_model_config(model_key))
+        st = structure_for(path) if path else None
+        if not st or not st.get("is_moe") or not st.get("layers"):
+            return None
+        gm, rm, _rec = _need_margins(worker, model_key, True)
+        need = gguf_need(st, ctx=None, n_cpu_moe=int(n_cpu_moe), n_gpu_layers=-1,
+                         gpu_margin=gm, ram_margin=rm)
+        return int(need["ram_bytes"])
+    except Exception:  # noqa: BLE001 — unpriceable -> the contract's own figure stands
+        logger.debug("MoE RAM need for %s failed", model_key, exc_info=True)
+        return None
+
+
 def planned_need(worker: Dict[str, Any], model_key: str, *,
                  ctx: Optional[int] = None, pct: Optional[int] = None,
                  n_gpu_layers: int = -1,
@@ -2309,19 +2361,7 @@ def planned_need(worker: Dict[str, Any], model_key: str, *,
         if not st or not st.get("layers"):
             return None
         is_moe = bool(st.get("is_moe"))
-        rec = None
-        try:
-            dc = next((g.get("name") for g in (worker.get("gpus") or [])
-                       if isinstance(g, dict) and g.get("name")), None)
-            rec = weights_margin_for(model_key, device_class=dc)
-        except Exception:  # noqa: BLE001
-            rec = None
-        prior = float(os.environ.get("HUGPY_VRAM_HEADROOM", "1.15"))
-        if is_moe:
-            gm = float(rec["gpu_margin"]) if (rec and rec.get("moe") and rec.get("gpu_margin")) else prior
-            rm = float(rec["ram_margin"]) if (rec and rec.get("moe") and rec.get("ram_margin")) else prior
-        else:
-            gm = rm = float(rec["margin"]) if (rec and rec.get("margin") and not rec.get("moe")) else prior
+        gm, rm, rec = _need_margins(worker, model_key, is_moe)
         try:
             mmproj = int(_spill.vision_projector_bytes(path) or 0)
         except Exception:  # noqa: BLE001
@@ -2928,8 +2968,8 @@ def derived_default_allocation(worker: Dict[str, Any],
     central's authoritative sources and asks the shared math. ANY lookup miss
     degrades to max-gpu / {} — never a 500, never a guess."""
     try:
-        from hugpy_engine.alloc_modes import default_allocation
-        return default_allocation(
+        from hugpy_engine.alloc_modes import default_allocation, _gib_ceil
+        out = default_allocation(
             _model_engine(model_key),
             _model_size_bytes(model_key),
             _worker_gpu_total_bytes(worker),
@@ -2938,6 +2978,20 @@ def derived_default_allocation(worker: Dict[str, Any],
             bnb=bnb_enabled(worker, model_key),
             moe_force=moe_override(worker, model_key),
             gpu_reserve_bytes=_model_moe_gpu_reserve(model_key))
+        # ONE NEED FUNCTION for the split's RAM (2026-10-02): the contract
+        # priced cpu_mem_gib as the raw expert bytes, while the worker prices
+        # the same --n-cpu-moe as experts + token_embd x the RAM margin — the
+        # 35.1 GiB budget vs 45.6 GiB need that refused Qwen3-Coder-Next on ae.
+        # Re-price the derived budget with gguf_need at the contract's N.
+        sp = out.get("spill") or {}
+        if sp.get("n_cpu_moe") and sp.get("cpu_mem_gib") is not None:
+            rb = _moe_ram_need_bytes(worker, model_key, int(sp["n_cpu_moe"]))
+            if rb:
+                out = dict(out, spill=dict(sp, cpu_mem_gib=_gib_ceil(rb)))
+                out["why"] = (str(out.get("why") or "")
+                              + f"; RAM priced by the need function at --n-cpu-moe "
+                              f"{sp['n_cpu_moe']}: {rb / (1 << 30):.2f} GiB")
+        return out
     except Exception:  # noqa: BLE001 — a derivation must never break a read/relay
         return {"mode": "max-gpu", "spill": {},
                 "why": "derivation unavailable — kept the max-gpu default"}
@@ -6343,6 +6397,13 @@ class WorkerStore:
         # AFTER apply_moe_override_to_spill so the explicit toggle wins and this
         # only fills the AUTO gap (see the helper's docstring for the composition).
         suppress_moe_split_for_gpu_only(worker, model_key, spill)
+        # WHO stated the RAM budget (2026-10-02): only a cpu_mem_gib the DB pair
+        # row itself carries is the operator's HARD budget; one supplied by the
+        # MoE overlay / the in-store cache is derived, and the worker gates it on
+        # free host RAM instead of refusing over it.
+        if spill.get("cpu_mem_gib") is not None \
+                and _db_pair_vals(worker, model_key).get("cpu_mem_gib") is not None:
+            spill["cpu_mem_gib_source"] = "pair"
         try:
             from hugpy_engine.alloc_modes import gate_spill_for_worker
             gated, note = gate_spill_for_worker(

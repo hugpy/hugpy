@@ -26,3 +26,14 @@ def test_vram_residents_skips_inprocess_rows_not_held(monkeypatch):
     monkeypatch.setattr(A, "_slot_statuses", lambda: [])
     keys = [r["model_key"] for r in A._vram_residents(A.WorkerState(name="t", url=None, worker_id="w"))]
     assert "held" in keys and "gone" not in keys
+
+
+def test_vram_residents_carry_measured_ram(monkeypatch):
+    G = 1 << 30
+    monkeypatch.setattr(A, "_inprocess_gpu_bytes",
+                        lambda: {"cpu-model": {"vram_bytes": 0, "cpu_bytes": 60 * G, "device": "cpu", "gpu_index": None}})
+    monkeypatch.setattr(P, "snapshot_for_heartbeat", lambda: {"models": [
+        {"model_key": "cpu-model", "vram_bytes": 0, "host_mode": "in_process"}]})
+    monkeypatch.setattr(A, "_slot_statuses", lambda: [])
+    rows = {r["model_key"]: r for r in A._vram_residents(A.WorkerState(name="t", url=None, worker_id="w"))}
+    assert rows["cpu-model"].get("ram_bytes") == 60 * G

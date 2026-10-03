@@ -135,6 +135,14 @@ class FitPolicy:
                                 share is checked against (the slot preflight's
                                 ``cpu_mem_gib``), now at PLAN time and at the
                                 plan's own N.
+    ``ram_target_source``       WHO stated ``ram_target_bytes`` (2026-10-02):
+                                ``"pair"`` — the DB pair row carries an
+                                explicit ``cpu_mem_gib`` (a HARD budget the
+                                split is refused over); ``"derived"`` — central
+                                derived it (or it is a leftover of an earlier
+                                request): never a refusal on its own, the split
+                                is checked against free host RAM after the
+                                RAM-deficit evictions instead.
     ``ctx_cap_on_evict_pct``    step 2 (F7), DEFAULT OFF (None). When set
                                 (1..100), a subject that would otherwise
                                 EVICT is first offered a reduced-ctx seat: if
@@ -154,6 +162,7 @@ class FitPolicy:
     priority_device: str = "gpu"
     gpu_target_bytes: Optional[int] = None
     ram_target_bytes: Optional[int] = None
+    ram_target_source: str = "derived"
     ram_safety_frac: float = 0.95
     min_offload_frac: float = 0.05
     ctx_cap_on_evict_pct: Optional[int] = None
@@ -174,12 +183,19 @@ class Resident:
     not a resident — the "loaded and idle" diagnosis). Carried for the step-2
     residency rule; step 1 does not decide on it.
 
+    ``ram_bytes`` (2026-10-02) is the MEASURED host RAM the resident pins —
+    an in-process torch model's parameter+buffer bytes on device 'cpu', a slot
+    child's anonymous RSS (file-backed mmap pages are already counted as
+    available by MemAvailable, so they are never "freed"). None = unmeasured:
+    the RAM-deficit stage never walks it (degrade-not-guess).
+
     The remaining fields are the flex inputs (``kv_bytes``, ``ctx_pct``,
     ``ctx_deviation_pct``, ``pinned``, ``priority``) and the shared-eviction
     ledger inputs (``pref``, ``last_call``, ``calls``, ``mid_generation``,
     ``resident_since`` — see ``eviction.EvictUnit``)."""
     model_key: str
     vram_bytes: Optional[int] = None
+    ram_bytes: Optional[int] = None
     host_mode: Optional[str] = None
     protected: bool = False
     why: Optional[str] = None
@@ -265,11 +281,14 @@ class FitRequest:
 
 @dataclass(frozen=True)
 class Eviction:
-    """One planned (or, under a polite load, SPARED) eviction, in plan order."""
+    """One planned (or, under a polite load, SPARED) eviction, in plan order.
+    ``ram_bytes`` is the victim's measured host RAM (``Resident.ram_bytes``):
+    what the eviction is credited with against a RAM deficit."""
     model_key: str
     vram_bytes: Optional[int] = None
     host_mode: Optional[str] = None
     rank: int = 0
+    ram_bytes: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -299,7 +318,7 @@ class MoeSplit:
 # FitFailure kinds (diagnosis (b).6): capacity failures a plan can name at
 # PLAN time. ``permanent`` = no state change would admit it; ``state_dependent``
 # = an eviction / a freed card / a changed contract could.
-FAILURE_KINDS = ("vram_fit", "ram_budget", "split_not_expressible",
+FAILURE_KINDS = ("vram_fit", "ram_budget", "ram_fit", "split_not_expressible",
                  "engine_unavailable", "hard_load")
 
 
@@ -313,8 +332,9 @@ class FitFailure:
     ``reason``        the deterministic sentence (bytes, with units).
     ``need_bytes`` / ``budget_bytes``  the two figures that disagreed, priced in
                       the same basis (VRAM need vs VRAM room for ``vram_fit``;
-                      RAM need at the plan's N vs the contract's RAM budget for
-                      ``ram_budget``).
+                      RAM need at the plan's N vs the pair's RAM budget for
+                      ``ram_budget``; host RAM need vs free host RAM + what
+                      the planned evictions free for ``ram_fit``).
     ``plan_n_cpu_moe`` / ``contract_n_cpu_moe``  the split N the plan derived
                       vs the contract's, so a basis mismatch is visible.
     ``ctx_effective`` / ``kv_bytes`` / ``ctx_pct``  (2026-09-29) the context
@@ -379,6 +399,10 @@ class FitPlan:
     ``split`` is the MoE split that governs the load when set, and
     ``ram_need_bytes`` the host RAM it implies AT THAT N; ``ram_budget_bytes``
     is the contract's RAM budget it was checked against (None = no contract).
+    ``ram_free_bytes`` is the snapshot's free host RAM the RAM need was gated
+    on and ``predicted_ram_freed_bytes`` the host RAM the planned evictions
+    free (2026-10-02 RAM-deficit stage) — the executor walks the evictions
+    until BOTH the VRAM fit and ``ram_free + freed >= ram_need`` hold.
     ``moe_commit`` keeps the need detail's governing split dict for the
     executor's commit. ``reasons`` is the attribution trail.
     """
@@ -408,6 +432,8 @@ class FitPlan:
     n_cpu_moe: Optional[int] = None
     ram_need_bytes: Optional[int] = None
     ram_budget_bytes: Optional[int] = None
+    ram_free_bytes: Optional[int] = None
+    predicted_ram_freed_bytes: int = 0
     moe_plan: Optional[Mapping[str, Any]] = None
     partial: Optional[Mapping[str, Any]] = None
     partial_kind: Optional[str] = None

@@ -357,8 +357,11 @@ def test_polite_moe_admission_over_the_ram_budget_fails_at_plan_time_without_evi
     snap = fit.ResourceSnapshot(total_bytes=25_769_803_776, free_bytes=6_023_413_760,
                                 ram_free_bytes=104_906_166_272,
                                 ram_total_bytes=134_112_841_728, now=NOW)
+    # A budget the PAIR row states is HARD (2026-10-02); a derived one is
+    # checked against host RAM instead (test below).
     policy = fit.FitPolicy(ceiling_reserve_bytes=0, alloc_mode="explicit",
-                           ram_target_bytes=37_686_190_538)            # 35.098 GiB
+                           ram_target_bytes=37_686_190_538,            # 35.098 GiB
+                           ram_target_source="pair")
     residents = [
         fit.Resident("Qwen3.5-9B-DeepSeek-V4-Flash-GGUF", vram_bytes=14_535_557_120,
                      host_mode="slot", pinned=True, materialized=True, last_call=NOW - 60),
