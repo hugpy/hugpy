@@ -1464,6 +1464,14 @@ def _adopt_storage_inputs(state: "WorkerState", worker: dict | None) -> None:
                 except (TypeError, ValueError):
                     pass
         _RUNTIME_SETTINGS["ctx_pct_db"] = cmap
+        mmap = {}
+        for k, v in sbm.items():
+            if isinstance(v, dict) and v.get("ctx_min_pct") is not None:
+                try:
+                    mmap[k] = max(0, min(100, int(v["ctx_min_pct"])))
+                except (TypeError, ValueError):
+                    pass
+        _RUNTIME_SETTINGS["ctx_min_pct_db"] = mmap
         # The whole per-model spill, for the fit preview (it must price what a
         # real load of the model would carry — n_cpu_moe, bnb_4bit, ...).
         _RUNTIME_SETTINGS["spill_by_model_db"] = {
@@ -8324,6 +8332,20 @@ def _ctx_deviation_pct(model_key: str) -> "float | None":
     return max(0.0, min(100.0, d))
 
 
+def _ctx_min_pct(model_key: str) -> "int | None":
+    """CONTEXT RANGE (operator 2026-10-02): the pair's minimum ctx% — the floor
+    of the polite [min, target] window the admission may shrink a load's own
+    context into before evicting anyone. From the DB pair knob ``ctx_min_pct``
+    via central's spill map; None = no range (0 means "down to the smallest")."""
+    val = (_RUNTIME_SETTINGS.get("ctx_min_pct_db") or {}).get(model_key)
+    if val is None:
+        return None
+    try:
+        return max(0, min(100, int(val)))
+    except (TypeError, ValueError):
+        return None
+
+
 def _flex_priority(model_key: str) -> int:
     """Per-model flex priority (0 == normal) from settings, via the ONE seam
     (flex.flex_priority_key). Higher compresses/evicts lower-priority neighbours
@@ -12570,6 +12592,7 @@ def _fit_request(state: "WorkerState", model_key: str, need: int, det: dict,
         planned_gpu_bytes=planned,
         subject_held_bytes=int(_subject_resident_vram_bytes(state, model_key) or 0),
         ctx_deviation_pct=_ctx_deviation_pct(model_key),
+        ctx_floor_pct=_ctx_min_pct(model_key),
         vram_deviation_pct=_vram_deviation_pct(model_key),
         priority=_flex_priority(model_key), polite=bool(polite),
         gguf_path=ppath, total_layers=total_layers,
@@ -12628,6 +12651,7 @@ def _fit_residents(state: "WorkerState", model_key: str):
             priority=_fpk(_flex_alloc(mk)), kv_bytes=int(rkv or 0),
             ctx_pct=(rdet or {}).get("ctx_pct"),
             ctx_deviation_pct=_ctx_deviation_pct(mk),
+            ctx_floor_pct=_ctx_min_pct(mk),
             pref=(u.pref if u is not None else _ev.VRAM),
             last_call=(u.last_call if u is not None else None),
             calls=(u.calls if u is not None else 0),

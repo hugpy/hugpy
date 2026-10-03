@@ -312,10 +312,12 @@ def plan_fit(request: FitRequest, snapshot: ResourceSnapshot,
     subject = {"weights_bytes": subj_weights, "kv_bytes": det.get("kv"),
                "ctx_pct": det.get("ctx_pct"),
                "ctx_deviation_pct": request.ctx_deviation_pct,
+               "ctx_floor_pct": request.ctx_floor_pct,
                "priority": request.priority}
     resident_rows = [{
         "model_key": r.model_key, "kv_bytes": int(r.kv_bytes or 0),
         "ctx_pct": r.ctx_pct, "ctx_deviation_pct": r.ctx_deviation_pct,
+        "ctx_floor_pct": r.ctx_floor_pct,
         "vram_bytes": int(r.vram_bytes or 0), "protected": False,
         "pinned": bool(r.pinned), "alloc": {"priority": r.priority}}
         for r in candidates]

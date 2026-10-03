@@ -189,6 +189,7 @@ class Resident:
     kv_bytes: int = 0
     ctx_pct: Optional[int] = None
     ctx_deviation_pct: Optional[float] = None
+    ctx_floor_pct: Optional[int] = None
     pref: str = "vram"
     last_call: Optional[float] = None
     calls: int = 0
@@ -246,6 +247,9 @@ class FitRequest:
     planned_gpu_bytes: Optional[int] = None
     subject_held_bytes: int = 0
     ctx_deviation_pct: Optional[float] = None
+    # CONTEXT RANGE (operator 2026-10-02): the pair's explicit minimum ctx% —
+    # the floor of a [min, target] polite window; None = no range.
+    ctx_floor_pct: Optional[int] = None
     vram_deviation_pct: Optional[float] = None
     priority: int = 0
     polite: bool = False

@@ -324,6 +324,16 @@ class ModelIndexService:
             if not 1 <= cp <= 100:
                 return "bad_knob", ["ctx_pct must be an integer 1..100"]
             to_set["ctx_pct"] = cp
+        if "ctx_min_pct" in to_set:
+            try:
+                mp = int(to_set["ctx_min_pct"])
+            except (TypeError, ValueError):
+                return "bad_knob", ["ctx_min_pct must be an integer 0..100"]
+            if not 0 <= mp <= 100:
+                return "bad_knob", ["ctx_min_pct must be an integer 0..100"]
+            if "ctx_pct" in to_set and mp > int(to_set["ctx_pct"]):
+                return "bad_knob", [f"ctx_min_pct {mp} is above the ctx_pct target {to_set['ctx_pct']}"]
+            to_set["ctx_min_pct"] = mp
         import json as _json
         import os as _os
         try:
@@ -334,6 +344,13 @@ class ModelIndexService:
                         pair = cur.fetchone()
                         if pair is None:
                             return "unassigned", None
+                        _rng = dict(pair[0] or {}); _rng.update(to_set)
+                        for k in to_unset:
+                            _rng.pop(k, None)
+                        if (_rng.get("ctx_min_pct") is not None and _rng.get("ctx_pct") is not None
+                                and int(_rng["ctx_min_pct"]) > int(_rng["ctx_pct"])):
+                            return "bad_knob", [f"context range minimum {_rng['ctx_min_pct']}% is above "
+                                                f"the target {_rng['ctx_pct']}% — lower the minimum first"]
                         if "quants" in to_set:
                             # QUANT LIST (operator 2026-10-02): every entry must be a known
                             # GGUF of this model; gguf_file is DERIVED = the first listed

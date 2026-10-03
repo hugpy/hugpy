@@ -829,6 +829,10 @@ class CallQueries:
 # in-memory WorkerStore). One truth: react/testshell/compute.py imports this.
 PAIR_KNOB_KEYS = ("alloc_mode", "n_gpu_layers", "n_cpu_moe", "gguf_file", "moe", "bnb_4bit",
                   "threads", "llama_ctx", "serve_mode", "gpu_mem_gib", "cpu_mem_gib", "ctx_pct",
+                  # CONTEXT RANGE (operator 2026-10-02): the minimum of a [min,
+                  # ctx_pct] polite window the admission may shrink into before
+                  # evicting; absent = no range.
+                  "ctx_min_pct",
                   # KV cache knobs (operator 2026-10-02: "the actual area of
                   # adjustment that truly can make a tight load work"). The cache
                   # type is a LAUNCH choice (llama-server --cache-type-k/-v), not a

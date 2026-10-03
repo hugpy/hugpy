@@ -127,7 +127,8 @@ def band_ceiling(target: float, deviation_pct: Optional[float],
 
 # ── band math (ctx%: the 1..100 point scale) ─────────────────────────────────
 def ctx_band_bounds(ctx_pct: Optional[int],
-                    deviation_pct: Optional[float]) -> "tuple[int, int] | None":
+                    deviation_pct: Optional[float],
+                    floor_pct: Optional[int] = None) -> "tuple[int, int] | None":
     """The hard ctx band ``(floor_pct, ceil_pct)`` in whole percent points, or
     None when there is no ctx target (ctx band is opt-in — no target == today's
     default ctx, byte-identical).
@@ -143,6 +144,15 @@ def ctx_band_bounds(ctx_pct: Optional[int],
     except (TypeError, ValueError):
         return None
     c = max(1, min(100, c))
+    # CONTEXT RANGE (operator 2026-10-02): an explicit minimum makes the band
+    # [min, target] — a polite window below the target, never above it.
+    if floor_pct is not None:
+        try:
+            f = int(floor_pct)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None:
+            return max(1, min(c, f)), c
     dev = float(deviation_pct or 0.0)
     if dev <= 0:
         return c, c
@@ -610,17 +620,27 @@ def plan_flex(subject: dict, residents: list, deficit_bytes: int) -> FlexPlan:
     subj_ctx = subject.get("ctx_pct")
     subj_dev = subject.get("ctx_deviation_pct")
     subj_kv = int(subject.get("kv_bytes") or 0)
-    band = ctx_band_bounds(subj_ctx, subj_dev)
+    band = ctx_band_bounds(subj_ctx, subj_dev, subject.get("ctx_floor_pct"))
     if band is not None and subj_kv > 0:
         floor_pct, _ceil = band
         if floor_pct < int(subj_ctx):
-            kv_floor = kv_at_ctx_pct(subj_kv, int(subj_ctx), floor_pct)
-            saved = max(0, subj_kv - kv_floor)
+            c = int(subj_ctx)
+            to_pct = floor_pct
+            if subject.get("ctx_floor_pct") is not None:
+                # An explicit RANGE: the LARGEST ctx in [min, target) whose KV
+                # saving covers the deficit ("adjusting to fit where possible",
+                # 2026-10-02) — never deeper than needed; the minimum when even
+                # it is not enough. A ± deviation band keeps its floor jump.
+                keep = subj_kv - remaining
+                fit_pct = int(c * keep // subj_kv) if keep > 0 else 0
+                to_pct = max(floor_pct, min(c - 1, fit_pct))
+            kv_to = kv_at_ctx_pct(subj_kv, c, to_pct)
+            saved = max(0, subj_kv - kv_to)
             if saved > 0:
-                self_ctx_pct = floor_pct
+                self_ctx_pct = to_pct
                 remaining -= saved
                 note_parts.append(
-                    f"self ctx {subj_ctx}%->{floor_pct}% freed {saved}B")
+                    f"self ctx {subj_ctx}%->{to_pct}% freed {saved}B")
 
     if remaining <= 0:
         return FlexPlan("flex", self_ctx_pct=self_ctx_pct,
@@ -635,7 +655,7 @@ def plan_flex(subject: dict, residents: list, deficit_bytes: int) -> FlexPlan:
     for r in residents:
         if r.get("protected"):
             continue                       # protection outranks priority, always
-        rb = ctx_band_bounds(r.get("ctx_pct"), r.get("ctx_deviation_pct"))
+        rb = ctx_band_bounds(r.get("ctx_pct"), r.get("ctx_deviation_pct"), r.get("ctx_floor_pct"))
         rkv = int(r.get("kv_bytes") or 0)
         if rb is None or rkv <= 0:
             continue                       # nothing to compress
