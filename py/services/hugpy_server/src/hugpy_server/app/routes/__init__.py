@@ -30,3 +30,4 @@ from hugpy_server.app.routes.script_first_routes import script_first_bp
 from hugpy_server.app.routes.fleet_doctrine_routes import fleet_doctrine_bp
 from hugpy_server.app.routes.interim_routes import interim_bp
 from hugpy_server.app.routes.test_fire_routes import test_fire_bp
+from hugpy_server.app.routes.env_profile_routes import env_profile_bp

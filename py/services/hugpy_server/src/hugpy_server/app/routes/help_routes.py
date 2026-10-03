@@ -275,6 +275,14 @@ def help_ticket_act(tid):
     d = t.get("detail") or {}
     if action == "dismiss":
         return jsonify(help_tickets.set_status(tid, "dismissed", {"by": _who()}))
+    if action == "approve" and t.get("kind") == "env-profile":
+        from hugpy_server.app import env_profiles as ep
+        prof = ep.approve(d.get("name"), by=_who())
+        if not prof:
+            return jsonify({"error": f"no environment {d.get('name')!r}"}), 404
+        out = help_tickets.set_status(tid, "acted", {"action": "approve", "env_profile": d.get("name"),
+                                                     "by": _who()})
+        return jsonify({"ticket": out, "env_profile": prof})
     if action == "calibrate":
         from hugpy_server.app import calibration_run
         from hugpy_server.app.routes.worker_routes import get_worker
@@ -307,4 +315,5 @@ def help_ticket_act(tid):
         out = help_tickets.set_status(tid, "acted", {"action": "discuss", "session": sess.get("id"),
                                                      "by": _who()})
         return jsonify({"ticket": out, "session": sess})
-    return jsonify({"error": "action must be one of calibrate, keeper, discuss, dismiss"}), 400
+    return jsonify({"error": "action must be one of calibrate, keeper, discuss, dismiss "
+                             "(approve for an env-profile ticket)"}), 400

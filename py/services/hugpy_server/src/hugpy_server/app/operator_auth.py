@@ -323,6 +323,8 @@ _SENSITIVE = [
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/discover$")),
     # Model notes + flags (2026-10-02): operator / hugpy-brain annotations.
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/notes$")),
+    # Per-model environments (2026-10-02): profile recipes are worker pip installs.
+    ({"POST"},                   re.compile(r"^/llm/env-profiles(/[^/]+/(approve|test))?$")),
     # Calibrate run (2026-10-02): loads + evicts models on a worker card.
     ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/calibrate$")),
     ({"POST"},                   re.compile(r"^/models/discover$")),

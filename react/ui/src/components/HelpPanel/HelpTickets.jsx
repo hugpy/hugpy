@@ -34,7 +34,8 @@ export function useHelpTicketCount() {
 }
 
 const ACTIONS = [
-  { id: 'calibrate', label: '⚗ re-calibrate', title: 'run the calibration again on the same worker (same 4-bit setting)' },
+  { id: 'approve', label: '✓ approve', title: 'approve this environment — workers then build it for the models attributed to it', kinds: ['env-profile'] },
+  { id: 'calibrate', label: '⚗ re-calibrate', title: 'run the calibration again on the same worker (same 4-bit setting)', kinds: ['calibration'] },
   { id: 'keeper', label: '→ keeper', title: 'file it on the keeper bridge — pending your approval there' },
   { id: 'discuss', label: '💬 discuss', title: 'open a help session primed with this finding' },
   { id: 'dismiss', label: '✕ dismiss', title: 'close it without acting' },
@@ -57,7 +58,8 @@ export default function HelpTickets({ open, onSession }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
       })
       if (!r.ok) throw new Error(r.body?.error || `HTTP ${r.status}`)
-      const msg = action === 'calibrate' ? `calibration started (${r.body?.job?.job_id || ''})`
+      const msg = action === 'approve' ? 'environment approved'
+        : action === 'calibrate' ? `calibration started (${r.body?.job?.job_id || ''})`
         : action === 'keeper' ? 'filed on the keeper bridge — approve it there'
           : action === 'discuss' ? 'help session opened' : 'dismissed'
       setNote(n => ({ ...n, [t.id]: msg }))
@@ -88,7 +90,7 @@ export default function HelpTickets({ open, onSession }) {
               {d.bnb ? '4-bit · ' : ''}{new Date((t.updated || t.created) * 1000).toLocaleString()}
             </div>
             <div className="hp-ticket-actions">
-              {ACTIONS.map(a => (
+              {ACTIONS.filter(a => !a.kinds || a.kinds.includes(t.kind)).map(a => (
                 <button key={a.id} type="button" className="hp-btn ghost"
                         disabled={!!busy || (a.id === 'keeper' && !data?.keeper)}
                         title={a.id === 'keeper' && !data?.keeper ? 'no keeper is available on this deployment' : a.title}
