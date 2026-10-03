@@ -1219,28 +1219,32 @@ def write_hugpy_marker(directory, *, hub_id, name=None, framework=None,
     # for on every walk (pipeline_tag, license, ...) are stamped here from the
     # metadata store row the download path already filled — a local read,
     # never a fetch — and read back by get_module's resolver chain.
-    if payload.get(HUB_META_KEY) is None:
-        hub_meta = prior.get(HUB_META_KEY) if isinstance(prior.get(HUB_META_KEY), dict) else None
-        if hub_meta is None and source == "download":
-            try:
-                hub_meta = cached_hub_meta(hub_id)
-            except Exception:  # noqa: BLE001 — a cache read must never block the stamp
-                hub_meta = None
-        if hub_meta:
-            payload[HUB_META_KEY] = hub_meta
-    # INIT RECORD (2026-10-02): the full Hub row and the per-file weights facts
-    # ride every identity write — local reads only (cache + headers).
+    # INIT RECORD (2026-10-02): the full Hub row rides every identity write —
+    # a local read (metadata-store cache), done ONCE; hub_meta below derives
+    # from that same row rather than reading it again.
+    fresh_hub = None
     if payload.get(HUB_KEY) is None:
         hub = prior.get(HUB_KEY) if isinstance(prior.get(HUB_KEY), dict) else None
         if hub is None:
             try:
                 hub = cached_hub_record(hub_id)
                 if hub:
+                    fresh_hub = dict(hub)
                     hub["captured_at"] = _utc_now_iso()
             except Exception:  # noqa: BLE001 — a cache read must never block the stamp
                 hub = None
         if hub:
             payload[HUB_KEY] = hub
+    if payload.get(HUB_META_KEY) is None:
+        hub_meta = prior.get(HUB_META_KEY) if isinstance(prior.get(HUB_META_KEY), dict) else None
+        if hub_meta is None and source == "download":
+            try:
+                hub_meta = (hub_meta_from_repo_info(fresh_hub) if fresh_hub is not None
+                            else cached_hub_meta(hub_id))
+            except Exception:  # noqa: BLE001 — a cache read must never block the stamp
+                hub_meta = None
+        if hub_meta:
+            payload[HUB_META_KEY] = hub_meta
     if payload.get(WEIGHTS_FACTS_KEY) is None and isinstance(prior.get(WEIGHTS_FACTS_KEY), dict):
         payload[WEIGHTS_FACTS_KEY] = prior[WEIGHTS_FACTS_KEY]
     os.makedirs(directory, exist_ok=True)
