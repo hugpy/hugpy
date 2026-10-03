@@ -10159,7 +10159,7 @@ def _cuda_holders(limit: int = 12) -> dict:
                 for t in list(o.parameters(recurse=True)) + list(o.buffers(recurse=True)):
                     if t.is_cuda:
                         tot += t.numel() * t.element_size()
-                if tot >= 64 * MB:
+                if tot >= 1 * MB:
                     modules.append((o, tot))
             elif isinstance(o, torch.Tensor) and not isinstance(o, torch.nn.Parameter) and o.is_cuda:
                 try:
@@ -10170,7 +10170,7 @@ def _cuda_holders(limit: int = 12) -> dict:
                     continue
                 seen_storage.add(sp)
                 nb = o.untyped_storage().nbytes() if hasattr(o, "untyped_storage") else o.numel() * o.element_size()
-                if nb >= 16 * MB:
+                if nb >= 1 * MB:
                     loose.append((o, nb))
         except Exception:  # noqa: BLE001
             continue
