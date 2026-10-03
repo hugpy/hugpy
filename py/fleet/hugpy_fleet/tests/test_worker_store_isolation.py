@@ -28,7 +28,9 @@ def _snapshot(path):
     return (True, st.st_mtime_ns, st.st_size, ids)
 
 
-def test_isolated_worker_store_redirects_registry_and_sidecar():
+def test_isolated_worker_store_redirects_registry_and_sidecar(monkeypatch):
+    # the sidecar is frozen since the DB detach (2026-10-02): opt in to prove the redirect
+    monkeypatch.setenv("HUGPY_ASSIGN_SIDECAR_WRITE", "1")
     real_workers = W._default_workers_path()
     real_mem = W._assign_memory_path()
     before_w, before_m = _snapshot(real_workers), _snapshot(real_mem)
