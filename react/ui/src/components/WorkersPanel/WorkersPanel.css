@@ -1864,3 +1864,21 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
   border-radius: 50%; background: var(--accent, #6aa0ff); cursor: pointer; }
 .wp-dual-range input.wp-dual-lo::-webkit-slider-thumb { background: var(--warn, #c90); }
 .wp-dual-range input.wp-dual-lo::-moz-range-thumb { background: var(--warn, #c90); }
+
+/* model notes + flags (2026-10-02) */
+.wp-notes-btn { font-size: 11px; padding: 0 3px; margin-left: 4px; border: 0; background: transparent; cursor: pointer; opacity: 0.35; }
+.wp-notes-btn:hover, .wp-notes-btn-has { opacity: 1; }
+.wp-note-flag { display: inline-block; font-size: 10px; padding: 0 6px; margin-left: 4px; border-radius: 8px;
+  border: 1px solid currentColor; color: var(--muted); background: transparent; }
+.wp-note-flag-broken { color: var(--danger, #d33); }
+.wp-note-flag-trash, .wp-note-flag-archive { color: var(--muted); }
+.wp-note-flag-unknown, .wp-note-flag-needs-env, .wp-note-flag-experimental { color: var(--warn, #c90); }
+.wp-note-flag-keep { color: var(--ok, #3a3); }
+.wp-notes-popup { width: min(640px, 94vw); }
+.wp-notes-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.wp-notes-flags .wp-note-flag { cursor: pointer; opacity: 0.5; font-size: 12px; padding: 2px 8px; }
+.wp-notes-flags .wp-note-flag-on { opacity: 1; font-weight: 600; }
+.wp-notes-text { width: 100%; box-sizing: border-box; font: inherit; }
+.wp-notes-actions { display: flex; align-items: center; margin: 6px 0; }
+.wp-notes-hist { font-size: 11px; padding: 4px 0; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.wp-notes-hist em { color: var(--muted); font-style: normal; }

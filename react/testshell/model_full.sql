@@ -71,6 +71,10 @@ SELECT m.id, m.name, m.hub_id, m.framework,
                     'cold_load_s', x.cold_load_s, 'hot_load_s', x.hot_load_s, 'load_s', x.load_s,
                     'grade', x.grade, 'grade_suite', x.grade_suite, 'graded_at', x.graded_at,
                     'updated_at', x.updated_at) ORDER BY x.worker, x.quant, x.alloc_mode)
-                 FROM model_metrics x WHERE x.model_id = m.id), '[]'::jsonb) AS metrics
+                 FROM model_metrics x WHERE x.model_id = m.id), '[]'::jsonb) AS metrics,
+       -- 2026-10-02: operator / hugpy-brain notes + flags (model_annotations)
+       (SELECT jsonb_build_object('flags', to_jsonb(a.flags), 'note', a.note, 'updated_by', a.updated_by,
+                                  'by_kind', a.by_kind, 'updated_at', a.updated_at)
+          FROM model_annotations a WHERE a.model_id = m.id) AS notes
 FROM models m;
 COMMENT ON VIEW model_full IS 'one row per model: spec/weights/serving/quants/workers(knobs+plan, intent) + live(mechanics) + calls(7d) + metrics(per worker/quant, grades). Built for react/testshell 2026-10-01.';

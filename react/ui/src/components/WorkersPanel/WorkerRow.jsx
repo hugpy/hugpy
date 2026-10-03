@@ -22,6 +22,7 @@ import { fmtBytes, fmtServed, midTrunc } from './formatters'
 import { ExternalLeases } from './ExternalLeases'
 import { TestFireButton, TestFireStrip, useTestFire } from './TestFire'
 import TestFireHistory from './TestFireHistory'
+import { ModelFlagChips, ModelNotesButton } from './ModelNotes'
 import { ResidencyMenu } from './ResidencyMenu'
 import { ResourceStrip } from './ResourceStrip'
 import { SpillBadge } from './SpillBadge'
@@ -1115,6 +1116,9 @@ export function WorkerRow({ worker, models, allocation, onChat = null, onAssign,
           )}
           {isPairBlocked && <span className="wp-blocked-chip" title="Blocked on this worker only.">⛔ this worker</span>}
           {isAutoBlocked && <span className="wp-blocked-chip" title="Automatic fit block: this model does not fit this worker's reported capacity.">⛔ no fit</span>}
+          <ModelFlagChips modelKey={key} />
+          <ModelNotesButton modelKey={key}
+                            dbRef={findCatalogRow(models, key)?._modelDatabase?.id != null ? String(findCatalogRow(models, key)._modelDatabase.id) : key} />
         </>
       ),
     },

@@ -205,6 +205,36 @@ def model_database_discover(model_key):
     return jsonify(out), (200 if not out.get("error") else 422)
 
 
+@llm_bp.route("/models/notes", methods=["GET"])
+def model_notes_all():
+    """{model_key: {flags, note, ...}} for every annotated model, plus the flag
+    vocabulary (the console's model rows)."""
+    from hugpy_server.app import model_notes
+    return jsonify({"notes": model_notes.all_flags(), "flags": list(model_notes.FLAGS)})
+
+
+@llm_bp.route("/models/database/<model_key>/notes", methods=["GET", "POST"])
+def model_database_notes(model_key):
+    """GET the model's note + flags + history; POST {flags: [...], note, by_kind?}
+    to replace them (operator-gated; hugpy-brain posts with by_kind "agent")."""
+    from hugpy_engine.model_index import resolve_model_id
+    from hugpy_server.app import model_notes
+    model_id = resolve_model_id(model_key)
+    if model_id is None:
+        return jsonify({"error": f"unknown model {model_key!r}"}), 404
+    if request.method == "GET":
+        out = model_notes.get(model_id)
+        return (jsonify(out), 200) if out is not None else (jsonify({"error": "model notes unavailable"}), 503)
+    body = request.get_json(silent=True) or {}
+    kind = "agent" if str(body.get("by_kind") or "").lower() == "agent" else "operator"
+    try:
+        out = model_notes.put(model_id, model_key, body.get("flags"), body.get("note"),
+                              by=_operator_name_or("operator"), by_kind=kind)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "flags": list(model_notes.FLAGS)}), 400
+    return (jsonify(out), 200) if out is not None else (jsonify({"error": "model notes unavailable"}), 503)
+
+
 @llm_bp.route("/models/database/<model_key>/workers/<worker_id>/assigned", methods=["POST"])
 def model_database_pair_assigned(model_key, worker_id):
     """Console designation write for ONE (model, worker) pair — straight to the

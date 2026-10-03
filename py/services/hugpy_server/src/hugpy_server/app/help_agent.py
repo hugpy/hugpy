@@ -103,6 +103,10 @@ LOGS AND DIAGNOSTICS (all read-only)
     /srv/hugpy/venv/bin/hugpy-model-audit --only <model_key>
 - The toolserver MCP tools metrics_actions / metrics_loads / pkg_status / pkg_jobs
   are also available to you and read the same stores.
+- Model notes + flags (shared with the operator): curl -s {SELF_BASE}/api/models/database/<model>/notes
+  ; to record what you found, POST {{"flags": [...], "note": "...", "by_kind": "agent"}} to the same
+  path (flags: broken, trash, archive, unknown, needs-env, experimental, keep; operator-gated
+  route — send the X-Operator-Token you were given, else hand the note to the operator).
 
 CODE AND TESTS
 - You MAY read and edit files under {SOURCE_ROOT} (and only there).

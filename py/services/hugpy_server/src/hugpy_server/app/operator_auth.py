@@ -321,6 +321,8 @@ _SENSITIVE = [
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/workers/[^/]+/pinned$")),
     # Targeted discovery (2026-10-02): re-stamps a model's marker + recomputes its verdicts.
     ({"POST"},                   re.compile(r"^/models/database/[^/]+/discover$")),
+    # Model notes + flags (2026-10-02): operator / hugpy-brain annotations.
+    ({"POST"},                   re.compile(r"^/models/database/[^/]+/notes$")),
     # Calibrate run (2026-10-02): loads + evicts models on a worker card.
     ({"POST"},                   re.compile(r"^/llm/workers/[^/]+/calibrate$")),
     ({"POST"},                   re.compile(r"^/models/discover$")),
