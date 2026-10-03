@@ -87,11 +87,19 @@ def validate_manifest(manifest) -> list[str]:
         errors.append("package ids are not unique")
     known = set(ids)
     graph: dict[str, set[str]] = {}
+    hard_graph: dict[str, set[str]] = {}
     for pkg in manifest.packages.values():
         unknown = pkg.allowed - known
         if unknown:
             errors.append(f"{pkg.id}: unknown dependencies {sorted(unknown)}")
         graph[pkg.id] = pkg.allowed
+        # Cycle detection runs over HARD ``depends`` only. An ``optional_depends``
+        # edge is a lazy/extra dependency (a pip extra, imported only inside a
+        # function), never an install-ordering constraint, so it cannot deadlock
+        # resolution and must not be reported as a dependency cycle — e.g. storage's
+        # lazy GGUF-fact reader of engine, where engine already hard-depends on
+        # storage.  Unknown-dependency validation above still spans ``allowed``.
+        hard_graph[pkg.id] = set(pkg.depends)
         dests: dict[Path, str] = {}
         for src, dest in pkg.moves.items():
             exists_here = (manifest.source_root / src).exists()
@@ -122,7 +130,7 @@ def validate_manifest(manifest) -> list[str]:
     if unowned:
         errors.append(f"unowned monolith files ({len(unowned)}): " + ", ".join(unowned[:25]))
 
-    found_cycle = _cycle(graph)
+    found_cycle = _cycle(hard_graph)
     if found_cycle:
         errors.append("dependency cycle: " + " -> ".join(found_cycle))
     return errors
