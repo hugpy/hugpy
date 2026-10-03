@@ -107,6 +107,9 @@ import_name = "hugpy_storage"
 destination = "storage/hugpy_storage"
 status = "new"
 depends = ["platform", "control"]
+# hugpy_marker stamps GGUF facts (shards, KV cost, MoE geometry) with the
+# engine's readers when it is installed — lazily, never at import (2026-10-02).
+optional_depends = ["engine"]
 
 [package.moves]
 "downloader" = "downloader"

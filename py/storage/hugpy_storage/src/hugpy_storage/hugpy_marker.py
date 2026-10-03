@@ -766,7 +766,10 @@ KV_COMPUTE_BYTES = 512 * 1024 * 1024          # the compute allowance the planne
 
 def kv_cost_for_gguf(path, geo):
     """Precalculated ctx -> KV cost for ONE gguf, or None when unpriceable."""
-    from hugpy_engine.spill import kv_bytes_for_geo
+    try:
+        from hugpy_engine.spill import kv_bytes_for_geo
+    except ImportError:                  # optional dependency absent: unpriceable here
+        return None
     g = dict(geo or {})
     train = int(g.get("ctx_train") or 0)
     if train <= 0:

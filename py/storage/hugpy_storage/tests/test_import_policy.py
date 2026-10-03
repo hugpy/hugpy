@@ -18,7 +18,7 @@ import pytest
 PACKAGE = "hugpy_storage"
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / PACKAGE
 ALLOWED = ['hugpy_platform', 'hugpy_control']
-OPTIONAL = []
+OPTIONAL = ['hugpy_engine']
 ECOSYSTEM = ['hugpy_platform', 'hugpy_control', 'hugpy_storage', 'hugpy_engine', 'hugpy_media', 'hugpy_video', 'hugpy_oracle', 'hugpy_fleet', 'hugpy_curation', 'hugpy_ops', 'hugpy_discord', 'hugpy_server', 'hugpy']
 MONOLITH = "abstract_hugpy_dev"
 

@@ -48,6 +48,7 @@ Architecture = "https://github.com/hugpy/hugpy/blob/main/PARTITION.md"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-timeout"]
+engine = ["hugpy-engine"]
 
 [project.scripts]
 hugpy-storage = "hugpy_storage.cli:main"
