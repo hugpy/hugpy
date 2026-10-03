@@ -4767,6 +4767,18 @@ def build_app(state: "WorkerState") -> Flask:
         return jsonify({"ok": True, "restarting": True,
                         "worker_id": state.worker_id})
 
+    @app.route("/ops/cuda-holders", methods=["GET"])
+    def ops_cuda_holders():
+        # READ-ONLY leak hunt (2026-10-02 test fire: the worker held 17.4 GB with
+        # loaded_models=[] and gc + empty_cache freed nothing). Who still holds
+        # CUDA memory in THIS process: torch's allocator totals, the largest
+        # root nn.Modules with CUDA storage, loose CUDA tensors, and — for each —
+        # the chain of objects referencing it (named module globals / attrs).
+        try:
+            return jsonify(_cuda_holders(limit=int(request.args.get("limit") or 12)))
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must answer
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 200
+
     @app.route("/ops/free-ram", methods=["POST"])
     def ops_free_ram():
         # NON-destructive host-RAM reclaim: return glibc's orphaned allocator
@@ -10082,6 +10094,104 @@ def _forget_resident(model_key: str) -> None:
         _pidreg.forget(model_key)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _referrer_names(obj, depth: int = 3, _seen=None) -> list:
+    """Best-effort names for what keeps ``obj`` alive: walk gc referrers up to
+    ``depth`` levels and name module globals (module.attr), class/instance
+    attributes (Type.attr) and dict/list containers; frames are reported as such."""
+    import gc
+    import inspect
+    import types
+    _seen = _seen if _seen is not None else set()
+    out = []
+    for ref in gc.get_referrers(obj):
+        if id(ref) in _seen or ref is _seen:
+            continue
+        _seen.add(id(ref))
+        if inspect.isframe(ref):
+            out.append(f"frame {ref.f_code.co_name} ({ref.f_code.co_filename.rsplit('/', 1)[-1]}:{ref.f_lineno})")
+            continue
+        if isinstance(ref, dict):
+            named = False
+            for owner in gc.get_referrers(ref):
+                if isinstance(owner, types.ModuleType) and getattr(owner, "__dict__", None) is ref:
+                    key = next((k for k, v in ref.items() if v is obj), "?")
+                    out.append(f"global {owner.__name__}.{key}")
+                    named = True
+                elif getattr(owner, "__dict__", None) is ref:
+                    key = next((k for k, v in ref.items() if v is obj), "?")
+                    label = f"{type(owner).__module__}.{type(owner).__name__}.{key}"
+                    if depth > 1:
+                        up = _referrer_names(owner, depth - 1, _seen)
+                        label += (" <- " + " | ".join(up[:3])) if up else ""
+                    out.append(label)
+                    named = True
+            if not named and depth > 1:
+                key = next((repr(k)[:60] for k, v in ref.items() if v is obj), "?")
+                up = _referrer_names(ref, depth - 1, _seen)
+                out.append(f"dict[{key}]" + ((" <- " + " | ".join(up[:3])) if up else ""))
+            continue
+        if isinstance(ref, (list, tuple)) and depth > 1:
+            up = _referrer_names(ref, depth - 1, _seen)
+            out.append(f"{type(ref).__name__}[{len(ref)}]" + ((" <- " + " | ".join(up[:3])) if up else ""))
+            continue
+        out.append(f"{type(ref).__module__}.{type(ref).__name__}")
+    return out[:8]
+
+
+def _cuda_holders(limit: int = 12) -> dict:
+    """Read-only: what in this process holds CUDA memory (see /ops/cuda-holders)."""
+    import gc
+    import sys as _sys
+    torch = _sys.modules.get("torch")
+    if torch is None or not torch.cuda.is_initialized():
+        return {"torch_cuda": False}
+    gc.collect()
+    MB = 1 << 20
+    modules = []
+    loose = []
+    seen_storage = set()
+    for o in gc.get_objects():
+        try:
+            if isinstance(o, torch.nn.Module):
+                tot = 0
+                for t in list(o.parameters(recurse=True)) + list(o.buffers(recurse=True)):
+                    if t.is_cuda:
+                        tot += t.numel() * t.element_size()
+                if tot >= 64 * MB:
+                    modules.append((o, tot))
+            elif isinstance(o, torch.Tensor) and not isinstance(o, torch.nn.Parameter) and o.is_cuda:
+                try:
+                    sp = o.untyped_storage().data_ptr()
+                except Exception:  # noqa: BLE001
+                    sp = id(o)
+                if sp in seen_storage:
+                    continue
+                seen_storage.add(sp)
+                nb = o.untyped_storage().nbytes() if hasattr(o, "untyped_storage") else o.numel() * o.element_size()
+                if nb >= 16 * MB:
+                    loose.append((o, nb))
+        except Exception:  # noqa: BLE001
+            continue
+    # ROOTS: a module not referenced from another module's _modules dict
+    child_ids = set()
+    for m, _ in modules:
+        for c in m.children():
+            child_ids.add(id(c))
+    roots = sorted([(m, b) for m, b in modules if id(m) not in child_ids], key=lambda x: -x[1])[:limit]
+    loose = sorted(loose, key=lambda x: -x[1])[:limit]
+    return {
+        "torch_cuda": True,
+        "allocated_bytes": int(torch.cuda.memory_allocated()),
+        "reserved_bytes": int(torch.cuda.memory_reserved()),
+        "loaded_models": loaded_model_keys(),
+        "root_modules": [{"type": f"{type(m).__module__}.{type(m).__name__}",
+                          "name_or_path": getattr(getattr(m, "config", None), "_name_or_path", None),
+                          "cuda_bytes": b, "held_by": _referrer_names(m)} for m, b in roots],
+        "loose_tensors": [{"shape": list(t.shape), "dtype": str(t.dtype), "bytes": b,
+                           "held_by": _referrer_names(t)} for t, b in loose],
+    }
 
 
 def _drop_inprocess_model(model_key: str) -> bool:
