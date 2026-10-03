@@ -463,10 +463,38 @@ def _trim_host_ram() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:  # noqa: BLE001 — non-glibc/musl: no malloc_trim, skip
         pass
+    _release_cuda_cache()
+
+
+def _release_cuda_cache() -> None:
+    """Hand torch's cached CUDA blocks back to the driver.
+
+    THE PINNED SEGMENT (2026-10-02 test fire). A transformers load lands its
+    weights in ONE model-sized allocator segment, and the first matmul then
+    carves cuBLAS's workspace (~8 MiB, alive for the handle's lifetime) out of
+    that same segment. After eviction 8 MiB stayed allocated, empty_cache() can
+    only free WHOLE segments, so the model's 16.7 GB stayed reserved; five
+    sequential loads stacked 17 GB and refused every later load. Clearing the
+    cuBLAS workspaces frees the segment. Only when NO in-process model still
+    holds CUDA weights — a sibling mid-matmul in another thread must keep its
+    workspace; then this is the plain empty_cache() it always was."""
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
     try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if not torch.cuda.is_initialized():
+            return
+        try:
+            idle = not any((v or {}).get("device") == "cuda"
+                           for v in (_inprocess_gpu_bytes() or {}).values())
+        except Exception:  # noqa: BLE001 — unknown: keep the workspaces
+            idle = False
+        if idle:
+            clear = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear is not None:
+                torch.cuda.synchronize()
+                clear()
+        torch.cuda.empty_cache()
     except Exception:  # noqa: BLE001 — no torch/cuda: nothing to release
         pass
 
@@ -10277,11 +10305,10 @@ def _drop_inprocess_model(model_key: str) -> bool:
     try:
         import torch
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
     except Exception:  # noqa: BLE001
         pass
-    _trim_host_ram()
+    _trim_host_ram()                  # gc + malloc_trim + _release_cuda_cache
     # The materialized flag must die WITH the weights (this is the unload
     # chokepoint every evict path funnels through). Without this, a
     # transformers/DeepCoder entry in _MATERIALIZED — which has no live cache
