@@ -51,6 +51,48 @@ class DeepCoderChatRunner:
         """Resolve the underlying DeepCoder. Loads on first access."""
         return REGISTRY.get(self._cfg)
 
+    # --- env-profiles stage 3 ----------------------------------------------
+
+    def _profile_delegate(self):
+        """The slot-child runner for a model attributed to a dependency
+        profile, or None (no profile -> the in-process path below, unchanged).
+
+        READY -> a ProfileChildChatRunner: the model runs in a slot child
+        launched from the profile venv's python (tf_child.py), so it loads with
+        the profile's package versions. Not ready (materializing/error) ->
+        RAISES naming the profile + its state/error: the in-process path runs
+        the WORKER's packages, the exact conflict the profile isolates."""
+        from hugpy_engine.serve import profiles
+        prof = profiles.resolve_model(self.model_key)
+        if not prof:
+            return None
+        from hugpy_engine.llama.runners.get import LocalEngineUnavailable
+        if prof.get("state") != "ready" or not prof.get("bin"):
+            detail = f": {prof.get('error')}" if prof.get("error") else ""
+            raise LocalEngineUnavailable(
+                f"model {self.model_key!r} is attributed to dependency profile "
+                f"{prof.get('name')!r}, which is {prof.get('state')}{detail} — it "
+                "is served from that profile's venv once ready, never in-process "
+                "from the worker's packages")
+        cfg = self._cfg
+        opts = {"engine": "transformers", "path": str(cfg.model_dir),
+                "profile_bin": prof["bin"], "profile": prof.get("name")}
+        if cfg.adapter_dir:
+            opts["adapter_dir"] = str(cfg.adapter_dir)
+        if cfg.trust_remote_code:
+            opts["trust_remote_code"] = True
+        from hugpy_engine.spill import bnb_4bit_env, transformers_max_memory
+        if cfg.use_quantization or bnb_4bit_env():
+            opts["bnb4"] = True
+        if cfg.device == "cuda":
+            mm = transformers_max_memory()
+            if mm:
+                opts["max_memory"] = {str(k): v for k, v in mm.items()}
+        else:
+            opts["device"] = "cpu"
+        from hugpy_engine.llama.runners.chat_runner import ProfileChildChatRunner
+        return ProfileChildChatRunner(self.model_key, opts)
+
     # --- result helpers ----------------------------------------------------
 
     def _error_result(self, req: ChatRequest, error: str) -> ChatResult:
@@ -68,6 +110,9 @@ class DeepCoderChatRunner:
     # --- non-streaming -----------------------------------------------------
 
     async def run(self, req: ChatRequest) -> ChatResult:
+        delegate = self._profile_delegate()
+        if delegate is not None:
+            return await delegate.run(req)
         messages = [
             m.model_dump() if hasattr(m, "model_dump") else m
             for m in req.messages
@@ -212,6 +257,11 @@ class DeepCoderChatRunner:
         callable to completion — it can't drive a stream. Errors mid-stream
         belong in DeepCoder.stream_chat as ErrorEvents, not swallowed here.
         """
+        delegate = self._profile_delegate()
+        if delegate is not None:
+            async for event in delegate.stream(req, cancel_event=cancel_event):
+                yield event
+            return
         if not getattr(req, "unbounded", False):
             async for event in self.coder.stream_chat(req, cancel_event=cancel_event):
                 yield event

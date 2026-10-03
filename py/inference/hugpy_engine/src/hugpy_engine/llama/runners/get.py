@@ -316,6 +316,54 @@ def _require_profile_ready(model_key: str) -> "dict | None":
     return resolve
 
 
+def get_profile_child_runner(model_key: str, opts: dict) -> "LlamaCppRunner":
+    """Env-profiles stage 3: get-or-build the HTTP runner for a TRANSFORMERS
+    model served by a slot child running its profile venv (``opts`` carries
+    ``engine='transformers'``, ``path`` = the model dir, ``profile_bin``, ...).
+
+    Same cache as the GGUF runners (``_LLAMA_INSTANCES``), so the residency
+    readers (slot_backed_model_keys / _is_materialized), the stale-seat check
+    and evict_llama_runner treat it exactly like a slot-backed GGUF runner. The
+    opts ride on the runner (``_slot_opts``) so a stale-endpoint refresh
+    re-seats it as a transformers child, never as a GGUF. No fallback: a seat
+    that cannot be had raises."""
+    with _LLAMA_LOCK:
+        runner = _LLAMA_INSTANCES.get(model_key)
+    if runner is not None:
+        if _slot_still_holds(runner, model_key):
+            return runner
+        evict_llama_runner(model_key)
+    with _LLAMA_BUILD_LOCK:
+        with _LLAMA_LOCK:
+            runner = _LLAMA_INSTANCES.get(model_key)
+        if runner is not None:
+            return runner
+        from hugpy_engine.serve.policy import no_local_serving, local_serving_error
+        if no_local_serving():
+            raise LocalEngineUnavailable(local_serving_error(
+                model_key, detail="local transformers profile serving is disabled on this box"))
+        from hugpy_engine.serve.slots import SlotPool, slots_enabled
+        if not slots_enabled():
+            raise LocalEngineUnavailable(
+                f"model {model_key!r} needs dependency profile {opts.get('profile')!r} "
+                "(ready), which is served only by a slot child, and slots are "
+                "disabled on this box (SLOT_COUNT=0); refusing the shared-venv "
+                "in-process path")
+        sep = SlotPool().endpoint_for(model_key, opts=dict(opts))
+        if not sep:
+            raise LocalEngineUnavailable(
+                f"model {model_key!r} needs dependency profile {opts.get('profile')!r} "
+                "(ready) but every slot is busy with another model; refusing the "
+                "shared-venv in-process path")
+        runner = LlamaCppRunner(model_key, base_url=sep)
+        runner._slot_opts = dict(opts)
+        logger.info("get_profile_child_runner: %s -> slot %s (transformers child, "
+                    "profile %s)", model_key, sep, opts.get("profile"))
+        with _LLAMA_LOCK:
+            _LLAMA_INSTANCES[model_key] = runner
+        return runner
+
+
 # ---------------------------------------------------------------------------
 # Vision GGUFs (2026-09-23): a model that ships a multimodal projector (mmproj)
 # is served ONLY by a native llama-server launched with ``--mmproj`` — the slot

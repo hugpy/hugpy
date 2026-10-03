@@ -221,7 +221,8 @@ def _model_path_of(argv):
     (``python -m llama_cpp.server``), which is not a model file at all."""
     argv = argv or []
     for i, arg in enumerate(argv):
-        if arg == "--model" and i + 1 < len(argv):
+        # --model-dir: the transformers child (tf_child.py) — a model DIRECTORY.
+        if arg in ("--model", "--model-dir") and i + 1 < len(argv):
             return argv[i + 1]
     for i, arg in enumerate(argv):
         if arg == "-m" and i + 1 < len(argv):
@@ -756,10 +757,65 @@ def _slot_parallel(ctx=None, model_bytes=None, path=None, kv_cache_type=None):
         return 1                                     # hardcoded fallback
 
 
+# Env-profiles stage 3: the transformers child script, launched BY PATH so it
+# imports nothing from hugpy (it also runs under an ``isolated`` profile venv).
+_TF_CHILD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tf_child.py")
+
+
+def _dir_weight_bytes(path):
+    """Sum of the weight files in a transformers model dir (the load-progress
+    denominator / size-scaled hard cap), or None when none are found."""
+    try:
+        total = sum(os.path.getsize(os.path.join(path, f)) for f in os.listdir(path)
+                    if f.endswith((".safetensors", ".bin", ".pt", ".pth")))
+    except OSError:
+        return None
+    return total or None
+
+
+def _build_tf_cmd(model_key, n_gpu_layers=None, ctx=None, path=None,
+                  profile_bin=None, tf_opts=None):
+    """argv for a TRANSFORMERS slot child (env-profiles stage 3): the profile
+    venv's python running ``tf_child.py`` on the model directory. No GGUF
+    resolution, no layer autofit — placement is device_map=auto (bounded by the
+    caller's ``max_memory``) or CPU when the caller asked for 0 GPU layers.
+    Returns the same 8-tuple as :func:`_build_cmd`; ``n_gpu_layers`` is echoed
+    as asked (0 = CPU, anything else = device_map auto)."""
+    tf_opts = tf_opts or {}
+    if not path or not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"{model_key}: transformers slot load needs the model directory; got "
+            f"{path!r} (not a directory) — refusing to spawn the transformers child")
+    import sys as _sys
+    from hugpy_engine.serve import profiles as _profiles
+    child_py = _profiles.child_python(profile_bin, _sys.executable)
+    argv = [child_py, _TF_CHILD, "--model-dir", path, "--model-key", model_key,
+            "--host", "127.0.0.1", "--port", str(SLOT_CHILD_PORT)]
+    if ctx:
+        argv += ["--ctx", str(int(ctx))]
+    if tf_opts.get("bnb4"):
+        argv.append("--bnb4")
+    if tf_opts.get("trust_remote_code"):
+        argv.append("--trust-remote-code")
+    cpu = tf_opts.get("device") == "cpu" or (
+        n_gpu_layers not in (None, "") and str(n_gpu_layers).strip().lower()
+        in ("0", "off", "cpu", "none"))
+    argv += ["--device", "cpu" if cpu else "auto"]
+    if tf_opts.get("max_memory") and not cpu:
+        import json as _json
+        argv += ["--max-memory", _json.dumps(tf_opts["max_memory"])]
+    if tf_opts.get("adapter_dir"):
+        argv += ["--adapter-dir", str(tf_opts["adapter_dir"])]
+    logger.info("slot %s: %s is a transformers model; child %s (profile bin %s)",
+                SLOT_ID, model_key, child_py, profile_bin)
+    return (argv, n_gpu_layers, int(ctx) if ctx else None, None, None,
+            "python", None, None)
+
+
 def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
                path=None, gpu_mem_gib=None, cpu_mem_gib=None, profile_bin=None,
                n_cpu_moe=None, tensor_split=None, main_gpu=None,
-               kv_cache_type=None, flash_attn=None):
+               kv_cache_type=None, flash_attn=None, engine=None, tf_opts=None):
     """argv for the child llama-server + the resolved (ngl, ctx, threads, cpus).
 
     ``n_cpu_moe`` (MoE expert split, 2026-07-24; DEFAULT since 2026-07-25):
@@ -801,7 +857,13 @@ def _build_cmd(model_key, n_gpu_layers=None, ctx=None, threads=None, cpus=None,
     process seam. The native-binary child is unaffected in argv (its binary is
     resolved by the engine resolver); its PATH still prefers the profile bin via
     the child env (see ``Slot.load``), so a profile-shipped binary would win.
+
+    ``engine="transformers"`` (env-profiles stage 3): ``path`` is a model
+    DIRECTORY and the child is ``tf_child.py`` — see :func:`_build_tf_cmd`.
     """
+    if engine == "transformers":
+        return _build_tf_cmd(model_key, n_gpu_layers, ctx, path=path,
+                             profile_bin=profile_bin, tf_opts=tf_opts)
     from hugpy_engine.serve.serve import (
         _model_file_for,
         _ctx_for,
@@ -1624,6 +1686,10 @@ class Slot:
         # card / auto placement.
         self.tensor_split = None
         self.main_gpu = None
+        # env-profiles stage 3: engine="transformers" load opts of the seated
+        # model (path/bnb4/max_memory/...), kept so a relaunch re-seats it the
+        # same way. None for a GGUF seat.
+        self.tf_opts = None
         self.profile_bin = None      # env-profiles (stage 1): the profile venv
         # bin dir this model's child launches from (None = shared venv default).
         self.expected_bytes = None
@@ -1786,6 +1852,7 @@ class Slot:
         self.total_layers = None
         self.n_cpu_moe = None
         self.profile_bin = None
+        self.tf_opts = None
         self.model_path = None
         self.alloc_requested = self.alloc_source = self.reload_reason = None
         self._identity = {"pid": None, "ok": True, "note": None, "at": 0.0}
@@ -1858,6 +1925,9 @@ class Slot:
             "tensor_split": getattr(self, "tensor_split", None),
             "main_gpu": getattr(self, "main_gpu", None),
             "profile_bin": self.profile_bin,   # env-profiles: child's venv, or None
+            # env-profiles stage 3: which engine the seated child runs (None idle).
+            "engine": (("transformers" if getattr(self, "tf_opts", None) else "llama.cpp")
+                       if self.model_key else None),
             "allowed_cpus": _allowed_cpus(),   # kernel-enforced dedicated cores
             "loaded_at": self.loaded_at,
             "last_used": self.last_used,
@@ -1911,7 +1981,9 @@ class Slot:
              n_cpu_moe=None, alloc_mode=None, alloc_requested=None,
              alloc_source=None, reload_reason=None,
              tensor_split=None, main_gpu=None,
-             kv_cache_type=None, flash_attn=None) -> dict:
+             kv_cache_type=None, flash_attn=None, engine=None,
+             adapter_dir=None, bnb4=None, trust_remote_code=None,
+             max_memory=None, device=None) -> dict:
         with self.lock:
             # k64: the ACTIVE allocation mode, as a per-load opt. The slot is a
             # separate process spawned at boot, so the agent's per-request
@@ -1969,13 +2041,19 @@ class Slot:
             self.main_gpu = _as_int_or_none(main_gpu) if is_split else None
             self._kill()
             self.profile_bin = profile_bin or None
+            self.tf_opts = ({"engine": "transformers", "path": path,
+                             "adapter_dir": adapter_dir, "bnb4": bnb4,
+                             "trust_remote_code": trust_remote_code,
+                             "max_memory": max_memory, "device": device}
+                            if engine == "transformers" else None)
             (argv, self.ngl, self.ctx, self.threads, self.cpus,
              self.child_kind, self.total_layers, self.n_cpu_moe) = _build_cmd(
                 model_key, n_gpu_layers, ctx, threads, cpus, path=path,
                 gpu_mem_gib=gpu_mem_gib, cpu_mem_gib=cpu_mem_gib,
                 profile_bin=self.profile_bin, n_cpu_moe=n_cpu_moe,
                 tensor_split=self.tensor_split, main_gpu=self.main_gpu,
-                kv_cache_type=kv_cache_type, flash_attn=flash_attn)
+                kv_cache_type=kv_cache_type, flash_attn=flash_attn,
+                engine=engine, tf_opts=self.tf_opts)
             # Sequences the child serves (--parallel; 1 when absent). llama-server
             # allocates KV for ctx x parallel at load, so a measurement of this
             # residency must subtract that many sequences, not one.
@@ -1989,7 +2067,8 @@ class Slot:
             # per-load GPU pin overrides the slot's MAIN_GPU default; a split
             # leaves the card unset so every visible GPU can hold its shard.
             self.gpu = None if is_split else (gpu if gpu not in (None, "") else MAIN_GPU)
-            self.expected_bytes = _model_expected_bytes(model_key)
+            self.expected_bytes = (_dir_weight_bytes(path) if self.tf_opts
+                                   else _model_expected_bytes(model_key))
             logger.info("slot %s loading %s (ngl=%s ctx=%s threads=%s cpus=%s "
                         "gpu=%s tensor_split=%s main_gpu=%s): %s",
                         SLOT_ID, model_key, self.ngl, self.ctx, self.threads,
@@ -2288,6 +2367,8 @@ class Slot:
             # getattr-guarded for a slot built without the newer fields.
             tensor_split=getattr(self, "tensor_split", None),
             main_gpu=getattr(self, "main_gpu", None),
+            # A transformers seat (stage 3) re-seats as one: same dir + opts.
+            **(getattr(self, "tf_opts", None) or {}),
             alloc_requested={"n_gpu_layers": requested_ngl, "alloc_mode": None},
             alloc_source={"kind": "operator", "via": "relaunch", "at": time.time()})
         # Surface the request alongside the honest launched value so the caller
@@ -2392,7 +2473,14 @@ def build_app():
                                      kv_cache_type=body.get("kv_cache_type"),
                                      flash_attn=body.get("flash_attn"),
                                      tensor_split=body.get("tensor_split"),
-                                     main_gpu=body.get("main_gpu")))
+                                     main_gpu=body.get("main_gpu"),
+                                     # env-profiles stage 3: transformers child
+                                     engine=body.get("engine"),
+                                     adapter_dir=body.get("adapter_dir"),
+                                     bnb4=body.get("bnb4"),
+                                     trust_remote_code=body.get("trust_remote_code"),
+                                     max_memory=body.get("max_memory"),
+                                     device=body.get("device")))
         except Exception as exc:  # noqa: BLE001
             out = {"error": f"{type(exc).__name__}: {exc}"}
             # Additive (2026-09-23): the structured verdict, so the pool client

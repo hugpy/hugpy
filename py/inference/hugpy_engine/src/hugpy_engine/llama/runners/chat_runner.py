@@ -243,3 +243,24 @@ class LlamaCppChatRunner:
                 return
             first = False
             yield event
+
+
+class ProfileChildChatRunner(LlamaCppChatRunner):
+    """Env-profiles stage 3: a TRANSFORMERS model whose dependency profile is
+    ready, served by a slot child (``tf_child.py`` under the profile venv's
+    python) and spoken to over the same OpenAI HTTP surface as a GGUF slot.
+
+    Everything but runner resolution is LlamaCppChatRunner's (run/stream, the
+    timings stash, the stale-seat heal — its evict_llama_runner drops the same
+    cache entry this resolves through). Built per call by DeepCoderChatRunner;
+    ``opts`` are the transformers load opts (engine/path/profile_bin/...)."""
+
+    def __init__(self, model_key: str, opts: dict):
+        self.cfg = None
+        self.model_key = model_key
+        self._opts = dict(opts)
+
+    @property
+    def runner(self):
+        from hugpy_engine.llama.runners.get import get_profile_child_runner
+        return get_profile_child_runner(self.model_key, self._opts)

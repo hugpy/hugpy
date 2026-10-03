@@ -96,7 +96,11 @@ class LlamaCppRunner(LlamaCppBaseRunner):
             # serve layer, which knows nothing about slots.
             try:
                 from hugpy_engine.serve.slots import SlotPool
-                base = SlotPool().endpoint_for(self.model_key)
+                # Stage 3: a transformers profile child re-seats with ITS load
+                # opts (engine/path/profile_bin) — without them the pool would
+                # try to seat the model as a GGUF.
+                base = SlotPool().endpoint_for(
+                    self.model_key, opts=getattr(self, "_slot_opts", None))
             except Exception:  # noqa: BLE001
                 base = None
         if not base:
