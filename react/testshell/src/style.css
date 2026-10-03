@@ -4,6 +4,7 @@ body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,
 .shell { max-width: 1400px; margin: 0 auto; padding: 16px 20px 60px; }
 header { position: sticky; top:0; background:var(--bg); padding: 8px 0 12px; border-bottom:1px solid var(--line); margin-bottom:16px; z-index:2; }
 h1 { font-size: 18px; margin: 0 0 8px; }
+h1 a.switch { font-size: 13px; font-weight: 600; text-decoration: none; padding: 3px 10px; border-radius: 5px; border: 1px solid var(--line); margin-left: 6px; }
 .controls { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
 .controls input[type=text], .controls input:not([type]) { flex:1; min-width:260px; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
 .muted { color: var(--muted); font-weight: normal; }

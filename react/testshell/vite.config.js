@@ -5,6 +5,8 @@ import react from '@vitejs/plugin-react'
 const API = process.env.HUGPY_TESTSHELL_API || 'http://127.0.0.1:7013'
 
 export default defineConfig({
+  // relative asset URLs: the same build serves at :7013/ and under https://dev.hugpy.ai/modeldb/styled/
+  base: './',
   plugins: [react()],
   server: { proxy: { '/api': { target: API, changeOrigin: true } } },
   preview: { proxy: { '/api': { target: API, changeOrigin: true } } },

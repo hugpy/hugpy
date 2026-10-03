@@ -18,11 +18,12 @@ export default function Expandable({ text, className = '', max = null }) {
   )
 }
 
-// The model's record in the DB mirror (react/testshell, :7014; deep link ?q=).
-// window.HUGPY_DB_UI overrides the base (e.g. a proxied URL off-LAN).
+// The model's record in the DB dashboard: the styled per-model view (react/testshell)
+// served under https://dev.hugpy.ai/modeldb/styled/ (LAN + WireGuard), one click from
+// the raw table browser at /modeldb/. window.HUGPY_DB_UI overrides the base.
 export function dbUiUrl(modelKey) {
   const base = (typeof window !== 'undefined' && window.HUGPY_DB_UI)
-    || `${window.location.protocol}//${window.location.hostname}:7014`
+    || 'https://dev.hugpy.ai/modeldb/styled/'
   return `${base.replace(/\/$/, '')}/?q=${encodeURIComponent(modelKey)}`
 }
 

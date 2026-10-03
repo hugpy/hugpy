@@ -2,6 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 
 const REFRESH_MS = 5000
 
+// The raw table browser (abstract_database hugpy_model_viewer): its parent dir when
+// this app is served under /modeldb/styled/, else the published site.
+const RAW_DB = window.location.pathname.includes('/modeldb/') ? '../' : 'https://dev.hugpy.ai/modeldb/'
+export const rawHref = (params = '') => RAW_DB + (params ? `?${params}` : '')
+
 async function api(path, opts) {
   const r = await fetch(path, { cache: 'no-store', ...opts })
   const body = await r.text()
@@ -16,9 +21,15 @@ export function App() {
   const [q, setQ] = useState(() => new URLSearchParams(window.location.search).get('q') || '')  // ?q=<model> deep link (console links, 2026-10-02)
   const [allocatedOnly, setAllocatedOnly] = useState(false)
   const [tick, setTick] = useState(0)
+  useEffect(() => {  // keep ?q= in the address bar so the view can be shared / reloaded
+    const p = new URLSearchParams(window.location.search)
+    if (q) p.set('q', q); else p.delete('q')
+    const s = p.toString()
+    window.history.replaceState(null, '', s ? `?${s}` : window.location.pathname)
+  }, [q])
 
   const load = async () => {
-    try { setData(await api('/api/models')); setError(null); setTick(Date.now()) }
+    try { setData(await api('api/models')); setError(null); setTick(Date.now()) }
     catch (e) { setError(e.message) }
   }
   useEffect(() => { load(); const t = setInterval(load, REFRESH_MS); return () => clearInterval(t) }, [])
@@ -51,7 +62,8 @@ export function App() {
       <header>
         <h1>hugpy testshell {onlyIds ? <span className="tag ok">test page · {[...onlyIds].join(', ')}</span> : null} <span className="muted">· weights → per-worker plan → live · knobs write the DB</span>
           {' '}<a href="?ids=92,78,94,251" className="small" title="Anko (GGUF MoE) · Qwen3.6-35B-A3B (safetensors hybrid MoE, 4-bit) · MN-GRAND 23.5B dense (safetensors + GGUF)">test set</a>
-          {onlyIds ? <>{' '}<a href="?" className="small">all</a></> : null}</h1>
+          {onlyIds ? <>{' '}<a href="?" className="small">all</a></> : null}
+          {' '}<a href={rawHref(q ? `table=model_full&q=${encodeURIComponent(q)}` : 'table=model_full')} className="switch" title="Raw table browser — every table, related rows, JSON">Raw DB ↗</a></h1>
         <div className="controls">
           <input placeholder="filter by model, hub id, framework, worker…" value={q} onChange={e => setQ(e.target.value)} />
           <label><input type="checkbox" checked={allocatedOnly} onChange={e => setAllocatedOnly(e.target.checked)} /> allocated only</label>
@@ -103,9 +115,9 @@ function ModelTable({ m, workers, allocModes, onPatch }) {
     setBusy(label); setErr(null)
     try { const r = await fn(); if (r?.model) onPatch(r.model) } catch (e) { setErr(e.message) } finally { setBusy(null) }
   }
-  const recompute = () => run('recompute', () => api(`/api/models/${m.id}/recompute`, { method: 'POST' }))
+  const recompute = () => run('recompute', () => api(`api/models/${m.id}/recompute`, { method: 'POST' }))
   const saveKnobs = (wid, set, unset) => run(`knobs:${wid}`, async () => {
-    const r = await api(`/api/models/${m.id}/workers/${encodeURIComponent(wid)}/knobs`, {
+    const r = await api(`api/models/${m.id}/workers/${encodeURIComponent(wid)}/knobs`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ set, unset }) })
     setEditing(null); return r
   })
@@ -114,7 +126,7 @@ function ModelTable({ m, workers, allocModes, onPatch }) {
     <section className="model">
       <table>
         <caption>
-          <strong>{m.name}</strong> <span className="muted">#{m.id}</span>
+          <strong>{m.name}</strong> <span className="muted">#{m.id}</span>{' '}<a className="small" href={rawHref(`table=model_full&f=id:${m.id}`)} title="this model's row + related tables in the raw browser">raw</a>
           {m.framework && <span className="tag">{m.framework}</span>}
           {m.hub_id && <span className="muted"> {m.hub_id}</span>}
           <span className="right">
