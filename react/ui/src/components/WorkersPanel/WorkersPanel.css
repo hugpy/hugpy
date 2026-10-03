@@ -1882,3 +1882,14 @@ input.wp-range:disabled { opacity: 0.4; cursor: default; }
 .wp-notes-actions { display: flex; align-items: center; margin: 6px 0; }
 .wp-notes-hist { font-size: 11px; padding: 4px 0; border-top: 1px solid rgba(255, 255, 255, 0.06); }
 .wp-notes-hist em { color: var(--muted); font-style: normal; }
+
+/* environments (2026-10-02) */
+.wp-envs { margin-top: 10px; }
+.wp-env-chip { display: inline-block; font-size: 10px; padding: 0 6px; margin: 1px 3px 1px 0; border-radius: 8px; border: 1px solid currentColor; }
+.wp-env-ok { color: var(--ok, #3a3); }
+.wp-env-bad { color: var(--danger, #d33); }
+.wp-env-wait { color: var(--warn, #c90); }
+.wp-env-test { display: inline-flex; gap: 4px; align-items: center; }
+.wp-env-test input { width: 140px; }
+.wp-env-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; margin-top: 8px; }
+.wp-env-form textarea { min-width: 240px; font: inherit; }

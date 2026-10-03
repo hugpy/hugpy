@@ -11,6 +11,7 @@ import { findCatalogRow } from './catalogRow'
 import { GroupAssignPanel } from './GroupAssignPanel'
 import { useFleetDistribution } from './useFleetDistribution'
 import { WorkerRow, effectivePin } from './WorkerRow'
+import EnvProfilesPanel from './EnvProfilesPanel'
 import { responseReason } from '../responseReason'
 import './WorkersPanel.css'
 
@@ -1308,6 +1309,7 @@ export default function WorkersPanel({ models = [], embedded = false, onChat = n
           {workers.length > 0 && (
             <GroupAssignPanel models={models} workers={workers} onGroupAssign={groupAssign} />
           )}
+          <EnvProfilesPanel workers={workers} />
 
           {/* Add & manage workers — install command, enrollment tokens, manual
               add. Moved BELOW the workers + group actions (t22). Stays collapsed
