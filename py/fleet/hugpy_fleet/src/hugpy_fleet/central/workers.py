@@ -1118,7 +1118,8 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
         # with nothing persisted is deliberately ABSENT rather than stamped
         # max-gpu: absent degrades to the blank max-gpu default at the reader,
         # which is the same answer without asserting a preference nobody chose.
-        "model_alloc_modes": dict(model_fields.get("model_alloc_modes") or {}),
+        "model_alloc_modes": dict(model_fields.get("model_alloc_modes")
+                                  or _persisted_alloc_modes(worker)),
         # BITSANDBYTES SPECIALIZATION (operator, 2026-07-26) — two separate
         # maps because "can this take it" and "is it switched on" are different
         # questions and the console needs both: availability decides whether the
@@ -1171,7 +1172,14 @@ def _public_view_fields(worker: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _model_alloc_modes(worker: Dict[str, Any]) -> Dict[str, str]:
+def _persisted_alloc_modes(worker: Dict[str, Any]) -> Dict[str, str]:
+    """Only the PERSISTED contracts' modes (the cheap half of
+    ``_model_alloc_modes``, no derivation): what a cold model-view cache still
+    ships, so the worker's eviction preference never empties (2026-10-02)."""
+    return _model_alloc_modes(worker, derive=False)
+
+
+def _model_alloc_modes(worker: Dict[str, Any], derive: bool = True) -> Dict[str, str]:
     """``{model_key: alloc mode name}`` from this worker's persisted spills.
 
     PURE and read-time, like every other _public_view derivation. Uses
@@ -1218,6 +1226,8 @@ def _model_alloc_modes(worker: Dict[str, Any]) -> Dict[str, str]:
     # (setdefault). Read-time and pure like the rest of _public_view; per-key
     # failures are skipped rather than raised, and a key that resolves to
     # nothing is simply omitted (the console then keeps its own fallback).
+    if not derive:
+        return out
     for mk in (worker.get("models") or []):
         if str(mk) in out:
             continue
