@@ -47,6 +47,30 @@ SELECT m.id, m.name, m.hub_id, m.framework,
                                     WHERE f.feed = 'liveness' AND e->>'id' = r.worker_id LIMIT 1) lv ON true
                  WHERE w.model_id = m.id), '[]'::jsonb) AS live,
        m.updated_at,
-       m.hub                AS hub
+       m.hub                AS hub,
+       -- 2026-10-02: the model's calls (7 days; failures included since the
+       -- call-log end hook) and its measured metrics + grades, per worker/quant.
+       (SELECT jsonb_build_object(
+                  'days', 7, 'total', count(*),
+                  'ok', count(*) FILTER (WHERE COALESCE(c.state->'outcome'->>'ok', 'true') = 'true'),
+                  'failed', count(*) FILTER (WHERE c.state->'outcome'->>'ok' = 'false'
+                                             AND COALESCE(c.state->'outcome'->>'status', '') <> 'cancelled'),
+                  'cancelled', count(*) FILTER (WHERE c.state->'outcome'->>'status' = 'cancelled'),
+                  'median_tok_s', round((percentile_cont(0.5) WITHIN GROUP (ORDER BY c.tok_per_s))::numeric, 1),
+                  'last_call', max(c.ts),
+                  'top_errors', (SELECT COALESCE(jsonb_agg(jsonb_build_object('error', e.err, 'n', e.n) ORDER BY e.n DESC), '[]'::jsonb)
+                                   FROM (SELECT left(c2.state->'outcome'->>'error', 120) AS err, count(*) AS n
+                                           FROM model_calls c2
+                                          WHERE c2.model_id = m.id AND c2.ts > now() - interval '7 days'
+                                            AND c2.state->'outcome'->>'ok' = 'false'
+                                          GROUP BY 1 ORDER BY 2 DESC LIMIT 3) e))
+          FROM model_calls c WHERE c.model_id = m.id AND c.ts > now() - interval '7 days') AS calls,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                    'worker', x.worker, 'quant', x.quant, 'alloc_mode', x.alloc_mode, 'task', x.task,
+                    'tok_per_s', x.tok_per_s, 'tok_per_s_avg', x.tok_per_s_avg, 'n', x.n_samples,
+                    'cold_load_s', x.cold_load_s, 'hot_load_s', x.hot_load_s, 'load_s', x.load_s,
+                    'grade', x.grade, 'grade_suite', x.grade_suite, 'graded_at', x.graded_at,
+                    'updated_at', x.updated_at) ORDER BY x.worker, x.quant, x.alloc_mode)
+                 FROM model_metrics x WHERE x.model_id = m.id), '[]'::jsonb) AS metrics
 FROM models m;
-COMMENT ON VIEW model_full IS 'one row per model: spec/weights/serving/quants/workers(knobs+plan, intent) + live(mechanics). Built for react/testshell 2026-10-01.';
+COMMENT ON VIEW model_full IS 'one row per model: spec/weights/serving/quants/workers(knobs+plan, intent) + live(mechanics) + calls(7d) + metrics(per worker/quant, grades). Built for react/testshell 2026-10-01.';
