@@ -212,7 +212,12 @@ def main(argv: list[str] | None = None) -> int:
     if any(p["distribution"] == "hugpy-server" for p in pkgs):
         stale = console_stale_reason()
         if stale:
-            raise SystemExit(f"build_wheels: refusing to build hugpy-server: {stale}")
+            # Gate disabled (operator 2026-10-03): a console bundle that lags its
+            # source no longer BLOCKS the build — GitHub publishes what it is handed.
+            # The only hard verification kept is identity/version (verify(): every
+            # artifact is a hugpy distribution at the tag version). Rebuild the
+            # bundle with build_console.py --from-source when you want it current.
+            print(f"build_wheels: WARNING (non-blocking): {stale}", file=sys.stderr)
 
     out = Path(args.out).resolve()
     if out.exists():
