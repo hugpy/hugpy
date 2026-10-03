@@ -40,3 +40,16 @@ def _reset_request_spill_overlay():
     set_request_env(None)
     yield
     set_request_env(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Each test leaves os.environ as it found it. _apply_spill / central-limit
+    adoption write process env directly (HUGPY_NO_EVICT, HUGPY_GPU_MEM_GIB, ...),
+    outside monkeypatch — one test's polite load leaked into the eviction-aware
+    autofit and flex tests under the full-suite order (2026-10-02)."""
+    before = dict(os.environ)
+    yield
+    if os.environ != before:
+        os.environ.clear()
+        os.environ.update(before)
