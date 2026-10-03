@@ -124,11 +124,48 @@ def _state_path(name: str) -> str:
     return os.path.join(profile_dir(name), "profile.json")
 
 
-def manifest_hash(packages) -> str:
+BASES = ("isolated", "worker")
+
+
+def manifest_hash(packages, base: str = "isolated") -> str:
     """Stable short hash of the (normalized) package manifest. A change here is
-    what triggers a re-materialize; a byte-identical manifest is a no-op."""
+    what triggers a re-materialize; a byte-identical manifest is a no-op. The
+    base is part of it (an isolated profile keeps its pre-base hash)."""
     pkgs = [p.strip() for p in (packages or []) if isinstance(p, str) and p.strip()]
-    return hashlib.sha256(json.dumps(pkgs).encode("utf-8")).hexdigest()[:16]
+    key = pkgs if base == "isolated" else {"packages": pkgs, "base": base}
+    return hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()[:16]
+
+
+def _purelib(python: str) -> str:
+    out = subprocess.run([python, "-c", "import sysconfig;print(sysconfig.get_paths()['purelib'])"],
+                         capture_output=True, text=True, timeout=60)
+    return (out.stdout or "").strip()
+
+
+def _link_worker_base(name: str) -> None:
+    """BASE "worker" (2026-10-02): the profile is an OVERLAY on the worker's own
+    venv — a ``.pth`` in the profile's site-packages appends the worker venv's
+    site-packages, so torch & co. come from the worker while anything the
+    profile installs (its own site-packages is searched FIRST) wins. A profile
+    that only needs ``compressed-tensors>=0.15`` or one transformers version
+    then costs megabytes, not a second torch."""
+    import site
+    own = _purelib(profile_python(name))
+    base = [p for p in site.getsitepackages() if os.path.isdir(p)]
+    if not own or not base:
+        raise RuntimeError(f"cannot link the worker base into profile {name!r} "
+                           f"(profile site-packages {own!r}, worker {base!r})")
+    with open(os.path.join(own, "_hugpy_worker_base.pth"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(base) + "\n")
+
+
+def _freeze(name: str) -> list:
+    """The profile's OWN installed packages (pip freeze of its site-packages
+    only — never the worker base it overlays): the lock that reproduces it."""
+    own = _purelib(profile_python(name))
+    out = subprocess.run([profile_python(name), "-m", "pip", "freeze", "--path", own],
+                         capture_output=True, text=True, timeout=300)
+    return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +180,8 @@ def read_state(name: str) -> "dict | None":
         return None
 
 
-def _write_state(name: str, *, ok: bool, hash: str, packages, error=None) -> None:
+def _write_state(name: str, *, ok: bool, hash: str, packages, error=None,
+                 base: str = "isolated", lock=None) -> None:
     d = profile_dir(name)
     os.makedirs(d, exist_ok=True)
     payload = {
@@ -153,6 +191,8 @@ def _write_state(name: str, *, ok: bool, hash: str, packages, error=None) -> Non
         "packages": list(packages or []),
         "materialized_at": time.time(),
         "error": error,
+        "base": base,
+        "lock": list(lock or []),
     }
     tmp = _state_path(name) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -191,7 +231,7 @@ def _run(cmd: "list[str]", timeout: float = 1800.0) -> None:
             f"{out or '(stdout and stderr empty, bytes=0)'}")
 
 
-def materialize(name: str, packages) -> dict:
+def materialize(name: str, packages, base: str = "isolated") -> dict:
     """(Re)create the profile venv and install its manifest. Idempotent by
     manifest hash. **Never raises** — the outcome is recorded as DATA in
     ``profile.json`` (ok/error) so the heartbeat can report it and the agent is
@@ -203,7 +243,8 @@ def materialize(name: str, packages) -> dict:
         logger.warning("profiles: refusing invalid profile name %r", name)
         return {"state": "error", "error": f"invalid profile name {name!r}"}
     pkgs = [p.strip() for p in (packages or []) if isinstance(p, str) and p.strip()]
-    want = manifest_hash(pkgs)
+    base = base if base in BASES else "isolated"
+    want = manifest_hash(pkgs, base)
     st = read_state(name)
     if (st and st.get("ok") and st.get("hash") == want
             and os.path.isdir(profile_dir(name))):
@@ -216,26 +257,32 @@ def materialize(name: str, packages) -> dict:
         # package abstract_hugpy_dev is deliberately NOT installed here — the
         # venv serves the slot child's deps/binaries, not the agent.
         _run([sys.executable, "-m", "venv", "--clear", profile_dir(name)])
+        if base == "worker":
+            _link_worker_base(name)
         if pkgs:
             _run([profile_python(name), "-m", "pip", "install", "--upgrade", *pkgs])
-        _write_state(name, ok=True, hash=want, packages=pkgs, error=None)
+        try:
+            lock = _freeze(name)
+        except Exception:  # noqa: BLE001 — a missing lock is not a failed profile
+            lock = []
+        _write_state(name, ok=True, hash=want, packages=pkgs, error=None, base=base, lock=lock)
         logger.info("profiles: materialized %r (%d package(s))", name, len(pkgs))
         return {"state": "ready", "hash": want}
     except Exception as exc:   # noqa: BLE001 — failure must be data, never a crash
         err = f"{type(exc).__name__}: {exc}"
         logger.warning("profiles: materialization of %r failed: %s", name, err)
-        _write_state(name, ok=False, hash=want, packages=pkgs, error=err)
+        _write_state(name, ok=False, hash=want, packages=pkgs, error=err, base=base)
         return {"state": "error", "error": err}
     finally:
         _clear_inflight(name)
 
 
-def state_for(name: str, packages) -> str:
+def state_for(name: str, packages, base: str = "isolated") -> str:
     """Coarse routing/heartbeat state for one profile: ``ready`` |
     ``materializing`` | ``error``. ``ready`` means the on-disk venv matches the
     CURRENT manifest hash and its last pip succeeded — the only state in which a
     profiled model may seat."""
-    want = manifest_hash(packages)
+    want = manifest_hash(packages, base)
     if _is_inflight(name):
         return "materializing"
     st = read_state(name)
@@ -252,10 +299,15 @@ def report(declared: dict) -> dict:
     out: dict = {}
     for name, spec in (declared or {}).items():
         packages = (spec or {}).get("packages") or []
-        state = state_for(name, packages)
-        row = {"state": state}
+        base = (spec or {}).get("base") or "isolated"
+        state = state_for(name, packages, base)
+        st = read_state(name) or {}
+        row = {"state": state, "base": base}
         if state == "error":
-            row["error"] = (read_state(name) or {}).get("error")
+            row["error"] = st.get("error")
+        if state == "ready":
+            row["lock"] = st.get("lock") or []
+            row["materialized_at"] = st.get("materialized_at")
         out[name] = row
     return out
 
@@ -276,8 +328,9 @@ def materialize_all(declared: dict, *, register=None):
             logger.warning("profiles: skipping invalid profile name %r", name)
             continue
         packages = (spec or {}).get("packages") or []
-        if state_for(name, packages) != "ready":
-            pending.append((name, packages))
+        base = (spec or {}).get("base") or "isolated"
+        if state_for(name, packages, base) != "ready":
+            pending.append((name, packages, base))
             _mark_inflight(name)      # report 'materializing' the instant we kick
     if not pending:
         return None
@@ -299,8 +352,8 @@ def materialize_all(declared: dict, *, register=None):
             register(pool)
         except Exception:  # noqa: BLE001 — registration is best-effort
             pass
-    for name, packages in pending:
-        pool.submit(materialize, name, packages)
+    for name, packages, base in pending:
+        pool.submit(materialize, name, packages, base)
     # Let the pool retire its worker once the batch drains; already-submitted
     # tasks still run to completion (shutdown(wait=False) blocks no new submits).
     pool.shutdown(wait=False)
