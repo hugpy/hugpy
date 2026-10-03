@@ -1135,6 +1135,9 @@ def test_a_worker_row_keeps_its_shape_and_its_live_fields(monkeypatch):
         "limits": {}, "config": {"pinned": {"repo-0": True}},
         "spill_by_model": {}, "loaded_models": ["repo-0"],
     }
+    # Per-model derived facts live in the materialized model view (filled by
+    # the registry write transaction since 85b9ab8) — fill it as a heartbeat would.
+    wk._refresh_model_view(worker)
     view = wk._public_view(worker)
     for key in ("id", "name", "pkg_version", "gpus", "slots", "storage",
                 "models", "spill_by_model", "config", "ram_total", "limits",

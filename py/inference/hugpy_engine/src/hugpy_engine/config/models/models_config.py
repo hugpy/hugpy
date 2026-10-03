@@ -1620,8 +1620,11 @@ def record_worker_models(worker_id: str, rows: dict) -> list[str]:
         changed = old != clean
         # DETACH STEP 2 (operator 2026-10-02): the catalog's home is the DB
         # (model_worker_presence, source 'discovered'); the JSON is written only
-        # with HUGPY_WORKER_CATALOG_JSON=1 (frozen otherwise).
+        # with HUGPY_WORKER_CATALOG_JSON=1 — or when the DB write did not land
+        # (no DB / DB down): the JSON is the no-DB fallback the reader uses, so
+        # a no-DB central must still persist its scan there (2026-10-02).
         db_changed = False
+        db_ok = False
         try:
             from hugpy_engine.model_index import record_worker_presence
             rows = []
@@ -1631,10 +1634,11 @@ def record_worker_models(worker_id: str, rows: dict) -> list[str]:
                     r["external_location"] = r["worker_location"]
                 rows.append(r)
             st, det = record_worker_presence(worker_id, rows, source="discovered", complete=True)
-            db_changed = bool(st == "ok" and (det or {}).get("changed"))
+            db_ok = st == "ok"
+            db_changed = bool(db_ok and (det or {}).get("changed"))
         except Exception:  # noqa: BLE001 — a DB miss never breaks a heartbeat
             db_changed = False
-        if changed and os.environ.get("HUGPY_WORKER_CATALOG_JSON", "0") == "1":
+        if changed and (not db_ok or os.environ.get("HUGPY_WORKER_CATALOG_JSON", "0") == "1"):
             data[worker_id] = {"at": time.time(), "models": clean}
             tmp = path + f".{os.getpid()}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
