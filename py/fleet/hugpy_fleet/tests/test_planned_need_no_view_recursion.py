@@ -116,5 +116,9 @@ def test_cold_model_view_with_pg_backend_does_not_recurse(store, monkeypatch):
     s._cache = None
     for w in s._read_unlocked().values():
         w.pop("_model_view_cache", None)
+    # Materialization rides the WRITE transaction since 85b9ab8 (reads never
+    # materialize); a stale view there must still not recurse.
+    with s._transaction():
+        pass
     rows = s.all()
     assert rows and depth["max"] == 1

@@ -91,19 +91,24 @@ def test_storage_view_is_materialized_on_change_or_expiry(monkeypatch, tmp_path)
     store = WorkerStore(path=str(path))
     store._pg = db
 
-    assert store._load()["w1"]["_storage_view_cache"]["view"]["n"] == 1
+    # Views materialize after a WRITE transaction (the heartbeat), never on a
+    # read: since 85b9ab8 (2026-10-02) _load() opens no DB write transaction.
+    with store._transaction():
+        pass
+    assert db.rows["w1"]["_storage_view_cache"]["view"]["n"] == 1
     with monkeypatch.context() as patch:
         patch.setattr(module, "storage_proposal", lambda worker: (_ for _ in ()).throw(AssertionError("recomputed on read")))
+        store._cache_at = 0
         assert store.get("w1")["storage"]["n"] == 1
-    store._cache_at = 0
-    assert store._load()["w1"]["_storage_view_cache"]["view"]["n"] == 1
+        assert store._load()["w1"]["_storage_view_cache"]["view"]["n"] == 1
     with store._transaction() as workers:
         workers["w1"]["storage"]["models"][0]["store"] = "reapable"
     assert db.rows["w1"]["_storage_view_cache"]["view"]["n"] == 2
 
     db.rows["w1"]["_storage_view_cache"]["expires_at"] = 0
-    store._cache_at = 0
-    assert store._load()["w1"]["_storage_view_cache"]["view"]["n"] == 3
+    with store._transaction():
+        pass
+    assert db.rows["w1"]["_storage_view_cache"]["view"]["n"] == 3
 
 
 class _Cursor:
