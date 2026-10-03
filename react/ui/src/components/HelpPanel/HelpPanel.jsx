@@ -10,6 +10,7 @@
 //   model, worker from the URL, last console error) — pure buildHelpContext().
 //   openHelpPanel({error}) from anywhere puts THAT error into the strip.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import HelpTickets from './HelpTickets'
 import { hugpyFetch } from '../../runtime/config'
 import { buildHelpContext, recordsToView } from './helpModel'
 import { OPEN_EVENT, getLastConsoleError } from './helpBus'
@@ -282,6 +283,7 @@ export default function HelpPanel({ tab = '', model = '', error = '' }) {
         ) : (
           <>
             <div className="hp-body" ref={bodyRef}>
+              <HelpTickets open={open} onSession={pick} />
               {!view.length && (
                 <div className="hp-msg note">
                   Ask about anything in hugpy: a failed load, an error on screen, a worker acting up. The agent

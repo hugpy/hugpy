@@ -20,7 +20,7 @@ import { readSavedCentral, probeLocalCentral, isDemoHost } from './../runtime/lo
 // identically by all four surfaces (see ui_shared/help/helpWidget.js).
 import { mountHelpWidget, setHelpWidgetOverride } from './../../../ui_shared/help/helpWidget'
 // The operator's hugpy help agent (logs + code + tests) — the console's Help.
-import HelpPanel, { openHelpPanel } from './../components/HelpPanel'
+import HelpPanel, { openHelpPanel, useHelpTicketCount } from './../components/HelpPanel'
 import './App.css'
 
 // NOTE: the embedded Console tab (KeeperConsole -> @hugpy/console + xterm) is
@@ -358,6 +358,9 @@ export function Console({ banner = null }) {
   }, [refreshModels])
 
 
+  // Findings waiting for the operator's approval (help tickets) — the Help badge.
+  const helpPending = useHelpTicketCount()
+
   // Inside the console the floating Help button opens the help agent too.
   useEffect(() => {
     setHelpWidgetOverride(() => openHelpPanel())
@@ -382,7 +385,10 @@ export function Console({ banner = null }) {
           own sticky header stack, directly beneath the nav (operator directive
           2026-07-21) — instead of floating above the nav in a separate context. */}
       <Navbar banner={banner}>
-        <button onClick={() => openHelpPanel()} title="Ask the hugpy help agent (logs, code, tests)" className="hugpy-navbar-action">Help</button>
+        <button onClick={() => openHelpPanel()} className="hugpy-navbar-action"
+                title={helpPending ? `Ask the hugpy help agent — ${helpPending} finding(s) waiting for your approval` : 'Ask the hugpy help agent (logs, code, tests)'}>
+          Help{helpPending > 0 && <span className="hp-badge">{helpPending}</span>}
+        </button>
         <button onClick={signOut} title="Sign out of the console" className="hugpy-navbar-action">Sign out</button>
       </Navbar>
       <HelpPanel tab={activeTab} model={activeChat || ''} error={error || ''} />
