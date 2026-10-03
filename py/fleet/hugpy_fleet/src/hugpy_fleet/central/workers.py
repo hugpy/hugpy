@@ -8023,8 +8023,27 @@ def record_serve_metrics(worker_id: str, model_key: str,
     pattern. Fail-open all the way down; see the store method. ``meta`` is the
     per-query record (request_id, prompt/completion tokens, elapsed_s, source,
     estimated) that lands in toks_log.jsonl."""
-    return worker_store.record_serve_metrics(worker_id, model_key, tok_s=tok_s,
-                                             **meta)
+    out = worker_store.record_serve_metrics(worker_id, model_key, tok_s=tok_s,
+                                            **meta)
+    ok = (meta.get("outcome") or {}).get("ok") if isinstance(meta.get("outcome"), dict) else meta.get("ok")
+    if ok is not False:
+        for hook in list(_CALL_SUCCESS_HOOKS):
+            try:
+                hook(worker_id, model_key, meta)
+            except Exception:  # noqa: BLE001 — a hook never fails a serve
+                logger.debug("call-success hook failed", exc_info=True)
+    return out
+
+
+# Seams the web layer registers (2026-10-02: the grading trigger) — called after
+# every recorded successful call with (worker_id, model_key, meta). Kept here so
+# the core never imports the server.
+_CALL_SUCCESS_HOOKS: list = []
+
+
+def add_call_success_hook(fn) -> None:
+    if fn not in _CALL_SUCCESS_HOOKS:
+        _CALL_SUCCESS_HOOKS.append(fn)
 
 
 # ---------------------------------------------------------------------------

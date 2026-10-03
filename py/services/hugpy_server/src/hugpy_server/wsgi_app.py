@@ -617,6 +617,14 @@ def get_hugpy_flask(name=None, allowed_origins=None, debug=False, *,
             start_benchmark_resume()
         except Exception as _exc:  # noqa: BLE001 — must never break app creation
             logger.error("benchmark resume hook failed: %s", _exc)
+    # GRADING TRIGGER (operator 2026-10-02): a model's first successful load
+    # with no grading attempt on record queues it for a benchmark run.
+    if _daemons_enabled(start_daemons):
+        try:
+            from hugpy_server.app.grading_trigger import start as _start_grading_trigger
+            _start_grading_trigger()
+        except Exception as _exc:  # noqa: BLE001 — must never break app creation
+            logger.error("grading trigger start failed: %s", _exc)
     # STALE WORKER-NAME MIGRATION (operator incident 2026-09-25): rewrite
     # placement tokens written under a now-renamed worker ("aeb" -> "ae-worker")
     # to that worker's stable id, so central stops logging "ordered worker

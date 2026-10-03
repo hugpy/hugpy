@@ -835,18 +835,36 @@ def benchmark_run():
               "with_judge": with_judge, "budgets": budgets, "resume": resume, "force": force,
               "force_cold": force_cold, "measure_cold_load": measure_cold_load}
 
+    started, public = start_benchmark_run(params, executor=executor)
+    return jsonify(public), (202 if started else 409)
+
+
+def benchmark_active() -> bool:
+    """Is a benchmark run (any phase) in flight right now?"""
+    with _benchmark_lock():
+        _benchmark_reload()
+        return _BENCHMARK.get("status") in _BENCHMARK_ACTIVE
+
+
+def start_benchmark_run(params: dict, executor: str = "hugpy-central") -> "tuple[bool, dict]":
+    """Start one benchmark run (the route's body; also the grading trigger's).
+    ``params`` = {tokens, models, workers, suite, with_judge, budgets, resume,
+    force, force_cold, measure_cold_load}. (False, public) when one is running."""
+    import time as _time
+    import uuid
     with _benchmark_lock():
         _benchmark_reload()
         if _BENCHMARK.get("status") in _BENCHMARK_ACTIVE:
-            return jsonify(_benchmark_public()), 409
+            return False, _benchmark_public()
         run_id = uuid.uuid4().hex[:12]
         _BENCHMARK.clear()
         _BENCHMARK.update({"run_id": run_id, "status": "running",
                            "executor": executor, "started": _time.time(),
-                           "finished": None, "tokens": tokens,
+                           "finished": None, "tokens": params.get("tokens"),
                            "heartbeat": _time.time(), "owner": _benchmark_owner(),
                            "params": params,
-                           "models": model_ids, "workers": worker_ids,
+                           "models": list(params.get("models") or []),
+                           "workers": list(params.get("workers") or []),
                            "events": [], "results": [], "calls": [],
                            "summary": {},
                            "plan": {"rows": [], "total": 0, "runnable": 0},
@@ -854,7 +872,14 @@ def benchmark_run():
                            "report": None})
         _benchmark_updated()
     _start_benchmark_thread(run_id, params)
-    return jsonify(_benchmark_public()), 202
+    return True, _benchmark_public()
+
+
+def benchmark_state() -> dict:
+    """{run_id, status} of the current/last run (for the grading trigger)."""
+    with _benchmark_lock():
+        _benchmark_reload()
+        return {"run_id": _BENCHMARK.get("run_id"), "status": _BENCHMARK.get("status")}
 
 
 @review_bp.route("/llm/benchmark/judge", methods=["POST"])
