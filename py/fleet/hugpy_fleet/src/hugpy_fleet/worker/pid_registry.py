@@ -205,6 +205,23 @@ class PidRegistry:
         with self._lock:
             return self._records.pop(model_key, None) is not None
 
+    def forget_absent(self, host_mode: HostMode, keep) -> List[str]:
+        """Drop every ``host_mode`` record whose model_key is NOT in ``keep``.
+
+        In-process models share the worker's (always alive) PID, so sweep_dead
+        never retires them: a dropped model's row lived on, the worker PID's VRAM
+        was split across every key it had ever hosted, and the admission planned
+        to evict models that were long gone ("not resident on this worker",
+        2026-10-02 test fire). The heartbeat passes the keys actually held."""
+        keep = set(keep or ())
+        dropped: List[str] = []
+        with self._lock:
+            for mk, rec in list(self._records.items()):
+                if rec.get("host_mode") == host_mode and mk not in keep:
+                    self._records.pop(mk, None)
+                    dropped.append(mk)
+        return dropped
+
     def sweep_dead(self) -> List[str]:
         """Drop every record whose process is gone OR whose PID was recycled.
         Returns the list of forgotten model_keys."""
@@ -594,6 +611,10 @@ def forget(model_key: str) -> bool:
 
 def sweep_dead() -> List[str]:
     return _REGISTRY.sweep_dead()
+
+
+def forget_absent(host_mode: HostMode, keep) -> List[str]:
+    return _REGISTRY.forget_absent(host_mode, keep)
 
 
 def verify(model_key: str) -> Optional[int]:

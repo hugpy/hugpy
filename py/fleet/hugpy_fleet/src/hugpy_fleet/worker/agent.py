@@ -10134,6 +10134,11 @@ def _drop_inprocess_model(model_key: str) -> bool:
                 dropped = True
     except Exception:  # noqa: BLE001
         pass
+    try:  # the pid registry must not keep attributing VRAM to a dropped model
+        from hugpy_fleet.worker import pid_registry as _pidreg
+        _pidreg.forget(model_key)
+    except Exception:  # noqa: BLE001
+        pass
     # Free the CUDA caching allocator's blocks too — dropping python refs alone
     # leaves the memory reserved by torch and still visible to nvidia-smi, which
     # is what makes an "evicted" model look like it never left the card.
@@ -11691,8 +11696,10 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
     try:
         _ip_dev = {mk: v.get("gpu_index")
                    for mk, v in (_inprocess_gpu_bytes() or {}).items()}
+        _ip_known = True
     except Exception:  # noqa: BLE001 — no torch -> no per-device attribution
         _ip_dev = {}
+        _ip_known = False
     _comfy_dev = None
     _cd_env = (os.environ.get("HUGPY_COMFY_CUDA_DEVICE") or "").strip()
     if _cd_env:
@@ -11707,6 +11714,8 @@ def _vram_residents(state: "WorkerState") -> "list[dict]":
             mk = row.get("model_key")
             if not mk:
                 continue                    # cuda_context lump / idle comfy: no model
+            if _ip_known and row.get("host_mode") == "in_process" and mk not in _ip_dev:
+                continue                    # a registry row one beat behind a drop: not a resident
             seen.add(mk)
             _row = {
                 "model_key": mk,
@@ -15520,6 +15529,8 @@ def _heartbeat_loop(client: CentralClient, state: WorkerState, args) -> None:
                     if _s.get("model_key") and _s.get("child_pid"):
                         _pidreg.record_launch(_s["model_key"], _s["child_pid"], "subprocess")
                 _inproc = _inprocess_gpu_bytes()
+                # only models ACTUALLY held in-process keep an in_process row
+                _pidreg.forget_absent("in_process", _inproc)
                 for _mk in _inproc:
                     _pidreg.record_launch(_mk, os.getpid(), "in_process")
                 # OWN-PID attribution (2026-07-14): tell reconcile which GPU pids are
