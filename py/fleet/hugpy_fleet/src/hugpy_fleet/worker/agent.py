@@ -9189,12 +9189,16 @@ def _effective_ctx(model_key: str, cfg: dict | None = None, *,
     # _need_total(weights x headroom, KV(ctx), learned correction) against the
     # reachable room (free + evictable + own seat, from the admission) less
     # the ceiling reserve. No admission hint -> the live free read.
+    # Every engine with a KV geometry gets the bound (2026-10-02 test fire:
+    # five transformers models were refused at their loader-default 131k-262k
+    # ctx — 16-72 GB of KV — whose weights fit; "auto" = the largest ctx that
+    # fits, as for GGUF). GGUF also needs its served file.
     bound = None
-    if is_gguf:
+    if is_gguf or framework not in ("", "comfy", "diffusers", "ollama"):
         try:
             from hugpy_engine import spill
             geo = _model_kv_geometry(model_key, cfg) or {}
-            ppath, _tl = _served_gguf_geometry(model_key)
+            ppath = _served_gguf_geometry(model_key)[0] if is_gguf else "n/a"
             if ppath and geo.get("n_kv_heads") and geo.get("head_dim"):
                 w0, corr = _fit_weights_and_corr(model_key)
                 w = int(weights_bytes) if weights_bytes else w0
