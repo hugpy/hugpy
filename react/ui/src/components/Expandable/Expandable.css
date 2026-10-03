@@ -1,0 +1,5 @@
+.xp { display: inline-block; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom; cursor: zoom-in; }
+.xp-open { max-width: none; white-space: pre-wrap; word-break: break-word; cursor: zoom-out; }
+.xp-dblink { color: var(--accent, #6aa0ff); text-decoration: none; }
+.xp-dblink:hover { text-decoration: underline; }

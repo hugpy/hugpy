@@ -13,7 +13,7 @@ async function api(path, opts) {
 export function App() {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
-  const [q, setQ] = useState('')
+  const [q, setQ] = useState(() => new URLSearchParams(window.location.search).get('q') || '')  // ?q=<model> deep link (console links, 2026-10-02)
   const [allocatedOnly, setAllocatedOnly] = useState(false)
   const [tick, setTick] = useState(0)
 

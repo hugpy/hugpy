@@ -7,6 +7,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { fetchJson } from '../../api'
 import { hugpyFetch } from '../../runtime/config'
+import Expandable, { ModelDbLink } from '../Expandable/Expandable'
+import { openHelpPanel } from '../HelpPanel/helpBus'
 
 const SHOWN = 8
 
@@ -26,7 +28,32 @@ function dur(a, b) {
   return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`
 }
 
-function Popup({ title, onClose, children }) {
+// Row selection for the popups: a Set of keys + toggle / all helpers.
+function useSelection() {
+  const [sel, setSel] = useState(() => new Set())
+  const toggle = k => setSel(s => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n })
+  const setAll = (keys, on) => setSel(on ? new Set(keys) : new Set())
+  return [sel, toggle, setAll]
+}
+
+function SelectAll({ keys, sel, setAll }) {
+  const all = keys.length > 0 && keys.every(k => sel.has(k))
+  return <input type="checkbox" aria-label="select all" checked={all} onChange={e => setAll(keys, e.target.checked)} />
+}
+
+// "Ask hugpy-brain" about the selected rows: opens the help panel with a
+// prompt + the rows as context (operator 2026-10-02).
+function AskBrain({ count, build }) {
+  return (
+    <button className="wp-test-fire" disabled={!count}
+            title={count ? 'open a help session with hugpy-brain about the selected rows' : 'select rows first'}
+            onClick={() => { const { prompt, rows } = build(); openHelpPanel({ prompt, context: { test_fire_rows: JSON.stringify(rows).slice(0, 6000) } }) }}>
+      💬 ask hugpy-brain{count ? ` (${count})` : ''}
+    </button>
+  )
+}
+
+function Popup({ title, onClose, children, actions = null }) {
   useEffect(() => {
     const onKey = e => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -38,6 +65,7 @@ function Popup({ title, onClose, children }) {
         <div className="wp-tfh-popup-head">
           <span className="wp-tfh-popup-title">{title}</span>
           <span className="wp-tf-spacer" />
+          {actions}
           <button className="wp-tf-toggle" onClick={onClose} title="close (Esc)">✕</button>
         </div>
         <div className="wp-tfh-popup-body">{children}</div>
@@ -75,6 +103,21 @@ function RunPopup({ worker, run, onClose, onResumed }) {
     return () => { off = true }
   }, [worker, run.job_id])
   const results = data?.results || []
+  const [selM, toggleM, allM] = useSelection()
+  const [selC, toggleC, allC] = useSelection()
+  const buildAsk = () => {
+    const calls = results.filter((_, i) => selC.has(i)).map(r => ({
+      model: r.model_key, ok: r.ok, latency_s: r.latency_s, tok_s: r.tok_s,
+      error_kind: r.error_kind, error: r.error, reply: r.content80 }))
+    const models = [...selM]
+    return {
+      prompt: `About test fire ${run.job_id} on ${worker.name}: ` +
+        (models.length ? `models ${models.join(', ')}` : '') + (models.length && calls.length ? '; ' : '') +
+        (calls.length ? `${calls.length} selected call(s)` : '') +
+        '. What went wrong (or right), why, and what should change?',
+      rows: { worker: worker.name, run: run.job_id, models, calls },
+    }
+  }
   const perModel = {}
   for (const r of results) {
     const m = perModel[r.model_key] || (perModel[r.model_key] = { ok: 0, failed: 0, lat: [], tps: [] })
@@ -83,7 +126,8 @@ function RunPopup({ worker, run, onClose, onResumed }) {
   const med = xs => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)] }
   const skipped = data?.skipped || []
   return (
-    <Popup title={`test fire ${run.job_id} · ${when(run.created)} · ${worker.name}`} onClose={onClose}>
+    <Popup title={`test fire ${run.job_id} · ${when(run.created)} · ${worker.name}`} onClose={onClose}
+           actions={<AskBrain count={selM.size + selC.size} build={buildAsk} />}>
       {error && <div className="wp-tf-err">⚠ {error}</div>}
       {!data && !error && <div className="wp-lt-muted">loading…</div>}
       {data && (
@@ -103,11 +147,12 @@ function RunPopup({ worker, run, onClose, onResumed }) {
             )}
           </div>
           <table className="wp-tfh-table">
-            <thead><tr><th>model</th><th>ok</th><th>failed</th><th>median latency</th><th>median tok/s</th></tr></thead>
+            <thead><tr><th><SelectAll keys={Object.keys(perModel)} sel={selM} setAll={allM} /></th><th>model</th><th>ok</th><th>failed</th><th>median latency</th><th>median tok/s</th></tr></thead>
             <tbody>
               {Object.entries(perModel).map(([k, m]) => (
                 <tr key={k} className={m.failed && !m.ok ? 'wp-tfh-bad' : m.failed ? 'wp-tfh-warn' : ''}>
-                  <td>{k}</td><td>{m.ok}</td><td>{m.failed}</td>
+                  <td><input type="checkbox" checked={selM.has(k)} onChange={() => toggleM(k)} /></td>
+                  <td><ModelDbLink modelKey={k} /></td><td>{m.ok}</td><td>{m.failed}</td>
                   <td>{med(m.lat) != null ? `${med(m.lat)}s` : '—'}</td><td>{med(m.tps) ?? '—'}</td>
                 </tr>
               ))}
@@ -115,19 +160,19 @@ function RunPopup({ worker, run, onClose, onResumed }) {
           </table>
           <div className="wp-tfh-sub">every call ({results.length})</div>
           <table className="wp-tfh-table">
-            <thead><tr><th>time</th><th>model</th><th></th><th>latency</th><th>tokens</th><th>tok/s</th><th>result</th></tr></thead>
+            <thead><tr><th><SelectAll keys={results.map((_, i) => i)} sel={selC} setAll={allC} /></th><th>time</th><th>model</th><th></th><th>latency</th><th>tokens</th><th>tok/s</th><th>result</th></tr></thead>
             <tbody>
               {results.map((r, i) => (
                 <tr key={i} className={r.ok ? '' : 'wp-tfh-bad'}>
+                  <td><input type="checkbox" checked={selC.has(i)} onChange={() => toggleC(i)} /></td>
                   <td>{r.started ? new Date(r.started * 1000).toLocaleTimeString() : '—'}</td>
-                  <td>{r.model_key}</td>
+                  <td><ModelDbLink modelKey={r.model_key} /></td>
                   <td>{r.ok ? '✓' : '✗'}</td>
                   <td>{r.latency_s != null ? `${r.latency_s}s` : '—'}</td>
                   <td>{r.tokens ?? '—'}</td>
                   <td>{r.tok_s ?? '—'}</td>
-                  <td className="wp-tfh-result" title={r.ok ? `${r.prompt || ''}\n→ ${r.content80 || ''}` : r.error || ''}>
-                    {r.ok ? (r.content80 || '') : `${r.error_kind || 'error'}: ${String(r.error || '').slice(0, 140)}`}
-                  </td>
+                  <td><Expandable text={r.ok ? `${r.prompt ? `${r.prompt}\n→ ` : ''}${r.content80 || ''}`
+                                              : `${r.error_kind || 'error'}: ${r.error || ''}`} /></td>
                 </tr>
               ))}
             </tbody>
@@ -149,11 +194,17 @@ function AnalysisPopup({ worker, onClose }) {
     return () => { off = true }
   }, [worker])
   const rows = Object.entries(data?.models || {})
+  const [sel, toggle, setAll] = useSelection()
   const order = { failing: 0, regressed: 1, flaky: 2, untested: 3, healthy: 4 }
   rows.sort((a, b) => (order[a[1].verdict] ?? 9) - (order[b[1].verdict] ?? 9) || a[0].localeCompare(b[0]))
   const th = data?.thresholds
   return (
-    <Popup title={`test fire analysis · ${worker.name}`} onClose={onClose}>
+    <Popup title={`test fire analysis · ${worker.name}`} onClose={onClose}
+           actions={<AskBrain count={sel.size} build={() => {
+             const picked = rows.filter(([k]) => sel.has(k)).map(([k, v]) => ({ model: k, ...v }))
+             return { prompt: `About the test-fire analysis on ${worker.name} for ${picked.map(p => `${p.model} (${p.verdict})`).join(', ')}: why, and what should change?`,
+                      rows: { worker: worker.name, models: picked } }
+           }} />}>
       {error && <div className="wp-tf-err">⚠ {error}</div>}
       {!data && !error && <div className="wp-lt-muted">analyzing…</div>}
       {data && (
@@ -170,17 +221,18 @@ function AnalysisPopup({ worker, onClose }) {
             </div>
           )}
           <table className="wp-tfh-table">
-            <thead><tr><th>model</th><th>verdict</th><th>ok / calls</th><th>baseline tok/s · latency</th><th>latest tok/s · latency</th><th>errors</th><th>why</th></tr></thead>
+            <thead><tr><th><SelectAll keys={rows.map(([k]) => k)} sel={sel} setAll={setAll} /></th><th>model</th><th>verdict</th><th>ok / calls</th><th>baseline tok/s · latency</th><th>latest tok/s · latency</th><th>errors</th><th>why</th></tr></thead>
             <tbody>
               {rows.map(([k, v]) => (
                 <tr key={k}>
-                  <td>{k}</td>
+                  <td><input type="checkbox" checked={sel.has(k)} onChange={() => toggle(k)} /></td>
+                  <td><ModelDbLink modelKey={k} /></td>
                   <td><span className={`wp-tfh-v wp-tfh-v-${v.verdict}`}>{v.verdict}</span></td>
                   <td>{v.ok}/{v.calls}{v.success_rate != null ? ` (${Math.round(v.success_rate * 100)}%)` : ''}</td>
                   <td>{v.baseline ? `${v.baseline.tok_s ?? '—'} · ${v.baseline.latency_s ?? '—'}s (${v.baseline.samples})` : '—'}</td>
                   <td>{v.latest ? `${v.latest.tok_s ?? '—'} · ${v.latest.latency_s ?? '—'}s (${v.latest.samples})` : '—'}</td>
                   <td>{Object.entries(v.error_kinds || {}).map(([e, n]) => `${e}×${n}`).join(', ') || '—'}</td>
-                  <td className="wp-tfh-result">{v.why}</td>
+                  <td><Expandable text={v.why} /></td>
                 </tr>
               ))}
             </tbody>
