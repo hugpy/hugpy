@@ -66,7 +66,7 @@ class FakeLocal:
 
     def complete(self, messages, timeout=240):
         self.calls.append(messages)
-        return self.reply
+        return self.reply, "fake-model", []
 
 
 @pytest.fixture

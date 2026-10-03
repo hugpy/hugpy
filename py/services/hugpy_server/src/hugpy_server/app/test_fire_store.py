@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import statistics
-import threading
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -73,61 +71,26 @@ REGRESS_TOK_S = 0.70         # latest run's median tok/s below 70% of baseline -
 REGRESS_LATENCY = 1.50       # ... or median latency above 150% of baseline
 MIN_BASELINE = 3             # ok calls needed before a baseline is drawn
 
-_lock = threading.Lock()
-_conn = None
-_conn_pid = None
-_ddl_done = False
-_warned = False
+_RUNNER = None
 
 
 def _dsn() -> Optional[str]:
-    v = (os.environ.get("HUGPY_REGISTRY_PG_DSN") or "").strip()
-    if v:
-        return v
-    try:
-        from hugpy_engine.model_index.client import enabled, resolve_dsn
-    except ImportError:
-        return None
-    return resolve_dsn() if enabled() else None
+    from hugpy_server.app.small_pg import registry_dsn
+    return registry_dsn()
 
 
 def _run(fn):
-    """One short autocommit statement on this module's own connection
-    (lock_timeout 5 s); None on any failure."""
-    global _conn, _conn_pid, _ddl_done, _warned
-    dsn = _dsn()
-    if not dsn:
-        return None
-    with _lock:
-        try:
-            import psycopg
-            if _conn is None or _conn.closed or _conn_pid != os.getpid():
-                _conn = psycopg.connect(dsn, autocommit=True, connect_timeout=5)
-                _conn_pid = os.getpid()
-                with _conn.cursor() as cur:
-                    cur.execute("SET lock_timeout = '5s'")
-            with _conn.cursor() as cur:
-                if not _ddl_done:
-                    cur.execute(DDL)
-                    _ddl_done = True
-                return fn(cur)
-        except Exception as exc:  # noqa: BLE001
-            if not _warned:
-                log.warning("test-fire history unavailable (%s: %s) — runs are not remembered",
-                            type(exc).__name__, exc)
-                _warned = True
-            try:
-                if _conn is not None:
-                    _conn.close()
-            except Exception:  # noqa: BLE001
-                pass
-            _conn = None
-            return None
+    """One short statement on the history's own connection; None on failure."""
+    global _RUNNER
+    if _RUNNER is None:
+        from hugpy_server.app.small_pg import Runner
+        _RUNNER = Runner("test-fire history", DDL, dsn=lambda: _dsn())
+    return _RUNNER.run(fn)
 
 
 def _rows(cur) -> list:
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    from hugpy_server.app.small_pg import rows
+    return rows(cur)
 
 
 # ── writes (called by the job) ───────────────────────────────────────────────

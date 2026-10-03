@@ -230,3 +230,81 @@ def help_logs():
         a.get("source") or "", lines=a.get("lines") or 200, worker=a.get("worker") or "",
         model=a.get("model") or "", since=since_f, request_id=a.get("request_id") or "",
         errors=(a.get("errors") or "").lower() in ("1", "true", "yes")))
+
+
+# ── help tickets (operator 2026-10-02): pre-existing approvals ───────────────
+def _ticket_prompt(t: dict) -> str:
+    d = t.get("detail") or {}
+    return (f"A {t.get('kind')} ticket was filed: {t.get('title')}.\n"
+            f"model={t.get('model_key')} worker={t.get('worker_name') or t.get('worker_id')} "
+            f"verdict={d.get('verdict')} file={d.get('file')} gpu={d.get('gpu')} ctx={d.get('ctx')} "
+            f"4-bit={d.get('bnb')}\npredicted={json.dumps(d.get('predicted'), default=str)[:1500]}\n"
+            f"measured={json.dumps(d.get('measured'), default=str)[:1500]}\n"
+            "Explain the most likely cause of the disagreement between the load gate's prediction "
+            "and the measurement, and what (if anything) should change.")
+
+
+@help_bp.route("/llm/help/tickets", methods=["GET"])
+def help_tickets_list():
+    """{tickets, pending, keeper} — ?status=pending|acted|sent|dismissed (default all)."""
+    g = _gate()
+    if g is not None:
+        return g
+    from hugpy_server.app import help_tickets
+    from hugpy_server.app.routes.keeper_help_routes import keeper_available
+    status = request.args.get("status") or None
+    return jsonify({"tickets": help_tickets.list_tickets(status, 200),
+                    "pending": help_tickets.pending_count(), "keeper": keeper_available()})
+
+
+@help_bp.route("/llm/help/tickets/<int:tid>/act", methods=["POST"])
+def help_ticket_act(tid):
+    """The operator's choice on one ticket. Body {action}:
+      calibrate — run the calibration again (same model, worker, 4-bit flag)
+      keeper    — file it on the keeper bridge (pending approval) when one exists
+      discuss   — open a help session primed with the ticket
+      dismiss   — close it"""
+    g = _gate()
+    if g is not None:
+        return g
+    from hugpy_server.app import help_tickets
+    t = help_tickets.get_ticket(tid)
+    if not t:
+        return jsonify({"error": f"no help ticket {tid}"}), 404
+    action = str((request.get_json(silent=True) or {}).get("action") or "").lower()
+    d = t.get("detail") or {}
+    if action == "dismiss":
+        return jsonify(help_tickets.set_status(tid, "dismissed", {"by": _who()}))
+    if action == "calibrate":
+        from hugpy_server.app import calibration_run
+        from hugpy_server.app.routes.worker_routes import get_worker
+        worker = get_worker(t.get("worker_id")) if t.get("worker_id") else None
+        if worker is None:
+            return jsonify({"error": f"worker {t.get('worker_id')!r} is not in the registry"}), 404
+        job = calibration_run.start(worker, t["model_key"], bnb=bool(d.get("bnb")), evict_others=False)
+        if job.get("error"):
+            return jsonify({"error": job["error"], "job": job}), 409
+        out = help_tickets.set_status(tid, "acted", {"action": "calibrate", "job_id": job.get("job_id"),
+                                                     "by": _who()})
+        return jsonify({"ticket": out, "job": job})
+    if action == "keeper":
+        from hugpy_server.app.routes.keeper_help_routes import file_keeper_report
+        msg, bridge = file_keeper_report(t["title"], proposed="look into this calibration finding",
+                                         context=json.dumps(d, default=str)[:4000],
+                                         username=_who(), source="help-ticket")
+        if bridge is None:
+            return jsonify({"error": "no keeper is available on this deployment"}), 409
+        if not msg:
+            return jsonify({"error": "could not file it on the keeper bridge"}), 503
+        out = help_tickets.set_status(tid, "sent", {"action": "keeper", "bridge_id": bridge["id"],
+                                                    "message_id": msg.get("id"), "by": _who()})
+        return jsonify({"ticket": out, "keeper": {"bridge_id": bridge["id"], "message_id": msg.get("id")}})
+    if action == "discuss":
+        try:
+            sess = help_agent.service().start(_ticket_prompt(t), {"ticket": t.get("id")}, by=_who())
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        out = help_tickets.set_status(tid, "acted", {"action": "discuss", "session": sess.get("id"),
+                                                     "by": _who()})
+        return jsonify({"ticket": out, "session": sess})
+    return jsonify({"error": "action must be one of calibrate, keeper, discuss, dismiss"}), 400

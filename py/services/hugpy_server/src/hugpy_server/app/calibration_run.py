@@ -296,6 +296,13 @@ def _run(jid: str, worker: dict, model_key: str, bnb: bool, evict_others: bool) 
             row["id"] = _record(row)
         except Exception as exc:  # noqa: BLE001 — the result is still returned
             row["record_error"] = f"{type(exc).__name__}: {exc}"
+        try:  # a finding the operator may want acted on -> a help ticket (approval)
+            from hugpy_server.app.help_tickets import calibration_ticket
+            tk = calibration_ticket(row)
+            if tk:
+                row["help_ticket"] = tk.get("id")
+        except Exception:  # noqa: BLE001 — tickets never break a calibration
+            pass
         _step(jid, f"done: {verdict}" + (f" (gate {err_pct:+.1f}% vs measured)" if err_pct is not None else ""))
         _job_update(jid, status="done", result=row)
         logger.info("calibration %s on %s: %s gate_err=%s%% leftover=%s", model_key, name, verdict, err_pct, leak)

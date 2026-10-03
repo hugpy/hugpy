@@ -514,17 +514,49 @@ class LocalModelBackend:
             return False
         return st == 200 and bool((body or {}).get("data"))
 
-    def complete(self, messages: list, timeout: float = 240) -> str:
+    def models(self) -> list:
+        """The HELP MODEL GROUP (operator 2026-10-02): the ordered fallback list
+        from the priority group HUGPY_HELP_MODEL_GROUP (default "help", kept
+        DISABLED so it designates without re-routing anyone else's requests);
+        an explicit HUGPY_HELP_LOCAL_MODEL, or no group, is a list of one."""
+        if os.environ.get("HUGPY_HELP_LOCAL_MODEL"):
+            return [self.model]
+        try:
+            from hugpy_fleet.central.priority_groups import expand_members, get_group
+            g = get_group(os.environ.get("HUGPY_HELP_MODEL_GROUP", "help"))
+            keys = [k for k, _via in expand_members(g)] if g else []
+        except Exception:  # noqa: BLE001
+            keys = []
+        return keys or [self.model]
+
+    def _complete_one(self, model: str, messages: list, timeout: float) -> str:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             self.base + "/v1/chat/completions", method="POST", headers=headers,
-            data=json.dumps({"model": self.model, "messages": messages,
+            data=json.dumps({"model": model, "messages": messages,
                              "max_tokens": 1200, "temperature": 0.2}).encode())
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = json.loads(r.read().decode("utf-8", "replace"))
         return ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+    def complete(self, messages: list, timeout: float = 240) -> "tuple[str, str, list]":
+        """Walk the help group in order; a member that errors or returns nothing
+        falls through to the next. Returns (reply, model that answered, the
+        failures before it); raises BackendError when every member failed."""
+        failed = []
+        for model in self.models():
+            try:
+                text = self._complete_one(model, messages, timeout)
+            except Exception as exc:  # noqa: BLE001 — the next member is the answer
+                failed.append({"model": model, "error": f"{type(exc).__name__}: {exc}"[:300]})
+                continue
+            if text and text.strip() and "[error:" not in text[:200]:
+                return text, model, failed
+            failed.append({"model": model, "error": (text or "empty reply")[:300]})
+        raise BackendError("every help model failed: "
+                           + "; ".join(f"{f['model']}: {f['error']}" for f in failed))
 
 
 def claude_backends() -> list:
@@ -680,10 +712,11 @@ class HelpService:
 
     def _local_turn(self, sid, backend, msgs, mid):
         try:
-            reply = backend.complete(msgs)
-            self.store.append(sid, {"kind": "event", "type": "text", "text": reply},
+            reply, model, failed = backend.complete(msgs)
+            self.store.append(sid, {"kind": "event", "type": "text", "text": reply,
+                                    "model": model, "fallbacks": failed},
                               {"kind": "event", "type": "done", "rc": 0,
-                               "message_ids": [mid]})
+                               "message_ids": [mid], "model": model})
         except Exception as exc:  # noqa: BLE001
             self.store.append(sid, {"kind": "event", "type": "done", "rc": 1,
                                     "error": f"local model failed: {exc}",

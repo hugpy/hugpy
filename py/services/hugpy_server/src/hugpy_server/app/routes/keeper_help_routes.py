@@ -169,6 +169,53 @@ def keeper_help_ask():
                     "offline": bool(res.get("offline"))})
 
 
+def keeper_available() -> bool:
+    """Is there a keeper approval channel to send to? (help tickets grey out
+    "send to keeper" when not)."""
+    try:
+        return _resolve_help_bridge() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def file_keeper_report(description, *, proposed=None, page_url=None, context=None,
+                       username="operator", source="help-widget"):
+    """File one PENDING message on the keeper bridge — the one filing path for
+    the member widget and the console's help tickets. Returns (msg, bridge);
+    bridge None = no keeper channel; msg None = the append failed. Never sends:
+    an operator approves it in the bridge transcript."""
+    bridge = _resolve_help_bridge()
+    if not bridge:
+        return None, None
+    lines = [
+        "**Help request (pending operator approval)**",
+        f"from: {username}",
+    ]
+    if page_url:
+        lines.append(f"page: {page_url}")
+    lines.append("")
+    lines.append(description)
+    if proposed:
+        lines.append("")
+        lines.append("proposed action:")
+        lines.append(proposed)
+    if context:
+        lines.append("")
+        lines.append("page context:")
+        lines.append(context)
+    msg = append_bridge_message(
+        bridge["id"],
+        direction="out",
+        source=source,
+        content="\n".join(lines),
+        author=username,
+        # ALWAYS pending, regardless of the bridge's own defer_mode: a proposed
+        # action is operator-approved by construction, never auto-sent.
+        status="pending",
+    )
+    return msg, bridge
+
+
 @keeper_help_bp.route("/keeper/help/report", methods=["POST"])
 def keeper_help_report():
     """MEMBER or OPERATOR: file a help request / proposed action for approval.
@@ -193,42 +240,14 @@ def keeper_help_report():
     context = _clip(body.get("context"), _MAX_CONTEXT)
     username = _username() or "operator"
 
-    bridge = _resolve_help_bridge()
-    if not bridge:
+    msg, bridge = file_keeper_report(description, proposed=proposed, page_url=page_url,
+                                     context=context, username=username)
+    if bridge is None:
         logger.error("help report: no keeper bridge available (set HUGPY_HELP_BRIDGE_ID)")
         return jsonify({
             "error": "no keeper approval channel is configured on this deployment "
                      "(set HUGPY_HELP_BRIDGE_ID)",
         }), 503
-
-    lines = [
-        "**Help request (pending operator approval)**",
-        f"from: {username}",
-    ]
-    if page_url:
-        lines.append(f"page: {page_url}")
-    lines.append("")
-    lines.append(description)
-    if proposed:
-        lines.append("")
-        lines.append("proposed action:")
-        lines.append(proposed)
-    if context:
-        lines.append("")
-        lines.append("page context:")
-        lines.append(context)
-    content = "\n".join(lines)
-
-    msg = append_bridge_message(
-        bridge["id"],
-        direction="out",
-        source="help-widget",
-        content=content,
-        author=username,
-        # ALWAYS pending, regardless of the bridge's own defer_mode: a member's
-        # proposed action is operator-approved by construction, never auto-sent.
-        status="pending",
-    )
     if not msg:
         return jsonify({"error": "could not file the request"}), 503
     logger.info("help report filed: bridge=%s msg=%s by=%s",
